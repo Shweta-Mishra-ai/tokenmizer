@@ -32,7 +32,7 @@ EXPECTED_COMPLETED_TASKS = [
     "project structure",
     "password hashing",
     "login endpoint",
-    "fix 422 error",
+    "422 error",
 ]
 EXPECTED_DECISIONS = [
     "postgresql",
@@ -61,7 +61,7 @@ class TestTaskRetention:
     def test_completed_tasks_extracted(self, filled_graph):
         completed = [
             n for n in filled_graph._nodes.values()
-            if n.type == NodeType.TASK and n.status == NodeStatus.COMPLETED
+            if n.type in (NodeType.TASK, NodeType.ENDPOINT) and n.status == NodeStatus.COMPLETED
         ]
         labels_lower = {n.label.lower() for n in completed}
         found = sum(

@@ -44,7 +44,7 @@ class TestCorruptedGraph:
         db_path.write_bytes(b"corrupted!")
 
         g = GraphMemory("fresh-after-corrupt", storage_dir=str(tmp_path))
-        nid = g.add_node(NodeType.TASK, "New task")
+        nid = g.add_node(NodeType.TASK, "Implement fresh task after recovery")
         assert nid in g._nodes
 
 
@@ -96,8 +96,9 @@ class TestStorageEdgeCases:
     def test_graph_with_very_long_labels(self, tmp_path):
         """Labels longer than 120 chars should be truncated, not crash."""
         g = GraphMemory("long-label", storage_dir=str(tmp_path))
-        long_label = "A" * 500
+        long_label = "Implement task with " + ("A" * 500)
         nid = g.add_node(NodeType.TASK, long_label)
+        assert nid != ""
         assert len(g._nodes[nid].label) <= 120
 
     def test_graph_with_special_characters(self, tmp_path):
@@ -112,10 +113,12 @@ class TestStorageEdgeCases:
     def test_many_sessions_isolated(self, tmp_path):
         """Different session IDs should have isolated graphs."""
         g1 = GraphMemory("session-A", storage_dir=str(tmp_path))
-        g1.add_node(NodeType.TASK, "Task for A")
+        g1.add_node(NodeType.TASK, "Implement task for session A")
+        g1._persist()
 
         g2 = GraphMemory("session-B", storage_dir=str(tmp_path))
-        g2.add_node(NodeType.TASK, "Task for B")
+        g2.add_node(NodeType.TASK, "Implement task for session B")
+        g2._persist()
 
         # Reload both
         g1r = GraphMemory("session-A", storage_dir=str(tmp_path))
@@ -124,7 +127,7 @@ class TestStorageEdgeCases:
         labels_a = {n.label for n in g1r._nodes.values()}
         labels_b = {n.label for n in g2r._nodes.values()}
 
-        assert "Task for A" in labels_a
-        assert "Task for A" not in labels_b
-        assert "Task for B" in labels_b
-        assert "Task for B" not in labels_a
+        assert "Implement task for session A" in labels_a
+        assert "Implement task for session A" not in labels_b
+        assert "Implement task for session B" in labels_b
+        assert "Implement task for session B" not in labels_a

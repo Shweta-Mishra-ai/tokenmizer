@@ -56,11 +56,27 @@ class CheckpointManager:
         self._dir = Path(storage_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._db_path = self._dir / "checkpoints.db"
-        self._init_db()
+        self._safe_init_db()
         self._prev_snapshots: dict[str, dict] = {}  # session_id → last snapshot
 
+    def _safe_init_db(self) -> None:
+        """Initialize DB, deleting corrupt file if necessary."""
+        try:
+            self._init_db()
+        except Exception:
+            logger.warning(f"Checkpoint DB corrupt or unreadable — recreating: {self._db_path}")
+            try:
+                self._db_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                self._init_db()
+            except Exception as e:
+                logger.error(f"Cannot initialize checkpoint DB after cleanup: {e}")
+
     def _init_db(self) -> None:
-        with sqlite3.connect(self._db_path) as conn:
+        conn = sqlite3.connect(self._db_path)
+        try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS checkpoints (
                     checkpoint_id TEXT PRIMARY KEY,
@@ -74,6 +90,8 @@ class CheckpointManager:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ckpt_session ON checkpoints(session_id)")
             conn.commit()
+        finally:
+            conn.close()
 
     def create(
         self,
@@ -231,7 +249,8 @@ class CheckpointManager:
 
     def _save(self, ckpt: Checkpoint) -> None:
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            conn = sqlite3.connect(self._db_path)
+            try:
                 conn.execute(
                     """INSERT OR REPLACE INTO checkpoints
                        (checkpoint_id, session_id, created_at, context_pct, trigger, message_count, data_json)
@@ -255,12 +274,15 @@ class CheckpointManager:
                     ),
                 )
                 conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             logger.error(f"Checkpoint save failed: {e}")
 
     def get_latest(self, session_id: str) -> Optional[Checkpoint]:
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            conn = sqlite3.connect(self._db_path)
+            try:
                 row = conn.execute(
                     """SELECT checkpoint_id, session_id, created_at, context_pct,
                               trigger, message_count, data_json
@@ -268,6 +290,8 @@ class CheckpointManager:
                        ORDER BY created_at DESC LIMIT 1""",
                     (session_id,),
                 ).fetchone()
+            finally:
+                conn.close()
             if not row:
                 return None
             return self._row_to_checkpoint(row)
@@ -277,12 +301,15 @@ class CheckpointManager:
 
     def list_checkpoints(self, session_id: str) -> list[dict]:
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            conn = sqlite3.connect(self._db_path)
+            try:
                 rows = conn.execute(
                     """SELECT checkpoint_id, created_at, context_pct, trigger, message_count
                        FROM checkpoints WHERE session_id=? ORDER BY created_at DESC""",
                     (session_id,),
                 ).fetchall()
+            finally:
+                conn.close()
             return [
                 {"checkpoint_id": r[0], "created_at": r[1], "context_pct": r[2],
                  "trigger": r[3], "message_count": r[4]}

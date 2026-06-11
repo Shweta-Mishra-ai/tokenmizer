@@ -84,7 +84,7 @@ class TestDecisionTracker:
 
             if mysql_id and postgres_id in g._nodes:
                 # Old PostgreSQL decision should be superseded
-                assert g._nodes[postgres_id].status == NodeStatus.MODIFIED
+                assert g._nodes[postgres_id].status == NodeStatus.SUPERSEDED
                 assert "Superseded by" in g._nodes[postgres_id].summary
 
     def test_superseded_decisions_excluded_from_resume(self):
@@ -113,7 +113,7 @@ class TestDecisionTracker:
             superseded = [
                 n for n in g._nodes.values()
                 if n.type == NodeType.DECISION
-                and n.status == NodeStatus.MODIFIED
+                and n.status == NodeStatus.SUPERSEDED
             ]
 
             # We should have 1 active and 1 superseded (if topic matched)
@@ -260,5 +260,5 @@ class TestDecisionHistory:
             if pg_id and my_id and pg_id in g._nodes and my_id in g._nodes:
                 # Check supersedes edge exists
                 edge_types = [e.type for e in g._edges]
-                if g._nodes[pg_id].status == NodeStatus.MODIFIED:
+                if g._nodes[pg_id].status == NodeStatus.SUPERSEDED:
                     assert EdgeType.SUPERSEDES in edge_types

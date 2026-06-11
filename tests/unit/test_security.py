@@ -30,7 +30,7 @@ class TestRedaction:
 
     def test_node_redaction(self):
         label, summary = redact_node(
-            "API key sk-ant-api03-SECRET123",
+            "API key sk-ant-api03-SECRET123456",
             "Using this key for anthropic calls"
         )
         assert "sk-ant" not in label

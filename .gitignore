@@ -21,7 +21,7 @@ venv/
 env/
 ENV/
 
-# TokenMizer runtime data (anchored to repo root — do NOT match tokenmizer/checkpoints/)
+# TokenMizer runtime data
 /checkpoints/
 /memory/
 *.db

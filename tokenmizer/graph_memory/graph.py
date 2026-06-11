@@ -516,7 +516,8 @@ class GraphMemory:
     # ── DB ──────────────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self._db_path) as conn:
+        conn = sqlite3.connect(self._db_path)
+        try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS graphs (
                     session_id TEXT PRIMARY KEY,
@@ -527,10 +528,13 @@ class GraphMemory:
                 )
             """)
             conn.commit()
+        finally:
+            conn.close()
 
     def _persist(self) -> None:
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            conn = sqlite3.connect(self._db_path)
+            try:
                 conn.execute(
                     """INSERT OR REPLACE INTO graphs
                        (session_id, nodes_json, edges_json, processed_hashes, updated_at)
@@ -544,16 +548,21 @@ class GraphMemory:
                     ),
                 )
                 conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             logger.error(f"Graph persist failed for {self.session_id}: {e}")
 
     def _load(self) -> None:
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            conn = sqlite3.connect(self._db_path)
+            try:
                 row = conn.execute(
                     "SELECT nodes_json, edges_json, processed_hashes FROM graphs WHERE session_id=?",
                     (self.session_id,),
                 ).fetchone()
+            finally:
+                conn.close()
             if not row:
                 return
             nodes_data = json.loads(row[0])

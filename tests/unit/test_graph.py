@@ -30,8 +30,8 @@ class TestNodeDeduplication:
         assert id1 == id2
 
     def test_different_type_same_label_different_nodes(self, graph):
-        id1 = graph.add_node(NodeType.TASK, "auth")
-        id2 = graph.add_node(NodeType.FILE, "auth")
+        id1 = graph.add_node(NodeType.TASK, "Implement auth")
+        id2 = graph.add_node(NodeType.FILE, "api/auth.py")
         assert id1 != id2
         assert len(graph._nodes) == 2
 
@@ -50,9 +50,16 @@ class TestNodeDeduplication:
 class TestNodeTypes:
 
     def test_all_new_node_types_accepted(self, graph):
-        for nt in [NodeType.ENVIRONMENT, NodeType.GOAL, NodeType.TEST,
-                   NodeType.ENDPOINT, NodeType.SCHEMA]:
-            nid = graph.add_node(nt, f"test {nt.value}")
+        labels = {
+            NodeType.ENVIRONMENT: "Python 3.12",
+            NodeType.GOAL: "Build FastAPI authentication service",
+            NodeType.TEST: "run pytest auth suite",
+            NodeType.ENDPOINT: "POST /api/auth/login",
+            NodeType.SCHEMA: "User: id, email, password_hash",
+        }
+        for nt, label in labels.items():
+            nid = graph.add_node(nt, label)
+            assert nid != ""
             assert nid in graph._nodes
 
     def test_goal_gets_high_importance(self, graph):
@@ -103,12 +110,14 @@ class TestPruning:
         import time
         # Add many completed tasks with old timestamp
         for i in range(10):
-            nid = graph.add_node(NodeType.TASK, f"Old task {i}", NodeStatus.COMPLETED)
+            nid = graph.add_node(NodeType.TASK, f"Implement old task {i}", NodeStatus.COMPLETED)
+            assert nid != ""
             graph._nodes[nid].updated_at = time.time() - 100 * 86400  # 100 days ago
 
         # Add some recent ones
         for i in range(5):
-            graph.add_node(NodeType.TASK, f"Recent task {i}", NodeStatus.PENDING)
+            nid = graph.add_node(NodeType.TASK, f"Implement recent task {i}", NodeStatus.PENDING)
+            assert nid != ""
 
         pruned = graph.prune(max_nodes=5, max_age_days=30)
         assert pruned > 0
@@ -117,17 +126,19 @@ class TestPruning:
     def test_prune_preserves_decisions(self, graph):
         import time
         for i in range(10):
-            nid = graph.add_node(NodeType.DECISION, f"Decision {i}", NodeStatus.COMPLETED)
+            nid = graph.add_node(NodeType.DECISION, f"Use SQLite for local storage {i}", NodeStatus.COMPLETED)
+            assert nid != ""
             graph._nodes[nid].updated_at = time.time() - 100 * 86400
 
-        graph.prune(max_nodes=2, max_age_days=30)
+        graph.prune(max_nodes=2, max_age_days=150)
         decisions = [n for n in graph._nodes.values() if n.type == NodeType.DECISION]
         assert len(decisions) == 10  # all preserved
 
     def test_prune_preserves_goals(self, graph):
         import time
         for i in range(5):
-            nid = graph.add_node(NodeType.GOAL, f"Goal {i}")
+            nid = graph.add_node(NodeType.GOAL, f"Build FastAPI authentication service {i}")
+            assert nid != ""
             graph._nodes[nid].updated_at = time.time() - 100 * 86400
 
         graph.prune(max_nodes=1, max_age_days=1)
@@ -141,9 +152,9 @@ class TestContextBlock:
         from tokenmizer.core.tokenizer import count_tokens
         # Fill graph with lots of data
         for i in range(50):
-            graph.add_node(NodeType.TASK, f"Task number {i} doing something important")
+            graph.add_node(NodeType.TASK, f"Implement task number {i} doing something important")
         for i in range(20):
-            graph.add_node(NodeType.DECISION, f"Decision {i} we made for the project")
+            graph.add_node(NodeType.DECISION, f"Use SQLite database {i} for storage")
 
         block = graph.to_context_block(token_budget=200)
         tokens = count_tokens(block)

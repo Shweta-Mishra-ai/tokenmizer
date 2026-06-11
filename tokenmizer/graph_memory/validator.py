@@ -278,8 +278,18 @@ class GraphValidator:
 _validator: Optional[GraphValidator] = None
 
 
-def get_validator(min_confidence: float = 0.65) -> GraphValidator:
+def get_validator(min_confidence: float | None = None) -> GraphValidator:
     global _validator
-    if _validator is None:
+    if min_confidence is not None:
+        # If explicitly passed, override or create a new validator instance
         _validator = GraphValidator(min_confidence=min_confidence)
+        return _validator
+
+    if _validator is None:
+        try:
+            from tokenmizer.config.settings import get_settings
+            threshold = get_settings().graph_checkpoint.min_confidence
+        except Exception:
+            threshold = 0.65
+        _validator = GraphValidator(min_confidence=threshold)
     return _validator

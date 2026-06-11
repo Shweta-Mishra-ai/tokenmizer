@@ -1,6 +1,10 @@
 import os
+from unittest.mock import patch
 
 import pytest
+
+# Disable Hugging Face downloads and sentence-transformers model load in tests
+patch("tokenmizer.semantic_cache.cache.EmbeddingEngine._load", lambda self: None).start()
 
 
 @pytest.fixture(scope="session", autouse=True)

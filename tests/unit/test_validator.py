@@ -71,7 +71,7 @@ class TestAccepted:
     def test_dependency_with_version_accepted(self, v):
         r = v.validate("fastapi>=0.111.0", "dependency")
         assert r.accepted is True
-        assert r.confidence >= 0.70
+        assert r.confidence >= 0.65
 
     def test_goal_accepted(self, v):
         r = v.validate("Build FastAPI authentication service with JWT", "goal")

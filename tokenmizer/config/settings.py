@@ -27,6 +27,7 @@ class GraphCheckpointSettings(BaseSettings):
     max_resume_tokens: int = 400
     use_llm_extraction: bool = False  # set True for 80%+ recall (needs API key, ~$0.001/turn)
     extraction_model: str = ""        # leave empty = auto-pick cheapest model for your provider
+    min_confidence: float = 0.65      # minimum validation confidence threshold
 
 
 class RoutingSettings(BaseSettings):
