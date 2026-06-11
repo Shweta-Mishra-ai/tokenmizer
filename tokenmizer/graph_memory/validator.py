@@ -19,8 +19,8 @@ Without this, graph pollution accumulates every session.
 """
 from __future__ import annotations
 
-import re
 import logging
+import re
 from dataclasses import dataclass
 from typing import Optional
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
+from tokenmizer.core.tokenizer import count_messages_tokens
 
 if TYPE_CHECKING:
     from tokenmizer.graph_memory.graph import GraphMemory

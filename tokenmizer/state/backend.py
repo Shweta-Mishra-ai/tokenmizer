@@ -8,6 +8,7 @@ Set TOKENMIZER_STATE_BACKEND=redis and TOKENMIZER_REDIS_URL=redis://...
 to enable Redis in production.
 """
 from __future__ import annotations
+
 import json
 import logging
 from abc import ABC, abstractmethod

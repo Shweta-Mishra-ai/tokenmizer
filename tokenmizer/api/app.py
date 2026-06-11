@@ -14,33 +14,32 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from tokenmizer.config.settings import get_settings
-from tokenmizer.core.tokenizer import count_tokens, count_messages_tokens
-from tokenmizer.security.auth import verify_api_key
-from tokenmizer.security.middleware import injection_guard
-from tokenmizer.security.redaction import redact_messages
-from tokenmizer.state.backend import get_state_backend
-from tokenmizer.providers.providers import build_provider
+from tokenmizer.analytics.engine import AnalyticsEngine
+from tokenmizer.api.rate_limiter import get_rate_limiter
+from tokenmizer.checkpoints.manager import CheckpointManager
 from tokenmizer.compression.engine import CompressionPipeline
 from tokenmizer.compression.output_trimmer import OutputTrimmer
 from tokenmizer.compression.window import SmartMessageWindow, needs_windowing
+from tokenmizer.config.settings import get_settings
+from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.filters.file_intelligence import FileIntelligence
-from tokenmizer.semantic_cache.cache import SemanticCache
 from tokenmizer.graph_memory.graph import GraphMemory
-from tokenmizer.checkpoints.manager import CheckpointManager
-from tokenmizer.analytics.engine import AnalyticsEngine
-from tokenmizer.api.rate_limiter import get_rate_limiter
+from tokenmizer.providers.providers import build_provider
+from tokenmizer.security.auth import verify_api_key
+from tokenmizer.security.middleware import injection_guard
+from tokenmizer.security.redaction import redact_messages
+from tokenmizer.semantic_cache.cache import SemanticCache
+from tokenmizer.state.backend import get_state_backend
 
 logger = logging.getLogger(__name__)
 
@@ -108,9 +107,7 @@ def _get_cheap_provider():
     if _cheap_provider is not None:
         return _cheap_provider
 
-    from tokenmizer.providers.providers import (
-        AnthropicProvider, OpenAIProvider
-    )
+    from tokenmizer.providers.providers import AnthropicProvider, OpenAIProvider
 
     provider = settings.provider.lower()
     key = settings.get_api_key_for_provider(provider)
@@ -602,7 +599,7 @@ async def invalidate_decision(session_id: str, decision_label: str, reason: str 
     History is preserved; decision is flagged as a warning in future resumes.
     """
     try:
-        from tokenmizer.graph_memory.graph import NodeType, NodeStatus
+        from tokenmizer.graph_memory.graph import NodeStatus, NodeType
         graph = _get_graph(session_id)
         label_lower = decision_label.lower().strip()
         found = False

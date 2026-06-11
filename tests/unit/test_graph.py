@@ -1,11 +1,8 @@
 """Unit tests — graph memory."""
-import pytest
-import tempfile
-import os
 
-from tokenmizer.graph_memory.graph import (
-    GraphMemory, NodeType, NodeStatus, MemoryNode
-)
+import pytest
+
+from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
 
 
 @pytest.fixture

@@ -3,8 +3,8 @@ Accurate token counting using tiktoken.
 Replaces every `len(text) // 4` in the codebase.
 """
 from __future__ import annotations
+
 import functools
-from typing import Optional
 
 _FALLBACK_RATIO = 4  # chars per token — only used if tiktoken unavailable
 

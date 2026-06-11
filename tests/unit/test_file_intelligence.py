@@ -1,11 +1,12 @@
 """Unit tests — file intelligence layer."""
-import pytest
+from tokenmizer.core.tokenizer import count_tokens
 from tokenmizer.filters.file_intelligence import (
-    FileIntelligence, CSVExtractor, JSONExtractor, TextExtractor,
+    CSVExtractor,
+    FileIntelligence,
+    JSONExtractor,
+    TextExtractor,
     detect_file_type,
 )
-from tokenmizer.core.tokenizer import count_tokens
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

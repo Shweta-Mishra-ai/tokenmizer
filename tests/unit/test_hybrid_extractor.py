@@ -1,6 +1,7 @@
 """Tests for HybridExtractor — targets 80%+ recall on synthetic session."""
 import pytest
-from tokenmizer.graph_memory.hybrid_extractor import HybridExtractor, ExtractedData
+
+from tokenmizer.graph_memory.hybrid_extractor import ExtractedData, HybridExtractor
 
 MESSAGES = [
     {"role": "user", "content": "Goal: build FastAPI auth service with JWT and PostgreSQL."},

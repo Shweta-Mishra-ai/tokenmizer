@@ -13,8 +13,8 @@ Average savings: 5-15% on verbose models (GPT-5.5, Gemini 3.1 Pro).
 from __future__ import annotations
 
 import re
-from tokenmizer.core.tokenizer import count_tokens
 
+from tokenmizer.core.tokenizer import count_tokens
 
 # ── Filler patterns ───────────────────────────────────────────────────────────
 # Ordered: most specific first

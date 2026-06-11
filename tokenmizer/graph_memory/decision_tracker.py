@@ -140,7 +140,7 @@ def find_contradicting_decisions(
     Returns:
         List of node IDs to supersede
     """
-    from tokenmizer.graph_memory.graph import NodeType, NodeStatus
+    from tokenmizer.graph_memory.graph import NodeStatus, NodeType
 
     new_topic = classify_topic(new_label, new_summary)
 
@@ -173,7 +173,7 @@ def _find_by_word_overlap(
     Fallback: find decisions with high word overlap (same topic, unknown category).
     Only used when topic classification returns None.
     """
-    from tokenmizer.graph_memory.graph import NodeType, NodeStatus
+    from tokenmizer.graph_memory.graph import NodeStatus, NodeType
 
     _STOP = frozenset({"use", "using", "the", "a", "an", "for", "to", "in",
                        "on", "with", "and", "or", "of", "is", "are", "we",

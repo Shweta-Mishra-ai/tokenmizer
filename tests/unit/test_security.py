@@ -1,6 +1,5 @@
 """Unit tests — security: redaction, auth, injection detection."""
-import pytest
-from tokenmizer.security.redaction import redact, redact_node, redact_messages
+from tokenmizer.security.redaction import redact, redact_messages, redact_node
 
 
 class TestRedaction:

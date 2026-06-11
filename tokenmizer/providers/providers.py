@@ -15,10 +15,10 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import AsyncIterator, Optional
+from typing import Optional
 
-from tokenmizer.core.tokenizer import count_tokens, count_messages_tokens
 from tokenmizer.core.errors import ProviderError
+from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 
 logger = logging.getLogger(__name__)
 

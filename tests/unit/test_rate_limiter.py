@@ -1,6 +1,6 @@
 """Tests for the rate limiter."""
-import asyncio
 import pytest
+
 from tokenmizer.api.rate_limiter import RateLimiter
 
 

@@ -10,9 +10,11 @@ When empty (default), auth is skipped — dev mode.
 Uses constant-time comparison to prevent timing attacks.
 """
 from __future__ import annotations
+
 import hashlib
 import hmac
-from fastapi import Request, HTTPException
+
+from fastapi import HTTPException, Request
 
 
 def _get_configured_key() -> str:

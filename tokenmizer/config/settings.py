@@ -1,6 +1,8 @@
 """TokenMizer configuration — Pydantic Settings with env var support."""
 from __future__ import annotations
-from typing import Literal, List
+
+from typing import List, Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

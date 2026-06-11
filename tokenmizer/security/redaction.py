@@ -4,6 +4,7 @@ Applied before ANY node is written to the graph, any checkpoint is saved,
 or any error message is logged.
 """
 from __future__ import annotations
+
 import re
 
 _PATTERNS = [

@@ -1,6 +1,7 @@
 """Unit tests — graph validator and confidence scoring."""
 import pytest
-from tokenmizer.graph_memory.validator import GraphValidator, ValidationResult
+
+from tokenmizer.graph_memory.validator import GraphValidator
 
 
 @pytest.fixture
@@ -165,7 +166,7 @@ class TestGraphIntegration:
         assert 0.0 < stats["avg_confidence"] <= 1.0
 
     def test_semantic_edges_not_accidental(self, tmp_path):
-        from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+        from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
         g = GraphMemory("edge-test", storage_dir=str(tmp_path))
 
         # Add task about auth

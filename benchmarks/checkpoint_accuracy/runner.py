@@ -7,15 +7,13 @@ Run: python -m benchmarks.checkpoint_accuracy.runner
 from __future__ import annotations
 
 import json
-import time
-from dataclasses import dataclass, asdict
-from pathlib import Path
 import tempfile
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
-from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
 from tokenmizer.checkpoints.manager import CheckpointManager
-from tokenmizer.core.tokenizer import count_tokens
-
+from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
 
 # ── Synthetic sessions ────────────────────────────────────────────────────────
 

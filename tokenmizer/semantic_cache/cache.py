@@ -16,8 +16,8 @@ LRU eviction, TTL expiry, eviction metrics included.
 from __future__ import annotations
 
 import hashlib
-import re
 import logging
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass

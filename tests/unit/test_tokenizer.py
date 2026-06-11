@@ -1,6 +1,5 @@
 """Unit tests — accurate token counting."""
-import pytest
-from tokenmizer.core.tokenizer import count_tokens, count_messages_tokens
+from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 
 
 class TestTokenizer:

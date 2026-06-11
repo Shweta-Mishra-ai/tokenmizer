@@ -3,8 +3,8 @@ Memory accuracy tests — simulate real coding sessions and measure
 task/decision/file retention precision and recall.
 """
 import pytest
-from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
 
+from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
 
 # ── Synthetic 30-turn session ─────────────────────────────────────────────────
 

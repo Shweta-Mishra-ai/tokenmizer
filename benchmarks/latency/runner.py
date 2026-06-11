@@ -6,10 +6,11 @@ Run: python -m benchmarks.latency.runner
 Requires: tokenmizer serve running at localhost:8000
 """
 import asyncio
-import time
-import statistics
-import httpx
 import os
+import statistics
+import time
+
+import httpx
 
 URL = os.getenv("TOKENMIZER_URL", "http://localhost:8000")
 REQUESTS = 50
@@ -39,7 +40,7 @@ async def single_request(client: httpx.AsyncClient, prompt: str) -> float:
 
 
 async def run():
-    print(f"\nTokenMizer Latency Benchmark")
+    print("\nTokenMizer Latency Benchmark")
     print(f"  Target: {URL}")
     print(f"  Requests: {REQUESTS}, Concurrency: {CONCURRENCY}")
     print()
@@ -52,7 +53,7 @@ async def run():
             print("  ✅ Server reachable")
         except Exception as e:
             print(f"  ❌ Server not reachable: {e}")
-            print(f"     Start with: tokenmizer serve")
+            print("     Start with: tokenmizer serve")
             return
 
     latencies = []

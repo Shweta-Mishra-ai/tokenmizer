@@ -1,7 +1,9 @@
 """Prompt injection detection middleware."""
 from __future__ import annotations
-import re
+
 import logging
+import re
+
 # FastAPI imported lazily — _scan_messages works without it
 
 logger = logging.getLogger(__name__)

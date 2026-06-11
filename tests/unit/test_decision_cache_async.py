@@ -4,10 +4,7 @@ Tests for the three core quality fixes:
 2. Cache session isolation + cross-session sharing
 3. Background async extraction (non-blocking)
 """
-import pytest
-import time
 import tempfile
-
 
 # ── 1. Decision Contradiction ──────────────────────────────────────────────────
 
@@ -37,8 +34,7 @@ class TestDecisionTracker:
         assert result is None  # unknown topic
 
     def test_same_decision_not_superseded(self):
-        from tokenmizer.graph_memory.decision_tracker import find_contradicting_decisions
-        from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+        from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
 
         with tempfile.TemporaryDirectory() as tmp:
             g = GraphMemory("dup-test", storage_dir=tmp)
@@ -63,7 +59,7 @@ class TestDecisionTracker:
                 assert g._nodes[nid].status == NodeStatus.COMPLETED
 
     def test_contradicting_decision_supersedes_old(self):
-        from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+        from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
 
         with tempfile.TemporaryDirectory() as tmp:
             g = GraphMemory("contra-test", storage_dir=tmp)
@@ -92,7 +88,7 @@ class TestDecisionTracker:
                 assert "Superseded by" in g._nodes[postgres_id].summary
 
     def test_superseded_decisions_excluded_from_resume(self):
-        from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+        from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
 
         with tempfile.TemporaryDirectory() as tmp:
             g = GraphMemory("resume-test", storage_dir=tmp)
@@ -125,7 +121,7 @@ class TestDecisionTracker:
             assert total == 2  # both exist in graph (history preserved)
 
     def test_different_topic_decisions_coexist(self):
-        from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+        from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
 
         with tempfile.TemporaryDirectory() as tmp:
             g = GraphMemory("coexist-test", storage_dir=tmp)
@@ -229,7 +225,7 @@ class TestDecisionHistory:
         It should NOT appear in resume context.
         It SHOULD appear in full graph stats (for audit/rollback).
         """
-        from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+        from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
 
         with tempfile.TemporaryDirectory() as tmp:
             g = GraphMemory("history-test", storage_dir=tmp)
@@ -253,7 +249,7 @@ class TestDecisionHistory:
                 assert db_count <= 2  # at most both if topic not matched
 
     def test_supersede_edge_created(self):
-        from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus, EdgeType
+        from tokenmizer.graph_memory.graph import EdgeType, GraphMemory, NodeStatus, NodeType
 
         with tempfile.TemporaryDirectory() as tmp:
             g = GraphMemory("edge-test", storage_dir=tmp)

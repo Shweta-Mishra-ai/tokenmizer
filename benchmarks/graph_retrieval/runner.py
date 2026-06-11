@@ -6,12 +6,15 @@ Run: python -m benchmarks.graph_retrieval.runner
 No server required — tests graph module directly.
 """
 from __future__ import annotations
-import sys
+
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tokenmizer.graph_memory.graph import GraphMemory
 import tempfile
+
+from tokenmizer.graph_memory.graph import GraphMemory
 
 SYNTHETIC_SESSION = [
     {"role": "user", "content": "Let's build a FastAPI auth service with JWT and PostgreSQL."},
@@ -86,8 +89,8 @@ def run():
         if overall >= 0.80:
             print("  ✅ Target met (≥80%)")
         else:
-            print(f"  ⚠️  Below target. Enable LLM extraction for higher recall.")
-            print(f"     Set: use_llm_extraction: true in tokenmizer.yaml")
+            print("  ⚠️  Below target. Enable LLM extraction for higher recall.")
+            print("     Set: use_llm_extraction: true in tokenmizer.yaml")
         print()
 
 

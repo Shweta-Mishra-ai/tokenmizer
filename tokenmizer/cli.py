@@ -1,11 +1,11 @@
 """TokenMizer CLI"""
 from __future__ import annotations
+
 from typing import Optional
+
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
-from rich import box
 
 app = typer.Typer(
     name="tokenmizer",
@@ -24,8 +24,9 @@ def serve(
     workers: int = typer.Option(1, help="Number of worker processes"),
 ):
     """Start TokenMizer proxy + dashboard."""
-    import uvicorn
     import os
+
+    import uvicorn
 
     if config:
         os.environ["TOKENMIZER_CONFIG"] = config

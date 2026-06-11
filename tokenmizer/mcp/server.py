@@ -311,7 +311,6 @@ def run_stdio_server():
     MCP stdio transport — reads JSON-RPC from stdin, writes to stdout.
     This is the standard MCP server protocol.
     """
-    import json
 
     def send(obj: dict):
         sys.stdout.write(json.dumps(obj) + "\n")

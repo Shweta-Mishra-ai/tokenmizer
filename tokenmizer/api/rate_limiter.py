@@ -4,9 +4,9 @@ No external deps — pure stdlib.
 """
 from __future__ import annotations
 
-import time
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 

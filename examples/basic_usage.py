@@ -7,7 +7,6 @@ TokenMizer usage examples.
 """
 import asyncio
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Example 1: Drop-in OpenAI-compatible proxy
 # Just change base_url — everything else stays the same
@@ -114,8 +113,9 @@ async def example_session_resume():
 async def example_direct_api():
     """Use TokenMizer graph memory directly in your Python app."""
     import tempfile
-    from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+
     from tokenmizer.checkpoints.manager import CheckpointManager
+    from tokenmizer.graph_memory.graph import GraphMemory
 
     with tempfile.TemporaryDirectory() as tmp:
         graph = GraphMemory("my-session", storage_dir=tmp)

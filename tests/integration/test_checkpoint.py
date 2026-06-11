@@ -1,9 +1,9 @@
 """Integration tests — checkpoint creation and resume."""
 import pytest
-from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+
 from tokenmizer.checkpoints.manager import CheckpointManager
 from tokenmizer.core.tokenizer import count_tokens
-
+from tokenmizer.graph_memory.graph import GraphMemory
 
 MESSAGES = [
     {"role": "user", "content": "We're building a FastAPI app with PostgreSQL"},
