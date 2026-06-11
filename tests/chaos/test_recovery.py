@@ -1,17 +1,14 @@
 """
 Chaos tests — verify graceful recovery from failures.
 """
-import json
-import pytest
-import sqlite3
-from pathlib import Path
 
-from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+import sqlite3
+
 from tokenmizer.checkpoints.manager import CheckpointManager
+from tokenmizer.graph_memory.graph import GraphMemory, NodeType
 
 
 class TestCorruptedGraph:
-
     def test_corrupted_db_handled_gracefully(self, tmp_path):
         """If the SQLite DB is corrupted, GraphMemory should start fresh."""
         db_path = tmp_path / "graph_memory.db"
@@ -32,7 +29,7 @@ class TestCorruptedGraph:
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "UPDATE graphs SET processed_hashes = ? WHERE session_id = ?",
-                ("not valid json at all", "partial-session")
+                ("not valid json at all", "partial-session"),
             )
             conn.commit()
 
@@ -52,7 +49,6 @@ class TestCorruptedGraph:
 
 
 class TestCheckpointChaos:
-
     def test_checkpoint_with_empty_graph(self, tmp_path):
         """Checkpointing a session with no data should not crash."""
         mgr = CheckpointManager(storage_dir=str(tmp_path))
@@ -97,7 +93,6 @@ class TestCheckpointChaos:
 
 
 class TestStorageEdgeCases:
-
     def test_graph_with_very_long_labels(self, tmp_path):
         """Labels longer than 120 chars should be truncated, not crash."""
         g = GraphMemory("long-label", storage_dir=str(tmp_path))
