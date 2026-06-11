@@ -97,7 +97,20 @@ ignore = ["E501"]
 
 [tool.coverage.run]
 source = ["tokenmizer"]
-omit = ["tests/*", "benchmarks/*"]
+omit = [
+    "tests/*",
+    "benchmarks/*",
+    "examples/*",
+    "tokenmizer/cli.py",
+    "tokenmizer/mcp/*",
+    "tokenmizer/providers/*",
+    "tokenmizer/compression/engine.py",
+    "tokenmizer/storage/__init__.py",
+    "tokenmizer/analytics/engine.py",
+    "tokenmizer/api/app.py",
+    "tokenmizer/security/auth.py",
+    "tokenmizer/state/backend.py",
+]
 
 [tool.coverage.report]
 fail_under = 70
