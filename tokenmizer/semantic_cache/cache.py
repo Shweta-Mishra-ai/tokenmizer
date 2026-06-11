@@ -55,9 +55,12 @@ class EmbeddingEngine:
 
     def __init__(self):
         self._model = None
-        self._load()
+        self._initialized = False
 
     def _load(self) -> None:
+        if self._initialized:
+            return
+        self._initialized = True
         try:
             from sentence_transformers import SentenceTransformer  # type: ignore
             self._model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -67,9 +70,11 @@ class EmbeddingEngine:
 
     @property
     def available(self) -> bool:
+        self._load()
         return self._model is not None
 
     def embed(self, text: str):
+        self._load()
         if self._model is None:
             return None
         return self._model.encode(text[:1000], normalize_embeddings=True)
