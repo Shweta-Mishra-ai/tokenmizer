@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  tokenmizer:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - TOKENMIZER_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - TOKENMIZER_OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - TOKENMIZER_GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - TOKENMIZER_API_KEY=${TOKENMIZER_API_KEY:-}
+      - TOKENMIZER_STATE_BACKEND=redis
+      - TOKENMIZER_REDIS_URL=redis://redis:6379/0
+      - TOKENMIZER_PROVIDER=${TOKENMIZER_PROVIDER:-anthropic}
+      - TOKENMIZER_DEFAULT_MODEL=${TOKENMIZER_DEFAULT_MODEL:-claude-sonnet-4-6}
+    volumes:
+      - checkpoints:/app/checkpoints
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  checkpoints:
+  redis_data:

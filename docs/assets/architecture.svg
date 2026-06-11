@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" width="900" height="560">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#07090f"/>
+      <stop offset="100%" stop-color="#0c1020"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <marker id="ap" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#7c6af7"/></marker>
+    <marker id="ag" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#4ade80"/></marker>
+    <marker id="at" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#5ee7c8"/></marker>
+    <marker id="ay" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#fbbf24"/></marker>
+  </defs>
+
+  <rect width="900" height="560" fill="url(#bg)" rx="14"/>
+
+  <!-- subtle dot grid -->
+  <pattern id="dots" x="0" y="0" width="24" height="24" patternUnits="userSpaceOnUse">
+    <circle cx="1" cy="1" r="0.8" fill="#ffffff" opacity="0.025"/>
+  </pattern>
+  <rect width="900" height="560" fill="url(#dots)" rx="14"/>
+
+  <!-- ── TITLE ── -->
+  <text x="450" y="38" text-anchor="middle" fill="#e8eaf6" font-family="'JetBrains Mono',monospace" font-size="15" font-weight="700" letter-spacing="4">TOKENMIZER</text>
+  <text x="450" y="56" text-anchor="middle" fill="#3d3f5a" font-family="'JetBrains Mono',monospace" font-size="9" letter-spacing="3">NEVER LOSE AI CONTEXT AGAIN</text>
+
+  <!-- ── CLIENT ── -->
+  <rect x="30" y="80" width="120" height="54" rx="8" fill="#111422" stroke="#252840" stroke-width="1.5"/>
+  <text x="90" y="102" text-anchor="middle" fill="#6366a0" font-family="'JetBrains Mono',monospace" font-size="8" letter-spacing="1.5">CLIENT</text>
+  <text x="90" y="118" text-anchor="middle" fill="#c4b5fd" font-family="'JetBrains Mono',monospace" font-size="10" font-weight="600">Your App</text>
+  <text x="90" y="129" text-anchor="middle" fill="#3d3f5a" font-family="'JetBrains Mono',monospace" font-size="7.5">OpenAI SDK / curl</text>
+
+  <!-- request arrow down -->
+  <line x1="90" y1="134" x2="90" y2="162" stroke="#7c6af7" stroke-width="1.5" marker-end="url(#ap)"/>
+  <text x="100" y="152" fill="#4a3a8a" font-family="'JetBrains Mono',monospace" font-size="7.5">POST /v1/chat</text>
+
+  <!-- ── PROXY BOX ── -->
+  <rect x="30" y="164" width="550" height="340" rx="10" fill="#090c18" stroke="#1e2040" stroke-width="1.5"/>
+  <rect x="30" y="164" width="550" height="22" rx="8" fill="#0f1228"/>
+  <text x="305" y="179" text-anchor="middle" fill="#7c6af7" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="700" letter-spacing="2">TOKENMIZER PROXY  ·  :8000</text>
+
+  <!-- Pipeline layers inside proxy -->
+  <!-- L0 -->
+  <rect x="46" y="196" width="518" height="40" rx="6" fill="#0a1220" stroke="#162040" stroke-width="1"/>
+  <rect x="46" y="196" width="4" height="40" rx="2" fill="#60a5fa"/>
+  <text x="60" y="213" fill="#60a5fa" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L0</text>
+  <text x="78" y="213" fill="#93c5fd" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">File Intelligence</text>
+  <text x="60" y="228" fill="#2a4060" font-family="'JetBrains Mono',monospace" font-size="7.5">CSV · PDF · Excel · JSON · Code  →  schema + stats + sample  ·  99%+ token reduction</text>
+
+  <!-- L1 -->
+  <rect x="46" y="242" width="518" height="40" rx="6" fill="#0a1810" stroke="#163020" stroke-width="1"/>
+  <rect x="46" y="242" width="4" height="40" rx="2" fill="#4ade80"/>
+  <text x="60" y="259" fill="#4ade80" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L1</text>
+  <text x="78" y="259" fill="#86efac" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Prompt Compression</text>
+  <text x="60" y="274" fill="#1a4020" font-family="'JetBrains Mono',monospace" font-size="7.5">Heuristic pipeline  ·  LLMLingua2 (optional)  ·  quality gate 0.55  ·  15–40% savings</text>
+
+  <!-- L2 -->
+  <rect x="46" y="288" width="518" height="40" rx="6" fill="#181408" stroke="#302808" stroke-width="1"/>
+  <rect x="46" y="288" width="4" height="40" rx="2" fill="#fbbf24"/>
+  <text x="60" y="305" fill="#fbbf24" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L2</text>
+  <text x="78" y="305" fill="#fde68a" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Output Trimmer  +  Terse Injection</text>
+  <text x="60" y="320" fill="#403010" font-family="'JetBrains Mono',monospace" font-size="7.5">Remove LLM filler · inject brevity prompt  ·  5–15% output savings  ·  zero info loss</text>
+
+  <!-- L3 -->
+  <rect x="46" y="334" width="518" height="40" rx="6" fill="#081420" stroke="#103040" stroke-width="1"/>
+  <rect x="46" y="334" width="4" height="40" rx="2" fill="#38bdf8"/>
+  <text x="60" y="351" fill="#38bdf8" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L3</text>
+  <text x="78" y="351" fill="#7dd3fc" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Semantic Cache</text>
+  <text x="60" y="366" fill="#104060" font-family="'JetBrains Mono',monospace" font-size="7.5">Exact match (O1) → embedding similarity → miss  ·  LRU eviction  ·  session isolation</text>
+
+  <!-- L4 -->
+  <rect x="46" y="380" width="518" height="52" rx="6" fill="#0c0820" stroke="#201840" stroke-width="1.5"/>
+  <rect x="46" y="380" width="4" height="52" rx="2" fill="#a78bfa"/>
+  <text x="60" y="398" fill="#a78bfa" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L4</text>
+  <text x="78" y="398" fill="#ddd6fe" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Graph Memory  +  Smart Window  +  Checkpoint</text>
+  <!-- status pills -->
+  <rect x="60" y="404" width="64" height="13" rx="3" fill="#0a2010"/>
+  <text x="92" y="414" text-anchor="middle" fill="#4ade80" font-family="'JetBrains Mono',monospace" font-size="7.5" font-weight="600">● ACTIVE</text>
+  <rect x="130" y="404" width="82" height="13" rx="3" fill="#201a08"/>
+  <text x="171" y="414" text-anchor="middle" fill="#fbbf24" font-family="'JetBrains Mono',monospace" font-size="7.5" font-weight="600">◐ SUPERSEDED</text>
+  <rect x="218" y="404" width="84" height="13" rx="3" fill="#200808"/>
+  <text x="260" y="414" text-anchor="middle" fill="#f87171" font-family="'JetBrains Mono',monospace" font-size="7.5" font-weight="600">✕ INVALIDATED</text>
+  <rect x="308" y="404" width="64" height="13" rx="3" fill="#141414"/>
+  <text x="340" y="414" text-anchor="middle" fill="#94a3b8" font-family="'JetBrains Mono',monospace" font-size="7.5" font-weight="600">○ ARCHIVED</text>
+  <text x="60" y="426" fill="#1e1440" font-family="'JetBrains Mono',monospace" font-size="7.5">SQLite persistence  ·  confidence scoring  ·  topic-aware superseding  ·  auto-checkpoint 85%</text>
+
+  <!-- L5 -->
+  <rect x="46" y="438" width="518" height="36" rx="6" fill="#08140a" stroke="#102018" stroke-width="1"/>
+  <rect x="46" y="438" width="4" height="36" rx="2" fill="#34d399"/>
+  <text x="60" y="455" fill="#34d399" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L5</text>
+  <text x="78" y="455" fill="#6ee7b7" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Provider Layer  +  Anthropic Prompt Cache</text>
+  <text x="60" y="468" fill="#0a2814" font-family="'JetBrains Mono',monospace" font-size="7.5">Unified LLMResponse DTO  ·  retry+backoff  ·  system prompt @10% cost on repeats</text>
+
+  <!-- response arrow up -->
+  <line x1="90" y1="504" x2="90" y2="526" stroke="#5ee7c8" stroke-width="1.5"/>
+  <line x1="90" y1="504" x2="64" y2="504" stroke="#5ee7c8" stroke-width="1.5"/>
+  <line x1="64" y1="134" x2="64" y2="504" stroke="#5ee7c8" stroke-width="1.5"/>
+  <line x1="64" y1="134" x2="88" y2="134" stroke="#5ee7c8" stroke-width="1.5" marker-end="url(#at)"/>
+  <text x="40" y="330" fill="#1a3a30" font-family="'JetBrains Mono',monospace" font-size="7.5" transform="rotate(-90,40,330)">response</text>
+
+  <!-- ── LLM PROVIDERS ── -->
+  <rect x="640" y="164" width="230" height="340" rx="10" fill="#090c18" stroke="#1a2030" stroke-width="1.5"/>
+  <rect x="640" y="164" width="230" height="22" rx="8" fill="#0f1228"/>
+  <text x="755" y="179" text-anchor="middle" fill="#4b5e7a" font-family="'JetBrains Mono',monospace" font-size="9" letter-spacing="2">LLM PROVIDERS</text>
+
+  <!-- provider list -->
+  <g font-family="'JetBrains Mono',monospace" font-size="9.5">
+    <rect x="654" y="196" width="202" height="26" rx="5" fill="#0f1420" stroke="#f9731618" stroke-width="1"/>
+    <circle cx="670" cy="209" r="4" fill="#f97316" opacity="0.8"/>
+    <text x="682" y="213" fill="#f97316" font-weight="600">Anthropic · Claude</text>
+
+    <rect x="654" y="228" width="202" height="26" rx="5" fill="#0f1420" stroke="#22c55e18" stroke-width="1"/>
+    <circle cx="670" cy="241" r="4" fill="#4ade80" opacity="0.8"/>
+    <text x="682" y="245" fill="#4ade80" font-weight="600">OpenAI · GPT</text>
+
+    <rect x="654" y="260" width="202" height="26" rx="5" fill="#0f1420" stroke="#3b82f618" stroke-width="1"/>
+    <circle cx="670" cy="273" r="4" fill="#60a5fa" opacity="0.8"/>
+    <text x="682" y="277" fill="#60a5fa" font-weight="600">Google · Gemini</text>
+
+    <rect x="654" y="292" width="202" height="26" rx="5" fill="#0f1420" stroke="#8b5cf618" stroke-width="1"/>
+    <circle cx="670" cy="305" r="4" fill="#a78bfa" opacity="0.8"/>
+    <text x="682" y="309" fill="#a78bfa" font-weight="600">DeepSeek</text>
+
+    <rect x="654" y="324" width="202" height="26" rx="5" fill="#0f1420" stroke="#ec489918" stroke-width="1"/>
+    <circle cx="670" cy="337" r="4" fill="#f472b6" opacity="0.8"/>
+    <text x="682" y="341" fill="#f472b6" font-weight="600">Mistral · Grok · Cohere</text>
+
+    <rect x="654" y="356" width="202" height="26" rx="5" fill="#0f1420" stroke="#06b6d418" stroke-width="1"/>
+    <circle cx="670" cy="369" r="4" fill="#22d3ee" opacity="0.8"/>
+    <text x="682" y="373" fill="#22d3ee" font-weight="600">OpenRouter</text>
+
+    <rect x="654" y="388" width="202" height="26" rx="5" fill="#0f1420" stroke="#64748b30" stroke-width="1"/>
+    <circle cx="670" cy="401" r="4" fill="#94a3b8" opacity="0.8"/>
+    <text x="682" y="405" fill="#94a3b8" font-weight="600">Ollama · Local</text>
+  </g>
+
+  <!-- arrow proxy → providers -->
+  <line x1="580" y1="340" x2="636" y2="340" stroke="#4ade80" stroke-width="1.5" marker-end="url(#ag)"/>
+  <text x="608" y="334" text-anchor="middle" fill="#1a3a20" font-family="'JetBrains Mono',monospace" font-size="7">send</text>
+
+  <!-- arrow providers → proxy -->
+  <line x1="636" y1="358" x2="580" y2="358" stroke="#5ee7c8" stroke-width="1.5" marker-end="url(#at)"/>
+  <text x="608" y="372" text-anchor="middle" fill="#1a3a30" font-family="'JetBrains Mono',monospace" font-size="7">response</text>
+
+  <!-- ── STORAGE + SECURITY side ── -->
+  <rect x="640" y="430" width="110" height="60" rx="6" fill="#090c14" stroke="#141a28" stroke-width="1"/>
+  <text x="695" y="448" text-anchor="middle" fill="#3d4060" font-family="'JetBrains Mono',monospace" font-size="7.5" letter-spacing="1">STORAGE</text>
+  <text x="695" y="462" text-anchor="middle" fill="#2a3050" font-family="'JetBrains Mono',monospace" font-size="7.5">SQLite · Redis</text>
+  <text x="695" y="475" text-anchor="middle" fill="#1e2440" font-family="'JetBrains Mono',monospace" font-size="7.5">In-memory (dev)</text>
+  <text x="695" y="483" text-anchor="middle" fill="#141830" font-family="'JetBrains Mono',monospace" font-size="7">survives restarts</text>
+
+  <rect x="760" y="430" width="110" height="60" rx="6" fill="#090c14" stroke="#141a28" stroke-width="1"/>
+  <text x="815" y="448" text-anchor="middle" fill="#3d4060" font-family="'JetBrains Mono',monospace" font-size="7.5" letter-spacing="1">SECURITY</text>
+  <text x="815" y="462" text-anchor="middle" fill="#2a3050" font-family="'JetBrains Mono',monospace" font-size="7.5">Key auth · Redaction</text>
+  <text x="815" y="475" text-anchor="middle" fill="#1e2440" font-family="'JetBrains Mono',monospace" font-size="7.5">Injection detect</text>
+  <text x="815" y="483" text-anchor="middle" fill="#141830" font-family="'JetBrains Mono',monospace" font-size="7">CORS restricted</text>
+
+  <!-- ── BOTTOM STATUS ── -->
+  <rect x="30" y="520" width="840" height="28" rx="5" fill="#07090f" stroke="#0f1220" stroke-width="1"/>
+  <circle cx="52" cy="534" r="3" fill="#4ade80" filter="url(#glow)"/>
+  <text x="62" y="538" fill="#1a3a20" font-family="'JetBrains Mono',monospace" font-size="8">ACTIVE</text>
+  <circle cx="112" cy="534" r="3" fill="#fbbf24"/>
+  <text x="122" y="538" fill="#403010" font-family="'JetBrains Mono',monospace" font-size="8">SUPERSEDED</text>
+  <circle cx="192" cy="534" r="3" fill="#f87171"/>
+  <text x="202" y="538" fill="#401010" font-family="'JetBrains Mono',monospace" font-size="8">INVALIDATED</text>
+  <circle cx="270" cy="534" r="3" fill="#94a3b8"/>
+  <text x="280" y="538" fill="#303040" font-family="'JetBrains Mono',monospace" font-size="8">ARCHIVED</text>
+  <text x="450" y="538" text-anchor="middle" fill="#1e2040" font-family="'JetBrains Mono',monospace" font-size="7.5">All layers independently togglable · tokenmizer.yaml</text>
+  <text x="820" y="538" text-anchor="end" fill="#1e2040" font-family="'JetBrains Mono',monospace" font-size="7.5">v0.1.0-alpha · MIT</text>
+</svg>

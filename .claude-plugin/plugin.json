@@ -1,0 +1,39 @@
+{
+  "name": "tokenmizer",
+  "version": "0.2.0",
+  "description": "Never lose your AI context again. Graph-backed memory, session checkpointing, and file intelligence for Claude Code and any LLM.",
+  "author": {
+    "name": "Shweta Mishra",
+    "url": "https://github.com/Shweta-Mishra-ai"
+  },
+  "homepage": "https://github.com/Shweta-Mishra-ai/tokenmizer",
+  "repository": "https://github.com/Shweta-Mishra-ai/tokenmizer",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "checkpoint",
+    "resume",
+    "context",
+    "token-optimization",
+    "graph",
+    "mcp"
+  ],
+  "skills": [
+    "./skills/checkpoint",
+    "./skills/resume",
+    "./skills/analyze",
+    "./skills/stats"
+  ],
+  "mcpServers": {
+    "tokenmizer": {
+      "command": "python",
+      "args": [
+        "-m",
+        "tokenmizer.mcp.server"
+      ],
+      "env": {
+        "TOKENMIZER_URL": "http://localhost:8000"
+      }
+    }
+  }
+}

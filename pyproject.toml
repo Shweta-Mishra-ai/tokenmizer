@@ -1,0 +1,104 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tokenmizer"
+version = "0.2.0"
+description = "Never lose your AI context again. Graph-backed checkpoint and resume for any LLM session."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Shweta Mishra", url = "https://github.com/Shweta-Mishra-ai" }]
+keywords = ["llm", "context", "memory", "checkpoint", "ai", "anthropic", "openai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "httpx>=0.27.0",
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+    "tiktoken>=0.7.0",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.30.0"]
+openai = ["openai>=1.35.0"]
+gemini = ["google-generativeai>=0.7.0"]
+cohere = ["cohere>=5.5.0"]
+
+# Semantic cache (optional but recommended)
+cache = ["sentence-transformers>=3.0.0", "numpy>=1.26.0"]
+
+# File intelligence extras (better PDF/Excel support)
+files = ["pypdf>=4.0.0", "openpyxl>=3.1.0"]
+
+# ML compression (much better than heuristic-only)
+compression = ["llmlingua>=0.2.0"]
+
+# Production persistence
+redis = ["redis>=5.0.0"]
+
+# Observability
+observability = ["prometheus-client>=0.20.0", "opentelemetry-sdk>=1.25.0", "opentelemetry-api>=1.25.0"]
+
+# Development
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "httpx>=0.27.0",
+    "ruff>=0.5.0",
+    "anthropic>=0.30.0",
+    "openai>=1.35.0",
+]
+
+# Install everything
+all = [
+    "tokenmizer[anthropic,openai,gemini,cohere,cache,files,compression,redis,observability]"
+]
+
+[project.scripts]
+tokenmizer = "tokenmizer.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/Shweta-Mishra-ai/tokenmizer"
+Repository = "https://github.com/Shweta-Mishra-ai/tokenmizer"
+Issues = "https://github.com/Shweta-Mishra-ai/tokenmizer/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tokenmizer"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.coverage.run]
+source = ["tokenmizer"]
+omit = ["tests/*", "benchmarks/*"]
+
+[tool.coverage.report]
+fail_under = 70
+show_missing = true

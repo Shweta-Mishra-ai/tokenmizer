@@ -1,0 +1,246 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="500" height="500">
+  <defs>
+    <!-- Deep space background -->
+    <radialGradient id="bg" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#1c1140"/>
+      <stop offset="60%" stop-color="#0d0820"/>
+      <stop offset="100%" stop-color="#060410"/>
+    </radialGradient>
+
+    <!-- Brain glow gradient -->
+    <radialGradient id="brainFill" cx="42%" cy="38%" r="65%">
+      <stop offset="0%" stop-color="#c4b5fd"/>
+      <stop offset="45%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#4c1d95"/>
+    </radialGradient>
+
+    <!-- Inner brain highlight -->
+    <radialGradient id="brainHighlight" cx="35%" cy="30%" r="50%">
+      <stop offset="0%" stop-color="#ede9fe" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#ede9fe" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Node glows -->
+    <radialGradient id="nodeGreen" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#6ee7b7"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </radialGradient>
+    <radialGradient id="nodeTeal" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#67e8f9"/>
+      <stop offset="100%" stop-color="#0891b2"/>
+    </radialGradient>
+    <radialGradient id="nodeAmber" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fde68a"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </radialGradient>
+    <radialGradient id="nodePurple" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#c4b5fd"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </radialGradient>
+
+    <!-- Pulse glow filter -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="softGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="textGlow" x="-20%" y="-40%" width="140%" height="180%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <!-- Clip to circle -->
+    <clipPath id="circleClip">
+      <circle cx="250" cy="250" r="230"/>
+    </clipPath>
+  </defs>
+
+  <!-- ── Background ── -->
+  <circle cx="250" cy="250" r="245" fill="url(#bg)"/>
+  <circle cx="250" cy="250" r="245" fill="none" stroke="#3b1f7a" stroke-width="1.5"/>
+
+  <!-- Starfield -->
+  <g opacity="0.5" clip-path="url(#circleClip)">
+    <circle cx="80" cy="70" r="1" fill="#c4b5fd"/>
+    <circle cx="420" cy="90" r="1.5" fill="#67e8f9"/>
+    <circle cx="160" cy="400" r="1" fill="#c4b5fd"/>
+    <circle cx="380" cy="380" r="1" fill="#6ee7b7"/>
+    <circle cx="60" cy="300" r="1.5" fill="#fde68a"/>
+    <circle cx="450" cy="280" r="1" fill="#c4b5fd"/>
+    <circle cx="320" cy="60" r="1" fill="#67e8f9"/>
+    <circle cx="110" cy="180" r="1" fill="#6ee7b7"/>
+    <circle cx="430" cy="160" r="1.5" fill="#fde68a"/>
+    <circle cx="200" cy="440" r="1" fill="#c4b5fd"/>
+    <circle cx="340" cy="430" r="1" fill="#67e8f9"/>
+  </g>
+
+  <!-- ── Graph edges — drawn BEHIND brain ── -->
+  <!-- Central hub to outer nodes -->
+  <g stroke-linecap="round" opacity="0.55" filter="url(#glow)">
+    <!-- hub → top-left (teal) -->
+    <line x1="250" y1="222" x2="148" y2="148" stroke="#67e8f9" stroke-width="1.5"/>
+    <!-- hub → top-right (amber) -->
+    <line x1="250" y1="222" x2="352" y2="148" stroke="#fde68a" stroke-width="1.5"/>
+    <!-- hub → left (green) -->
+    <line x1="250" y1="222" x2="105" y2="240" stroke="#6ee7b7" stroke-width="1.5"/>
+    <!-- hub → right (green) -->
+    <line x1="250" y1="222" x2="395" y2="240" stroke="#6ee7b7" stroke-width="1.5"/>
+    <!-- hub → bottom-left (purple) -->
+    <line x1="250" y1="222" x2="148" y2="322" stroke="#c4b5fd" stroke-width="1.5"/>
+    <!-- hub → bottom-right (purple) -->
+    <line x1="250" y1="222" x2="352" y2="322" stroke="#c4b5fd" stroke-width="1.5"/>
+    <!-- cross edges -->
+    <line x1="148" y1="148" x2="352" y2="148" stroke="#8b5cf6" stroke-width="1" opacity="0.4"/>
+    <line x1="105" y1="240" x2="148" y2="322" stroke="#8b5cf6" stroke-width="1" opacity="0.4"/>
+    <line x1="395" y1="240" x2="352" y2="322" stroke="#8b5cf6" stroke-width="1" opacity="0.4"/>
+    <line x1="148" y1="322" x2="352" y2="322" stroke="#8b5cf6" stroke-width="1" opacity="0.4"/>
+  </g>
+
+  <!-- ── Brain ── -->
+  <g filter="url(#softGlow)">
+    <!-- Main brain silhouette -->
+    <path d="
+      M250,115
+      C230,102 205,102 188,115
+      C168,128 160,150 163,170
+      C150,175 136,190 138,210
+      C136,228 148,244 163,250
+      C162,268 175,283 192,287
+      C205,295 220,296 235,294
+      L250,294
+      L265,294
+      C280,296 295,295 308,287
+      C325,283 338,268 337,250
+      C352,244 364,228 362,210
+      C364,190 350,175 337,170
+      C340,150 332,128 312,115
+      C295,102 270,102 250,115Z
+    " fill="url(#brainFill)"/>
+
+    <!-- Highlight overlay -->
+    <path d="
+      M250,115
+      C230,102 205,102 188,115
+      C168,128 160,150 163,170
+      C150,175 136,190 138,210
+      C136,228 148,244 163,250
+      C162,268 175,283 192,287
+      C205,295 220,296 235,294
+      L250,294
+      L265,294
+      C280,296 295,295 308,287
+      C325,283 338,268 337,250
+      C352,244 364,228 362,210
+      C364,190 350,175 337,170
+      C340,150 332,128 312,115
+      C295,102 270,102 250,115Z
+    " fill="url(#brainHighlight)"/>
+
+    <!-- Center dividing line (corpus callosum) -->
+    <line x1="250" y1="118" x2="250" y2="292" stroke="#2d1b6e" stroke-width="2.5" opacity="0.7"/>
+
+    <!-- Left hemisphere grooves -->
+    <path d="M183,168 C192,163 204,165 210,175 C215,185 210,200 200,203"
+          fill="none" stroke="#2d1b6e" stroke-width="2.2" stroke-linecap="round" opacity="0.8"/>
+    <path d="M165,215 C174,210 186,212 192,222 C197,232 192,245 184,248"
+          fill="none" stroke="#2d1b6e" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+    <path d="M175,255 C182,250 193,252 196,260"
+          fill="none" stroke="#2d1b6e" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/>
+
+    <!-- Right hemisphere grooves -->
+    <path d="M317,168 C308,163 296,165 290,175 C285,185 290,200 300,203"
+          fill="none" stroke="#2d1b6e" stroke-width="2.2" stroke-linecap="round" opacity="0.8"/>
+    <path d="M335,215 C326,210 314,212 308,222 C303,232 308,245 316,248"
+          fill="none" stroke="#2d1b6e" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+    <path d="M325,255 C318,250 307,252 304,260"
+          fill="none" stroke="#2d1b6e" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/>
+
+    <!-- Frontal lobe bumps -->
+    <path d="M220,118 C215,110 225,105 235,110"
+          fill="none" stroke="#2d1b6e" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+    <path d="M280,118 C285,110 275,105 265,110"
+          fill="none" stroke="#2d1b6e" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+  </g>
+
+  <!-- ── Central hub node ── -->
+  <circle cx="250" cy="222" r="13" fill="#1c1140" filter="url(#softGlow)"/>
+  <circle cx="250" cy="222" r="10" fill="url(#nodePurple)" filter="url(#glow)"/>
+  <circle cx="250" cy="222" r="5" fill="#ede9fe"/>
+
+  <!-- ── Outer nodes ── -->
+  <!-- Top-left: teal -->
+  <circle cx="148" cy="148" r="10" fill="#0c1a2e" filter="url(#softGlow)"/>
+  <circle cx="148" cy="148" r="8" fill="url(#nodeTeal)" filter="url(#glow)"/>
+  <circle cx="148" cy="148" r="4" fill="#e0f7fa"/>
+
+  <!-- Top-right: amber -->
+  <circle cx="352" cy="148" r="10" fill="#1a140c" filter="url(#softGlow)"/>
+  <circle cx="352" cy="148" r="8" fill="url(#nodeAmber)" filter="url(#glow)"/>
+  <circle cx="352" cy="148" r="4" fill="#fffde7"/>
+
+  <!-- Left: green -->
+  <circle cx="105" cy="240" r="9" fill="#0c1a12" filter="url(#softGlow)"/>
+  <circle cx="105" cy="240" r="7" fill="url(#nodeGreen)" filter="url(#glow)"/>
+  <circle cx="105" cy="240" r="3.5" fill="#ecfdf5"/>
+
+  <!-- Right: green -->
+  <circle cx="395" cy="240" r="9" fill="#0c1a12" filter="url(#softGlow)"/>
+  <circle cx="395" cy="240" r="7" fill="url(#nodeGreen)" filter="url(#glow)"/>
+  <circle cx="395" cy="240" r="3.5" fill="#ecfdf5"/>
+
+  <!-- Bottom-left: purple -->
+  <circle cx="148" cy="322" r="9" fill="#14102a" filter="url(#softGlow)"/>
+  <circle cx="148" cy="322" r="7" fill="url(#nodePurple)" filter="url(#glow)"/>
+  <circle cx="148" cy="322" r="3.5" fill="#ede9fe"/>
+
+  <!-- Bottom-right: purple -->
+  <circle cx="352" cy="322" r="9" fill="#14102a" filter="url(#softGlow)"/>
+  <circle cx="352" cy="322" r="7" fill="url(#nodePurple)" filter="url(#glow)"/>
+  <circle cx="352" cy="322" r="3.5" fill="#ede9fe"/>
+
+  <!-- ── Text ── -->
+  <!-- Main wordmark -->
+  <text
+    x="250" y="368"
+    font-family="'SF Pro Display','Helvetica Neue',Arial,sans-serif"
+    font-size="42"
+    font-weight="800"
+    letter-spacing="-1"
+    text-anchor="middle"
+    filter="url(#textGlow)">
+    <tspan fill="#f0eeff">Token</tspan><tspan fill="#a78bfa">Mizer</tspan>
+  </text>
+
+  <!-- Tagline -->
+  <text
+    x="250" y="396"
+    font-family="'SF Mono','Fira Code','Consolas',monospace"
+    font-size="11.5"
+    font-weight="400"
+    letter-spacing="3.5"
+    text-anchor="middle"
+    fill="#6d5fa8"
+    opacity="0.9">
+    NEVER LOSE AI CONTEXT
+  </text>
+
+  <!-- Version badge -->
+  <rect x="204" y="410" width="92" height="20" rx="10" fill="#1e0f4a" stroke="#3b2080" stroke-width="1"/>
+  <text
+    x="250" y="424"
+    font-family="'SF Mono','Fira Code','Consolas',monospace"
+    font-size="9"
+    font-weight="600"
+    letter-spacing="1.5"
+    text-anchor="middle"
+    fill="#8b6fc8">
+    v0.1.0 · alpha
+  </text>
+
+  <!-- Outer decorative ring -->
+  <circle cx="250" cy="250" r="242" fill="none" stroke="#3b1f7a" stroke-width="1" opacity="0.4"/>
+  <circle cx="250" cy="250" r="238" fill="none" stroke="#7c3aed" stroke-width="0.5" opacity="0.15"/>
+</svg>

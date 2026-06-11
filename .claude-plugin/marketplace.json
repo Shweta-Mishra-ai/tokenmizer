@@ -1,0 +1,31 @@
+{
+  "name": "tokenmizer",
+  "version": "0.2.0",
+  "description": "Never lose your AI context again. Graph-backed memory, session checkpointing, and file intelligence for any LLM.",
+  "homepage": "https://github.com/Shweta-Mishra-ai/tokenmizer",
+  "repository": "https://github.com/Shweta-Mishra-ai/tokenmizer",
+  "author": {
+    "name": "Shweta Mishra",
+    "url": "https://github.com/Shweta-Mishra-ai"
+  },
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "checkpoint",
+    "resume",
+    "context",
+    "graph",
+    "token-optimization",
+    "mcp",
+    "anthropic",
+    "openai",
+    "llm"
+  ],
+  "plugins": [
+    {
+      "name": "tokenmizer",
+      "path": ".",
+      "description": "Graph memory + checkpoints + file intelligence for any LLM session"
+    }
+  ]
+}

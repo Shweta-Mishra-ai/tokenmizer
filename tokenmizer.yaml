@@ -1,0 +1,70 @@
+# TokenMizer Configuration
+# Copy this file and set your values, or use environment variables (TOKENMIZER_* prefix)
+# Environment variables always override this file.
+
+# ── Provider ─────────────────────────────────────────────────────────────────
+provider: anthropic           # anthropic | openai | deepseek | mistral | gemini | grok | cohere | ollama | openrouter
+default_model: claude-sonnet-4-6
+
+# API keys — prefer env vars over this file
+# anthropic_api_key: ""       # or: TOKENMIZER_ANTHROPIC_API_KEY
+# openai_api_key: ""          # or: TOKENMIZER_OPENAI_API_KEY
+# gemini_api_key: ""          # or: TOKENMIZER_GEMINI_API_KEY
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+# api_key: ""                 # or: TOKENMIZER_API_KEY
+#                             # Empty = dev mode, no auth required
+#                             # In production: set to a strong random string
+
+# ── CORS ─────────────────────────────────────────────────────────────────────
+cors_origins:
+  - "http://localhost:3000"
+  - "http://localhost:8000"
+# Add your frontend domain in production:
+#   - "https://yourdomain.com"
+
+# ── State Backend ─────────────────────────────────────────────────────────────
+state_backend: memory         # memory (dev) | redis (production)
+# redis_url: redis://localhost:6379/0
+
+# ── Graph Memory + Checkpoints ────────────────────────────────────────────────
+graph_checkpoint:
+  enabled: true
+  trigger_at_percent: 0.85    # checkpoint when context is 85% full
+  storage_dir: ./checkpoints  # SQLite DB stored here
+  max_resume_tokens: 400      # cap on standard resume block size
+  use_llm_extraction: false   # true = use cheap LLM (haiku) for better accuracy
+                              # costs ~$0.001 per turn, much more accurate
+
+# ── Compression ───────────────────────────────────────────────────────────────
+compression:
+  enabled: true
+  engine: heuristic           # heuristic (default) | llmlingua2 (better, requires extra install)
+  ratio: 0.5                  # target compression ratio (0.1–1.0)
+  min_tokens_to_compress: 300 # don't compress short messages
+
+# ── Semantic Cache ────────────────────────────────────────────────────────────
+cache:
+  enabled: true
+  similarity_threshold: 0.92  # 0.90–0.98 recommended
+  ttl_seconds: 3600           # 1 hour
+  max_size: 10000             # LRU eviction when full
+
+# ── Terse Output ─────────────────────────────────────────────────────────────
+terse_output:
+  enabled: true
+  level: full                 # lite | full | ultra
+
+# ── Context Routing ───────────────────────────────────────────────────────────
+routing:
+  enabled: false              # enable to route simple queries to cheaper models
+
+# ── Memory ───────────────────────────────────────────────────────────────────
+memory:
+  enabled: true
+  max_tokens_before_summary: 4000
+  recent_turns_verbatim: 10
+
+# ── Server ───────────────────────────────────────────────────────────────────
+proxy_host: 0.0.0.0
+proxy_port: 8000
