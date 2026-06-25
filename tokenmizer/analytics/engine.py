@@ -56,6 +56,32 @@ class AnalyticsEngine:
     def __init__(self):
         self._records: List[AnalyticsRecord] = []
         self._by_provider: Dict[str, List[AnalyticsRecord]] = defaultdict(list)
+        # FIXED: previously, silent failures (checkpoint save, graph
+        # eviction persist, Redis write, AND background LLM extraction
+        # errors) were caught, logged at low severity, and otherwise
+        # invisible — no way to know in production whether data loss or
+        # feature degradation was happening without grepping logs. This
+        # counter makes "how many times did something silently fail this
+        # session" a queryable number via /api/stats instead of a fact
+        # buried in a log line. Dict key is `persist_failures` for API
+        # stability even though it now covers a slightly broader category
+        # than literal persistence (see record_silent_failure docstring).
+        self._persist_failures: Dict[str, int] = defaultdict(int)
+
+    def record_silent_failure(self, source: str) -> None:
+        """Track a failure that would otherwise be invisible outside debug
+        logs — persistence (checkpoint save, graph eviction, Redis write)
+        AND non-persistence failures like background LLM extraction
+        errors. The common thread: all of these used to fail silently
+        with zero visibility outside of logs nobody watches by default.
+        Call this from every place that catches such an exception — it
+        costs one dict increment and turns 'silent forever' into 'visible
+        in /api/stats'."""
+        self._persist_failures[source] += 1
+
+    @property
+    def persist_failures(self) -> Dict[str, int]:
+        return dict(self._persist_failures)
 
     def record(
         self,
@@ -155,4 +181,8 @@ class AnalyticsEngine:
             "layer_breakdown": self.layer_breakdown(),
             "by_provider": {p: len(recs) for p, recs in self._by_provider.items()},
             "suggestions": self.generate_suggestions(),
+            # FIXED: persistence failures (checkpoint/graph/redis writes that
+            # silently failed) are now visible here instead of only in logs.
+            # Non-zero values mean data was lost — investigate immediately.
+            "persist_failures": self.persist_failures,
         }

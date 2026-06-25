@@ -22,10 +22,26 @@ class StateBackend(ABC):
     def get(self, key: str) -> Optional[Any]: ...
 
     @abstractmethod
-    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None: ...
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Returns True if the write succeeded, False otherwise.
+
+        FIXED: previously returned None unconditionally (success or
+        failure looked identical to every caller). The one real caller —
+        `_set_context_used()` in api/app.py, which tracks how many tokens
+        of context a session has used — had no way to know its write was
+        dropped. A dropped write under-counts context usage, which means
+        the auto-checkpoint trigger_at_percent threshold could be silently
+        missed: the proxy would think a session is using less context than
+        it actually is, and the safety-net checkpoint that's supposed to
+        fire before the context window overflows simply... wouldn't.
+        """
+        ...
 
     @abstractmethod
-    def delete(self, key: str) -> None: ...
+    def delete(self, key: str) -> bool:
+        """Returns True if the delete succeeded (or key didn't exist),
+        False if the backend call itself failed."""
+        ...
 
     @abstractmethod
     def keys(self, prefix: str) -> list[str]: ...
@@ -47,11 +63,13 @@ class InMemoryBackend(StateBackend):
     def get(self, key: str) -> Optional[Any]:
         return self._store.get(key)
 
-    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         self._store[key] = value  # TTL not enforced in-memory
+        return True
 
-    def delete(self, key: str) -> None:
+    def delete(self, key: str) -> bool:
         self._store.pop(key, None)
+        return True
 
     def keys(self, prefix: str) -> list[str]:
         return [k for k in self._store if k.startswith(prefix)]
@@ -85,21 +103,25 @@ class RedisBackend(StateBackend):
             logger.warning(f"Redis GET failed for {key}: {e}")
             return None
 
-    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         try:
             serialized = json.dumps(value, default=str)
             if ttl:
                 self._r.setex(key, ttl, serialized)
             else:
                 self._r.set(key, serialized)
+            return True
         except Exception as e:
-            logger.warning(f"Redis SET failed for {key}: {e}")
+            logger.error(f"Redis SET failed for {key} — write was DROPPED: {e}")
+            return False
 
-    def delete(self, key: str) -> None:
+    def delete(self, key: str) -> bool:
         try:
             self._r.delete(key)
+            return True
         except Exception as e:
             logger.warning(f"Redis DELETE failed for {key}: {e}")
+            return False
 
     def keys(self, prefix: str) -> list[str]:
         try:

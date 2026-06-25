@@ -135,12 +135,35 @@ _settings: Settings | None = None
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
+        import logging
         import os
+        logger = logging.getLogger(__name__)
         yaml_path = os.environ.get("TOKENMIZER_CONFIG", "tokenmizer.yaml")
         if os.path.exists(yaml_path):
             try:
                 _settings = Settings.from_yaml(yaml_path)
-            except Exception:
+            except Exception as e:
+                # FIXED: previously this silently discarded the user's
+                # entire config file and fell back to hardcoded defaults
+                # with ZERO indication anything went wrong. The defaults
+                # are dev-mode-permissive: no API key required, CORS may
+                # be wider than intended, state backend is in-memory (no
+                # Redis). An operator who sets a real config — including
+                # security-relevant fields like `api_key` or
+                # `cors_origins` — could end up running with none of that
+                # applied, with no error, no warning, nothing. This is a
+                # security-relevant failure mode disguised as "graceful
+                # fallback." Logging at `error` (not silent) means a typo
+                # in tokenmizer.yaml is visible at startup instead of
+                # discovered later as "wait, why does this accept
+                # unauthenticated requests?"
+                logger.error(
+                    f"Failed to load config from {yaml_path}: {e}. "
+                    "Falling back to hardcoded defaults — this means any "
+                    "settings in your YAML file (including api_key, "
+                    "cors_origins, state_backend) are NOT applied. Fix the "
+                    "YAML file and restart."
+                )
                 _settings = Settings()
         else:
             _settings = Settings()

@@ -66,7 +66,8 @@ class EmbeddingEngine:
             self._model = SentenceTransformer("all-MiniLM-L6-v2")
             logger.info("Sentence transformer loaded for semantic cache")
         except ImportError:
-            logger.info("sentence-transformers not installed — semantic cache uses exact match only")
+            logger.info("sentence-transformers not installed "
+                        "— semantic cache uses exact match only")
 
     @property
     def available(self) -> bool:
@@ -224,11 +225,24 @@ class SemanticCache:
     ) -> None:
         """
         Store a cache entry.
-        session_id: if provided, this entry is session-scoped (not shared cross-session).
+
+        Scoping rules (safe-by-default):
+        - If prompt is sensitive → always session-scoped (never shared)
+        - If session_id provided → session-scoped (safe default)
+        - Only short, generic prompts with NO session_id go to shared cache
+          (e.g. "what is a JWT", "explain async/await")
         """
-        # Determine scope
         is_sensitive = self._is_session_sensitive(prompt)
-        scope = session_id if (session_id and is_sensitive) else "__shared__"
+
+        if is_sensitive:
+            # Sensitive content: always scoped to session, never shared
+            scope = session_id or "__private__"
+        elif session_id:
+            # Session provided: scope to session — safe default
+            scope = session_id
+        else:
+            # No session_id + not sensitive: safe to share (generic how-to queries)
+            scope = "__shared__"
 
         # Scoped key: sensitive responses keyed by session, generic by content
         key = self._key(prompt, scope)

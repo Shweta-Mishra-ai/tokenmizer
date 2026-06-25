@@ -29,10 +29,17 @@ class RateLimiter:
         allowed, retry_after = limiter.check("client-id")
     """
 
-    def __init__(self, rate: int = 60, per_seconds: int = 60, burst: int = 10):
+    def __init__(
+        self,
+        rate: int = 60,
+        per_seconds: int = 60,
+        burst: int = 10,
+        max_clients: int = 50_000,
+    ):
         self.rate = rate                  # tokens per window
         self.per_seconds = per_seconds    # window length
         self.burst = burst                # max burst above window rate
+        self.max_clients = max_clients    # hard cap — prevents unbounded growth
         self.capacity = rate + burst
         self.refill_rate = rate / per_seconds   # tokens per second
         self._buckets: dict[str, _Bucket] = defaultdict(
@@ -63,6 +70,15 @@ class RateLimiter:
             # Evict stale buckets periodically
             if now - self._last_cleanup > self._cleanup_interval:
                 self._evict_stale(now)
+
+            # Hard cap: if still over limit after cleanup, evict oldest entries
+            if len(self._buckets) >= self.max_clients:
+                # Remove ~10% oldest to avoid thrashing
+                evict_count = max(1, self.max_clients // 10)
+                oldest = sorted(self._buckets.items(), key=lambda x: x[1].last_refill)[:evict_count]
+                for k, _ in oldest:
+                    del self._buckets[k]
+                logger.warning(f"Rate limiter hard cap hit — evicted {evict_count} oldest buckets")
 
             if bucket.tokens >= 1.0:
                 bucket.tokens -= 1.0

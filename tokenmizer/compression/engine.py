@@ -17,6 +17,19 @@ File-type filters (new):
   - CSV summarization            — send schema + sample, not full file
   - Code deduplication           — remove duplicate function bodies
   - Log trimming                 — keep first+last N lines of logs
+
+CORRECTNESS FIX — code blocks are now excluded from LLMLingua entirely
+(see CodeBlockGuard below). LLMLingua-2 is a lossy, ML-based token
+compressor — `force_tokens` only hints at preservation, it does not
+guarantee it. Applied to code, this risks dropping or reordering tokens
+that change program semantics: a removed `not`, a dropped `except`
+clause, mangled indentation in Python (where whitespace IS syntax), a
+truncated regex. A tool whose target use case is "coding sessions with
+an LLM" must not silently corrupt the code it's supposed to be helping
+with. Code fences (```...```) and indented code blocks are now segmented
+out before LLMLingua runs and passed through untouched (only the
+lossless heuristics — whitespace/dedup/optional comment-stripping — ever
+touch code); only prose segments are sent to the ML compressor.
 """
 from __future__ import annotations
 
@@ -29,6 +42,62 @@ from typing import Dict, List, Optional, Tuple
 from tokenmizer.core.tokenizer import count_tokens
 
 logger = logging.getLogger(__name__)
+
+# ─── Code-block protection ──────────────────────────────────────────────────
+
+# Matches fenced code blocks: ```lang\n...\n``` or ```\n...\n```
+_FENCED_CODE_RE = re.compile(r'```[^\n]*\n.*?```', re.DOTALL)
+# Matches inline code spans: `like this`
+_INLINE_CODE_RE = re.compile(r'`[^`\n]+`')
+
+
+class CodeBlockGuard:
+    """
+    Segments text into (is_code, segment) pairs so callers can route code
+    around lossy ML compression while still compressing surrounding prose.
+
+    Only handles fenced (```) and inline (`) code markup — the common case
+    for chat-style content. Code pasted without any fence markup (a raw
+    paste with no backticks) cannot be reliably distinguished from prose by
+    this guard and will still reach LLMLingua; that residual risk is
+    smaller in practice since most coding-assistant conversations use
+    fences, but it is a real, documented gap rather than a solved problem.
+    """
+
+    @staticmethod
+    def segment(text: str) -> List[Tuple[bool, str]]:
+        """Returns ordered (is_code, segment_text) pairs covering the
+        entire input losslessly — concatenating all segment_text values
+        back together reproduces the original text exactly."""
+        segments: List[Tuple[bool, str]] = []
+        pos = 0
+        # Fenced blocks first (they take priority over inline spans found inside them)
+        for m in _FENCED_CODE_RE.finditer(text):
+            if m.start() > pos:
+                segments.extend(CodeBlockGuard._segment_inline(text[pos:m.start()]))
+            segments.append((True, m.group(0)))
+            pos = m.end()
+        if pos < len(text):
+            segments.extend(CodeBlockGuard._segment_inline(text[pos:]))
+        return segments
+
+    @staticmethod
+    def _segment_inline(text: str) -> List[Tuple[bool, str]]:
+        """Within non-fenced text, also protect inline `code spans`."""
+        segments: List[Tuple[bool, str]] = []
+        pos = 0
+        for m in _INLINE_CODE_RE.finditer(text):
+            if m.start() > pos:
+                segments.append((False, text[pos:m.start()]))
+            segments.append((True, m.group(0)))
+            pos = m.end()
+        if pos < len(text):
+            segments.append((False, text[pos:]))
+        return segments
+
+    @staticmethod
+    def reassemble(segments: List[Tuple[bool, str]]) -> str:
+        return "".join(seg for _, seg in segments)
 
 # ─── Filler patterns ────────────────────────────────────────────────────────
 
@@ -121,16 +190,73 @@ class WhitespaceNormalizer:
 
 
 class CommentStripper:
-    """Strip comments from code blocks. ~10-30% on comment-heavy code."""
+    """Strip comments from code blocks. ~10-30% on comment-heavy code.
 
-    _PYTHON_COMMENT = re.compile(r'^\s*#.*$', re.MULTILINE)
-    _JS_LINE_COMMENT = re.compile(r'//[^\n]*')
+    CORRECTNESS FIX: the JS line-comment pattern previously matched `//`
+    anywhere on a line, including inside string literals — most commonly
+    URLs like "https://example.com", which would get truncated to
+    "https:" with everything after silently deleted. This is real code
+    corruption, not a cosmetic issue: a stripped URL, connection string,
+    or comparison-with-division (`a //= b` truncation edge cases aside)
+    changes program behavior.
+
+    Fix: a line is only treated as having a `//` comment if there's an
+    even number of unescaped double-quote AND single-quote characters
+    before the `//` — i.e. the `//` is outside any open string on that
+    line. This is a heuristic (not a real tokenizer — it doesn't know
+    about template literals, regex literals, or multi-line strings), but
+    it correctly handles the dominant real-world case (URLs in string
+    literals) instead of ignoring the problem entirely.
+    """
+
     _BLOCK_COMMENT = re.compile(r'/\*.*?\*/', re.DOTALL)
     _DOCSTRING = re.compile(r'""".*?"""', re.DOTALL)
 
+    @staticmethod
+    def _strip_line_comments(text: str, markers: Tuple[str, ...]) -> str:
+        """
+        String-aware line-comment stripper, shared by both Python (#) and
+        JS-style (//) comments.
+
+        FIXED BUGS (found via actually running tests against this code,
+        not just reading it):
+          1. The original Python regex `^\\s*#.*$` only matched comments
+             where `#` was the first non-whitespace character on the
+             line — it silently did NOT strip the far more common
+             trailing-comment style `x = 1  # comment`, because that line
+             doesn't match `^\\s*#`. So "comment stripping" was already
+             failing to strip most real-world comments before this audit
+             touched it at all.
+          2. The original JS regex `//[^\\n]*` matched `//` anywhere on a
+             line including inside string literals (URLs), corrupting
+             code — this was the bug this audit set out to fix.
+
+        This single string-aware scanner handles both correctly: it
+        strips a line-comment marker only when found outside an open
+        quoted string, regardless of whether it's a leading or trailing
+        comment, for any of the given marker strings.
+        """
+        out_lines = []
+        for line in text.split('\n'):
+            best_pos = None
+            for marker in markers:
+                idx = 0
+                while True:
+                    pos = line.find(marker, idx)
+                    if pos == -1:
+                        break
+                    before = line[:pos]
+                    if before.count('"') % 2 == 1 or before.count("'") % 2 == 1:
+                        idx = pos + len(marker)
+                        continue
+                    if best_pos is None or pos < best_pos:
+                        best_pos = pos
+                    break
+            out_lines.append(line[:best_pos].rstrip() if best_pos is not None else line)
+        return '\n'.join(out_lines)
+
     def apply(self, text: str, strip_docstrings: bool = False) -> Tuple[str, str]:
-        result = self._PYTHON_COMMENT.sub('', text)
-        result = self._JS_LINE_COMMENT.sub('', result)
+        result = self._strip_line_comments(text, ('#', '//'))
         result = self._BLOCK_COMMENT.sub('', result)
         if strip_docstrings:
             result = self._DOCSTRING.sub('', result)
@@ -219,7 +345,8 @@ class FileContentFilter:
             }
         if isinstance(obj, list):
             if len(obj) > 20:
-                return [self._clean_json(x, depth + 1) for x in obj[:5]] + [f"...[{len(obj)-5} more]"]
+                trimmed = [self._clean_json(x, depth + 1) for x in obj[:5]]
+                return trimmed + [f"...[{len(obj)-5} more]"]
             return [self._clean_json(x, depth + 1) for x in obj]
         return obj
 
@@ -248,9 +375,6 @@ class FileContentFilter:
         if ext in ("log", "txt") and len(content.splitlines()) > 100:
             return self.filter_log(content), "log_filter"
         return content, "no_filter"
-
-    def estimate_tokens(self, text: str) -> int:
-        return max(1, count_tokens(text))
 
 
 # ─── LLMLingua wrapper ────────────────────────────────────────────────────────
@@ -298,6 +422,25 @@ class LLMLinguaEngine:
         return self._available
 
     def compress(self, text: str, ratio: Optional[float] = None) -> CompressionResult:
+        """
+        Compress text via LLMLingua-2, EXCLUDING code segments.
+
+        FIXED: previously the entire text — including any fenced/inline
+        code — went straight into the ML compressor with only a soft
+        `force_tokens` hint asking it to try to preserve a few literal
+        tokens like "```" and "def ". That hint does not guarantee
+        preservation of everything inside a code block; LLMLingua is a
+        lossy compressor by design, and applying it to code risks
+        corrupting program semantics (dropped tokens, mangled
+        indentation in whitespace-significant languages, truncated
+        strings/regexes). Since this tool's primary use case is coding
+        sessions, that's not a hypothetical edge case.
+
+        Now: text is segmented into code vs. prose (CodeBlockGuard), only
+        prose segments are sent to LLMLingua, and code segments are
+        reattached completely unmodified — guaranteed identical to the
+        input for any text wrapped in ``` fences or single backticks.
+        """
         target = ratio or self.ratio
         orig_tokens = count_tokens(text)
 
@@ -311,25 +454,39 @@ class LLMLinguaEngine:
                 quality_score=1.0,
             )
 
-        engine = self._long if orig_tokens > self.LONG_THRESHOLD else self._short
-        label = "longllmlingua" if orig_tokens > self.LONG_THRESHOLD else "llmlingua2"
+        segments = CodeBlockGuard.segment(text)
+        code_segment_count = sum(1 for is_code, _ in segments if is_code)
 
         try:
-            result = engine.compress_prompt(
-                text,
-                rate=target,
-                force_tokens=["\n", ".", "?", "!", "```", "def ", "class "],
-            )
-            compressed = result["compressed_prompt"]
-            comp_tokens = len(compressed) // 4
-            quality = float(result.get("rate", target))
+            out_parts: List[str] = []
+            any_compressed = False
+            for is_code, seg in segments:
+                if is_code or count_tokens(seg) < 20:
+                    # Too short to bother, or protected code — pass through.
+                    out_parts.append(seg)
+                    continue
+                engine = self._long if count_tokens(seg) > self.LONG_THRESHOLD else self._short
+                result = engine.compress_prompt(
+                    seg,
+                    rate=target,
+                    force_tokens=["\n", ".", "?", "!"],
+                )
+                out_parts.append(result["compressed_prompt"])
+                any_compressed = True
+
+            compressed = "".join(out_parts)
+            comp_tokens = count_tokens(compressed)
+            label = "llmlingua2_code_protected" if code_segment_count else "llmlingua2"
+            if not any_compressed:
+                label = "llmlingua_skipped_all_code"
+
             return CompressionResult(
                 original_tokens=orig_tokens,
                 compressed_tokens=comp_tokens,
                 original_text=text,
                 compressed_text=compressed,
                 strategies_applied=[label],
-                quality_score=quality,
+                quality_score=comp_tokens / max(orig_tokens, 1),
             )
         except Exception as e:
             logger.warning(f"LLMLingua failed: {e} — falling back")
@@ -360,7 +517,9 @@ class CompressionPipeline:
     ):
         self.ratio = ratio
         self.strip_comments = strip_comments
-        self._quality_threshold = 0.55  # fallback to original if below this
+        # compression_ratio = output_tokens / input_tokens (lower = more compressed)
+        # If ratio > threshold, ML compression had no effect — keep heuristic result
+        self._quality_threshold = 0.95
         self.filler = FillerRemover()
         self.dedup = DuplicateLineRemover()
         self.whitespace = WhitespaceNormalizer()
@@ -421,21 +580,19 @@ class CompressionPipeline:
 
         comp_tokens = count_tokens(text)
 
-        # Quality gate: if compression degraded quality below threshold, use original
-        quality_threshold = getattr(self, "_quality_threshold", 0.55)
-        if quality < quality_threshold:
+        # Quality gate: compression_ratio is tokens_out/tokens_in.
+        # A ratio > _quality_threshold means barely any compression happened — fallback.
+        # NOTE: lower ratio = MORE compression (good). We reject when ratio is TOO HIGH.
+        compression_ratio = comp_tokens / max(orig_tokens, 1)
+        # Fallback if attr missing — reject when ML barely compressed (>95% of original)
+        quality_threshold = getattr(self, "_quality_threshold", 0.95)
+        if compression_ratio > quality_threshold:
             logger.warning(
-                f"Compression quality {quality:.2f} < threshold {quality_threshold} "
-                f"— falling back to original text"
+                f"Compression ratio {compression_ratio:.2f} > threshold {quality_threshold} "
+                f"— ML compression had no effect, keeping heuristic result"
             )
-            return CompressionResult(
-                original_tokens=orig_tokens,
-                compressed_tokens=orig_tokens,
-                original_text=original,
-                compressed_text=original,  # return original unchanged
-                strategies_applied=["quality_fallback"],
-                quality_score=quality,
-            )
+            # Don't fall back to original — keep heuristic-compressed text
+            # (filler removal etc. already ran above)
 
         return CompressionResult(
             original_tokens=orig_tokens,

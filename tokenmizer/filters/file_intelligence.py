@@ -96,8 +96,8 @@ def detect_file_type(filename: str, content_bytes: bytes) -> str:
             return "tsv"
         if "," in head and "\n" in head:
             return "csv"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"File type sniff failed, defaulting to text: {e}")
     return "text"
 
 
@@ -193,7 +193,7 @@ class CSVExtractor:
             parts.append("Categories:\n" + cats)
 
         # 5. Sample rows — use TSV format (fewer tokens than CSV/JSON)
-        sampled = self._stratified_sample(rows, sample_rows)
+        sampled = self._stratified_sample(rows, sample_rows, columns=columns, type_map=type_map)
         header = "\t".join(columns)
         sample_lines = [header] + [
             "\t".join(str(r.get(c, "")) for c in columns) for r in sampled
@@ -261,7 +261,7 @@ class CSVExtractor:
                 try:
                     vals.append(float(str(r.get(col, "")).replace(",", "").replace("$", "")))
                 except (ValueError, TypeError):
-                    pass
+                    pass  # intentional: skip non-numeric cells during stats scan
             if not vals:
                 continue
             mn, mx, avg = min(vals), max(vals), sum(vals) / len(vals)
@@ -279,12 +279,93 @@ class CSVExtractor:
                 lines.append(f"  {col}: {', '.join(sorted(unique)[:max_unique])}")
         return "\n".join(lines)
 
-    def _stratified_sample(self, rows: list[dict], n: int) -> list[dict]:
+    def _stratified_sample(
+        self, rows: list[dict], n: int,
+        columns: list[str] | None = None,
+        type_map: dict | None = None,
+    ) -> list[dict]:
+        """
+        Genuinely stratified sample — not just evenly-spaced indices.
+
+        Guarantees inclusion of:
+        1. First and last row (temporal/sequence boundaries)
+        2. Rows containing the MIN and MAX of the first numeric column
+           (outliers are otherwise invisible to the LLM — it would see
+           "max=50000" in stats but never the row that has it)
+        3. One row per rare value of the first low-cardinality categorical
+           column (e.g. status="cancelled" appearing once in 10,000 rows)
+
+        Remaining budget filled with evenly-spaced rows for general coverage.
+
+        This directly prevents the failure mode where evenly-spaced sampling
+        silently drops the one row that actually matters (an error row, an
+        outlier transaction, a rare status value).
+        """
         if len(rows) <= n:
             return rows
-        step = len(rows) // n
-        indices = [0] + [i * step for i in range(1, n - 1)] + [len(rows) - 1]
-        return [rows[i] for i in indices[:n]]
+
+        selected_indices: set[int] = set()
+        columns = columns or (list(rows[0].keys()) if rows else [])
+        type_map = type_map or {}
+
+        # 1. Boundaries
+        selected_indices.add(0)
+        selected_indices.add(len(rows) - 1)
+
+        # 2. Outliers — min/max rows across ALL numeric columns.
+        # (Checking only the first numeric column is wrong: it's often a
+        # sequential ID/index whose min/max are just row 0 and row N-1,
+        # already covered by boundaries — the REAL outlier in e.g. an
+        # "amount" column would be missed entirely.)
+        numeric_cols = [c for c in columns if type_map.get(c) == "number"]
+        for col in numeric_cols:
+            if len(selected_indices) >= n:
+                break
+            best_min_idx = best_max_idx = None
+            best_min_val = best_max_val = None
+            for i, r in enumerate(rows):
+                try:
+                    v = float(str(r.get(col, "")).replace(",", "").replace("$", ""))
+                except (ValueError, TypeError):
+                    continue
+                if best_min_val is None or v < best_min_val:
+                    best_min_val, best_min_idx = v, i
+                if best_max_val is None or v > best_max_val:
+                    best_max_val, best_max_idx = v, i
+            if best_min_idx is not None:
+                selected_indices.add(best_min_idx)
+            if best_max_idx is not None and len(selected_indices) < n:
+                selected_indices.add(best_max_idx)
+
+        # 3. Rare categorical values — one row per rare value (≤3 occurrences)
+        # in the first low-cardinality text column
+        text_cols = [c for c in columns if type_map.get(c) == "text"]
+        if text_cols and len(selected_indices) < n:
+            col = text_cols[0]
+            value_counts: dict[str, list[int]] = {}
+            for i, r in enumerate(rows):
+                v = str(r.get(col, ""))
+                if v:
+                    value_counts.setdefault(v, []).append(i)
+            # Rare = appears <=3 times in the dataset
+            for val, idxs in value_counts.items():
+                if len(idxs) <= 3 and len(selected_indices) < n:
+                    selected_indices.add(idxs[0])
+
+        # 4. Fill remaining budget with evenly-spaced rows for general coverage
+        remaining = n - len(selected_indices)
+        if remaining > 0:
+            step = max(1, len(rows) // (remaining + 1))
+            for i in range(1, remaining + 1):
+                idx = min(i * step, len(rows) - 1)
+                if len(selected_indices) < n:
+                    selected_indices.add(idx)
+                else:
+                    break
+
+        # Return in original row order
+        ordered = sorted(selected_indices)[:n]
+        return [rows[i] for i in ordered]
 
     def _missing_summary(self, rows: list[dict], columns: list[str]) -> str:
         parts = []
@@ -458,7 +539,12 @@ class PDFExtractor:
         for i, page in enumerate(reader.pages):
             try:
                 page_texts.append(page.extract_text() or "")
-            except Exception:
+            except Exception as e:
+                # Non-fatal: one corrupted page shouldn't block extracting
+                # the rest of the document. Logged (not silent) so a
+                # document with many failing pages is at least visible —
+                # previously this was a bare `except: pass`.
+                logger.debug(f"Failed to extract text from page {i} of {filename}: {e}")
                 page_texts.append("")
 
         # Heading structure (lines that look like headings)

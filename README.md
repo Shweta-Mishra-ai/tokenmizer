@@ -3,7 +3,7 @@
 
   <h1>TokenMizer</h1>
 
-  <p><strong>Never lose your AI context again.</strong></p>
+  <p><strong>Keep your AI context alive across sessions.</strong></p>
 
   <p>
     Graph-backed memory · session checkpointing · intelligent compression<br/>
@@ -298,24 +298,90 @@ TOKENMIZER_API_KEY=strong-key docker-compose up
 
 ## Security
 
-- API key auth — `TOKENMIZER_API_KEY`
-- Secret redaction before graph storage
-- Session-isolated cache (sensitive data never shared)
-- Prompt injection detection
-- CORS restricted
+- API key auth — `TOKENMIZER_API_KEY` (constant-time comparison)
+- Secret/PII redaction applied once at ingestion, before graph storage,
+  checkpoint storage, AND every LLM call (main chat *and* the background
+  extraction model — these are separate, the redaction gap between them
+  was a real bug, now fixed)
+- Session-isolated cache (sensitive data never shared across sessions)
+- Basic prompt-injection keyword filter — catches copy-pasted jailbreak
+  templates only; **not** a security boundary against a motivated
+  adversary. See [SECURITY.md](SECURITY.md#prompt-injection-basic-keyword-filter-read-the-scope)
+  for exactly what it does and doesn't catch.
+- CORS restricted to configured origins by default
 
 ---
 
 ## Benchmarks
 
 ```bash
-python -m benchmarks.checkpoint_accuracy.runner
+python benchmarks/checkpoint_accuracy/runner_v2.py
 pytest tests/ -v
 ```
 
-**Heuristic (default):** Task recall ~75% · Decision recall ~75% · File recall ~100%
+**Benchmark v2 — Graph vs plain Summary (3 sessions, heuristic-only):**
 
-**With `use_llm_extraction: true`:** Task recall ~85–90% · Decision recall ~85–90%
+| Method | Task Recall | Decision Recall | File Recall | Info Preserved |
+|--------|-------------|-----------------|-------------|----------------|
+| TokenMizer Graph | 76% | 77% | 100% | **84%** |
+| Plain Summary baseline | 76% | 70% | 92% | 79% |
+| **Δ advantage** | 0% | **+7%** | **+8%** | **+5%** |
+
+Avg resume size: **246 tokens** vs ~1,500+ tokens of raw history.
+
+Enable `use_llm_extraction: true` for hybrid extraction (LLM + heuristic merge).
+
+**On LLM/hybrid recall numbers — read this before trusting any percentage
+here:** earlier versions of this README quoted "90-100% hybrid recall"
+sourced from `runner_v3.py`'s `MockLLMProvider`. That mock sampled its
+fake output directly from the same ground-truth dict used to *score*
+recall — circular by construction, guaranteed to look good regardless of
+what the real extraction logic did. It measured nothing about actual LLM
+extraction quality. That number has been removed rather than replaced
+with a better-sounding one we can't back up.
+
+What `runner_v3.py` now actually does:
+- **Default mode** verifies `HybridExtractor.merge()`'s logic contract
+  against fixtures with deliberately known overlap (corroborated /
+  LLM-only / heuristic-only items) — confirms merge never drops an item
+  either source found, and applies confidence tiers (0.95 corroborated,
+  0.80 LLM-only, 0.65 heuristic-only) correctly. This is a real,
+  non-circular check, but it's a logic-contract test, not a recall
+  measurement.
+- **`--live` mode** calls a real configured provider (`ANTHROPIC_API_KEY`
+  or `OPENAI_API_KEY`) and scores its actual output against ground truth.
+  This is the only path that produces a number meaningful enough to put
+  in a table. Run it yourself — we're not publishing a live-mode number
+  here because n=3 sessions is too small a sample to generalize, and
+  publishing one without a large, ongoing benchmark would just be
+  swapping one unsubstantiated number for another.
+
+Heuristic-only numbers above (76-100%) ARE real, deterministic,
+reproducible measurements — `runner_v2.py` runs actual heuristic
+extraction against actual ground truth with no LLM and no mocking
+involved, which is why those numbers are presented with confidence
+and the LLM ones currently are not.
+
+---
+
+## Why TokenMizer and not X?
+
+Engineers ask this every time. Honest answers:
+
+**Why not just use Git history?**
+Git stores *what changed*, not *why you decided to change it*. You can't ask Git "what did we decide about auth?" or "why did we switch from MySQL to PostgreSQL?" TokenMizer stores decisions with trigger, reason, and evidence — not diffs.
+
+**Why not RAG (retrieval-augmented generation)?**
+RAG retrieves *relevant chunks* — it doesn't model *decision state*. If you switched from bcrypt to Argon2 mid-session, RAG might retrieve both and confuse the model about which is current. TokenMizer tracks decision supersession explicitly: old decision is marked `SUPERSEDED`, new decision is `ACTIVE`. Resume context only includes current state.
+
+**Why not a plain summary at the start of each session?**
+Summaries lose structure. You can't query "all superseded decisions" or "what triggered the auth change" from a blob of text. Our benchmark shows graph memory preserves +5% more information than a summary baseline — and unlike summaries, the graph is queryable, editable, and grows incrementally without re-summarizing everything each turn.
+
+**Why not Mem0 or Zep?**
+Mem0 and Zep store *facts* ("user prefers Python"). TokenMizer stores *decisions with rationale* — the full causal chain: what was decided, what replaced it, why, what evidence triggered the change, and how confidence shifted. If you need "remember my name across sessions," use Mem0. If you need "remember that we switched from PostgreSQL to SQLite because of cost, and here's the evidence," use TokenMizer.
+
+**Why not just a longer context window?**
+Longer context = higher cost + slower inference + model attention dilution on long histories. TokenMizer compresses a 50-turn session into ~246 tokens of structured context — not by summarizing, but by extracting what actually matters: goals, active decisions, current tasks, recent errors.
 
 ---
 
@@ -325,9 +391,24 @@ pytest tests/ -v
 tokenmizer serve [--port 8000]
 tokenmizer checkpoint <session-id>
 tokenmizer resume <session-id> [--level standard|full|critical]
-tokenmizer analyze <file> [query]
 tokenmizer stats
 ```
+
+> **Note on file analysis:** `/tokenmizer:analyze` (used from inside Claude
+> Code, see [Claude Code Integration](#claude-code-integration) above) is
+> real and works — it's a plugin skill (`.claude-plugin/skills/analyze/`)
+> that calls `FileIntelligence` directly via an inline Python snippet,
+> independent of the CLI/API layer. What does **not** exist is a bare
+> `tokenmizer analyze <file>` terminal command or a `/api/analyze` HTTP
+> endpoint — useful if you want file analysis from a plain shell or a
+> non-Claude-Code tool (Cursor, a script, curl, etc.) rather than inside
+> Claude Code specifically. Found during a documentation accuracy pass:
+> an earlier version of this README listed `tokenmizer analyze <file>` in
+> this CLI section as if it were a `cli.py` command — it never was.
+> Removed from here rather than left in place pointing at something that
+> would fail. Tracked as a real, wanted gap — contributions adding a
+> `/api/analyze` endpoint + thin CLI wrapper (following the existing
+> pattern in `cli.py`) are welcome.
 
 ---
 

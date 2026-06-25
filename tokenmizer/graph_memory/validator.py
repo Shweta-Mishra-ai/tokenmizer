@@ -289,7 +289,16 @@ def get_validator(min_confidence: float | None = None) -> GraphValidator:
         try:
             from tokenmizer.config.settings import get_settings
             threshold = get_settings().graph_checkpoint.min_confidence
-        except Exception:
+        except Exception as e:
+            # Low-risk fallback (unlike the auth.py case — this only
+            # affects node-acceptance confidence threshold, not a security
+            # control), but logged for debuggability: if a config error is
+            # silently masking other settings too (see config/settings.py
+            # fix), this log line is a clue something upstream is broken.
+            logger.warning(
+                f"Could not read min_confidence from settings ({e}) — "
+                f"using hardcoded default 0.65"
+            )
             threshold = 0.65
         _validator = GraphValidator(min_confidence=threshold)
     return _validator

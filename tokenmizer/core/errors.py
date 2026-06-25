@@ -22,3 +22,14 @@ class ConfigError(TokenMizerError):
 
 class StorageError(TokenMizerError):
     """Persistence failure."""
+
+
+class CheckpointPersistError(StorageError):
+    """Checkpoint write failed. Callers MUST NOT treat a checkpoint as
+    successfully created if this is raised — there is no fallback write
+    path, so a swallowed instance of this error means data loss."""
+
+
+class GraphPersistError(StorageError):
+    """Graph (node/edge) write failed. Same data-loss caveat as
+    CheckpointPersistError — see that class's docstring."""

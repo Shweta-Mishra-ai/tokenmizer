@@ -28,32 +28,35 @@ logger = logging.getLogger(__name__)
 
 # ── Extraction prompt ─────────────────────────────────────────────────────────
 
-EXTRACTION_SYSTEM = """You are a technical memory extractor. 
-Extract structured information from conversation messages.
-Respond ONLY with valid JSON matching this exact schema. No explanation, no markdown.
+EXTRACTION_SYSTEM = """You are a technical memory extractor for AI coding sessions.
+Extract ALL structured information from conversation messages.
+Respond ONLY with valid JSON. No explanation, no markdown fences.
 
 {
-  "goals": ["string"],
-  "tasks_done": ["string"],
-  "tasks_wip": ["string"],
-  "tasks_todo": ["string"],
-  "decisions": [{"label": "string", "reason": "string"}],
-  "files": ["string"],
-  "errors": ["string"],
-  "dependencies": ["string"],
-  "environments": ["string"],
-  "endpoints": ["string"],
-  "schemas": ["string"],
-  "superseded": [{"old": "string", "new": "string"}]
+  "goals": ["string — the main objective of this session"],
+  "tasks_done": ["string — completed work items, be specific"],
+  "tasks_wip": ["string — work currently in progress"],
+  "tasks_todo": ["string — planned but not started"],
+  "decisions": [{"label": "string — what was decided", "reason": "string — why"}],
+  "files": ["string — actual filenames or paths only, e.g. api/auth.py"],
+  "errors": ["string — bugs, exceptions, failures encountered"],
+  "dependencies": ["string — libraries, packages, tools added"],
+  "environments": ["string — runtime versions, e.g. Python 3.12, Node 20"],
+  "endpoints": ["string — API routes, e.g. POST /api/auth/login"],
+  "schemas": ["string — data models, DB tables, e.g. users table"],
+  "superseded": [{"old": "string — old decision", "new": "string — new decision"}]
 }
 
-Rules:
-- Only extract concrete, specific facts (not generic statements)
-- Files: include actual filenames/paths only (e.g. api/auth.py, not "the file")
-- Decisions: include the reason when mentioned
-- Superseded: when a decision explicitly replaces another (e.g. "switching from X to Y")
-- Max 15 items per category
-- If nothing found for a category, use empty array []"""
+CRITICAL RULES:
+- decisions: extract ANY technology choice, architecture choice, or "going with X" statement
+  Examples: "Use PostgreSQL", "bcrypt for passwords", "Redis for sessions", "JWT tokens"
+  Look for: "decided:", "going with", "will use", "chose", "using X for Y", "switched to"
+- tasks_done: extract ALL completed work. Look for: "completed:", "done:", "fixed:", "implemented:", "created:"
+- files: extract EVERY filename mentioned with extension (.py, .js, .ts, .yaml, .json etc)
+- superseded: when user or assistant says "switching from X to Y" or "instead of X, use Y"
+- Max 20 items per category
+- If nothing found for a category, use []
+- NEVER fabricate — only extract what is explicitly stated"""
 
 
 EXTRACTION_USER_TEMPLATE = """Extract from these conversation messages:
@@ -66,43 +69,181 @@ Respond with JSON only."""
 # ── Heuristic patterns (enhanced) ────────────────────────────────────────────
 
 _FILE_PATH = re.compile(
-    r'(?:^|[\s\'"`(])([a-zA-Z0-9_\-]+(?:/[a-zA-Z0-9_\-\.]+){1,6}\.[a-zA-Z]{1,6})',
+    r'(?:^|[\s\'\"`(])([a-zA-Z0-9_\-]+(?:/[a-zA-Z0-9_\-\.]+){1,6}\.[a-zA-Z]{1,6})',
     re.MULTILINE,
 )
 _FILE_COMMON = re.compile(
     r'\b((?:[\w\-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|cs|cpp|c|h|yaml|yml|json|toml|env|md|sh|sql|html|css))\b)',
     re.IGNORECASE,
 )
+
+# ── Decision patterns — 5 passes ─────────────────────────────────────────────
+
+# Pass 1: explicit verb ("decided:", "going with", "will use")
 _DECISION = re.compile(
-    r'(?:decided?|going with|will use|chose?|switching? to|opted for|settled on|picked|sticking with)\s+(.{5,80})',
+    r'(?:decided?|going with|will use|chose?|switching? to|opted for|settled on|'
+    r'picked|sticking with|selected?|using|went with|we.ll use|let.s use)'
+    r'[\s:\-]+(.{5,80})',
     re.IGNORECASE,
 )
+
+# Pass 2: header format ("Decision: X", "Tech choice: X")
+_DECISION_HEADER = re.compile(
+    r'(?:^|\n)\s*(?:decision|tech choice|architecture choice|approach|stack)\s*[:\-]\s*(.{5,80})',
+    re.IGNORECASE,
+)
+
+# Pass 3: known tech names — expanded (was missing bcrypt, slowapi, etc.)
+_DECISION_FOR = re.compile(
+    r'\b((?:'
+    r'postgres(?:ql)?|redis|sqlite|mongodb|mysql|mariadb|cassandra|dynamodb|supabase|'
+    r'fastapi|flask|django|express|nestjs|next\.?js|nuxt|react|vue|svelte|angular|'
+    r'docker|kubernetes|k8s|terraform|ansible|'
+    r'jwt|oauth|oauth2|openid|bcrypt|argon2|passlib|'
+    r'graphql|rest|grpc|websocket|'
+    r'celery|rabbitmq|kafka|bull|'
+    r'nginx|gunicorn|uvicorn|caddy|traefik|'
+    r'pytest|jest|vitest|cypress|playwright|'
+    r'sqlalchemy|prisma|drizzle|typeorm|'
+    r'pydantic|zod|yup|marshmallow|'
+    r'slowapi|authlib|httpx|aiohttp|'
+    r'openai|anthropic|gemini|langchain|llamaindex'
+    r')\b(?:(?!\s+(?:to|with|for)\s+\w)[^.!?\n,—\-]){0,40})',
+    re.IGNORECASE,
+)
+
+# Pass 4: passive/implicit — "bcrypt with cost factor 12", "JWT expires in 15m"
+_DECISION_PASSIVE = re.compile(
+    r'\b((?:'
+    r'postgres(?:ql)?|redis|sqlite|mongodb|mysql|'
+    r'fastapi|flask|django|express|'
+    r'jwt|bcrypt|argon2|oauth|'
+    r'docker|kubernetes|nginx|gunicorn|uvicorn|'
+    r'celery|rabbitmq|kafka|'
+    r'slowapi|pydantic|sqlalchemy|prisma'
+    r'))\s+(?:is|are|will be|handles?|with|has|provides?|expires?)',
+    re.IGNORECASE,
+)
+
+# Pass 5: config decisions — "expires in 15 minutes", "cost factor 12"
+_DECISION_CONFIG = re.compile(
+    r'\b(?:expire[sd]? in|cost factor|timeout of|limit of|max(?:imum)? of|'
+    r'requests? per|connections? per|workers?)\s+(\d+[^.!?\n]{0,40})',
+    re.IGNORECASE,
+)
+
 _SUPERSEDED = re.compile(
-    r'(?:switching?\s+from|replacing|instead of|moved?\s+from|migrat\w+\s+from)\s+(\w[\w\s\-]{2,30})\s+to\s+(\w[\w\s\-]{2,30})',
+    r'(?:'
+    r'switched?\s+(?:from|away\s+from)|'
+    r'switching?\s+from|'
+    r'replacing|'
+    r'instead\s+of|'
+    r'moved?\s+from|'
+    r'migrat\w+\s+(?:from|away\s+from)|'
+    r'dropping|'
+    r'no\s+longer\s+using|'
+    r'replaced?\s+\w+\s+with|'
+    r'moving\s+(?:away\s+from|from)'
+    r')'
+    r'\s+(\w[\w\s\.\-]{2,30}?)\s+(?:to|with|for)\s+(\w[\w\s\.\-]{2,30})',
     re.IGNORECASE,
 )
+
+# ── Evidence extraction patterns ──────────────────────────────────────────────
+
+# Numeric metrics with context — "latency 340ms", "score was 61"
+_EVIDENCE_NUMBER = re.compile(
+    r'(\d+(?:\.\d+)?\s*(?:ms|s|seconds?|minutes?|hours?|'
+    r'%|percent|'
+    r'mb|gb|tb|kb|'
+    r'rpm|rps|req/s|'
+    r'\$/(?:month|mo|year|yr)|'
+    r'x\s+(?:faster|slower|larger|smaller)'
+    r')[^.!?\n]{0,40})',
+    re.IGNORECASE,
+)
+
+# Bare score/rating — "score was 61", "rating of 4.5"
+_EVIDENCE_SCORE = re.compile(
+    r'(?:score|rating|result|grade)\s+(?:was|is|of|:)\s*(\d+(?:\.\d+)?(?:/\d+)?[^.!?\n]{0,30})',
+    re.IGNORECASE,
+)
+
+# Dollar amounts — "$50/month", "costs $200"
+_EVIDENCE_COST = re.compile(
+    r'(\$\d+(?:\.\d+)?(?:/(?:month|mo|year|yr|day))?[^.!?\n]{0,20})',
+)
+
+
+# Direct quotes from user — "user said X", "you mentioned X"
+_EVIDENCE_QUOTE = re.compile(
+    r'(?:you said|user said|you mentioned|you told me|per your requirement|'
+    r'as you noted|because you|since you want|you need)'
+    r'\s+["\']?(.{10,100}?)["\']?(?:\.|,|$)',
+    re.IGNORECASE,
+)
+
+# Standards/recommendations — "OWASP recommends", "industry standard"
+_EVIDENCE_STANDARD = re.compile(
+    r'(?:OWASP|RFC|ISO|IEEE|NIST|W3C|MDN|Google|Lighthouse|'
+    r'industry standard|best practice|recommended|specification)'
+    r'[^.!?\n]{0,60}',
+    re.IGNORECASE,
+)
+
 _TASK_DONE = re.compile(
-    r'(?:completed?|finished?|done|implemented?|fixed?|added?|built?|shipped?|wired up|set up)\s*[:\-]?\s*(.{8,80})',
+    r'(?:completed?|finished?|done|implemented?|fixed?|added?|built?|shipped?|'
+    r'wired up|set up|created?|wrote?|updated?|deployed?|resolved?|merged?|'
+    r'refactored?|cleaned?|migrated?)'
+    r'[\s:\-]+(.{5,80})',
     re.IGNORECASE,
 )
+
+# Passive completion — "rate limiting is implemented", "tests are passing"
+_TASK_DONE_PASSIVE = re.compile(
+    r'(.{5,50}?)\s+(?:is|are)\s+(?:working|ready|done|complete|live|passing|'
+    r'implemented|deployed|fixed|resolved|working now|up and running)',
+    re.IGNORECASE,
+)
+
 _TASK_WIP = re.compile(
-    r'(?:working on|implementing|building|currently\s+\w+ing)\s+(.{8,80})',
+    r'(?:working on|implementing|building|currently\s+\w+ing|adding|integrating|'
+    r'setting up|configuring|writing|debugging|investigating)'
+    r'[\s:\-]+(.{5,80})',
     re.IGNORECASE,
 )
+
+_TASK_TODO = re.compile(
+    r'(?:will add|will implement|next:|todo:|will do|need to add|planning to|'
+    r'should add|still need|not yet|missing|pending|next step)'
+    r'[\s:\-]+(.{5,80})',
+    re.IGNORECASE,
+)
+
 _ERROR = re.compile(
-    r'(?:Error|Exception|TypeError|ValueError|ImportError|404|500|failed?|broken?)[\s:]+([A-Z][^.]{5,60})',
+    r'(?:Error|Exception|TypeError|ValueError|ImportError|KeyError|AttributeError|'
+    r'404|500|422|503|failed?|broken?|crash\w*|traceback)'
+    r'[\s:]+([A-Z][^.]{5,60})',
     re.IGNORECASE,
 )
+
 _DEPENDENCY = re.compile(
-    r'(?:pip install|npm install|import|require|using)\s+([a-zA-Z][a-zA-Z0-9_\-]{2,40})',
+    r'(?:pip install|pip add|npm install|npm add|yarn add|pnpm add|poetry add|'
+    r'cargo add|go get|adding|installed?)'
+    r'\s+([a-zA-Z][a-zA-Z0-9_\-]{2,40})',
     re.IGNORECASE,
 )
+
 _ENV = re.compile(
-    r'(?:Python|Node|npm|pip|Docker|Redis|PostgreSQL|SQLite|Linux|macOS|Windows)\s+([\d\.]+\+?)',
+    r'(?:Python|Node\.?js?|npm|pip|Docker|Redis|PostgreSQL|SQLite|MongoDB|'
+    r'Linux|macOS|Windows|Ubuntu|Debian)\s+([\d\.]+\+?)',
     re.IGNORECASE,
 )
+
 _GOAL_OPENERS = re.compile(
-    r'(?:goal|objective|trying to|want to|need to|building|creating)\s*[:\-]?\s*(.{10,120})',
+    r'(?:goal|objective|trying to|want to|need to|building|creating|'
+    r'let.s build|we.re building|the plan is|we need to build|task is)'
+    r'\s*[:\-]?\s*(.{10,120})',
     re.IGNORECASE,
 )
 
@@ -121,6 +262,9 @@ class ExtractedData:
     endpoints: list[str] = field(default_factory=list)
     schemas: list[str] = field(default_factory=list)
     superseded: list[dict] = field(default_factory=list)
+    # Evidence: metrics, quotes, standards extracted per message
+    # Format: {"text": str, "type": "metric"|"quote"|"standard", "turn": int}
+    evidence: list[dict] = field(default_factory=list)
     # Confidence per category (filled by merger)
     confidence: dict[str, float] = field(default_factory=dict)
 
@@ -202,66 +346,191 @@ class HybridExtractor:
 
     # ── Pass 2: Heuristic ────────────────────────────────────────────────────
 
-    def heuristic_extract(self, messages: list[dict]) -> ExtractedData:
-        """Fast regex-based extraction. No API calls."""
-        result = ExtractedData()
-        seen_files: set[str] = set()
+    def _extract_one_message(
+        self,
+        content: str,
+        role: str,
+        turn_idx: int,
+        is_recent: bool,
+        result: "ExtractedData",
+        seen_decisions: set,
+        seen_tasks: set,
+        seen_files: set,
+    ) -> None:
+        """
+        Apply all 5 extraction passes to a single message.
+        Mutates result in place. Called by heuristic_extract().
 
-        for i, msg in enumerate(messages):
-            content = msg.get("content", "")
-            if not isinstance(content, str):
-                continue
-            role = msg.get("role", "user")
+        Extracted into a helper to keep heuristic_extract() readable
+        (was 194L — loop body alone was 166L).
+        """
+        # Goals: first 4 messages only (session intent captured early)
+        if role == "user" and turn_idx < 4:
+            for m in _GOAL_OPENERS.finditer(content):
+                result.goals.append(m.group(1).strip()[:100])
 
-            # Goals: first user messages weighted higher
-            if role == "user" and i < 4:
-                for m in _GOAL_OPENERS.finditer(content):
-                    result.goals.append(m.group(1).strip()[:100])
+        # Tasks done: full history (completed = permanent fact)
+        for m in _TASK_DONE.finditer(content):
+            task = m.group(1).strip()[:80]
+            norm = self._normalize(task)
+            if norm not in seen_tasks:
+                result.tasks_done.append(task)
+                seen_tasks.add(norm)
 
-            # Tasks done
-            for m in _TASK_DONE.finditer(content):
-                result.tasks_done.append(m.group(1).strip()[:80])
+        # Passive completion: full history
+        for m in _TASK_DONE_PASSIVE.finditer(content):
+            task = re.sub(r'^(?:the|a|an|this|that)\\s+', '', m.group(1).strip()[:80], flags=re.IGNORECASE)
+            if len(task) > 5:
+                norm = self._normalize(task)
+                if norm not in seen_tasks:
+                    result.tasks_done.append(task)
+                    seen_tasks.add(norm)
 
-            # Tasks WIP
+        # WIP/TODO: recent window only (avoid stale in-progress)
+        if is_recent:
             for m in _TASK_WIP.finditer(content):
                 result.tasks_wip.append(m.group(1).strip()[:80])
+            for m in _TASK_TODO.finditer(content):
+                result.tasks_todo.append(m.group(1).strip()[:80])
 
-            # Decisions
-            for m in _DECISION.finditer(content):
-                result.decisions.append({"label": m.group(1).strip()[:80], "reason": ""})
+        # Decision Pass 1: explicit verb
+        for m in _DECISION.finditer(content):
+            label = m.group(1).strip()[:80]
+            norm  = self._normalize(label)
+            if norm not in seen_decisions and len(norm) > 4:
+                result.decisions.append({"label": label, "reason": ""})
+                seen_decisions.add(norm)
 
-            # Superseded
-            for m in _SUPERSEDED.finditer(content):
-                result.superseded.append({"old": m.group(1).strip(), "new": m.group(2).strip()})
+        # Decision Pass 2: header format
+        for m in _DECISION_HEADER.finditer(content):
+            label = m.group(1).strip()[:80]
+            norm  = self._normalize(label)
+            if norm not in seen_decisions:
+                result.decisions.append({"label": label, "reason": ""})
+                seen_decisions.add(norm)
 
-            # Files — both path and common extension patterns
-            for m in _FILE_PATH.finditer(content):
-                f = m.group(1).strip()
-                if f not in seen_files and len(f) > 4:
-                    result.files.append(f)
-                    seen_files.add(f)
-            for m in _FILE_COMMON.finditer(content):
-                f = m.group(1).strip()
-                if f not in seen_files:
-                    result.files.append(f)
-                    seen_files.add(f)
+        # Decision Pass 3: tech names
+        for m in _DECISION_FOR.finditer(content):
+            label = "Use " + m.group(1).strip()[:60]
+            norm  = self._normalize(label)
+            if norm not in seen_decisions:
+                result.decisions.append({"label": label, "reason": ""})
+                seen_decisions.add(norm)
 
-            # Errors
+        # Decision Pass 4: passive (bcrypt with cost factor 12)
+        for m in _DECISION_PASSIVE.finditer(content):
+            label = "Use " + m.group(1).strip()[:60]
+            norm  = self._normalize(label)
+            if norm not in seen_decisions:
+                result.decisions.append({"label": label, "reason": ""})
+                seen_decisions.add(norm)
+
+        # Superseded + both sides as decisions
+        for m in _SUPERSEDED.finditer(content):
+            old_label = m.group(1).strip()
+            new_label = m.group(2).strip()
+            result.superseded.append({"old": old_label, "new": new_label})
+            start = max(0, m.start() - 60)
+            surrounding = content[start:m.end() + 80].replace("\n", " ").strip()
+            for label in (f"Use {old_label}", f"Use {new_label}"):
+                norm = self._normalize(label)
+                if norm not in seen_decisions and len(norm) > 6:
+                    reason = f"Replaced by: {new_label}" if label.endswith(old_label) else surrounding[:100]
+                    result.decisions.append({"label": label, "reason": reason, "evidence": surrounding[:120]})
+                    seen_decisions.add(norm)
+
+        # Files
+        for m in _FILE_PATH.finditer(content):
+            f = m.group(1).strip()
+            if f not in seen_files and len(f) > 4:
+                result.files.append(f)
+                seen_files.add(f)
+        for m in _FILE_COMMON.finditer(content):
+            f = m.group(1).strip()
+            if f not in seen_files:
+                result.files.append(f)
+                seen_files.add(f)
+
+        # Errors (recent only)
+        if is_recent:
             for m in _ERROR.finditer(content):
                 result.errors.append(m.group(1).strip()[:80])
 
-            # Dependencies
-            for m in _DEPENDENCY.finditer(content):
-                dep = m.group(1).strip()
-                # Filter noise
-                if len(dep) > 2 and dep.lower() not in {"the", "a", "an", "it", "this"}:
-                    result.dependencies.append(dep)
+        # Dependencies
+        for m in _DEPENDENCY.finditer(content):
+            dep = m.group(1).strip()
+            if len(dep) > 2 and dep.lower() not in {"the", "a", "an", "it", "this", "that"}:
+                result.dependencies.append(dep)
 
-            # Environments
-            for m in _ENV.finditer(content):
-                result.environments.append(f"{m.group(0).strip()}")
+        # Environments
+        for m in _ENV.finditer(content):
+            result.environments.append(m.group(0).strip())
+
+        # Evidence
+        for m in _EVIDENCE_NUMBER.finditer(content):
+            text = m.group(1).strip()
+            if len(text) > 5:
+                result.evidence.append({"text": text, "type": "metric", "turn": turn_idx})
+        for m in _EVIDENCE_SCORE.finditer(content):
+            text = m.group(0).strip()
+            if len(text) > 5:
+                result.evidence.append({"text": text, "type": "metric", "turn": turn_idx})
+        for m in _EVIDENCE_COST.finditer(content):
+            text = m.group(1).strip()
+            if len(text) > 1:
+                result.evidence.append({"text": text, "type": "metric", "turn": turn_idx})
+        for m in _EVIDENCE_QUOTE.finditer(content):
+            text = m.group(1).strip()
+            if len(text) > 10:
+                result.evidence.append({"text": text, "type": "quote", "turn": turn_idx})
+        for m in _EVIDENCE_STANDARD.finditer(content):
+            text = m.group(0).strip()
+            if len(text) > 8:
+                result.evidence.append({"text": text, "type": "standard", "turn": turn_idx})
+
+
+    def heuristic_extract(
+        self,
+        messages: list[dict],
+        window_size: int = 0,
+    ) -> "ExtractedData":
+        """
+        Fast regex-based extraction. No API calls.
+
+        Sliding window strategy for long sessions (>30 turns):
+        - Goals: first 4 messages only (session intent)
+        - Decisions: full history (decisions are permanent facts)
+        - Tasks WIP/TODO: last window_size messages (stale WIP is noise)
+        - Errors: last window_size messages (old errors are usually fixed)
+        - Completed tasks + files: full history
+
+        Per-message extraction delegated to _extract_one_message() to
+        keep this method focused on windowing/setup logic (was 194L).
+        """
+        if window_size == 0:
+            window_size = len(messages)
+
+        recent_start   = max(0, len(messages) - window_size)
+        result         = ExtractedData()
+        seen_decisions: set[str] = set()
+        seen_tasks:     set[str] = set()
+        seen_files:     set[str] = set()
+
+        for i, msg in enumerate(messages):
+            from tokenmizer.graph_memory.graph import _content_to_text
+            content = _content_to_text(msg.get("content", ""))
+            if not content.strip():
+                continue
+            role      = msg.get("role", "user")
+            is_recent = i >= recent_start
+
+            self._extract_one_message(
+                content, role, i, is_recent,
+                result, seen_decisions, seen_tasks, seen_files,
+            )
 
         return result
+
 
     # ── Pass 3: Merge ────────────────────────────────────────────────────────
 
@@ -272,50 +541,110 @@ class HybridExtractor:
     ) -> ExtractedData:
         """
         Merge LLM + heuristic results with confidence scoring.
-        Corroborated items get highest confidence.
+
+        Corroboration confidence values are stored in decision dicts
+        under the 'confidence' key so _apply_extracted() can pass them
+        directly to add_node() — bypassing the validator's default confidence
+        which would otherwise overwrite the corroboration signal.
+
+        confidence values:
+          0.95 — corroborated (both LLM and heuristic found it)
+          0.80 — LLM-only (LLM caught it, heuristic missed)
+          0.65 — heuristic-only (heuristic caught it, LLM missed)
         """
         if llm is None:
-            # Heuristic only — lower base confidence
             result = self._deduplicate(heuristic)
             result.confidence = {k: 0.65 for k in vars(result) if k != "confidence"}
+            # Tag heuristic-only decisions with lower confidence
+            for d in result.decisions:
+                d.setdefault("confidence", 0.65)
             return result
 
         merged = ExtractedData()
 
-        # For each list category, merge with corroboration boost
+        # Simple list categories — merge with corroboration tracking
+        #
+        # FIXED — REAL BUG (found via testing, not in the original audit's
+        # list): this used to build `combined` directly from the
+        # normalized (lowercased) sets, which meant the FINAL OUTPUT
+        # stored lowercased strings permanently. For file paths this is
+        # not cosmetic: "src/App.tsx" and "src/app.tsx" are different
+        # files on any case-sensitive filesystem (Linux, most CI/prod
+        # environments). A user reading their session graph would see
+        # "src/app.tsx" even though the actual file on disk is
+        # "src/App.tsx" — wrong information about which file was
+        # touched. `_deduplicate()` elsewhere in this same file gets this
+        # right (normalizes only for the dedup KEY, keeps original-case
+        # value) — `merge()` was inconsistent with its own codebase's
+        # established correct pattern. Fixed to match: normalize only for
+        # set membership / corroboration detection, always emit the
+        # ORIGINAL (first-seen, original-case) string into the output.
         for attr in ["goals", "tasks_done", "tasks_wip", "tasks_todo",
                      "files", "errors", "dependencies", "environments",
                      "endpoints", "schemas"]:
-            llm_items = set(self._normalize(x) for x in getattr(llm, attr))
-            heu_items = set(self._normalize(x) for x in getattr(heuristic, attr))
+            llm_raw = list(getattr(llm, attr))
+            heu_raw = list(getattr(heuristic, attr))
 
-            corroborated = llm_items & heu_items
-            llm_only = llm_items - heu_items
-            heu_only = heu_items - llm_items
+            # norm -> original-case string, first occurrence wins
+            llm_by_norm: dict[str, str] = {}
+            for x in llm_raw:
+                llm_by_norm.setdefault(self._normalize(x), x)
+            heu_by_norm: dict[str, str] = {}
+            for x in heu_raw:
+                heu_by_norm.setdefault(self._normalize(x), x)
 
-            combined = list(corroborated) + list(llm_only) + list(heu_only)
-            # Cap per category
+            llm_keys = set(llm_by_norm.keys())
+            heu_keys = set(heu_by_norm.keys())
+            corroborated = bool(llm_keys & heu_keys)
+            llm_only     = bool(llm_keys - heu_keys)
+
+            combined = (
+                [llm_by_norm[k] for k in (llm_keys & heu_keys)] +   # prefer LLM casing when corroborated
+                [llm_by_norm[k] for k in (llm_keys - heu_keys)] +
+                [heu_by_norm[k] for k in (heu_keys - llm_keys)]
+            )
             setattr(merged, attr, combined[:15])
-
-            # Track corroboration for confidence
             merged.confidence[attr] = (
                 0.95 if corroborated else
                 0.80 if llm_only else
                 0.65
             )
 
-        # Decisions: merge by label similarity
-        all_decisions = llm.decisions[:]
-        seen_labels = {self._normalize(d.get("label", "")) for d in llm.decisions}
-        for d in heuristic.decisions:
-            norm = self._normalize(d.get("label", ""))
-            if norm not in seen_labels:
-                all_decisions.append(d)
-                seen_labels.add(norm)
-        merged.decisions = all_decisions[:15]
+        # Decisions: merge by label similarity, tag each with confidence
+        seen: dict[str, dict] = {}
+        for d in llm.decisions:
+            key = self._normalize(d.get("label", ""))
+            if key:
+                seen[key] = {**d, "confidence": 0.80, "_source": "llm"}
 
-        # Superseded: prefer LLM (it understands context better)
+        for d in heuristic.decisions:
+            key = self._normalize(d.get("label", ""))
+            if not key:
+                continue
+            if key in seen:
+                # Corroborated — upgrade confidence, keep LLM reason if better
+                existing = seen[key]
+                existing["confidence"] = 0.95
+                existing["_source"] = "both"
+                if d.get("reason") and not existing.get("reason"):
+                    existing["reason"] = d["reason"]
+                if d.get("evidence") and not existing.get("evidence"):
+                    existing["evidence"] = d["evidence"]
+            else:
+                seen[key] = {**d, "confidence": 0.65, "_source": "heuristic"}
+
+        merged.decisions = list(seen.values())[:15]
+        merged.confidence["decisions"] = (
+            0.95 if any(d.get("_source") == "both" for d in merged.decisions) else
+            0.80 if any(d.get("_source") == "llm"  for d in merged.decisions) else
+            0.65
+        )
+
+        # Transitions: prefer LLM (better context understanding)
         merged.superseded = (llm.superseded or heuristic.superseded)[:10]
+
+        # Evidence: combine from both sources
+        merged.evidence = llm.evidence + heuristic.evidence
 
         return merged
 

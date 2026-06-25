@@ -16,6 +16,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -63,31 +64,41 @@ _output_trimmer = OutputTrimmer()
 _rate_limiter = get_rate_limiter(rate=60, per_seconds=60, burst=10)
 
 # Bounded LRU for session locks — prevents memory leak on long-running servers.
-# Max 1000 concurrent sessions; LRU eviction removes oldest.
+# Max 1000 concurrent sessions; LRU eviction removes oldest UNHELD lock.
 _SESSION_LOCK_MAX = 1000
-_session_locks: "OrderedDict[str, asyncio.Lock]" = {}
-
-try:
-    from collections import OrderedDict as _OD
-    _session_locks = _OD()
-except ImportError:
-    pass
+_session_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
-    """Get or create a per-session async lock (LRU-bounded)."""
-    from collections import OrderedDict
-    if not isinstance(_session_locks, OrderedDict):
-        # Fallback: plain dict (shouldn't happen)
-        return asyncio.Lock()
+    """
+    Get or create a per-session async lock (LRU-bounded).
+
+    Eviction safety: only evicts UNHELD locks (lock.locked() == False).
+    If all locks happen to be held when over the cap (extremely unlikely
+    at 1000 concurrent sessions), we skip eviction this call rather than
+    risk a held lock being dropped — which would let a new request bypass
+    an in-flight request's mutual exclusion for the same session.
+    """
     if session_id in _session_locks:
         _session_locks.move_to_end(session_id)
         return _session_locks[session_id]
+
     lock = asyncio.Lock()
     _session_locks[session_id] = lock
+
     if len(_session_locks) > _SESSION_LOCK_MAX:
-        _session_locks.popitem(last=False)  # evict oldest
+        # Find oldest unheld lock to evict (iterate from front)
+        for old_id in list(_session_locks.keys()):
+            if old_id == session_id:
+                continue
+            if not _session_locks[old_id].locked():
+                del _session_locks[old_id]
+                break
+            if len(_session_locks) <= _SESSION_LOCK_MAX:
+                break
+
     return lock
+
 _smart_window = SmartMessageWindow(
     token_budget=settings.memory.max_tokens_before_summary,
     protect_recent=settings.memory.recent_turns_verbatim,
@@ -137,17 +148,68 @@ def _get_provider():
 
 # In-process graph cache — avoids SQLite reload on every request.
 # Thread-safe: each session_id maps to one GraphMemory, protected by _get_session_lock().
-_graph_cache: dict[str, GraphMemory] = {}
+
+# LRU-bounded cache of GraphMemory objects (evicts least-recently-used).
+# Graph data is persisted to SQLite, so eviction just frees memory —
+# the graph reloads from disk on next access. Cap chosen for typical
+# self-hosted deployments (one process, many sessions over time).
+_GRAPH_CACHE_MAX = 200
+_graph_cache: "OrderedDict[str, GraphMemory]" = OrderedDict()
+_graph_cache_lock = asyncio.Lock()  # guards dict creation — prevents TOCTOU race
 
 
-def _get_graph(session_id: str) -> GraphMemory:
-    """Get or create cached graph for session. Loaded from SQLite once, kept in memory."""
-    if session_id not in _graph_cache:
-        _graph_cache[session_id] = GraphMemory(
-            session_id,
-            storage_dir=settings.graph_checkpoint.storage_dir,
-        )
-    return _graph_cache[session_id]
+def _graph_cache_touch(session_id: str) -> None:
+    """Move session to end (most-recently-used) and evict oldest if over cap."""
+    _graph_cache.move_to_end(session_id)
+    while len(_graph_cache) > _GRAPH_CACHE_MAX:
+        evicted_id, evicted_graph = _graph_cache.popitem(last=False)
+        # Ensure pending writes are flushed before dropping from memory.
+        #
+        # FIXED: previously a failed flush here was caught, logged at
+        # `error`, and then the graph was dropped from memory anyway —
+        # meaning any nodes added since the last successful `_persist()`
+        # call were gone permanently, with zero visibility beyond a log
+        # line. This is silent, permanent data loss in a tool whose whole
+        # pitch is "never lose context." We now retry once (covers
+        # transient SQLite WAL lock contention) and record the failure to
+        # analytics so it's queryable via /api/stats instead of invisible.
+        persisted = False
+        for attempt in range(2):
+            try:
+                evicted_graph._persist()
+                persisted = True
+                break
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(
+                        f"Persist attempt 1 failed for evicted graph {evicted_id}, retrying: {e}"
+                    )
+                else:
+                    logger.error(
+                        f"Graph {evicted_id} evicted from cache WITHOUT persisting — "
+                        f"nodes added since last successful save are LOST: {e}"
+                    )
+        if not persisted:
+            _analytics.record_silent_failure("graph_eviction")
+
+
+async def _get_graph_async(session_id: str) -> GraphMemory:
+    """
+    Race-safe, LRU-bounded graph accessor for async handlers.
+    Double-checked locking: avoids creating two GraphMemory objects
+    for the same session when concurrent requests both see a cache miss.
+    """
+    if session_id in _graph_cache:
+        _graph_cache_touch(session_id)
+        return _graph_cache[session_id]
+    async with _graph_cache_lock:
+        if session_id not in _graph_cache:  # re-check after lock
+            _graph_cache[session_id] = GraphMemory(
+                session_id,
+                storage_dir=settings.graph_checkpoint.storage_dir,
+            )
+        _graph_cache_touch(session_id)
+        return _graph_cache[session_id]
 
 
 def _get_context_used(session_id: str) -> int:
@@ -155,7 +217,16 @@ def _get_context_used(session_id: str) -> int:
 
 
 def _set_context_used(session_id: str, tokens: int) -> None:
-    _state.set(f"ctx:{session_id}", tokens, ttl=86400)
+    # FIXED: state backend `set()` now returns bool (see state/backend.py).
+    # A dropped write here under-counts context usage, which can silently
+    # cause the auto-checkpoint trigger_at_percent threshold to be missed —
+    # the proxy thinks the session has used less context than it actually
+    # has. Recording the failure makes this visible via /api/stats instead
+    # of manifesting only as "why didn't my checkpoint fire."
+    ok = _state.set(f"ctx:{session_id}", tokens, ttl=86400)
+    if not ok:
+        logger.error(f"Failed to persist context usage for session {session_id}")
+        _analytics.record_silent_failure("state_backend_set")
 
 
 # ── Context window sizes ──────────────────────────────────────────────────────
@@ -196,10 +267,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=settings.cors_origins,  # defaults: localhost:3000, localhost:8000
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Session-ID", "X-API-Key"],
 )
 
 
@@ -221,13 +292,13 @@ class ChatRequest(BaseModel):
 # ── Main endpoint ─────────────────────────────────────────────────────────────
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key), Depends(injection_guard)])
-async def chat_completions(req: ChatRequest, request: Request):
-    session_id = req.session_id or str(uuid.uuid4())
-    model = req.model or settings.default_model
-    t0 = time.monotonic()
+# ── chat_completions helpers (split from 272-line monolith) ─────────────────
 
-    # ── Rate limiting ─────────────────────────────────────────────────────────
-    client_id = request.headers.get("Authorization", request.client.host if request.client else "unknown")
+
+async def _check_rate_limit(request: Request) -> None:
+    """Raise 429 if client is rate-limited."""
+    client_ip = request.client.host if request.client else "unknown"
+    client_id = request.headers.get("Authorization", client_ip)
     allowed, retry_after = await _rate_limiter.check(client_id)
     if not allowed:
         raise HTTPException(
@@ -236,25 +307,32 @@ async def chat_completions(req: ChatRequest, request: Request):
             headers={"Retry-After": str(int(retry_after) + 1)},
         )
 
-    raw_messages = [{"role": m.role, "content": m.content} for m in req.messages]
-    messages = raw_messages[:]
-    savings: dict[str, int] = {}
-    cache_hit = False
 
-    # ── Layer 0: File intelligence — large files extracted before anything else ─
-    user_query = next((m["content"] for m in reversed(raw_messages) if m.get("role") == "user"), "")
-    messages, file_tokens_saved = _file_intelligence.process_message_files(
+def _apply_compression_layers(
+    messages: list[dict],
+    settings,
+    savings: dict,
+) -> list[dict]:
+    """
+    Layer 0-2: file intelligence, compression, terse injection.
+    Returns compressed messages and populates savings dict.
+    """
+    user_query = next(
+        (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
+    )
+    # Layer 0: File intelligence
+    messages, file_saved = _file_intelligence.process_message_files(
         messages, token_budget_per_file=600, query=user_query
     )
-    savings["file_extraction"] = file_tokens_saved
+    savings["file_extraction"] = file_saved
 
-    # ── Layer 1: Prompt compression ───────────────────────────────────────────
+    # Layer 1: Prompt compression
     if settings.compression.enabled:
         compressed, saved = _compression.compress_messages(messages, protect_recent=3)
         messages = compressed
         savings["compression"] = saved
 
-    # ── Layer 2: Terse output injection ───────────────────────────────────────
+    # Layer 2: Terse output injection
     if settings.terse_output.enabled:
         terse = _compression.terse_system_prompt(settings.terse_output.level)
         has_system = any(m.get("role") == "system" for m in messages)
@@ -266,226 +344,301 @@ async def chat_completions(req: ChatRequest, request: Request):
         else:
             messages = [{"role": "system", "content": terse}] + messages
 
-    # ── Layer 3: Semantic cache ───────────────────────────────────────────────
-    user_content = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-    cached_response = None
+    return messages
 
-    if settings.cache.enabled and user_content:
-        # Pass session_id so session-sensitive responses are isolated
-        cached_response = _cache.get(user_content, session_id=session_id)
-        if cached_response:
-            cache_hit = True
-            savings["cache"] = count_tokens(user_content, model)
 
-    # ── Layer 4: Context graph + smart window ────────────────────────────────
-    if settings.graph_checkpoint.enabled:
-        # Note: graph operations are not thread-safe under high concurrency.
-        # For single-user dev use this is fine. For production multi-user
-        # deploy with TOKENMIZER_STATE_BACKEND=redis and use 1 worker per CPU.
-        context_used = _get_context_used(session_id)
-        context_window = _context_window(model)
-        input_tokens = count_messages_tokens(messages, model)
-        context_pct = (context_used + input_tokens) / context_window
+async def _update_graph(
+    session_id: str,
+    graph,
+    raw_messages: list[dict],
+    messages: list[dict],
+    model: str,
+    savings: dict,
+    user_query: str,
+) -> tuple[list[dict], dict]:
+    """
+    Layer 4: Graph extraction, smart windowing, context injection, checkpoint.
+    Mutates messages (adds graph context).
+    Returns (updated_messages, checkpoint_status) — checkpoint_status surfaces
+    auto-checkpoint success/failure to the caller instead of only logging it.
+    """
+    context_used   = _get_context_used(session_id)
+    context_window = _context_window(model)
+    input_tokens   = count_messages_tokens(messages, model)
+    context_pct    = (context_used + input_tokens) / context_window
 
-        graph = _get_graph(session_id)
+    # Extraction: heuristic sync now, LLM async in background
+    if settings.graph_checkpoint.use_llm_extraction:
+        cheap = _get_cheap_provider()
+        if cheap is not None:
+            recent = raw_messages[-4:] if len(raw_messages) >= 4 else raw_messages
+            new_msgs = [m for m in recent
+                        if graph._msg_hash(m) not in graph._processed_hashes]
+            if new_msgs:
+                graph.extract_from_messages(raw_messages, incremental=True)
+                _lock_ref = _get_session_lock(session_id)
 
-        # Update graph incrementally on each turn
-        # LLM extraction: much higher accuracy (~80%+ vs ~45% heuristic)
-        # Only fires when: setting enabled + cheap provider available + new messages exist
-        if settings.graph_checkpoint.use_llm_extraction:
-            cheap = _get_cheap_provider()
-            if cheap is not None:
-                # Run LLM extraction async — don't block main response
-                # We extract the LAST 2 turns (current exchange) incrementally
-                recent_new = raw_messages[-4:] if len(raw_messages) >= 4 else raw_messages
-                new_msgs = [m for m in recent_new
-                            if graph._msg_hash(m) not in graph._processed_hashes]
-                if new_msgs:
-                    # Heuristic extraction runs NOW (fast, synchronous)
-                    # so graph is updated before response is sent
-                    graph.extract_from_messages(raw_messages, incremental=True)
+                async def _background_extract(
+                    _g=graph, _msgs=new_msgs, _all=raw_messages,
+                    _cheap=cheap, _lock=_lock_ref, _sid=session_id,
+                ):
+                    async with _lock:
+                        try:
+                            from tokenmizer.graph_memory.hybrid_extractor import HybridExtractor
 
-                    # LLM extraction runs IN BACKGROUND (non-blocking)
-                    # It will update the graph AFTER response is returned.
-                    # Next request will benefit from improved extraction.
-                    # Fire and forget — response NOT delayed.
-                    # Lock passed into closure so background write is serialized.
-                    _lock_ref = _get_session_lock(session_id)
-
-                    async def _background_llm_extract_safe(
-                        _graph=graph, _msgs=new_msgs, _all=raw_messages,
-                        _cheap=cheap, _lock=_lock_ref, _session=session_id
-                    ):
-                        async with _lock:  # serialize concurrent writes to same graph
-                            try:
-                                # Use HybridExtractor: LLM → heuristic → merge
-                                # Falls back gracefully if LLM call fails
-                                from tokenmizer.graph_memory.hybrid_extractor import HybridExtractor
-
-                                async def _provider_fn(messages, system="", max_tokens=600):
-                                    r = await _cheap.chat(
-                                        messages=messages, system=system, max_tokens=max_tokens
-                                    )
-                                    return {"text": r.text}
-
-                                extractor = HybridExtractor(provider_fn=_provider_fn)
-                                extracted = await extractor.extract(_msgs)
-                                _graph.extract_from_messages(
-                                    _all, incremental=False, extracted_data=extracted
+                            async def _pfn(messages, system="", max_tokens=600):
+                                r = await _cheap.chat(
+                                    messages=messages, system=system, max_tokens=max_tokens
                                 )
-                                logger.debug(f"HybridExtractor complete for {_session}")
-                            except ImportError:
-                                # HybridExtractor not available — fall back to _llm_extract
-                                try:
-                                    from tokenmizer.graph_memory.graph import _llm_extract
-                                    async def _pfn(messages, system="", max_tokens=600):
-                                        r = await _cheap.chat(messages=messages, system=system, max_tokens=max_tokens)
-                                        return {"text": r.text}
-                                    extracted = await _llm_extract(_msgs, _pfn)
-                                    _graph.extract_from_messages(_all, incremental=False, extracted_data=extracted)
-                                except Exception as e2:
-                                    logger.debug(f"LLM extraction fallback failed: {e2}")
-                            except Exception as e:
-                                logger.debug(f"Background extraction failed (non-fatal): {e}")
+                                return {"text": r.text}
 
-                    asyncio.create_task(_background_llm_extract_safe())
-                else:
-                    graph.extract_from_messages(raw_messages, incremental=True)
+                            ext = HybridExtractor(provider_fn=_pfn)
+                            extracted = await ext.extract(_msgs)
+                            _g.extract_from_messages(_all, incremental=False,
+                                                     extracted_data=extracted)
+                            logger.debug(f"HybridExtractor complete for {_sid}")
+                        except Exception as e:
+                            # FIXED: previously logged at `debug` (off by
+                            # default in production) — meaning the entire
+                            # LLM-powered extraction feature could fail on
+                            # every single call (e.g. invalid/expired cheap-
+                            # provider API key, provider outage, quota
+                            # exhausted) and run silently for the whole
+                            # session with zero visibility anywhere. The
+                            # graph would just quietly stop gaining new
+                            # nodes from this path and nobody would know
+                            # why. Bumped to `warning` (visible by default)
+                            # and tracked via analytics so persistent
+                            # failures are queryable via /api/stats instead
+                            # of only discoverable by reading debug logs.
+                            logger.warning(
+                                f"Background LLM extraction failed for session "
+                                f"{_sid} (falling back to heuristic-only on next "
+                                f"calls, no data lost — just less accurate "
+                                f"extraction this turn): {e}"
+                            )
+                            _analytics.record_silent_failure("llm_extraction")
+
+                asyncio.create_task(_background_extract())
             else:
                 graph.extract_from_messages(raw_messages, incremental=True)
         else:
             graph.extract_from_messages(raw_messages, incremental=True)
+    else:
+        graph.extract_from_messages(raw_messages, incremental=True)
 
-        # Smart window: compress old turns → graph summary (kills middle-conversation waste)
-        if needs_windowing(messages, settings.memory.max_tokens_before_summary, model):
-            messages, window_saved = _smart_window.apply(messages, graph, model)
-            savings["windowing"] = window_saved
-        else:
-            savings["windowing"] = 0
+    # Smart windowing
+    if needs_windowing(messages, settings.memory.max_tokens_before_summary, model):
+        messages, window_saved = _smart_window.apply(messages, graph, model)
+        savings["windowing"] = window_saved
+    else:
+        savings["windowing"] = 0
 
-        # Targeted context injection: only relevant nodes, only when useful
-        if len(graph._nodes) >= 3 and len(user_query.split()) >= 4:
-            relevant_nodes = graph.query(user_query, top_k=8)
-            if relevant_nodes:
-                ctx_parts = []
-                for n in relevant_nodes[:6]:
-                    entry = n.label
-                    if n.summary:
-                        entry += f" ({n.summary[:50]})"
-                    ctx_parts.append(f"  {n.type.value}: {entry}")
-                ctx_block = "\n".join(ctx_parts)
-                sys_idx = next(
-                    (i for i, m in enumerate(messages) if m.get("role") == "system"), None
+    # Context injection — only when graph has enough signal
+    if len(graph._nodes) >= 3 and len(user_query.split()) >= 4:
+        relevant = graph.query(user_query, top_k=8)
+        if relevant:
+            ctx_parts = [
+                f"  {n.type.value}: {n.label}"
+                + (f" ({n.summary[:50]})" if n.summary else "")
+                for n in relevant[:6]
+            ]
+            ctx_block = "\n".join(ctx_parts)
+            sys_idx = next(
+                (i for i, m in enumerate(messages) if m.get("role") == "system"), None
+            )
+            if sys_idx is not None:
+                messages[sys_idx]["content"] = (
+                    f"[Relevant session context]\n{ctx_block}\n\n"
+                    f"{messages[sys_idx]['content']}"
                 )
-                if sys_idx is not None:
-                    messages[sys_idx]["content"] = (
-                        f"[Relevant session context]\n{ctx_block}\n\n"
-                        f"{messages[sys_idx]['content']}"
-                    )
 
-        # Auto-checkpoint at threshold
-        if (context_pct >= settings.graph_checkpoint.trigger_at_percent
-                and settings.graph_checkpoint.enabled):
+    # Auto-checkpoint
+    #
+    # FIXED: previously a failed auto-checkpoint was caught, logged at
+    # `warning`, and otherwise invisible — the chat response returned
+    # normally with no indication that the safety net didn't fire. For a
+    # tool whose entire pitch is "never lose context across sessions,"
+    # silently failing the auto-checkpoint and telling the user nothing is
+    # the single worst failure mode this codebase had. The chat request
+    # still should NOT fail just because the checkpoint failed (the user
+    # came here for an answer, not a checkpoint), but the failure must be
+    # visible somewhere the caller can actually see it.
+    #
+    # Fix: retry once (covers transient SQLite lock contention under
+    # concurrent requests — see WAL mode notes in checkpoints/manager.py),
+    # log at `error` if it still fails, and record the failure in `savings`
+    # so it flows into the `tokenmizer.checkpoint` response field below —
+    # a client that cares can check `checkpoint_failed` instead of having
+    # to grep server logs to discover their context wasn't saved.
+    checkpoint_status = {"attempted": False, "succeeded": False, "checkpoint_id": None}
+    if (context_pct >= settings.graph_checkpoint.trigger_at_percent
+            and settings.graph_checkpoint.enabled):
+        checkpoint_status["attempted"] = True
+        last_error: Optional[Exception] = None
+        for attempt in range(2):  # one retry for transient SQLite lock contention
             try:
                 ckpt = _checkpoint_mgr.create(
                     session_id=session_id,
-                    messages=raw_messages,  # FULL history — not just recent
+                    messages=raw_messages,
                     graph=graph,
                     context_pct=context_pct,
                     trigger="auto_threshold",
                     model=model,
                 )
                 logger.info(f"Auto-checkpoint {ckpt.checkpoint_id} for {session_id}")
+                checkpoint_status["succeeded"] = True
+                checkpoint_status["checkpoint_id"] = ckpt.checkpoint_id
+                last_error = None
+                break
             except Exception as e:
-                logger.warning(f"Checkpoint failed (non-fatal): {e}")
+                last_error = e
+                if attempt == 0:
+                    logger.warning(
+                        f"Auto-checkpoint attempt 1 failed for {session_id}, retrying once: {e}"
+                    )
+                await asyncio.sleep(0.1)
+        if last_error is not None:
+            logger.error(
+                f"Auto-checkpoint FAILED for {session_id} after retry — "
+                f"context was NOT saved at {context_pct:.0%} usage: {last_error}"
+            )
+            checkpoint_status["error"] = str(last_error)
+            _analytics.record_silent_failure("checkpoint")
 
-        _set_context_used(session_id, context_used + input_tokens)
+    _set_context_used(session_id, context_used + input_tokens)
+    return messages, checkpoint_status
 
-    # ── Layer 5: LLM call (or cache return) ──────────────────────────────────
+
+async def _call_provider(
+    req,
+    messages: list[dict],
+    model: str,
+    user_content: str,
+    session_id: str,
+    savings: dict,
+) -> tuple[str, int, int, float]:
+    """
+    Layer 3 + 5: Cache lookup → LLM call → output trim → cache write.
+    Returns (response_text, input_tokens, output_tokens, latency_ms).
+    """
+    # Cache lookup
+    if settings.cache.enabled and user_content:
+        cached = _cache.get(user_content, session_id=session_id)
+        if cached:
+            savings["cache"] = count_tokens(user_content, model)
+            output_tokens = count_tokens(cached.response, model)
+            return cached.response, 0, output_tokens, 0.0
+
+    # Streaming check
+    if req.stream:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Streaming is not yet supported by the TokenMizer proxy. "
+                "Set stream=False in your request, or connect directly to "
+                "your provider for streaming. True SSE streaming is planned for v0.3."
+            ),
+        )
+
+    # LLM call
+    # NOTE: `messages` is already redacted — redaction now happens once at
+    # ingestion in chat_completions() so every downstream consumer (this call,
+    # background graph extraction, checkpoint storage) sees the same safe
+    # copy. We do NOT re-redact here to avoid masking a regression upstream:
+    # if redaction is ever accidentally removed at ingestion, this call site
+    # should not silently paper over it.
+    provider = _get_provider()
+    try:
+        resp  = await provider.chat(
+            messages=messages, model=model,
+            max_tokens=req.max_tokens or 4096, stream=False,
+        )
+    except Exception as e:
+        logger.error(f"Provider error: {e}")
+        raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
+
+    response_text  = resp.text
+    output_tokens  = resp.output_tokens
+    input_tokens   = resp.input_tokens
+    latency_ms     = resp.latency_ms
+
+    # Output trim
+    if settings.terse_output.enabled:
+        response_text, output_saved = _output_trimmer.trim(
+            response_text, level=settings.terse_output.level
+        )
+        savings["output_trim"] = output_saved
+        output_tokens = max(1, output_tokens - output_saved)
+
+    # Cache write
+    if settings.cache.enabled and user_content:
+        _cache.set(user_content, response_text,
+                   input_tokens=input_tokens, output_tokens=output_tokens,
+                   session_id=session_id)
+
+    return response_text, input_tokens, output_tokens, latency_ms
+
+
+async def chat_completions(req: ChatRequest, request: Request):
+    """
+    Main proxy endpoint — orchestrates all 6 layers.
+
+    Split into helpers to keep this orchestrator readable:
+      _check_rate_limit()       — 429 if over limit
+      _apply_compression_layers() — file intelligence, compress, terse inject
+      _update_graph()           — graph extraction, windowing, context inject
+      _call_provider()          — cache → LLM → output trim → cache write
+    """
+    session_id = req.session_id or str(uuid.uuid4())
+    model      = req.model or settings.default_model
+    savings: dict[str, int] = {}
+
+    await _check_rate_limit(request)
+
+    # SECURITY: redact secrets/PII at the earliest possible point, before
+    # ANY downstream consumer sees the content. This includes:
+    #   - the main chat provider call (_call_provider)
+    #   - the background graph-extraction LLM call (_update_graph → HybridExtractor),
+    #     which talks to a *separate*, often cheaper third-party model
+    #     (haiku/gpt-4o-mini/deepseek) — previously this saw RAW unredacted
+    #     content because only _call_provider redacted its own copy.
+    #   - checkpoint storage (SQLite) and the graph DB itself
+    # Redacting once here means every downstream path is safe by construction
+    # instead of relying on each call site to remember to redact.
+    raw_messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    raw_messages = redact_messages(raw_messages)
+    messages     = raw_messages[:]
+    user_query   = next(
+        (m["content"] for m in reversed(raw_messages) if m.get("role") == "user"), ""
+    )
+    user_content = user_query
+
+    # Layer 0-2: file intelligence, compression, terse injection
+    messages = _apply_compression_layers(messages, settings, savings)
+
+    # Layer 3+5: cache + LLM + output trim (done before graph for latency)
+    # Graph runs in parallel-ish: heuristic extract is sync and fast,
+    # LLM extract fires async after provider returns.
     orig_input_tokens = count_messages_tokens(raw_messages, model)
     sent_input_tokens = count_messages_tokens(messages, model)
-    savings["routing"] = 0  # honest default
+    savings["routing"] = 0
 
-    if cached_response:
-        response_text = cached_response.response
-        output_tokens = count_tokens(response_text, model)
-        input_tokens_actual = 0  # cache hit = no LLM call
-        latency_ms = (time.monotonic() - t0) * 1000
-    else:
-        provider = _get_provider()
-        try:
-            # Redact secrets before sending to provider
-            clean_messages = redact_messages(messages)
+    # Layer 4: graph update + context injection (mutates messages)
+    checkpoint_status: dict = {"attempted": False, "succeeded": False, "checkpoint_id": None}
+    if settings.graph_checkpoint.enabled:
+        graph    = await _get_graph_async(session_id)
+        messages, checkpoint_status = await _update_graph(
+            session_id, graph, raw_messages, messages, model, savings, user_query
+        )
 
-            # Streaming: pass through to provider if client requested it.
-            # NOTE: streaming bypasses output trimmer and cache write (by design).
-            if req.stream:
-                from fastapi.responses import StreamingResponse as _SR
+    # Layer 5: call provider (or return cache hit)
+    response_text, input_tokens_actual, output_tokens, latency_ms = await _call_provider(
+        req, messages, model, user_content, session_id, savings
+    )
+    cache_hit = input_tokens_actual == 0 and response_text != ""
 
-                async def _stream_gen():
-                    try:
-                        resp = await provider.chat(
-                            messages=clean_messages,
-                            model=model,
-                            max_tokens=req.max_tokens or 4096,
-                            stream=True,
-                        )
-                        # Provider returns full text even in stream=True mode;
-                        # emit as a single SSE chunk for now.
-                        # TODO: wire true async token streaming in v0.2
-                        chunk = {
-                            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                            "object": "chat.completion.chunk",
-                            "model": model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {"role": "assistant", "content": resp.text},
-                                "finish_reason": "stop",
-                            }],
-                        }
-                        import json as _json
-                        yield f"data: {_json.dumps(chunk)}\n\n"
-                        yield "data: [DONE]\n\n"
-                    except Exception as e:
-                        logger.error(f"Streaming error: {e}")
-                        yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
-
-                return _SR(_stream_gen(), media_type="text/event-stream")
-
-            resp = await provider.chat(
-                messages=clean_messages,
-                model=model,
-                max_tokens=req.max_tokens or 4096,
-                stream=False,
-            )
-        except Exception as e:
-            logger.error(f"Provider error: {e}")
-            raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
-
-        response_text = resp.text
-        output_tokens = resp.output_tokens
-        input_tokens_actual = resp.input_tokens
-        latency_ms = resp.latency_ms
-
-        # Output trimmer: remove filler phrases (never touches real content)
-        if settings.terse_output.enabled:
-            response_text, output_saved = _output_trimmer.trim(
-                response_text, level=settings.terse_output.level
-            )
-            savings["output_trim"] = output_saved
-            output_tokens = max(1, output_tokens - output_saved)
-
-        # Cache the response — pass session_id for proper scope isolation
-        if settings.cache.enabled and user_content:
-            _cache.set(
-                user_content,
-                response_text,
-                input_tokens=input_tokens_actual,
-                output_tokens=output_tokens,
-                session_id=session_id,
-            )
-
-    # ── Analytics ────────────────────────────────────────────────────────────
+    # Analytics
     total_saved = sum(savings.values())
     _analytics.record(
         session_id=session_id,
@@ -501,31 +654,35 @@ async def chat_completions(req: ChatRequest, request: Request):
     )
 
     return {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-        "object": "chat.completion",
+        "id":      f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object":  "chat.completion",
         "created": int(time.time()),
-        "model": model,
+        "model":   model,
         "session_id": session_id,
         "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": response_text},
+            "index":         0,
+            "message":       {"role": "assistant", "content": response_text},
             "finish_reason": "stop",
         }],
         "usage": {
-            "prompt_tokens": input_tokens_actual,
-            "completion_tokens": output_tokens,
-            "total_tokens": input_tokens_actual + output_tokens,
+            "prompt_tokens":          input_tokens_actual,
+            "completion_tokens":      output_tokens,
+            "total_tokens":           input_tokens_actual + output_tokens,
             "original_prompt_tokens": orig_input_tokens,
-            "tokens_saved": total_saved,
+            "tokens_saved":           total_saved,
         },
         "tokenmizer": {
-            "cache_hit": cache_hit,
-            "savings": savings,
+            "cache_hit":   cache_hit,
+            "savings":     savings,
             "total_saved": total_saved,
-            "latency_ms": round(latency_ms, 1),
+            "latency_ms":  round(latency_ms, 1),
+            # FIXED: previously a failed auto-checkpoint was invisible to
+            # the caller — only a log line nobody watches. Now surfaced
+            # here so a client can detect "my context wasn't saved" instead
+            # of finding out only when resume returns nothing.
+            "checkpoint": checkpoint_status,
         },
     }
-
 
 # ── Health / Info ─────────────────────────────────────────────────────────────
 
@@ -549,20 +706,106 @@ async def stats(session_id: Optional[str] = None):
 
 @app.get("/api/cache/stats", dependencies=[Depends(verify_api_key)])
 async def cache_stats():
-    return _cache.stats()
+    stats = _cache.stats()
+    # Include preference context for completeness (was previously unused)
+    stats["preference_context"] = _cache._preferences.to_system_context()
+    return stats
+
+
+@app.get("/api/graph/{session_id}/history", dependencies=[Depends(verify_api_key)])
+async def get_graph_history(session_id: str, at_time: float = 0.0, top_k: int = 12):
+    """
+    Query graph state at a specific Unix timestamp.
+    at_time=0.0 (default) returns current state (equivalent to /viz).
+    at_time=<unix_ts> returns which nodes were active at that point in time.
+
+    Useful for: debugging decision changes, audit trail, "what did we decide
+    at 2pm?" queries.
+    """
+    graph = await _get_graph_async(session_id)
+    if at_time == 0.0:
+        nodes = graph.query("", top_k=top_k)
+    else:
+        nodes = graph.query_at_time("", at_time=at_time, top_k=top_k)
+    return {
+        "session_id": session_id,
+        "at_time": at_time or None,
+        "nodes": [
+            {
+                "id": n.id, "label": n.label, "type": n.type.value,
+                "status": n.status.value, "importance": n.importance,
+                "valid_from": n.valid_from, "valid_until": n.valid_until or None,
+            }
+            for n in nodes
+        ],
+        "count": len(nodes),
+    }
 
 
 @app.get("/api/graph/{session_id}", dependencies=[Depends(verify_api_key)])
 async def get_graph(session_id: str):
-    graph = _get_graph(session_id)
+    graph = await _get_graph_async(session_id)
     return graph.stats()
 
 
-@app.post("/api/checkpoint", dependencies=[Depends(verify_api_key)])
+@app.get("/api/graph/{session_id}/viz", dependencies=[Depends(verify_api_key)])
+async def get_graph_viz(session_id: str):
+    """
+    Return full graph as D3-compatible JSON for visualization.
+    {nodes: [...], edges: [...], meta: {...}}
+    Used by the dashboard Graph tab and any external viz tool.
+    """
+    graph = await _get_graph_async(session_id)
+    return graph.to_vis_json()
+
+
+@app.get("/api/graph/{session_id}/obsidian", dependencies=[Depends(verify_api_key)])
+async def get_graph_obsidian(session_id: str):
+    """
+    Download graph as Obsidian Canvas (.canvas) file.
+    Save as <any-name>.canvas inside your Obsidian vault and open directly.
+    """
+    from fastapi.responses import Response as _Resp
+    import json as _json
+    graph = await _get_graph_async(session_id)
+    canvas = graph.to_obsidian_canvas()
+    filename = f"tokenmizer-{session_id[:12]}.canvas"
+    return _Resp(
+        content=_json.dumps(canvas, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.get("/api/graph/{session_id}/transitions", dependencies=[Depends(verify_api_key)])
+async def get_transitions(session_id: str):
+    """Full decision transition history — trigger, reason, evidence, confidence_delta."""
+    graph = await _get_graph_async(session_id)
+    return {
+        "session_id": session_id,
+        "transitions": [
+            {
+                "id": t.id,
+                "from_label": t.from_label,
+                "to_label": t.to_label,
+                "trigger": t.trigger,
+                "reason": t.reason,
+                "evidence": t.evidence,
+                "confidence_delta": t.confidence_delta,
+                "timestamp": t.timestamp,
+                "context_line": t.to_context_line(),
+            }
+            for t in graph.get_transitions()
+        ],
+        "count": len(graph.get_transitions()),
+    }
+
+
+
 async def manual_checkpoint(session_id: str, model: str = ""):
     """Manually trigger a checkpoint for a session."""
     try:
-        graph = _get_graph(session_id)
+        graph = await _get_graph_async(session_id)
         if not graph._nodes:
             raise HTTPException(status_code=404, detail="No graph data found for session")
         ckpt = _checkpoint_mgr.create(
@@ -586,6 +829,54 @@ async def manual_checkpoint(session_id: str, model: str = ""):
         raise HTTPException(status_code=500, detail=f"Checkpoint failed: {str(e)}")
 
 
+@app.post("/api/checkpoint", dependencies=[Depends(verify_api_key)])
+async def create_manual_checkpoint(session_id: str):
+    """
+    Create a manual checkpoint for a session, snapshotting current graph
+    state. Used by `tokenmizer checkpoint <session-id>` (CLI) and the
+    `/tokenmizer:checkpoint` Claude Code skill.
+
+    FOUND DURING A FINAL ACCURACY PASS: this endpoint was referenced by
+    the README's API Reference table, cli.py's `checkpoint` command, AND
+    the Claude Code checkpoint skill (.claude-plugin/skills/checkpoint/
+    SKILL.md) — all three call `POST /api/checkpoint?session_id=...` —
+    but it was never actually implemented here. Every one of those three
+    callers would have gotten a 404 against the real running app. This
+    wasn't a documentation typo; it was a real, consistent gap across
+    three independent consumers that nothing caught because none of them
+    were exercised end-to-end during the original audit.
+
+    Design note: unlike the auto-checkpoint path in chat_completions(),
+    this has no live message history to extract from (a standalone HTTP
+    call has no conversation attached) — `CheckpointManager.create()` is
+    called with `messages=[]`, which is safe: extract_from_messages()
+    early-returns on an empty new-messages diff, and the checkpoint still
+    correctly snapshots whatever's ALREADY in the graph from prior chat
+    turns. Verified with a direct test before writing this (see
+    tests/unit/test_graph_persistence.py for the equivalent pattern).
+    """
+    try:
+        graph = await _get_graph_async(session_id)
+        ckpt = _checkpoint_mgr.create(
+            session_id=session_id,
+            messages=[],
+            graph=graph,
+            context_pct=0.0,
+            trigger="manual",
+        )
+        return {
+            "checkpoint_id": ckpt.checkpoint_id,
+            "session_id": session_id,
+            "node_count": len(ckpt.graph_snapshot.get("nodes", [])),
+            "resume_tokens": ckpt.resume_tokens,
+            "resume_standard": ckpt.resume_standard,
+            "trigger": ckpt.trigger,
+        }
+    except Exception as e:
+        logger.error(f"Manual checkpoint failed for session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/checkpoints/{session_id}", dependencies=[Depends(verify_api_key)])
 async def list_checkpoints(session_id: str):
     return _checkpoint_mgr.list_checkpoints(session_id)
@@ -600,21 +891,27 @@ async def invalidate_decision(session_id: str, decision_label: str, reason: str 
     """
     try:
         from tokenmizer.graph_memory.graph import NodeStatus, NodeType
-        graph = _get_graph(session_id)
+        graph = await _get_graph_async(session_id)
         label_lower = decision_label.lower().strip()
         found = False
         for node in graph._nodes.values():
             if (node.type == NodeType.DECISION and
                     label_lower in node.label.lower()):
                 node.status = NodeStatus.INVALIDATED
-                node.summary = f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
+                node.summary = (
+                    f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
+                )
                 found = True
         if not found:
             raise HTTPException(
                 status_code=404,
                 detail=f"No decision matching '{decision_label}' found in session '{session_id}'"
             )
-        graph._persist()
+        graph._persist(force=True)  # direct node mutation above bypasses add_node's
+                                      # dirty-tracking — force=True is required here or
+                                      # this write is silently skipped (caught in a final
+                                      # accuracy pass; same class of bug the eviction path
+                                      # and prune() were already protected against)
         return {
             "session_id": session_id,
             "invalidated": decision_label,
