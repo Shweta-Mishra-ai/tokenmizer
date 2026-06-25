@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
+if TYPE_CHECKING:
+    import sqlite3
+
+from tokenmizer.core.errors import CheckpointPersistError
+from tokenmizer.core.tokenizer import count_tokens
 from tokenmizer.graph_memory.graph import GraphMemory
-from tokenmizer.core.tokenizer import count_tokens, count_messages_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +70,23 @@ class CheckpointManager:
             logger.warning(f"Checkpoint DB corrupt or unreadable — recreating: {self._db_path}")
             try:
                 self._db_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as del_err:
+                logger.error(f"Could not delete corrupt checkpoint DB: {del_err}")
             try:
                 self._init_db()
             except Exception as e:
                 logger.error(f"Cannot initialize checkpoint DB after cleanup: {e}")
 
+    def _db_connect(self) -> sqlite3.Connection:
+        """SQLite connection with WAL mode and timeout for concurrent safety."""
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
     def _init_db(self) -> None:
-        conn = sqlite3.connect(self._db_path)
+        conn = self._db_connect()
         try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -248,8 +259,26 @@ class CheckpointManager:
         }
 
     def _save(self, ckpt: Checkpoint) -> None:
+        """
+        Persist a checkpoint to SQLite.
+
+        FIXED: previously this caught Exception, logged it, and returned
+        None — silently. The caller (create()) had no way to know the
+        save failed, so callers (including the auto-checkpoint trigger and
+        the manual /api/checkpoint endpoint) would report a checkpoint as
+        successfully created when nothing was actually written to disk.
+        For a tool whose entire pitch is "never lose context," silently
+        losing the checkpoint on save failure is the worst possible
+        failure mode — the user trusts the safety net fired and finds out
+        otherwise only when they try to resume and there's nothing there.
+
+        Now raises CheckpointPersistError so callers can decide how to
+        handle it (the API layer already wraps checkpoint creation in
+        try/except and returns a proper 500 — this just makes that path
+        reachable instead of dead code).
+        """
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = self._db_connect()
             try:
                 conn.execute(
                     """INSERT OR REPLACE INTO checkpoints
@@ -277,11 +306,15 @@ class CheckpointManager:
             finally:
                 conn.close()
         except Exception as e:
-            logger.error(f"Checkpoint save failed: {e}")
+            logger.error(f"Checkpoint save failed for {ckpt.checkpoint_id}: {e}")
+            raise CheckpointPersistError(
+                f"Failed to persist checkpoint {ckpt.checkpoint_id} for "
+                f"session {ckpt.session_id}: {e}"
+            ) from e
 
     def get_latest(self, session_id: str) -> Optional[Checkpoint]:
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = self._db_connect()
             try:
                 row = conn.execute(
                     """SELECT checkpoint_id, session_id, created_at, context_pct,
@@ -300,8 +333,20 @@ class CheckpointManager:
             return None
 
     def list_checkpoints(self, session_id: str) -> list[dict]:
+        """
+        Returns checkpoint metadata for a session, newest first.
+
+        FIXED: previously a DB read failure here was indistinguishable from
+        "this session genuinely has zero checkpoints" — both returned `[]`
+        with zero logging. A caller (e.g. the /api/checkpoints/{session_id}
+        endpoint) would show an empty list to the user with no way to tell
+        whether checkpointing is broken or just hasn't run yet. We still
+        return [] on failure (changing the return type here would break the
+        API contract), but now we log it at error level so it's actually
+        visible in production instead of invisible by design.
+        """
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = self._db_connect()
             try:
                 rows = conn.execute(
                     """SELECT checkpoint_id, created_at, context_pct, trigger, message_count
@@ -315,7 +360,8 @@ class CheckpointManager:
                  "trigger": r[3], "message_count": r[4]}
                 for r in rows
             ]
-        except Exception:
+        except Exception as e:
+            logger.error(f"Checkpoint list query failed for session {session_id}: {e}")
             return []
 
     def _row_to_checkpoint(self, row) -> Checkpoint:

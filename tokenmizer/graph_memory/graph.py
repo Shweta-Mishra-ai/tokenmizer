@@ -10,473 +10,54 @@ Key fixes over V3:
 - Graph pruning / aging
 - Secret redaction on every write
 - SQLite persistence (survives restarts)
+
+Module layout (split for maintainability — see types.py / helpers.py):
+- types.py:   NodeType, NodeStatus, EdgeType, MemoryNode, MemoryEdge, DecisionTransition
+- helpers.py: _content_to_text, _infer_trigger, _extract_evidence_from_text
+- graph.py:   GraphMemory (this file) — all extraction/query/persistence logic
+
+All names below are re-exported here for backward compatibility:
+existing code doing `from tokenmizer.graph_memory.graph import NodeType` etc.
+continues to work unchanged.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-import re
 import sqlite3
 import time
-from dataclasses import asdict, dataclass, field
-from enum import Enum
+from dataclasses import asdict
 from pathlib import Path
 
+from tokenmizer.graph_memory.types import (
+    NodeType,
+    NodeStatus,
+    EdgeType,
+    MemoryNode,
+    MemoryEdge,
+    DecisionTransition,
+)
+from tokenmizer.graph_memory.helpers import (
+    _content_to_text,
+    _infer_trigger,
+    _extract_evidence_from_text,
+)
+
+__all__ = [
+    "GraphMemory",
+    "NodeType", "NodeStatus", "EdgeType",
+    "MemoryNode", "MemoryEdge", "DecisionTransition",
+    "_content_to_text", "_infer_trigger", "_extract_evidence_from_text",
+]
+
 logger = logging.getLogger(__name__)
+
 
 # Lazy import to avoid circular dependency
 def _get_validator():
     from tokenmizer.graph_memory.validator import get_validator
     return get_validator()
-
-
-# ── Node / Edge types ────────────────────────────────────────────────────────
-
-class NodeType(str, Enum):
-    TASK = "task"
-    FILE = "file"
-    DECISION = "decision"
-    ERROR = "error"
-    CONCEPT = "concept"
-    DEPENDENCY = "dependency"
-    API = "api"
-    PROJECT = "project"
-    AGENT = "agent"
-    # V4 additions
-    ENVIRONMENT = "environment"   # runtime env, versions, infra
-    GOAL = "goal"                 # top-level session objective
-    TEST = "test"                 # test file / test result
-    ENDPOINT = "endpoint"         # HTTP endpoint definition
-    SCHEMA = "schema"             # data model / DB schema
-
-
-class NodeStatus(str, Enum):
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"       # active — shown in resume (GREEN)
-    FAILED = "failed"
-    SUPERSEDED = "superseded"     # replaced by newer decision (YELLOW) — kept in history
-    INVALIDATED = "invalidated"   # explicitly wrong/cancelled (RED) — kept as warning
-    ARCHIVED = "archived"         # old but valid, not relevant now (GRAY)
-    MODIFIED = "modified"         # alias for SUPERSEDED — backward compat
-
-
-class EdgeType(str, Enum):
-    DEPENDS_ON = "depends_on"
-    RELATED_TO = "related_to"
-    IMPLEMENTS = "implements"
-    FIXES = "fixes"
-    BLOCKS = "blocks"
-    PART_OF = "part_of"
-    SUPERSEDES = "supersedes"
-
-
-@dataclass
-class MemoryNode:
-    id: str
-    type: NodeType
-    label: str
-    status: NodeStatus = NodeStatus.PENDING
-    summary: str = ""
-    importance: float = 0.5       # 0–1, used in pruning
-    confidence: float = 0.7       # 0–1, from GraphValidator
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-    valid_from: float = field(default_factory=time.time)   # when this fact became true
-    valid_until: float = field(default=0.0)                # 0.0 = currently valid
-    _evicted: bool = field(default=False, repr=False)
-
-    def is_valid_at(self, t: float) -> bool:
-        """True if this node was active at time t."""
-        return self.valid_from <= t and (self.valid_until == 0.0 or self.valid_until > t)
-
-    def touch(self) -> None:
-        self.updated_at = time.time()
-        self.importance = min(1.0, self.importance + 0.05)
-
-    def age_days(self) -> float:
-        return (time.time() - self.updated_at) / 86400
-
-
-@dataclass
-class MemoryEdge:
-    source_id: str
-    target_id: str
-    type: EdgeType
-    weight: float = 1.0
-
-
-# ── Heuristic extractor (fallback) ──────────────────────────────────────────
-
-# ── Task patterns — broad coverage ──────────────────────────────────────────
-# Explicit completion verbs
-_TASK_DONE_EXPLICIT = re.compile(
-    r'(?:completed?|finished?|done|implemented?|created?|added?|fixed?|wrote?|updated?|refactored?|built?|set up|set-up|wired up|hooked up|deployed?|shipped?)\s*[:\-]?\s*(.{8,80})',
-    re.IGNORECASE,
-)
-# Passive / state phrases: "X is ready", "X is working", "X now works"
-_TASK_DONE_PASSIVE = re.compile(
-    r'(.{5,60})\s+(?:is|are|has been|have been)\s+(?:ready|done|complete|completed|finished|working|fixed|resolved|set up|passing)',
-    re.IGNORECASE,
-)
-# "X now works/passes/runs"
-_TASK_DONE_NOW = re.compile(
-    r'(.{5,60})\s+now\s+(?:works?|passes?|runs?|compiles?|deploys?|connects?)',
-    re.IGNORECASE,
-)
-_TASK_WIP = re.compile(
-    r'(?:working on|implementing|building|creating|adding|writing|fixing|updating|setting up|integrating)\s+(.{8,80})',
-    re.IGNORECASE,
-)
-_TASK_TODO = re.compile(
-    r'(?:next(?:\s+step)?(?:\s+is)?|need to|should|will|todo|plan to|going to|about to|still need)\s+(?:implement|create|add|write|fix|update|build|set up|configure|test|deploy|integrate)\s+(.{8,80})',
-    re.IGNORECASE,
-)
-
-# ── Decision patterns — comprehensive ────────────────────────────────────────
-# Explicit decision verbs
-_DECISION_EXPLICIT = re.compile(
-    r'(?:decided?|chose?|selected?|going with|will use|switched? to|settled on|opted for|went with|sticking with|picked)\s+(.{5,80})',
-    re.IGNORECASE,
-)
-# "X makes more sense", "X is the better choice", "better to use X"
-_DECISION_REASONING = re.compile(
-    r'(?:(.{5,60})\s+(?:makes? more sense|is (?:the )?better|is (?:the )?best|would work better|is (?:more )?appropriate))',
-    re.IGNORECASE,
-)
-# "X over Y", "X instead of Y", "X rather than Y"
-_DECISION_COMPARISON = re.compile(
-    r'([\w][\w\s]{1,40})\s+(?:over|instead of|rather than|vs\.?|versus)\s+([\w][\w\s]{1,40})',
-    re.IGNORECASE,
-)
-# "Using X for Y", "X for the Y"
-_DECISION_USING = re.compile(
-    r'(?:using|use)\s+([\w][\w\s\-]{3,40})\s+(?:for|as|to handle|to manage)\s+(.{5,60})',
-    re.IGNORECASE,
-)
-# "Switching to X", "switched to X", "moving to X", "migrating to X"
-_DECISION_SWITCH = re.compile(
-    r'(?:switch(?:ing|ed)?\s+to|mov(?:ing|ed)\s+to|migrat(?:ing|ed)\s+to|'
-    r'replac(?:ing|ed)\s+.*?\s+with|'
-    r'use\s+([\w][\w\.\-]{1,30})\s+(?:not|instead\s+of))\s+([\w][\w\.\s\-]{1,40})',
-    re.IGNORECASE,
-)
-# "Switching from X to Y"
-_DECISION_FROM_TO = re.compile(
-    r'(?:switch(?:ing|ed)|mov(?:ing|ed)|migrat(?:ing|ed))\s+from\s+([\w][\w\.\s\-]{1,30})\s+to\s+([\w][\w\.\s\-]{1,40})',
-    re.IGNORECASE,
-)
-# Tech name + rationale: "FastAPI because async", "PostgreSQL for concurrent writes"
-_DECISION_TECH = re.compile(
-    r'\b(fastapi|flask|django|postgresql|mysql|sqlite|mongodb|redis|jwt|oauth|docker|kubernetes|'
-    r'react|vue|angular|typescript|python|nodejs|go|rust|aws|gcp|azure|railway|vercel|'
-    r'bcrypt|argon2|celery|kafka|rabbitmq|elasticsearch|nginx|gunicorn|uvicorn)\b',
-    re.IGNORECASE,
-)
-
-_FILE = re.compile(r'[\w][\w\-/]*\.(?:py|js|ts|jsx|tsx|go|rs|java|rb|cpp|c|h|css|html|json|yaml|yml|toml|md|txt|sh|env|sql|proto|graphql)')
-_DEP = re.compile(r'(?:pip install|npm install|yarn add|npm i|require|from)\s+([\w\-]+(?:[>=<~!]+[\d.]+)?)', re.IGNORECASE)
-# Also catch "added X>=version to requirements" and "X==version" patterns
-_DEP_ADDED = re.compile(r'(?:added?|install(?:ing|ed)?|includ(?:ing|ed)?)\s+([\w\-]+[>=<~!]+[\d][\d.]*)', re.IGNORECASE)
-_DEP_INLINE = re.compile(r'\b([a-z][a-z0-9\-]{2,25})[>=<]{1,2}[\d]+[\d.]*\b', re.IGNORECASE)
-_ENV = re.compile(r'\b(?:python|node|npm|yarn|docker|postgres|postgresql|redis|mongodb|mysql|sqlite|nginx|ubuntu|debian|macos)\s*(?:v?[\d][\d.]*)?\b', re.IGNORECASE)
-_GOAL = re.compile(
-    r'(?:(?:let\'?s?|i\'?m?|we\'?re?)\s+(?:build|create|make|develop|implement|design|working on|starting)\s+(.{10,120})|'
-    r'(?:the goal|objective|purpose|aim)\s+(?:is|here is|of this)\s+(?:to\s+)?(.{10,120})|'
-    r'(?:building|creating|developing|implementing)\s+(?:a |an |the )?(.{10,100})\s+(?:using|with|in|for))',
-    re.IGNORECASE,
-)
-_ERROR = re.compile(
-    r'(?:error|exception|bug|issue|problem|failing?|crashed?|broke?n?|traceback|'
-    r'TypeError|ValueError|KeyError|AttributeError|ImportError|SyntaxError|'
-    r'404|422|500|502|503)\s*[:\-]?\s*(.{5,100})',
-    re.IGNORECASE,
-)
-
-
-def _heuristic_extract(messages: list[dict]) -> dict:
-    """
-    Extract structured facts using regex patterns.
-    Improved: catches passive completions, comparison decisions,
-    tech-name decisions, broader goal language, and errors.
-    Used as primary when use_llm_extraction=False, fallback otherwise.
-    """
-    tasks_done: list[dict] = []
-    tasks_wip:  list[dict] = []
-    tasks_todo: list[dict] = []
-    decisions:  list[dict] = []
-    files:      list[str]  = []
-    deps:       list[str]  = []
-    envs:       list[str]  = []
-    goals:      list[str]  = []
-    errors:     list[dict] = []
-
-    # Track tech names mentioned — used to build decisions below
-    tech_mentions: list[str] = []
-
-    for msg in messages:
-        text = msg.get("content", "")
-        role = msg.get("role", "assistant")
-        if not text:
-            continue
-
-        # ── Tasks ────────────────────────────────────────────────────────────
-
-        # Explicit completion verbs: "implemented X", "fixed X", "created X"
-        for m in _TASK_DONE_EXPLICIT.finditer(text):
-            label = m.group(1).strip()[:80]
-            if label:
-                tasks_done.append({"label": label, "status": "completed"})
-
-        # Passive completions: "X is ready", "X is working", "tests are passing"
-        for m in _TASK_DONE_PASSIVE.finditer(text):
-            label = m.group(1).strip()[:80]
-            if label and len(label) > 4:
-                tasks_done.append({"label": label, "status": "completed"})
-
-        # "X now works / passes"
-        for m in _TASK_DONE_NOW.finditer(text):
-            label = m.group(1).strip()[:80]
-            if label and len(label) > 4:
-                tasks_done.append({"label": label, "status": "completed"})
-
-        # In progress
-        for m in _TASK_WIP.finditer(text):
-            label = m.group(1).strip()[:80]
-            if label:
-                tasks_wip.append({"label": label, "status": "in_progress"})
-
-        # Pending / todo
-        for m in _TASK_TODO.finditer(text):  # _TASK_TODO = module-level compiled regex
-            label = m.group(1).strip()[:80]
-            if label:
-                tasks_todo.append({"label": label, "status": "pending"})
-
-        # ── Decisions ────────────────────────────────────────────────────────
-
-        # Explicit: "decided to use X", "going with X", "went with X"
-        for m in _DECISION_EXPLICIT.finditer(text):
-            label = m.group(1).strip()[:80]
-            if label:
-                decisions.append({"label": label, "rationale": ""})
-
-        # Reasoning: "X makes more sense", "X is the better choice"
-        for m in _DECISION_REASONING.finditer(text):
-            label = m.group(1).strip()[:80]
-            if label and len(label) > 5:
-                decisions.append({"label": label, "rationale": "makes more sense"})
-
-        # Comparison: "X over Y", "X instead of Y"
-        for m in _DECISION_COMPARISON.finditer(text):
-            chosen = m.group(1).strip()[:50]
-            rejected = m.group(2).strip()[:50]
-            if chosen and rejected:
-                decisions.append({
-                    "label": f"Use {chosen}",
-                    "rationale": f"over {rejected}",
-                })
-
-        # "Using X for Y"
-        for m in _DECISION_USING.finditer(text):
-            tech = m.group(1).strip()[:40]
-            purpose = m.group(2).strip()[:60]
-            if tech and purpose:
-                decisions.append({"label": f"Use {tech} for {purpose}", "rationale": ""})
-
-        # "Switching to X" / "use X not Y"
-        for m in _DECISION_SWITCH.finditer(text):
-            g1 = (m.group(1) or "").strip()  # chosen (the "use X" part)
-            g2 = (m.group(2) or "").strip()  # rejected (the "not Y" part)
-            chosen = g1 if g1 else g2
-            rejected = g2 if g1 else ""
-            if chosen and len(chosen) > 1:
-                label = f"Use {chosen}"
-                rationale = f"instead of {rejected}" if rejected and rejected != chosen else ""
-                decisions.append({"label": label, "rationale": rationale})
-
-        # "Switching from X to Y"
-        for m in _DECISION_FROM_TO.finditer(text):
-            rejected = m.group(1).strip()[:40]
-            chosen = m.group(2).strip()[:40]
-            if chosen:
-                decisions.append({"label": f"Use {chosen}", "rationale": f"replacing {rejected}"})
-
-        # Tech name mentions — collect for context
-        for m in _DECISION_TECH.finditer(text):
-            tech_mentions.append(m.group(0).lower())
-
-        # ── Files ─────────────────────────────────────────────────────────────
-        files.extend(m.group(0) for m in _FILE.finditer(text))
-
-        # ── Dependencies ──────────────────────────────────────────────────────
-        _STDLIB = {"os","sys","re","json","time","math","io","typing","abc",
-                   "enum","path","str","int","bool","list","dict","set","tuple"}
-        for m in _DEP.finditer(text):
-            dep = m.group(1).strip()
-            if dep and len(dep) > 1 and dep.split(">=")[0].split("==")[0] not in _STDLIB:
-                deps.append(dep)
-        # "Added stripe>=7.0.0", "installed redis==5.0.0"
-        for m in _DEP_ADDED.finditer(text):
-            dep = m.group(1).strip()
-            if dep and len(dep) > 1:
-                deps.append(dep)
-        # Inline version pins: "stripe>=7.0.0", "fastapi>=0.111"
-        for m in _DEP_INLINE.finditer(text):
-            pkg = m.group(1).strip()
-            if pkg not in _STDLIB and len(pkg) > 2:
-                deps.append(m.group(0).strip())
-
-        # ── Environment ───────────────────────────────────────────────────────
-        for m in _ENV.finditer(text):
-            env = m.group(0).strip()
-            if env and len(env) > 2:
-                envs.append(env)
-
-        # ── Goals ─────────────────────────────────────────────────────────────
-        # Goals appear in both user AND assistant messages
-        for m in _GOAL.finditer(text):
-            # Pattern has multiple groups — find first non-None
-            label = next((g for g in m.groups() if g), None)
-            if label:
-                goals.append(label.strip()[:120])
-
-        # ── Errors ────────────────────────────────────────────────────────────
-        for m in _ERROR.finditer(text):
-            label = m.group(1).strip()[:80] if m.lastindex else m.group(0).strip()[:80]
-            if label and len(label) > 4:
-                # Resolved if assistant message (assistant is fixing it)
-                resolved = role == "assistant"
-                errors.append({"label": label, "resolved": resolved})
-
-    # ── Clean and de-duplicate ───────────────────────────────────────────────
-
-    def _clean_label(raw: str) -> str:
-        """
-        Trim a raw regex capture to a clean, concise label.
-        Cuts at REAL sentence boundaries (uppercase after period),
-        preserves file paths and technical terms.
-        """
-        if not raw:
-            return ""
-        # Only cut at sentence-ending punctuation followed by uppercase
-        # This preserves "backend/models.py line 45" but cuts "Fixed X. Also did Y."
-        import re as _re
-        sentence_end = _re.search(r'[.!?]\s+[A-Z]', raw)
-        if sentence_end:
-            raw = raw[:sentence_end.start() + 1]
-        # Cut at newlines (always a boundary)
-        if "\n" in raw:
-            raw = raw[:raw.index("\n")]
-        # Remove leading articles/conjunctions
-        raw = re.sub(r"^(?:the |a |an |and |but |so |also |i've |i have |i am |i'm )", "", raw, flags=re.IGNORECASE)
-        # Remove trailing incomplete phrases
-        raw = re.sub(r"\s+(?:and|with|in|for|to|the|a|an)\s*$", "", raw, flags=re.IGNORECASE)
-        return raw.strip()[:80]
-
-    def _dedup(items: list[dict], key: str = "label") -> list[dict]:
-        seen: set[str] = set()
-        out: list[dict] = []
-        for item in items:
-            label = _clean_label(item.get(key, ""))
-            if not label or len(label) < 5:
-                continue
-            k = label.lower()[:50]
-            if k not in seen:
-                seen.add(k)
-                item[key] = label  # use cleaned label
-                out.append(item)
-        return out
-
-    # Clean decision labels too
-    def _clean_decisions(items: list[dict]) -> list[dict]:
-        out = []
-        seen: set[str] = set()
-        for d in items:
-            label = _clean_label(d.get("label", ""))
-            if not label or len(label) < 5:
-                continue
-            k = label.lower()[:40]
-            if k not in seen:
-                seen.add(k)
-                out.append({"label": label, "rationale": d.get("rationale", "")})
-        return out
-
-    return {
-        "tasks": _dedup(tasks_done + tasks_wip + tasks_todo),
-        "decisions": _clean_decisions(decisions),
-        "files": list(dict.fromkeys(files))[:25],
-        "dependencies": list(dict.fromkeys(deps))[:25],
-        "environment": list(dict.fromkeys(envs))[:15],
-        "goals": [_clean_label(g) for g in dict.fromkeys(goals) if g][:5],
-        "errors": _dedup(errors),
-        "tech_mentions": list(dict.fromkeys(tech_mentions))[:20],
-    }
-
-
-# ── LLM extractor ────────────────────────────────────────────────────────────
-
-_EXTRACTION_SYSTEM = """You are a project memory extractor. Read conversation turns and extract structured facts.
-
-Return ONLY this JSON — no markdown, no explanation, no extra text:
-{
-  "tasks": [{"label": "verb + specific object (e.g. Implement JWT refresh tokens)", "status": "completed|pending|in_progress|failed"}],
-  "decisions": [{"label": "what was chosen (e.g. Use Redis for sessions)", "rationale": "why (e.g. faster than DB)"}],
-  "files": ["exact/file/path.py"],
-  "errors": [{"label": "specific error (e.g. 422 on login endpoint)", "resolved": true}],
-  "dependencies": ["package>=version"],
-  "environment": ["Python 3.12", "FastAPI 0.111"],
-  "goals": ["top-level session goal (e.g. Build FastAPI auth service with JWT)"],
-  "endpoints": ["METHOD /path (e.g. POST /api/auth/login)"],
-  "schemas": ["Model: fields (e.g. User: id, email, password_hash)"]
-}
-
-TASK rules — capture ALL of these as "completed":
-- Explicit: "I implemented X", "created X", "fixed X", "added X"
-- Passive: "X is ready", "X is working", "X is done", "tests are passing"
-- State change: "X now works", "X now passes", "X is set up"
-- Status: "that bug is resolved", "the endpoint is live"
-
-DECISION rules — capture ALL of these:
-- Explicit choices: "going with X", "decided to use X", "chose X", "went with X"
-- Comparisons: "X over Y", "X instead of Y", "X rather than Y"
-- Reasoning: "X makes more sense", "X is better here", "better to use X"
-- Tech selection: "using FastAPI because async", "PostgreSQL for concurrent writes"
-- ALWAYS fill rationale — even "simpler", "faster", "team preference" counts
-
-GOAL rules:
-- Extract from FIRST user message if they describe what they are building
-- "Let's build X", "I'm working on X", "We need to create X", "Building X with Y"
-- One goal per session — the top-level objective
-
-Return empty arrays for categories with nothing found.
-Quality over quantity — 3 accurate nodes beats 10 noisy ones."""
-
-
-async def _llm_extract(messages: list[dict], provider_fn) -> dict:
-    """
-    Use cheap model (haiku / gpt-4o-mini) to extract structured facts.
-    ~$0.001 per extraction call. Much more accurate than heuristics.
-    """
-    # Take last 3 messages as the "current turn"
-    recent = messages[-3:] if len(messages) >= 3 else messages
-    conversation_text = "\n\n".join(
-        f"[{m['role'].upper()}]: {m.get('content','')[:2000]}" for m in recent
-    )
-
-    try:
-        result = await provider_fn(
-            messages=[{"role": "user", "content": conversation_text}],
-            system=_EXTRACTION_SYSTEM,
-            max_tokens=600,
-        )
-        text = result.get("text", "") if isinstance(result, dict) else str(result)
-        # Strip any accidental markdown fences
-        text = re.sub(r"```(?:json)?|```", "", text).strip()
-        return json.loads(text)
-    except Exception as e:
-        logger.warning(f"LLM extraction failed ({e}), using heuristic fallback")
-        return _heuristic_extract(messages[-3:])
 
 
 # ── Graph ────────────────────────────────────────────────────────────────────
@@ -491,12 +72,25 @@ class GraphMemory:
         self.session_id = session_id
         self._nodes: dict[str, MemoryNode] = {}
         self._edges: list[MemoryEdge] = []
+        self._transitions: list[DecisionTransition] = []   # full causal history
         self._processed_hashes: set[str] = set()
-        self._schema_version = 1  # increment when storage format changes  # for incremental extraction
+        self._schema_version = 1  # increment when storage format changes
+        # Counts non-fatal decision-contradiction-check failures (see add_node).
+        # Persistently non-zero means the supersede-tracking feature is
+        # broken, even though node creation itself keeps working.
+        self._decision_tracking_failures = 0
+        # True if the SQLite DB could not be reinitialized after corruption —
+        # the graph is running in-memory-only with no durable persistence.
+        self._persistence_broken = False
+        # Dirty-tracking for _persist() — see that method's docstring.
+        # Starts True so the first persist() call after construction always
+        # writes; cleared only after a confirmed successful write.
+        self._dirty = True
         self._db_path = Path(storage_dir) / "graph_memory.db"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._safe_init_db()
         self._load()
+        self._load_transitions()
 
     def _safe_init_db(self) -> None:
         """Initialize DB, deleting corrupt file if necessary."""
@@ -506,17 +100,37 @@ class GraphMemory:
             logger.warning(f"DB corrupt or unreadable — recreating: {self._db_path}")
             try:
                 self._db_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as del_err:
+                logger.error(f"Could not delete corrupt graph DB: {del_err}")
             try:
                 self._init_db()
             except Exception as e:
-                logger.error(f"Cannot initialize DB after cleanup: {e}")
+                logger.error(
+                    f"Cannot initialize DB after cleanup for {self.session_id}: {e} "
+                    "— running with in-memory graph only (data won't persist)"
+                )
+                # FIXED: previously this was a dead end — logged once at
+                # startup and then silently true for the rest of the
+                # process's life with no way to query it. See _load()'s
+                # matching reinit-failure path for the same fix.
+                self._persistence_broken = True
 
     # ── DB ──────────────────────────────────────────────────────────────────
 
+    def _db_connect(self) -> "sqlite3.Connection":
+        """
+        Open a SQLite connection with safe concurrent settings:
+        - WAL journal mode: readers don't block writers, writers don't block readers
+        - 5s timeout: prevents instant failure when another process holds a write lock
+        - check_same_thread=False: safe because we serialize via asyncio session locks
+        """
+        conn = sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")  # WAL + NORMAL = safe + fast
+        return conn
+
     def _init_db(self) -> None:
-        conn = sqlite3.connect(self._db_path)
+        conn = self._db_connect()
         try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS graphs (
@@ -527,13 +141,122 @@ class GraphMemory:
                     updated_at REAL NOT NULL
                 )
             """)
+            # Separate table for decision transitions — full causal story
+            # Kept separate so it survives graph pruning and is queryable independently
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS decision_transitions (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    from_decision_id TEXT NOT NULL,
+                    to_decision_id TEXT NOT NULL,
+                    from_label TEXT NOT NULL,
+                    to_label TEXT NOT NULL,
+                    trigger TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    evidence TEXT NOT NULL DEFAULT '',
+                    confidence_delta REAL NOT NULL DEFAULT 0.0,
+                    timestamp REAL NOT NULL
+                )
+            """)
             conn.commit()
         finally:
             conn.close()
 
-    def _persist(self) -> None:
+
+    def _persist_transition(self, t: DecisionTransition) -> None:
+        """Persist a single DecisionTransition to its own SQLite table."""
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = self._db_connect()
+            try:
+                conn.execute(
+                    """INSERT OR REPLACE INTO decision_transitions
+                       (id, session_id, from_decision_id, to_decision_id,
+                        from_label, to_label, trigger, reason, evidence,
+                        confidence_delta, timestamp)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (t.id, t.session_id, t.from_decision_id, t.to_decision_id,
+                     t.from_label, t.to_label, t.trigger, t.reason,
+                     t.evidence, t.confidence_delta, t.timestamp),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"Transition persist failed: {e}")
+
+    def get_transitions(self) -> list[DecisionTransition]:
+        """Return all decision transitions for this session, newest first."""
+        return sorted(self._transitions, key=lambda t: t.timestamp, reverse=True)
+
+    def _load_transitions(self) -> None:
+        """Load transitions from SQLite into memory."""
+        try:
+            conn = self._db_connect()
+            try:
+                rows = conn.execute(
+                    "SELECT id,session_id,from_decision_id,to_decision_id,"
+                    "from_label,to_label,trigger,reason,evidence,"
+                    "confidence_delta,timestamp "
+                    "FROM decision_transitions WHERE session_id=?",
+                    (self.session_id,),
+                ).fetchall()
+                self._transitions = [
+                    DecisionTransition(
+                        id=r[0], session_id=r[1],
+                        from_decision_id=r[2], to_decision_id=r[3],
+                        from_label=r[4], to_label=r[5],
+                        trigger=r[6], reason=r[7], evidence=r[8],
+                        confidence_delta=r[9], timestamp=r[10],
+                    )
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug(f"Transition load skipped (table may not exist yet): {e}")
+            self._transitions = []
+
+    def _persist(self, force: bool = False) -> None:
+        """
+        Persist the full graph (all nodes + edges) as JSON to SQLite.
+
+        KNOWN SCALING LIMITATION (documented, not silently shipped as if
+        it were fine): this rewrites EVERY node and edge as JSON on every
+        call, even when only 1-2 nodes actually changed. Cost is O(total
+        node count) per persist, and persist is called once per chat turn
+        in extract_from_messages(). The existing 200-node auto-prune cap
+        (see prune()) is itself evidence this was already a known
+        bottleneck — it caps the damage rather than fixing the cause.
+
+        Why this isn't rewritten to a proper per-node table in this pass:
+        that's a real schema migration (one row per node/edge instead of
+        one JSON blob per session), and shipping a migration without being
+        able to run it against real persisted data in this environment
+        (no app runtime available here — see repo's TESTING.md) is exactly
+        the kind of "looks fixed, silently corrupts production data" risk
+        this audit is supposed to eliminate, not introduce. Tracked as a
+        documented follow-up: migrate `graphs.nodes_json` blob storage to
+        a `graph_nodes(session_id, node_id, data_json, updated_at)` table
+        with per-node INSERT OR REPLACE, validated against a copy of real
+        checkpoint data before rollout.
+
+        What IS fixed here: a dirty flag so we skip the rewrite entirely
+        when nothing changed since the last successful persist (e.g. a
+        message produced zero new/updated nodes — common for short
+        acknowledgement turns). This doesn't fix the O(n) cost when a
+        write IS needed, but it does eliminate redundant full-rewrites,
+        which in practice is a meaningful fraction of calls.
+
+        force=True bypasses the dirty check. Required for callers that
+        mutate node/edge state directly without going through add_node()
+        (which sets the dirty flag) — e.g. the /api/decision/invalidate
+        endpoint flips `node.status` directly, then must force a write or
+        the change would silently never be saved.
+        """
+        if not self._dirty and not force:
+            return
+        try:
+            conn = self._db_connect()
             try:
                 conn.execute(
                     """INSERT OR REPLACE INTO graphs
@@ -550,12 +273,15 @@ class GraphMemory:
                 conn.commit()
             finally:
                 conn.close()
+            self._dirty = False  # only clear on confirmed success
         except Exception as e:
             logger.error(f"Graph persist failed for {self.session_id}: {e}")
+            # _dirty stays True — next call (even non-forced) will retry
+            # the full write rather than silently giving up on it forever.
 
     def _load(self) -> None:
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = self._db_connect()
             try:
                 row = conn.execute(
                     "SELECT nodes_json, edges_json, processed_hashes FROM graphs WHERE session_id=?",
@@ -584,8 +310,19 @@ class GraphMemory:
             try:
                 self._db_path.unlink(missing_ok=True)
                 self._init_db()
-            except Exception:
-                pass
+            except Exception as reinit_err:
+                logger.error(
+                    f"Graph DB reinit failed for {self.session_id}: {reinit_err} "
+                    "— running with in-memory graph only (data won't persist)"
+                )
+                # FIXED: this is the worst-case path — persistence is
+                # completely broken for this session going forward, but
+                # previously the only trace of that fact was a log line.
+                # Surfacing it via stats() means a health-check script (or
+                # a human looking at /api/graph/{session_id}) can detect
+                # "this session has no durable memory" instead of finding
+                # out only after a restart wipes everything.
+                self._persistence_broken = True
         except Exception as e:
             logger.warning(f"Graph load failed for {self.session_id}: {e}")
 
@@ -605,6 +342,7 @@ class GraphMemory:
         status: NodeStatus = NodeStatus.PENDING,
         summary: str = "",
         importance: float = 0.5,
+        confidence: float = 0.7,
     ) -> str:
         from tokenmizer.security.redaction import redact_node
         label, summary = redact_node(label, summary)
@@ -616,6 +354,7 @@ class GraphMemory:
             # Dedup: update existing node instead of creating duplicate
             existing = self._nodes[node_id]
             existing.touch()
+            self._dirty = True  # touch() always changes updated_at, must persist
             # Only upgrade status (completed > in_progress > pending)
             status_rank = {
                 NodeStatus.PENDING: 0,
@@ -659,15 +398,12 @@ class GraphMemory:
             status=status,
             summary=summary[:300],
             importance=importance,
-            confidence=result.confidence,
+            confidence=confidence if confidence != 0.7 else result.confidence,
         )
         self._nodes[node_id] = node
+        self._dirty = True
 
-        # Decision contradiction detection:
-        # If this is a new DECISION, check if any existing decision covers
-        # the same topic — if so, mark it as MODIFIED (superseded).
-        # Old decisions are KEPT in graph (for history/rollback) but
-        # marked MODIFIED so they are excluded from resume context.
+        # Decision contradiction detection — capture full transition story
         if node_type == NodeType.DECISION and status == NodeStatus.COMPLETED:
             try:
                 from tokenmizer.graph_memory.decision_tracker import (
@@ -679,34 +415,94 @@ class GraphMemory:
                 for old_id in to_supersede:
                     if old_id != node_id and old_id in self._nodes:
                         old_node = self._nodes[old_id]
+                        old_confidence = old_node.confidence
+
+                        # Mark old decision superseded
                         old_node.status = NodeStatus.SUPERSEDED
-                        old_node.valid_until = time.time()  # closed-world timestamp
+                        old_node.valid_until = time.time()
+
+                        # Build full transition object
+                        # Evidence: prefer explicit "|" separator, else extract from summary
+                        parts = (summary or "").split("|", 1)
+                        reason_text = parts[0].strip()
+                        evidence_text = parts[1].strip() if len(parts) > 1 else ""
+
+                        # Auto-extract evidence from summary if not explicit
+                        if not evidence_text and summary:
+                            evidence_text = _extract_evidence_from_text(summary)
+
+                        trigger = _infer_trigger(old_node.label, label, summary)
+
+                        transition = DecisionTransition(
+                            id=f"tr_{old_id[:8]}_{node_id[:8]}",
+                            session_id=self.session_id,
+                            from_decision_id=old_id,
+                            to_decision_id=node_id,
+                            from_label=old_node.label,
+                            to_label=label,
+                            trigger=trigger,
+                            reason=reason_text,
+                            evidence=evidence_text,
+                            confidence_delta=round(confidence - old_confidence, 3),
+                        )
+                        self._transitions.append(transition)
+                        self._persist_transition(transition)
+
                         old_node.summary = (
                             f"Superseded by: {label[:60]}"
-                            + (f" — {summary[:40]}" if summary else "")
+                            + (f" — {reason_text[:40]}" if reason_text else "")
                         )
-                        # Add supersedes edge
                         self.add_edge(node_id, old_id, EdgeType.SUPERSEDES, weight=1.0)
                         logger.info(
-                            f"Decision superseded: {old_node.label!r} → {label!r}"
+                            f"Decision transition: {old_node.label!r} → {label!r}"
+                            f" | trigger: {trigger[:40]}"
                         )
             except Exception as e:
-                logger.debug(f"Decision contradiction check failed (non-fatal): {e}")
+                # Intentionally non-fatal: a bug in contradiction detection
+                # must not block creating the new decision node itself —
+                # the node is more important than the supersede-tracking
+                # metadata around it.
+                #
+                # FIXED: previously logged at `debug` (off by default in
+                # production), meaning this core advertised feature —
+                # "decision transition tracking" / "Changed X → Y" in
+                # resume context — could silently stop working entirely
+                # and nobody would notice until they wondered why resume
+                # context never showed any decision changes. Bumped to
+                # `warning` and counted on the instance (surfaced via
+                # stats(), see below) so persistent failures are visible
+                # to anyone inspecting graph health, not just to someone
+                # who happens to be tailing logs at warning level.
+                logger.warning(
+                    f"Decision contradiction check failed for node {node_id} "
+                    f"(non-fatal — node was still created): {e}"
+                )
+                self._decision_tracking_failures += 1
 
         return node_id
 
-    def add_edge(self, source_id: str, target_id: str, edge_type: EdgeType, weight: float = 1.0) -> None:
+    def add_edge(
+        self, source_id: str, target_id: str, edge_type: EdgeType, weight: float = 1.0
+    ) -> None:
         # No duplicate edges
         for e in self._edges:
             if e.source_id == source_id and e.target_id == target_id and e.type == edge_type:
                 return
         self._edges.append(MemoryEdge(source_id=source_id, target_id=target_id,
                                        type=edge_type, weight=weight))
+        self._dirty = True
 
     # ── Extraction ───────────────────────────────────────────────────────────
 
     def _msg_hash(self, msg: dict) -> str:
-        return hashlib.sha1(msg.get("content", "")[:500].encode()).hexdigest()[:16]
+        """
+        Hash a message for dedup tracking.
+        Handles non-string content: None (empty), list (multimodal — extract text
+        parts), dict, or any other type (str() fallback).
+        """
+        content = msg.get("content", "")
+        text = _content_to_text(content)
+        return hashlib.sha1(text[:500].encode()).hexdigest()[:16]
 
     def extract_from_messages(
         self,
@@ -729,12 +525,65 @@ class GraphMemory:
         else:
             new_messages = messages
 
-        # Use provided data (from HybridExtractor or LLM) or fall back to heuristic
-        data = extracted_data if extracted_data is not None else _heuristic_extract(new_messages)
+        # Auto-select sliding window for long sessions
+        # For sessions > 30 messages: only extract WIP/errors from last 20
+        window_size = 20 if len(messages) > 30 else 0
+
+        # Use provided data (from LLM pipeline) or run HybridExtractor heuristic pass
+        if extracted_data is not None:
+            data = extracted_data
+        else:
+            from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
+            _he = get_hybrid_extractor()
+            _extracted = _he.heuristic_extract(new_messages, window_size=window_size)
+            data = {
+                "goals":        _extracted.goals,
+                "tasks":        (
+                    [{"label": t, "status": "completed"}   for t in _extracted.tasks_done] +
+                    [{"label": t, "status": "in_progress"} for t in _extracted.tasks_wip]  +
+                    [{"label": t, "status": "pending"}     for t in _extracted.tasks_todo]
+                ),
+                "decisions":    _extracted.decisions,
+                "files":        _extracted.files,
+                "errors":       _extracted.errors,
+                "dependencies": _extracted.dependencies,
+                "environments": _extracted.environments,
+                "endpoints":    _extracted.endpoints,
+                "schemas":      _extracted.schemas,
+                "superseded":   _extracted.superseded,
+            }
         self._apply_extracted(data, new_messages)
 
         for m in new_messages:
             self._processed_hashes.add(self._msg_hash(m))
+        if new_messages:
+            self._dirty = True  # processed_hashes changed even if no nodes did
+
+        # Cap processed_hashes — for very long sessions (1000+ turns), this set
+        # would otherwise grow unbounded (each hash ~16 bytes, but still).
+        # When over cap, rebuild from the most recent messages only.
+        # Effect: very old messages may be re-scanned on restart, but since
+        # their content is already in the graph, add_node() dedup makes
+        # re-extraction a safe no-op.
+        _MAX_PROCESSED_HASHES = 500
+        if len(self._processed_hashes) > _MAX_PROCESSED_HASHES:
+            self._processed_hashes = {
+                self._msg_hash(m) for m in messages[-_MAX_PROCESSED_HASHES:]
+            }
+            self._dirty = True  # processed_hashes is part of the persisted row
+
+        # Apply importance decay — completed tasks fade, superseded decisions fade
+        # Active decisions and goals never decay
+        decayed = self.apply_importance_decay()
+        if decayed:
+            logger.debug(f"Importance decay applied to {len(decayed)} nodes")
+
+        # Auto-prune: if graph has grown large, remove low-importance old nodes.
+        # Runs only when over threshold — cheap no-op for typical sessions.
+        if len(self._nodes) > 200:
+            pruned = self.prune(max_nodes=200)
+            if pruned:
+                logger.debug(f"Auto-pruned {pruned} nodes (graph exceeded 200 nodes)")
 
         self._persist()
 
@@ -788,19 +637,39 @@ class GraphMemory:
             label = d.get("label", "")
             if not label or len(label) < 5:
                 continue
-            summary = d.get("rationale", "")
+            summary = d.get("rationale", d.get("reason", ""))
+            # Use per-item confidence from merge() if provided (corroboration signal).
+            # Fallback: 0.9 for explicit decisions (high-value nodes).
+            node_confidence = float(d.get("confidence", 0.9))
             nid = self.add_node(NodeType.DECISION, label, NodeStatus.COMPLETED,
-                                summary=summary, importance=0.9)
+                                summary=summary, importance=0.9,
+                                confidence=node_confidence)
             if nid:
                 decision_ids.append(nid)
-                # Link to tasks only if they share meaningful vocabulary
-                decision_words = self._meaningful_words(label)
+                # Link to tasks if they share meaningful vocabulary (with alias expansion)
+                decision_words = self._expand_with_aliases(
+                    self._meaningful_words(label)
+                )
                 for tid in task_ids:
                     task_node = self._nodes.get(tid)
                     if task_node:
-                        task_words = self._meaningful_words(task_node.label)
+                        task_words = self._expand_with_aliases(
+                            self._meaningful_words(task_node.label)
+                        )
                         if decision_words & task_words:
                             self.add_edge(nid, tid, EdgeType.RELATED_TO)
+
+                # SUPERSEDES edge: link new decision to any SUPERSEDED decision
+                # that shares topic words — enables "changed from X to Y" in resume
+                for existing_id, existing_node in list(self._nodes.items()):
+                    if (existing_id != nid
+                            and existing_node.type == NodeType.DECISION
+                            and existing_node.status == NodeStatus.SUPERSEDED):
+                        existing_words = self._expand_with_aliases(
+                            self._meaningful_words(existing_node.label)
+                        )
+                        if decision_words & existing_words:
+                            self.add_edge(nid, existing_id, EdgeType.SUPERSEDES)
 
         # Files — linked to tasks only if file name appears in task description
         for f in data.get("files", []):
@@ -815,16 +684,18 @@ class GraphMemory:
                     if task_node and file_stem and file_stem in task_node.label.lower():
                         self.add_edge(tid, nid, EdgeType.IMPLEMENTS)
 
-        # Errors
+        # Errors — handle both str and dict formats
         for e in data.get("errors", []):
-            label = e.get("label", "")
+            if isinstance(e, str):
+                label, resolved = e, False
+            else:
+                label, resolved = e.get("label", ""), e.get("resolved", False)
             if not label:
                 continue
-            status = NodeStatus.COMPLETED if e.get("resolved") else NodeStatus.FAILED
-            importance = 0.5 if e.get("resolved") else 0.9
+            status = NodeStatus.COMPLETED if resolved else NodeStatus.FAILED
+            importance = 0.5 if resolved else 0.9
             err_nid = self.add_node(NodeType.ERROR, label, status, importance=importance)
             if err_nid:
-                # Link error to file if file name is in error description
                 for fid in file_ids:
                     file_node = self._nodes.get(fid)
                     if file_node and file_node.label.split("/")[-1] in label:
@@ -836,7 +707,7 @@ class GraphMemory:
                 self.add_node(NodeType.DEPENDENCY, dep, NodeStatus.COMPLETED, importance=0.6)
 
         # Environment (no edges — standalone nodes)
-        for env in data.get("environment", []):
+        for env in data.get("environments", data.get("environment", [])):
             if env:
                 self.add_node(NodeType.ENVIRONMENT, env, NodeStatus.COMPLETED, importance=0.8)
 
@@ -863,8 +734,44 @@ class GraphMemory:
         "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
         "for", "of", "with", "is", "are", "was", "were", "be", "been",
         "have", "has", "do", "does", "will", "would", "could", "should",
-        "this", "that", "it", "we", "i", "you", "they", "use", "using",
+        "this", "that", "it", "we", "i", "you", "they",
+        # NOTE: "use" and "using" intentionally NOT in stop words —
+        # they appear in decision labels like "Use PostgreSQL for sessions"
+        # and removing them kills edge matching between decisions and tasks.
     })
+
+    # Tech aliases: maps common abbreviations/variants to canonical tokens
+    # Allows "Use PG" to match task "Set up PostgreSQL database"
+    _TECH_ALIASES: dict[str, frozenset] = {
+        "postgres":     frozenset({"postgres", "postgresql", "pg", "psql"}),
+        "postgresql":   frozenset({"postgres", "postgresql", "pg", "psql"}),
+        "pg":           frozenset({"postgres", "postgresql", "pg", "psql"}),
+        "mongo":        frozenset({"mongo", "mongodb"}),
+        "mongodb":      frozenset({"mongo", "mongodb"}),
+        "redis":        frozenset({"redis", "cache", "caching"}),
+        "jwt":          frozenset({"jwt", "token", "auth", "authentication"}),
+        "auth":         frozenset({"auth", "authentication", "authorize", "jwt"}),
+        "authentication": frozenset({"auth", "authentication", "authorize", "jwt"}),
+        "db":           frozenset({"db", "database", "storage"}),
+        "database":     frozenset({"db", "database", "storage"}),
+        "api":          frozenset({"api", "endpoint", "route", "rest"}),
+        "endpoint":     frozenset({"api", "endpoint", "route", "rest"}),
+        "fastapi":      frozenset({"fastapi", "api", "endpoint", "route"}),
+        "docker":       frozenset({"docker", "container", "containerize"}),
+        "k8s":          frozenset({"k8s", "kubernetes", "cluster"}),
+        "kubernetes":   frozenset({"k8s", "kubernetes", "cluster"}),
+        "ts":           frozenset({"ts", "typescript"}),
+        "typescript":   frozenset({"ts", "typescript"}),
+        "js":           frozenset({"js", "javascript", "node", "nodejs"}),
+    }
+
+    def _expand_with_aliases(self, words: frozenset) -> frozenset:
+        """Expand a word set with known tech aliases for fuzzy matching."""
+        expanded = set(words)
+        for w in words:
+            if w in self._TECH_ALIASES:
+                expanded |= self._TECH_ALIASES[w]
+        return frozenset(expanded)
 
     def _meaningful_words(self, text: str) -> frozenset:
         """Extract meaningful words from text for semantic edge linking."""
@@ -878,23 +785,54 @@ class GraphMemory:
     # ── Query ────────────────────────────────────────────────────────────────
 
     def query(self, task: str, top_k: int = 12) -> list[MemoryNode]:
-        """Keyword + importance ranked retrieval."""
-        words = set(task.lower().split())
+        """
+        Keyword + importance + type-boosted ranked retrieval.
+        Uses alias expansion so 'auth' matches 'authentication', 'PG' matches 'PostgreSQL'.
+        Type boost: DECISION/GOAL nodes score 20% higher when relevant.
+        """
+        query_words = self._expand_with_aliases(
+            frozenset(w.strip(".,!?:;()[]").lower() for w in task.split() if len(w) > 2)
+        )
+
+        # Type boost factors — decisions and goals are most valuable to surface
+        _TYPE_BOOST = {
+            NodeType.GOAL:       1.25,
+            NodeType.DECISION:   1.20,
+            NodeType.TASK:       1.00,
+            NodeType.ERROR:      0.95,
+            NodeType.FILE:       0.90,
+            NodeType.ENDPOINT:   0.90,
+            NodeType.SCHEMA:     0.85,
+            NodeType.DEPENDENCY: 0.70,
+            NodeType.ENVIRONMENT: 0.70,
+        }
+
         scored: list[tuple[float, MemoryNode]] = []
 
         for node in self._nodes.values():
             if node._evicted:
                 continue
-            # Skip archived/superseded nodes in retrieval — they're historical noise
-            if node.status in (NodeStatus.ARCHIVED, NodeStatus.SUPERSEDED,
-                               NodeStatus.MODIFIED, NodeStatus.INVALIDATED):
+            # Skip archived/superseded/invalidated — historical noise
+            if node.status in (
+                NodeStatus.ARCHIVED, NodeStatus.SUPERSEDED,
+                NodeStatus.MODIFIED, NodeStatus.INVALIDATED,
+            ):
                 continue
-            node_words = set(node.label.lower().split())
-            overlap = len(words & node_words) / max(1, len(words))
-            # Boost by importance and recency
+
+            node_words = self._expand_with_aliases(
+                frozenset(w.strip(".,!?:;()[]").lower() for w in node.label.split() if len(w) > 2)
+            )
+            if not node_words:
+                continue
+
+            overlap = len(query_words & node_words) / max(1, len(query_words))
             recency = 1.0 / (1.0 + node.age_days() * 0.1)
-            score = overlap * 0.6 + node.importance * 0.3 + recency * 0.1
-            if score > 0:
+            type_boost = _TYPE_BOOST.get(node.type, 1.0)
+
+            # Score: overlap is primary signal; importance and recency are tiebreakers
+            score = (overlap * 0.6 + node.importance * 0.3 + recency * 0.1) * type_boost
+
+            if score > 0.05:  # minimum threshold — don't return completely unrelated nodes
                 scored.append((score, node))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -903,12 +841,141 @@ class GraphMemory:
     def query_at_time(self, task: str, at_time: float, top_k: int = 12) -> list[MemoryNode]:
         """
         Return nodes that were ACTIVE at a specific point in time.
+
         Enables: "What did we decide last Tuesday?"
+
+        Bug fixed: was calling query() which excludes SUPERSEDED nodes.
+        A superseded decision WAS active before it was superseded.
+        We must scan ALL nodes and filter by valid_from/valid_until.
+
+        valid_from:  when the node was created (always set)
+        valid_until: when it was superseded/invalidated (0.0 = still active)
+
+        A node was active at at_time if:
+          valid_from <= at_time AND (valid_until == 0 OR valid_until > at_time)
         """
-        results = self.query(task, top_k=top_k * 2)
-        return [n for n in results if n.is_valid_at(at_time)][:top_k]
+        query_words = self._expand_with_aliases(
+            frozenset(
+                w.strip(".,!?:;()[]").lower()
+                for w in (task or "").split()
+                if len(w) > 2
+            )
+        ) if task else frozenset()
+
+        _TYPE_BOOST = {
+            NodeType.GOAL:     1.25,
+            NodeType.DECISION: 1.20,
+            NodeType.TASK:     1.00,
+            NodeType.ERROR:    0.90,
+            NodeType.FILE:     0.85,
+        }
+
+        scored: list[tuple[float, MemoryNode]] = []
+        for node in self._nodes.values():
+            if node._evicted:
+                continue
+
+            # Was this node active at at_time?
+            was_created = node.valid_from <= at_time
+            not_yet_closed = (node.valid_until == 0.0 or node.valid_until > at_time)
+            if not (was_created and not_yet_closed):
+                continue
+
+            if not query_words:
+                # No query — return all active nodes at that time
+                scored.append((node.importance, node))
+                continue
+
+            node_words = self._expand_with_aliases(
+                frozenset(
+                    w.strip(".,!?:;()[]").lower()
+                    for w in node.label.split()
+                    if len(w) > 2
+                )
+            )
+            if not node_words:
+                continue
+
+            overlap = len(query_words & node_words) / max(1, len(query_words))
+            type_boost = _TYPE_BOOST.get(node.type, 1.0)
+            score = (overlap * 0.7 + node.importance * 0.3) * type_boost
+
+            if score > 0.05:
+                scored.append((score, node))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [n for _, n in scored[:top_k]]
 
     # ── Prune ────────────────────────────────────────────────────────────────
+
+    def apply_importance_decay(self) -> dict[str, float]:
+        """
+        Time-based importance decay — runs automatically during extract_from_messages.
+
+        Decay rules (all intentional):
+        - COMPLETED tasks: decay 15% per day after 3 days (they're done — less relevant)
+        - SUPERSEDED decisions: decay 30% per day (old dead branches)
+        - ERROR nodes (resolved): decay 20% per day
+        - ACTIVE decisions: NO decay (current choices always matter)
+        - GOALS: NO decay (always relevant for resume context)
+        - IN_PROGRESS tasks: slight decay 5% per day after 7 days (stale WIP)
+
+        Min importance floor = 0.1 (never fully disappear from graph)
+        Max decay per call = 50% of current value (prevents single-call wipeout)
+
+        Returns: dict of {node_id: new_importance} for changed nodes
+        """
+        changed: dict[str, float] = {}
+
+        # Decay rates per day
+        _DECAY_RATE = {
+            # (status, type): daily_decay_fraction
+            (NodeStatus.COMPLETED,  NodeType.TASK):       0.15,
+            (NodeStatus.COMPLETED,  NodeType.ERROR):      0.20,
+            (NodeStatus.SUPERSEDED, NodeType.DECISION):   0.30,
+            (NodeStatus.ARCHIVED,   NodeType.DECISION):   0.25,
+            (NodeStatus.FAILED,     NodeType.TASK):       0.10,
+            (NodeStatus.IN_PROGRESS, NodeType.TASK):      0.05,
+        }
+        _NO_DECAY_TYPES = {NodeType.GOAL, NodeType.ENVIRONMENT, NodeType.SCHEMA}
+        _NO_DECAY_STATUSES = {NodeStatus.IN_PROGRESS, NodeStatus.PENDING}
+
+        for nid, node in self._nodes.items():
+            if node._evicted:
+                continue
+            # Never decay goals, environments, schemas
+            if node.type in _NO_DECAY_TYPES:
+                continue
+            # Never decay active decisions
+            if node.type == NodeType.DECISION and node.status == NodeStatus.COMPLETED:
+                continue
+
+            rate = _DECAY_RATE.get((node.status, node.type), 0.0)
+            if rate == 0.0:
+                continue
+
+            age_days = node.age_days()
+
+            # Grace period: no decay in first N days
+            grace = {
+                NodeType.TASK:  3.0,
+                NodeType.ERROR: 1.0,
+            }.get(node.type, 0.0)
+
+            if age_days <= grace:
+                continue
+
+            # Apply decay: importance *= (1 - rate) ^ days_since_grace
+            effective_days = age_days - grace
+            decay_factor = max(0.5, (1.0 - rate) ** effective_days)
+            new_importance = max(0.10, round(node.importance * decay_factor, 3))
+
+            if abs(new_importance - node.importance) > 0.005:
+                node.importance = new_importance
+                changed[nid] = new_importance
+                self._dirty = True
+
+        return changed
 
     def prune(
         self,
@@ -947,6 +1014,21 @@ class GraphMemory:
 
         candidates.sort()
         to_prune = len(self._nodes) - max_nodes
+
+        # If age-based pruning didn't find enough candidates (graph is fresh —
+        # all nodes created recently), fall back to importance-only pruning.
+        # This ensures the hard cap is always enforced even in long single-day sessions.
+        if len(candidates) < to_prune:
+            importance_candidates = [
+                (node.importance, nid)
+                for nid, node in self._nodes.items()
+                if node.type not in preserve_types
+                and node.type != NodeType.DECISION
+                and nid not in {nid for _, nid in candidates}
+            ]
+            importance_candidates.sort()  # lowest importance first
+            candidates.extend(importance_candidates)
+
         pruned = 0
 
         for _, nid in candidates[:to_prune]:
@@ -956,7 +1038,7 @@ class GraphMemory:
             pruned += 1
 
         if pruned:
-            self._persist()
+            self._persist(force=True)
             logger.info(f"Graph pruned {pruned} nodes for session {self.session_id}")
 
         return pruned
@@ -965,97 +1047,183 @@ class GraphMemory:
 
     def to_context_block(self, token_budget: int = 400) -> str:
         """
-        Build tiered resume context block.
-        Respects token_budget — truncates lower-priority sections first.
+        Build tiered resume context block for LLM injection.
+
+        Priority order (truncates from bottom if over budget):
+          1. Goal                    — always shown (anchor)
+          2. In-progress tasks       — sorted by importance (current focus)
+          3. Recent completed tasks  — top 5 by recency, not all 50
+          4. Active decisions        — top 6 by importance, with rationale
+          5. Recent decision changes — transition summary (not strikethrough waste)
+          6. Pending tasks           — what's next
+          7. Files touched           — context for file-specific questions
+          8. Environment             — versions, if present
+          9. Open errors             — unresolved failures
+
+        Quality rules applied:
+        - SUPERSEDED decisions: shown only as "Changed X → Y" one-liner
+          (not full label — wastes tokens showing wrong answer)
+        - Completed tasks: importance-weighted, capped at 5 most recent
+          (full history is in SQLite, not needed in resume)
+        - Similar nodes: deduplicated by normalized label prefix
+        - Transitions: shown as compact lines, not repeated decision labels
         """
         sections: list[str] = []
 
-        goals = [n for n in self._nodes.values()
-                 if n.type == NodeType.GOAL and not n._evicted]
+        # ── 1. Goal ──────────────────────────────────────────────────────────
+        goals = sorted(
+            [n for n in self._nodes.values()
+             if n.type == NodeType.GOAL and not n._evicted],
+            key=lambda x: x.importance, reverse=True
+        )
         if goals:
             sections.append("Goal: " + " | ".join(g.label for g in goals[:2]))
 
-        open_tasks = [n for n in self._nodes.values()
-                      if n.type == NodeType.TASK
-                      and n.status in (NodeStatus.PENDING, NodeStatus.IN_PROGRESS)
-                      and not n._evicted]
-        open_tasks.sort(key=lambda x: x.importance, reverse=True)
-        if open_tasks:
-            sections.append("In progress: " + " | ".join(t.label for t in open_tasks[:5]))
+        # ── 2. In-progress tasks ──────────────────────────────────────────────
+        open_tasks = sorted(
+            [n for n in self._nodes.values()
+             if n.type == NodeType.TASK
+             and n.status == NodeStatus.IN_PROGRESS
+             and not n._evicted],
+            key=lambda x: x.importance, reverse=True
+        )
+        # ── 3. Pending tasks (next steps) ─────────────────────────────────────
+        pending_tasks = sorted(
+            [n for n in self._nodes.values()
+             if n.type == NodeType.TASK
+             and n.status == NodeStatus.PENDING
+             and not n._evicted],
+            key=lambda x: x.importance, reverse=True
+        )
+        current_work = open_tasks[:4] + pending_tasks[:2]
+        if current_work:
+            sections.append("Working on: " + " | ".join(t.label for t in current_work))
 
-        done = [n for n in self._nodes.values()
-                if n.type == NodeType.TASK
-                and n.status == NodeStatus.COMPLETED
-                and not n._evicted]
-        done.sort(key=lambda x: x.updated_at, reverse=True)
-        if done:
-            sections.append("Done: " + " | ".join(t.label for t in done[:8]))
+        # ── 4. Recent completed tasks — top 5 by recency+importance ───────────
+        done = sorted(
+            [n for n in self._nodes.values()
+             if n.type == NodeType.TASK
+             and n.status == NodeStatus.COMPLETED
+             and not n._evicted],
+            key=lambda x: (x.updated_at * 0.6 + x.importance * 0.4),
+            reverse=True
+        )
+        # Deduplicate: skip if label is very similar to already-included task
+        done_deduped = []
+        seen_prefixes: set[str] = set()
+        for t in done:
+            prefix = self._normalize_label(t.label)[:20]
+            if prefix not in seen_prefixes:
+                done_deduped.append(t)
+                seen_prefixes.add(prefix)
+            if len(done_deduped) >= 6:
+                break
+        if done_deduped:
+            sections.append("Done: " + " | ".join(t.label for t in done_deduped))
 
-        # Active decisions — shown prominently
-        decisions = [
-            n for n in self._nodes.values()
-            if n.type == NodeType.DECISION
-            and n.status == NodeStatus.COMPLETED   # GREEN — active only in resume
-            and not n._evicted
-        ]
-        decisions.sort(key=lambda x: x.importance, reverse=True)
+        # ── 5. Active decisions — top 6 by importance ─────────────────────────
+        decisions = sorted(
+            [n for n in self._nodes.values()
+             if n.type == NodeType.DECISION
+             and n.status == NodeStatus.COMPLETED
+             and not n._evicted],
+            key=lambda x: x.importance, reverse=True
+        )
         if decisions:
             parts = []
             for d in decisions[:6]:
                 entry = d.label
+                # Include brief rationale if not redundant with label
                 if d.summary and "Superseded by" not in d.summary:
-                    entry += f" ({d.summary[:60]})"
+                    entry += f" ({d.summary[:50]})"
                 parts.append(entry)
             sections.append("Decided: " + " | ".join(parts))
 
-        # Superseded decisions — shown briefly for context (max 2, recently changed only)
-        # YELLOW: recently superseded decisions — shown briefly, fade after 7 days
-        # RED: invalidated decisions — always show as warning
-        superseded = [
-            n for n in self._nodes.values()
-            if n.type == NodeType.DECISION
-            and n.status in (NodeStatus.SUPERSEDED, NodeStatus.MODIFIED)
-            and n.age_days() < 7
+        # ── 6. Decision transitions — compact, no wasted tokens on wrong answer ─
+        # Show as "Changed X → Y" not full old label — the old label is wrong,
+        # showing it in full wastes tokens and risks LLM being confused about
+        # which is current.
+        recent_transitions = sorted(
+            self._transitions,
+            key=lambda t: t.timestamp, reverse=True
+        )[:3]
+        if recent_transitions:
+            lines = [t.to_context_line() for t in recent_transitions]
+            sections.append("Changes: " + " | ".join(lines))
+        elif any(
+            n.type == NodeType.DECISION
+            and n.status == NodeStatus.SUPERSEDED
+            and n.age_days() < 3
             and not n._evicted
-        ]
+            for n in self._nodes.values()
+        ):
+            # No transition object but recent supersede — note count only, no label
+            # (showing the old wrong label wastes tokens and risks LLM confusion)
+            changed_count = sum(
+                1 for n in self._nodes.values()
+                if n.type == NodeType.DECISION
+                and n.status == NodeStatus.SUPERSEDED
+                and n.age_days() < 3
+                and not n._evicted
+            )
+            sections.append(f"Note: {changed_count} decision(s) changed recently — see graph history")
+
+        # ── 7. Invalidated decisions — always warn ─────────────────────────────
         invalidated = [
             n for n in self._nodes.values()
             if n.type == NodeType.DECISION
             and n.status == NodeStatus.INVALIDATED
             and not n._evicted
         ]
-        superseded.sort(key=lambda x: x.updated_at, reverse=True)
-        if superseded[:2]:
-            labels = [f"~~{n.label[:40]}~~" for n in superseded[:2]]
-            sections.append("Changed: " + " | ".join(labels))
-        if invalidated[:2]:
-            labels = [f"[INVALID] {n.label[:40]}" for n in invalidated[:2]]
-            sections.append("Invalidated: " + " | ".join(labels))
+        if invalidated:
+            sections.append(
+                "Avoid: " + " | ".join(f"[DO NOT USE] {n.label[:40]}" for n in invalidated[:2])
+            )
 
-        files = [n for n in self._nodes.values()
-                 if n.type == NodeType.FILE and not n._evicted]
+        # ── 8. Files ──────────────────────────────────────────────────────────
+        files = sorted(
+            [n for n in self._nodes.values()
+             if n.type == NodeType.FILE and not n._evicted],
+            key=lambda x: x.importance, reverse=True
+        )
         if files:
             sections.append("Files: " + ", ".join(f.label for f in files[:10]))
 
-        env_nodes = [n for n in self._nodes.values()
-                     if n.type == NodeType.ENVIRONMENT and not n._evicted]
+        # ── 9. Environment ────────────────────────────────────────────────────
+        env_nodes = [
+            n for n in self._nodes.values()
+            if n.type == NodeType.ENVIRONMENT and not n._evicted
+        ]
         if env_nodes:
-            sections.append("Env: " + ", ".join(e.label for e in env_nodes[:6]))
+            sections.append("Env: " + ", ".join(e.label for e in env_nodes[:4]))
 
-        errors = [n for n in self._nodes.values()
-                  if n.type == NodeType.ERROR
-                  and n.status == NodeStatus.FAILED
-                  and not n._evicted]
+        # ── 10. Open errors ───────────────────────────────────────────────────
+        errors = sorted(
+            [n for n in self._nodes.values()
+             if n.type == NodeType.ERROR
+             and n.status == NodeStatus.FAILED
+             and not n._evicted],
+            key=lambda x: x.importance, reverse=True
+        )
         if errors:
             sections.append("Open issues: " + " | ".join(e.label for e in errors[:3]))
 
         block = "\n".join(sections)
 
-        # Trim to budget (rough token estimate)
+        # Trim to budget — count once, char-estimate for loop, exact verify at end
         from tokenmizer.core.tokenizer import count_tokens
-        while count_tokens(block) > token_budget and sections:
-            sections.pop()
+        total_tokens = count_tokens(block)
+        if total_tokens > token_budget and sections:
+
+            chars_per_token = len(block) / max(total_tokens, 1)
+            target_chars = int(token_budget * chars_per_token * 0.92)  # 8% safety buffer
+            while len("\n".join(sections)) > target_chars and sections:
+                sections.pop()
             block = "\n".join(sections)
+            # One final accurate tiktoken verify — trim one more section if still over
+            if sections and count_tokens(block) > token_budget:
+                sections.pop()
+                block = "\n".join(sections)
 
         return block
 
@@ -1079,7 +1247,21 @@ class GraphMemory:
             by_status=by_status,
             processed_messages=len(self._processed_hashes),
             avg_confidence=avg_confidence,
+            decision_tracking_failures=self._decision_tracking_failures,
+            persistence_broken=self._persistence_broken,
         )
         # Return as dict for JSON serialization — DTO used for type safety at boundary
         from dataclasses import asdict
         return asdict(dto)
+
+    # ── Visualization exports (see visualization.py) ──────────────────────────
+
+    def to_vis_json(self) -> dict:
+        """D3-compatible JSON export. Full implementation in visualization.py."""
+        from tokenmizer.graph_memory.visualization import to_vis_json
+        return to_vis_json(self)
+
+    def to_obsidian_canvas(self) -> dict:
+        """Obsidian Canvas export. Full implementation in visualization.py."""
+        from tokenmizer.graph_memory.visualization import to_obsidian_canvas
+        return to_obsidian_canvas(self)

@@ -41,6 +41,15 @@ class GraphStatsDTO:
     by_status: dict
     processed_messages: int
     avg_confidence: float
+    # FIXED: previously decision-contradiction-check failures (the logic
+    # that tracks "Changed X → Y" in resume context) were swallowed at
+    # debug level with zero visibility. Non-zero here means that feature
+    # is degraded even though node creation itself kept working fine.
+    decision_tracking_failures: int = 0
+    # True if SQLite could not be initialized for this session — the graph
+    # is running in-memory only, with NO durable persistence whatsoever.
+    # A restart will lose everything. This used to only ever appear in logs.
+    persistence_broken: bool = False
 
 
 # ── Checkpoint layer ──────────────────────────────────────────────────────────

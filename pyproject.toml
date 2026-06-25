@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tokenmizer"
 version = "0.2.0"
-description = "Never lose your AI context again. Graph-backed checkpoint and resume for any LLM session."
+description = "Reduce AI context loss by 2x. Graph-backed checkpoint and resume for any LLM session."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

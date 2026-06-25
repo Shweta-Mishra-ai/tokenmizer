@@ -75,6 +75,52 @@ def test_merge_boosts_corroborated():
     assert any("auth" in f for f in merged.files)
 
 
+def test_merge_preserves_original_case():
+    """
+    FIXED BUG (found while rewriting benchmarks/checkpoint_accuracy/
+    runner_v3.py to remove a circular mock — see that file's module
+    docstring): merge() previously built its combined output list
+    directly from `_normalize()`d (lowercased) sets. _normalize() is
+    meant to be a DEDUP KEY ONLY (this is exactly the pattern
+    _deduplicate() uses correctly elsewhere in this same file — it
+    normalizes for the `seen` set membership check but appends the
+    original-case `item` to the output). merge() was inconsistent with
+    that pattern: a file extracted as "src/App.tsx" by one source would
+    come out of merge() as "src/app.tsx" — wrong on any case-sensitive
+    filesystem (Linux, most CI/production environments), and misleading
+    to a user trying to find which file was actually touched.
+    """
+    llm_data = ExtractedData(files=["src/App.tsx", "src/Utils.ts"])
+    heu_data = ExtractedData(files=["src/app.tsx", "src/Other.ts"])  # same file, different case
+
+    merged = extractor.merge(llm_data, heu_data)
+
+    # The corroborated file must appear with ORIGINAL casing from one of
+    # the two sources — never silently lowercased into a third, wrong form.
+    assert any(f in ("src/App.tsx", "src/app.tsx") for f in merged.files), (
+        f"corroborated file lost its original casing entirely: {merged.files}"
+    )
+    assert not any(f == "src/app.tsx" and "src/App.tsx" not in llm_data.files
+                   and "src/App.tsx" not in heu_data.files for f in merged.files), (
+        "file casing was silently rewritten rather than preserved from a source"
+    )
+    # Both LLM-only and heuristic-only items must survive with their casing intact
+    assert "src/Utils.ts" in merged.files, f"LLM-only file dropped or recased: {merged.files}"
+    assert "src/Other.ts" in merged.files, f"heuristic-only file dropped or recased: {merged.files}"
+    # Corroboration confidence logic must still work after the fix
+    assert merged.confidence["files"] == 0.95
+
+
+def test_merge_llm_only_no_corroboration():
+    """Sanity check that the case-preservation fix didn't break the
+    llm-only confidence tier (0.80, not 0.95) for the simple-list categories."""
+    llm_data = ExtractedData(files=["src/Solo.ts"])
+    heu_data = ExtractedData(files=[])
+    merged = extractor.merge(llm_data, heu_data)
+    assert merged.files == ["src/Solo.ts"]
+    assert merged.confidence["files"] == 0.80
+
+
 def test_overall_recall_heuristic():
     """Heuristic-only recall should be ≥55% on synthetic session."""
     result = extractor.heuristic_extract(MESSAGES)

@@ -1,5 +1,4 @@
 """Unit tests — file intelligence layer."""
-from tokenmizer.core.tokenizer import count_tokens
 from tokenmizer.filters.file_intelligence import (
     CSVExtractor,
     FileIntelligence,

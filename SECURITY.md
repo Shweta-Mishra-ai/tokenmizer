@@ -97,14 +97,33 @@ In development mode (no key set), the proxy accepts all requests. **Do not expos
 
 ---
 
-## Prompt Injection
+## Prompt Injection (Basic Keyword Filter — Read the Scope)
 
-Incoming requests are scanned for common injection patterns:
+Incoming requests are scanned against a denylist of common, unsophisticated
+injection phrasings:
 - "ignore all previous instructions"
 - "print your system prompt"
 - "bypass your restrictions"
+- a handful of similar copy-pasted jailbreak templates (see
+  `tokenmizer/security/middleware.py` for the full list)
 
-Detected injection attempts return `429 Too Many Requests` and are logged.
+**What this catches:** literal copy-pasted jailbreak templates from the
+open web — the laziest, most common attempts.
+
+**What this does NOT catch:** paraphrased injection, non-English injection,
+encoded payloads (base64/unicode tricks), injection split across multiple
+turns, or anything not matching the literal pattern list. This is a regex
+denylist, not a trained classifier or a semantic detector. Treat it as one
+weak, optional speed bump — not a security boundary. If your threat model
+includes a motivated adversary, you need structural defenses (e.g. fencing
+untrusted content away from instructions, minimizing what the LLM is
+privileged to do regardless of its context) in addition to this filter,
+not instead of it.
+
+Matched requests return `400 Bad Request` (corrected from an earlier
+version of this doc/code that incorrectly returned `429 Too Many Requests`
+— 429 implies "retry later," which is wrong here; the request is rejected,
+not rate-limited) and are logged at `warning` level.
 
 ---
 

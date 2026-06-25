@@ -1,57 +1,15 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-dist/
 *.egg-info/
-.eggs/
-*.egg
-pip-wheel-metadata/
-.pytest_cache/
-.coverage
-coverage.xml
-htmlcov/
-
-# Virtual environments
+dist/
+build/
 .venv/
 venv/
-env/
-ENV/
-
-# TokenMizer runtime data
-/checkpoints/
-/memory/
+.pytest_cache/
+.coverage
+benchmark_v*_results.json
+# checkpoints/  # removed: conflicts with tokenmizer/checkpoints/ module
 *.db
-*.db-shm
 *.db-wal
-
-# Secrets — never commit
-.env
-.env.local
-.env.*.local
-tokenmizer.local.yaml
-
-# Logs
-*.log
-logs/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
+*.db-shm
 .DS_Store
-
-# Benchmark outputs
-benchmark_results.json
-*.benchmark.json
-
-# Docker
-.dockerignore
-
-# Distribution
-dist/
-build/
