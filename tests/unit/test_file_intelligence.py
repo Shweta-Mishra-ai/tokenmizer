@@ -209,7 +209,16 @@ class TestFileIntelligence:
             {"role": "user", "content": f"Analyze this data:\n{csv_block}"}
         ]
         processed, saved = fi.process_message_files(messages, token_budget_per_file=300)
-        assert saved >= 0  # saved some tokens
+        # FIXED: was `assert saved >= 0` (always true, and the comment
+        # "saved some tokens" wasn't actually checked). This masked a real
+        # bug: the "Analyze this data:" preamble line diluted the tabular-
+        # detection heuristic below its threshold, so CSV compression
+        # silently never triggered and saved was always exactly 0 here.
+        # See tokenmizer/filters/file_intelligence.py _extract_file_block fix.
+        assert saved > 0, (
+            f"Expected real token savings from compressing a 60-row CSV, got {saved}. "
+            f"CSV detection may be failing due to the preamble text."
+        )
         assert len(processed) == 1
 
     def test_process_message_files_skips_short_messages(self):
@@ -253,7 +262,11 @@ class TestOutputTrimmer:
         text = "The answer is 42.\n\nLet me know if you need anything else!"
         trimmed, saved = t.trim(text)
         assert "42" in trimmed
-        assert saved >= 0
+        # FIXED: was `assert saved >= 0` — always true, didn't check filler
+        # was actually removed. Verified trim() genuinely saves tokens here
+        # (10, for this input) — require > 0 so a no-op trim() would fail.
+        assert saved > 0, f"Expected filler removal to save tokens, got {saved}"
+        assert "Let me know" not in trimmed, "Filler line should have been removed"
 
     def test_preserves_real_content(self):
         from tokenmizer.compression.output_trimmer import OutputTrimmer

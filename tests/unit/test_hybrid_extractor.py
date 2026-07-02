@@ -57,7 +57,10 @@ def test_merge_heuristic_only():
     heu = extractor.heuristic_extract(MESSAGES)
     merged = extractor.merge(None, heu)
     assert isinstance(merged, ExtractedData)
-    assert len(merged.files) >= 0
+    # FIXED: was `assert len(merged.files) >= 0` (mathematically always true).
+    # MESSAGES explicitly mentions "api/auth.py" — a real extraction must find it.
+    assert len(merged.files) >= 1, "Should extract at least the file mentioned in MESSAGES"
+    assert "api/auth.py" in merged.files, f"Expected api/auth.py in {merged.files}"
 
 
 def test_merge_boosts_corroborated():
@@ -139,4 +142,7 @@ async def test_extract_without_provider():
     """extract() with no provider should run heuristic only."""
     result = await extractor.extract(MESSAGES, provider_fn=None)
     assert isinstance(result, ExtractedData)
-    assert len(result.files) >= 0  # at minimum doesn't crash
+    # FIXED: was `assert len(result.files) >= 0  # at minimum doesn't crash`
+    # (mathematically always true). Heuristic-only extraction should still
+    # find "api/auth.py", which is explicitly present in MESSAGES.
+    assert len(result.files) >= 1, "Heuristic-only extraction should find at least one file"

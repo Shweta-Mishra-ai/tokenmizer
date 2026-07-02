@@ -569,30 +569,42 @@ class CompressionPipeline:
             text, s = self.comments.apply(text)
             strategies.append(s)
 
+        # Save the heuristic-only result BEFORE running ML compression so we can
+        # actually revert to it if the quality gate below rejects the ML output.
+        #
+        # FIXED — this was a real bug, not cosmetic: the previous code assigned
+        # `text = result.compressed_text` immediately, THEN computed
+        # compression_ratio from that same already-overwritten `text`. That
+        # meant the "keep heuristic result" comment was describing something
+        # the code never actually did — by the time the ratio check ran, the
+        # heuristic-only text was already gone. The warning fired correctly;
+        # the revert it claimed to perform never happened.
+        heuristic_text = text
+        heuristic_tokens = count_tokens(text)
+
         # ML compression
+        comp_tokens = heuristic_tokens
+        quality = 0.9
         if self.lingua and self.lingua.available:
-            result = self.lingua.compress(text, ratio=self.ratio)
-            text = result.compressed_text
-            strategies.extend(result.strategies_applied)
-            quality = result.quality_score
-        else:
-            quality = 0.9
+            result = self.lingua.compress(heuristic_text, ratio=self.ratio)
+            ml_tokens = count_tokens(result.compressed_text)
+            compression_ratio = ml_tokens / max(orig_tokens, 1)
+            quality_threshold = getattr(self, "_quality_threshold", 0.95)
 
-        comp_tokens = count_tokens(text)
-
-        # Quality gate: compression_ratio is tokens_out/tokens_in.
-        # A ratio > _quality_threshold means barely any compression happened — fallback.
-        # NOTE: lower ratio = MORE compression (good). We reject when ratio is TOO HIGH.
-        compression_ratio = comp_tokens / max(orig_tokens, 1)
-        # Fallback if attr missing — reject when ML barely compressed (>95% of original)
-        quality_threshold = getattr(self, "_quality_threshold", 0.95)
-        if compression_ratio > quality_threshold:
-            logger.warning(
-                f"Compression ratio {compression_ratio:.2f} > threshold {quality_threshold} "
-                f"— ML compression had no effect, keeping heuristic result"
-            )
-            # Don't fall back to original — keep heuristic-compressed text
-            # (filler removal etc. already ran above)
+            if compression_ratio > quality_threshold:
+                # ML barely compressed anything — genuinely revert to heuristic text.
+                logger.warning(
+                    f"Compression ratio {compression_ratio:.2f} > threshold "
+                    f"{quality_threshold} — ML compression had no effect, "
+                    f"reverting to heuristic-only result"
+                )
+                strategies.append("llmlingua_reverted_quality_gate")
+                # text/comp_tokens already hold the heuristic-only values — no-op
+            else:
+                text = result.compressed_text
+                comp_tokens = ml_tokens
+                strategies.extend(result.strategies_applied)
+                quality = result.quality_score
 
         return CompressionResult(
             original_tokens=orig_tokens,

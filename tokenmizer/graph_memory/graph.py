@@ -293,7 +293,27 @@ class GraphMemory:
                 return
             nodes_data = json.loads(row[0])
             edges_data = json.loads(row[1])
-            self._processed_hashes = set(json.loads(row[2]))
+
+            # FIXED — real bug, found while writing a proper (non-vacuous) test
+            # for tests/chaos/test_recovery.py::test_partial_write_recovery.
+            # processed_hashes used to be parsed inline with nodes/edges, all
+            # inside the same try block. If processed_hashes was corrupted
+            # (e.g. a partial/interrupted write), json.loads() on it raised
+            # BEFORE the node-population loop below ever ran — so a session
+            # with perfectly valid nodes_json still lost every node on reload,
+            # just because the unrelated hashes field was bad. That directly
+            # contradicts this method's whole purpose (recover what's good).
+            # Isolating this parse means a corrupt hash set only costs you
+            # incremental-extraction dedup (some messages get re-processed —
+            # harmless, add_node() already dedupes), not your entire graph.
+            try:
+                self._processed_hashes = set(json.loads(row[2]))
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(
+                    f"processed_hashes corrupted for {self.session_id}, "
+                    f"resetting (nodes/edges are unaffected): {e}"
+                )
+                self._processed_hashes = set()
 
             for nd in nodes_data:
                 nd.pop("_evicted", None)

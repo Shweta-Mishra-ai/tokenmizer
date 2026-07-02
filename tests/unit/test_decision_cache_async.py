@@ -158,9 +158,19 @@ class TestCacheIsolation:
 
         # Session B should be able to retrieve it (generic = safe to share)
         result = c.get(generic, session_id="session-B")
-        # Generic queries should hit cross-session
-        # (depends on sensitivity detection — non-sensitive = shared)
-        assert result is not None or True  # may not hit if stored in session scope
+        # FIXED: this used to assert `result is not None or True`, which is
+        # always True regardless of the cache's actual behavior — the test
+        # ran and "passed" while masking a real bug in SemanticCache.set()
+        # where non-sensitive prompts were stored under session_id scope
+        # instead of "__shared__", making them permanently unreachable from
+        # any other session. Now that set() is fixed, this must be a real hit.
+        assert result is not None, (
+            "Non-sensitive query stored by session-A must be retrievable by "
+            "session-B — check SemanticCache.set()'s scope logic."
+        )
+        assert result.response == "TCP is connection-oriented...", (
+            f"Got a hit but wrong response: {result.response!r}"
+        )
 
     def test_sensitive_query_isolated_to_session(self):
         from tokenmizer.semantic_cache.cache import SemanticCache

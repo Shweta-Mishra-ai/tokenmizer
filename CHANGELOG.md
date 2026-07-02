@@ -1,5 +1,69 @@
 # Changelog
 
+## [Unreleased] — tokenizer, cache, and version consistency fixes
+
+### Correctness — core value proposition
+- **`core/tokenizer.py`:** Claude/Anthropic models were counted with tiktoken
+  (an OpenAI tokenizer) — wrong vocabulary, typically 5-20% error, worse on
+  code. Now routes Claude models through the Anthropic SDK's local tokenizer
+  when available, with an honestly-documented fallback to a cl100k_base
+  approximation when it isn't. Added `is_claude_model()` so callers can flag
+  the approximation to users.
+- **`compression/engine.py`:** the LLMLingua quality gate logged a warning
+  when ML compression had no real effect, but never actually reverted `text`
+  to the heuristic-only result — `text` had already been overwritten before
+  the check ran. The gate is now a real gate: heuristic result is saved
+  before ML runs, and reverted to on gate failure.
+- **`semantic_cache/cache.py`:** `SemanticCache.set()` scoped non-sensitive
+  prompts under `session_id` whenever one was provided, but `get()` only
+  ever checks the caller's own session key or `"__shared__"` — a non-sensitive
+  prompt stored by session A was permanently unreachable from session B.
+  Cross-session cache sharing for generic queries was silently, completely
+  broken. Fixed: non-sensitive prompts always scope to `"__shared__"`.
+- **`semantic_cache/cache.py`:** `SemanticCache` had no `_preference_store`
+  attribute; `api/app.py`'s `/api/cache/stats` endpoint referenced
+  `_cache._preferences` (wrong name, and the attribute didn't exist at all),
+  causing an `AttributeError` on every single call to that endpoint. Fixed:
+  attribute added, call site corrected.
+- **`graph_memory/graph.py` — found via writing a real (non-vacuous) test:**
+  `GraphMemory._load()` parsed `processed_hashes` JSON inline with
+  `nodes_json`/`edges_json`, all inside one try block. If `processed_hashes`
+  was corrupted (e.g. an interrupted write), the exception fired *before*
+  the node-population loop ran — so a session with perfectly valid
+  `nodes_json` lost every node on reload, purely because of an unrelated
+  corrupted field. This directly contradicted the graceful-recovery
+  behavior `test_partial_write_recovery` was supposed to verify (its
+  assertion had been `len(g2._nodes) >= 0`, which is always true and
+  therefore never caught this). Fixed: `processed_hashes` parsing is now
+  isolated in its own try/except; corruption there costs incremental-
+  extraction dedup only (safe — `add_node()` already dedupes), not the
+  whole graph.
+
+### Test quality
+- `tests/unit/test_decision_cache_async.py`: replaced
+  `assert result is not None or True` (always passes, tested nothing) with
+  a real assertion — now meaningful since the cache scope bug above is fixed.
+- `tests/chaos/test_recovery.py`: replaced `assert len(g2._nodes) >= 0`
+  (always passes) with an assertion that actually verifies the pre-corruption
+  node survives — this is what caught the `_load()` bug above.
+
+### Consistency
+- Version bumped to `0.2.3` in all 8 locations that had drifted
+  (`pyproject.toml`, `tokenmizer/__init__.py`, `mcp/server.py`,
+  `api/app.py`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
+  both SVGs in `docs/assets/`) to match CHANGELOG's own newest entry, plus
+  `SECURITY.md`'s supported-versions table (was still `0.1.x (alpha)`).
+- Hardcoded `"python"` binary replaced with `"python3"` (or a detected
+  `$PYTHON` variable) in 8 locations across `.mcp.json`, README.md, USAGE.md,
+  `.claude-plugin/plugin.json`, `mcp/server.py`'s docstring,
+  `scripts/setup.sh`, `scripts/install.sh` (which had already correctly
+  detected a `$PYTHON` variable earlier in the script but then ignored it
+  when writing `.mcp.json`), and a Claude Code skill file. Breaks on any
+  Debian/Ubuntu system where only `python3` exists.
+- README: added a visible streaming-unsupported warning directly after the
+  Quick Start code example (previously only mentioned deep in the CLI
+  section) — Cursor/Continue.dev users were hitting an unexplained HTTP 501.
+
 ## [Unreleased] — security/correctness audit pass
 
 Full senior-level audit covering security, silent failures, dead code,

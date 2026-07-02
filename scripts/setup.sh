@@ -59,11 +59,17 @@ fi
 
 # Claude Code MCP (if claude is installed)
 if command -v claude &>/dev/null && [ ! -f ".mcp.json" ]; then
+  # FIXED: hardcoded "python" fails on Ubuntu/Debian where only python3
+  # exists by default. Detect the correct binary here instead of assuming.
+  MCP_PYTHON_BIN="python3"
+  if ! command -v python3 &>/dev/null && command -v python &>/dev/null; then
+    MCP_PYTHON_BIN="python"
+  fi
   cat > .mcp.json << JSON
 {
   "mcpServers": {
     "tokenmizer": {
-      "command": "python",
+      "command": "${MCP_PYTHON_BIN}",
       "args": ["-m", "tokenmizer.mcp.server"],
       "env": { "TOKENMIZER_URL": "http://localhost:8000" }
     }
