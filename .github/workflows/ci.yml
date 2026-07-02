@@ -34,16 +34,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Lint (warnings only — non-blocking)
-        run: ruff check tokenmizer/ tests/ --exit-zero
+      - name: Lint (blocking)
+        run: ruff check tokenmizer/ tests/
 
+      # Coverage threshold lives in pyproject.toml [tool.coverage.report]
+      # fail_under — single source of truth, do NOT override it here.
       - name: Run tests with coverage
         run: |
           pytest tests/ \
             --cov=tokenmizer \
             --cov-report=term-missing \
             --cov-report=xml \
-            --cov-fail-under=60 \
             -v
 
       - name: Upload coverage

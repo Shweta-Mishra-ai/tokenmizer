@@ -7,6 +7,7 @@ Run: python -m benchmarks.checkpoint_accuracy.runner
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass
@@ -14,6 +15,11 @@ from pathlib import Path
 
 from tokenmizer.checkpoints.manager import CheckpointManager
 from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
+
+# Windows consoles default to cp1252 — emoji in report output crashes the
+# whole benchmark with UnicodeEncodeError. Force UTF-8 where supported.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ── Synthetic sessions ────────────────────────────────────────────────────────
 

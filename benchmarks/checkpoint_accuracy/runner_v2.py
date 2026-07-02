@@ -11,13 +11,19 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import tempfile
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
 from tokenmizer.checkpoints.manager import CheckpointManager
+from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
+
+# Windows consoles default to cp1252 — emoji in report output crashes the
+# whole benchmark with UnicodeEncodeError. Force UTF-8 where supported.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ── Benchmark sessions (diverse domains) ─────────────────────────────────────
 

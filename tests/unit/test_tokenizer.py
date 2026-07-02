@@ -40,7 +40,7 @@ class TestTokenizer:
         # A string of 40 chars that tiktoken encodes as many more tokens
         text = "😀" * 10  # emoji heavy — each emoji is multiple tokens
         tokens = count_tokens(text)
-        char_div_4 = len(text) // 4
+        len(text) // 4
         # With real tiktoken, emoji-heavy text should NOT equal len//4
         # (emojis are multi-byte and multi-token)
         assert tokens > 0

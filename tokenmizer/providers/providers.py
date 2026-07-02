@@ -22,6 +22,19 @@ from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 
 logger = logging.getLogger(__name__)
 
+# Sampling params forwarded from the proxy request to every provider.
+# Each provider maps these to its own SDK's naming.
+_SAMPLING_KEYS = ("temperature", "top_p", "stop")
+
+
+def _sampling(kwargs: dict) -> dict:
+    """Extract only recognized sampling params from arbitrary kwargs."""
+    return {k: kwargs[k] for k in _SAMPLING_KEYS if kwargs.get(k) is not None}
+
+
+def _as_stop_list(stop) -> list[str]:
+    return [stop] if isinstance(stop, str) else list(stop)
+
 
 # ── Response dataclass ────────────────────────────────────────────────────────
 
@@ -118,7 +131,10 @@ class AnthropicProvider(BaseProvider):
         system_text = "\n\n".join(sys_parts) if sys_parts else None
 
         try:
-            kwargs_clean = {k: v for k, v in kwargs.items() if k not in ("stream",)}
+            kwargs_clean = _sampling(kwargs)
+            # Anthropic SDK uses `stop_sequences`, not OpenAI's `stop`
+            if "stop" in kwargs_clean:
+                kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
             if system_text:
                 # Anthropic prompt caching — system prompts >200 tokens cached at 90% discount
                 # on repeated calls. Cache persists for 5 minutes.
@@ -189,11 +205,13 @@ class OpenAIProvider(BaseProvider):
             all_messages = [{"role": "system", "content": system}] + all_messages
 
         try:
+            sampling = _sampling(kwargs)  # OpenAI SDK accepts temperature/top_p/stop natively
             if stream:
                 full_text = ""
                 input_tokens = count_messages_tokens(all_messages, model)
                 async for chunk in await client.chat.completions.create(
-                    model=model, messages=all_messages, max_tokens=max_tokens, stream=True
+                    model=model, messages=all_messages, max_tokens=max_tokens,
+                    stream=True, **sampling
                 ):
                     delta = chunk.choices[0].delta.content or ""
                     full_text += delta
@@ -203,7 +221,7 @@ class OpenAIProvider(BaseProvider):
                                    model=model, provider="openai")
 
             resp = await client.chat.completions.create(
-                model=model, messages=all_messages, max_tokens=max_tokens
+                model=model, messages=all_messages, max_tokens=max_tokens, **sampling
             )
             choice = resp.choices[0]
             return LLMResponse(
@@ -269,7 +287,16 @@ class CohereProvider(BaseProvider):
             all_messages = [{"role": "system", "content": system}] + all_messages
 
         try:
-            resp = await client.chat(model=model, messages=all_messages, max_tokens=max_tokens)
+            s = _sampling(kwargs)
+            cohere_kw = {}
+            if "temperature" in s:
+                cohere_kw["temperature"] = s["temperature"]
+            if "top_p" in s:
+                cohere_kw["p"] = s["top_p"]          # Cohere names top_p as `p`
+            if "stop" in s:
+                cohere_kw["stop_sequences"] = _as_stop_list(s["stop"])
+            resp = await client.chat(model=model, messages=all_messages,
+                                     max_tokens=max_tokens, **cohere_kw)
             text = resp.message.content[0].text if resp.message.content else ""
             usage = resp.usage
             return LLMResponse(
@@ -327,10 +354,18 @@ class GeminiProvider(BaseProvider):
 
         try:
             chat = m_instance.start_chat(history=history)
+            s = _sampling(kwargs)
+            gen_kw = {"max_output_tokens": max_tokens}
+            if "temperature" in s:
+                gen_kw["temperature"] = s["temperature"]
+            if "top_p" in s:
+                gen_kw["top_p"] = s["top_p"]
+            if "stop" in s:
+                gen_kw["stop_sequences"] = _as_stop_list(s["stop"])
             # Use native async — not run_in_executor
             resp = await chat.send_message_async(
                 last_msg,
-                generation_config=genai.GenerationConfig(max_output_tokens=max_tokens),
+                generation_config=genai.GenerationConfig(**gen_kw),
             )
             text = resp.text or ""
             input_tokens = count_messages_tokens(conversation, model)
@@ -365,8 +400,16 @@ class OllamaProvider(BaseProvider):
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
 
+        s = _sampling(kwargs)
+        options = {"num_predict": max_tokens}
+        if "temperature" in s:
+            options["temperature"] = s["temperature"]
+        if "top_p" in s:
+            options["top_p"] = s["top_p"]
+        if "stop" in s:
+            options["stop"] = _as_stop_list(s["stop"])
         payload = {"model": model, "messages": all_messages, "stream": False,
-                   "options": {"num_predict": max_tokens}}
+                   "options": options}
 
         async with httpx.AsyncClient(timeout=120) as client:
             try:

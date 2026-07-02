@@ -79,7 +79,7 @@ class TestCheckpointCreation:
         assert len(ckpt.resume_standard) > 20
 
     def test_graph_diff_computed(self, checkpoint_mgr, graph_with_data):
-        ckpt1 = checkpoint_mgr.create(
+        checkpoint_mgr.create(
             session_id="diff-test",
             messages=MESSAGES[:4],
             graph=graph_with_data,

@@ -11,8 +11,6 @@
   </p>
 
   <p>
-    <a href="https://pypi.org/project/tokenmizer"><img src="https://img.shields.io/pypi/v/tokenmizer?color=7c6af7&style=flat-square" alt="PyPI"/></a>
-    <a href="https://pypi.org/project/tokenmizer"><img src="https://img.shields.io/pypi/pyversions/tokenmizer?color=5ee7c8&style=flat-square"/></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4ade80?style=flat-square"/></a>
     <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/actions"><img src="https://img.shields.io/github/actions/workflow/status/Shweta-Mishra-ai/tokenmizer/ci.yml?branch=main&style=flat-square&color=4ade80"/></a>
     <img src="https://img.shields.io/badge/Claude%20Code-Plugin-7c6af7?style=flat-square&logo=anthropic"/>
@@ -73,16 +71,22 @@ History is **never deleted**. "Why did we switch from React to Next.js?" — alw
 
 ### 1. Install
 
+> Not yet published to PyPI — install from source (PyPI release is on the
+> roadmap; the `pip install tokenmizer` short form will work after that).
+
 ```bash
+git clone https://github.com/Shweta-Mishra-ai/tokenmizer
+cd tokenmizer
+
 # Recommended
-pip install "tokenmizer[anthropic,cache]"
+pip install -e ".[anthropic,cache]"
 
 # All providers
-pip install "tokenmizer[anthropic,openai,gemini,cohere,cache]"
+pip install -e ".[anthropic,openai,gemini,cohere,cache]"
 
 # No key? Use Ollama (free, local)
 brew install ollama && ollama pull llama3
-pip install tokenmizer
+pip install -e .
 ```
 
 ### 2. Set your API key
@@ -234,6 +238,10 @@ TokenMizer **complements** — does not replace — these tools:
 
 ## Supported Providers
 
+Model strings pass through unchanged — the newest models work out of the box:
+`claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5`,
+GPT-4o/o-series, Gemini 1.5/2.0, and any Ollama/OpenRouter model.
+
 | Provider | Env var |
 |---|---|
 | Anthropic (Claude) | `TOKENMIZER_ANTHROPIC_API_KEY` |
@@ -327,15 +335,18 @@ python benchmarks/checkpoint_accuracy/runner_v2.py
 pytest tests/ -v
 ```
 
-**Benchmark v2 — Graph vs plain Summary (3 sessions, heuristic-only):**
+**Benchmark v2 — Graph vs plain Summary (3 sessions, heuristic-only,
+measured 2026-07-02 on v0.2.4):**
 
 | Method | Task Recall | Decision Recall | File Recall | Info Preserved |
 |--------|-------------|-----------------|-------------|----------------|
-| TokenMizer Graph | 76% | 77% | 100% | **84%** |
+| TokenMizer Graph | 76% | 85% | 100% | **87%** |
 | Plain Summary baseline | 76% | 70% | 92% | 79% |
-| **Δ advantage** | 0% | **+7%** | **+8%** | **+5%** |
+| **Δ advantage** | 0% | **+15%** | **+8%** | **+8%** |
 
-Avg resume size: **246 tokens** vs ~1,500+ tokens of raw history.
+Avg resume size: **254 tokens** vs ~1,500+ tokens of raw history.
+(n=3 synthetic sessions — small sample; treat as directional, reproduce
+with the command above.)
 
 Enable `use_llm_extraction: true` for hybrid extraction (LLM + heuristic merge).
 

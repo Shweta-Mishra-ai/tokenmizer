@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.2.4] — 2026-07-02 — launch-readiness fixes
+
+### Critical — the endpoint did not work
+- **`api/app.py`:** the `@app.post("/v1/chat/completions")` decorator was
+  attached to the `_check_rate_limit` helper (comments between decorator and
+  the intended handler don't matter to Python — a decorator binds to the next
+  `def`). The real `chat_completions` handler was never registered; every
+  request to the flagship endpoint returned `null`. Decorator moved onto the
+  actual handler.
+- **`security/middleware.py`:** `injection_guard(request)` had no `Request`
+  type annotation, so FastAPI treated `request` as a required string QUERY
+  parameter — every POST /v1/chat/completions got a 422 even with the route
+  fixed. Annotation added (with import-safe fallback).
+- **`tests/integration/test_api_endpoint.py`:** NEW — e2e tests that POST to
+  the real app with a mocked provider. Both bugs above are now regression-
+  tested, including an explicit route-binding assertion.
+
+### OpenAI compatibility
+- `ChatRequest` now accepts unknown OpenAI fields (`extra="allow"`) instead
+  of silently depending on pydantic's ignore behavior; content blocks
+  (multimodal list format) no longer 422 — normalized to text.
+- `temperature`, `top_p`, `stop` are now actually forwarded to ALL providers
+  (previously only Anthropic received kwargs; OpenAI/Cohere/Gemini/Ollama
+  dropped them silently). Provider-specific naming handled (`stop` →
+  `stop_sequences` for Anthropic/Cohere/Gemini, `p` for Cohere top_p).
+
+### Models
+- Newest Claude models verified working via passthrough: `claude-fable-5`,
+  `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5`. Context-window
+  lookup now matches longest key first (broad `"claude"` no longer shadows
+  specific entries).
+
+### Honest quality gates
+- Coverage: removed omits for product modules (api/app.py, auth.py,
+  providers, state, analytics, compression engine were all excluded —
+  coverage theater). Honest measured coverage: 61% over ALL product code;
+  fail_under set to 50 in pyproject (single source of truth; CI override
+  removed).
+- CI: ruff is now blocking (`--exit-zero` removed); lint violations fixed.
+
+### Docker
+- `pip install -e .` ran before the package source was copied — build broke.
+  Deps now installed from pyproject first (cached layer), package installed
+  after COPY.
+- `--workers 2` → `--workers 1`: session locks, graph cache, rate limiter,
+  analytics are in-process; multiple workers held divergent state for the
+  same session (last-writer-wins graph loss). Documented the Redis path for
+  horizontal scaling.
+
+### Portability
+- Benchmark runners crashed with `UnicodeEncodeError` on Windows (cp1252
+  console vs emoji output). stdout reconfigured to UTF-8 where supported.
+
+### Docs
+- README: install instructions no longer claim a PyPI package that isn't
+  published (source install until first PyPI release); dead PyPI badges
+  removed; benchmark table updated to freshly measured v0.2.4 numbers with
+  date and sample-size caveat.
+
 ## [Unreleased] — tokenizer, cache, and version consistency fixes
 
 ### Correctness — core value proposition

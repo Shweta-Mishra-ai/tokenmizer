@@ -68,7 +68,7 @@ class TestTaskRetention:
             1 for expected in EXPECTED_COMPLETED_TASKS
             if any(expected.lower() in label for label in labels_lower)
         )
-        precision = found / max(1, len(completed))
+        found / max(1, len(completed))
         recall = found / len(EXPECTED_COMPLETED_TASKS)
         # We expect at least 40% recall from heuristic extraction
         assert recall >= 0.4, f"Task recall too low: {recall:.2f} ({found}/{len(EXPECTED_COMPLETED_TASKS)})"
@@ -104,9 +104,8 @@ class TestDecisionRetention:
     def test_redis_decision_captured(self, filled_graph):
         """Redis over DB decision is critical — should be in graph."""
         decisions = [n for n in filled_graph._nodes.values() if n.type == NodeType.DECISION]
-        labels_lower = " ".join(n.label.lower() for n in decisions)
+        " ".join(n.label.lower() for n in decisions)
         # Either "redis" or "decided" should appear
-        has_redis = "redis" in labels_lower
         has_some_decision = len(decisions) > 0
         assert has_some_decision, "No decisions extracted at all"
 

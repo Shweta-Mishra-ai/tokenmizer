@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tokenmizer"
-version = "0.2.3"
+version = "0.2.4"
 description = "Reduce AI context loss by 2x. Graph-backed checkpoint and resume for any LLM session."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -97,21 +97,17 @@ ignore = ["E501"]
 
 [tool.coverage.run]
 source = ["tokenmizer"]
+# Only NON-PRODUCT code is omitted. Do not add product modules here to
+# inflate the number — a gamed coverage gate is worse than a low honest one.
 omit = [
     "tests/*",
     "benchmarks/*",
     "examples/*",
-    "tokenmizer/cli.py",
-    "tokenmizer/mcp/*",
-    "tokenmizer/providers/*",
-    "tokenmizer/compression/engine.py",
-    "tokenmizer/storage/__init__.py",
-    "tokenmizer/analytics/engine.py",
-    "tokenmizer/api/app.py",
-    "tokenmizer/security/auth.py",
-    "tokenmizer/state/backend.py",
 ]
 
 [tool.coverage.report]
-fail_under = 70
+# Honest floor over ALL product code (previously 70, but with api/app.py,
+# auth.py, providers and other core modules excluded — coverage theater).
+# Single source of truth: CI must not override this number.
+fail_under = 50
 show_missing = true
