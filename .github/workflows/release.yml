@@ -1,0 +1,57 @@
+name: Release to PyPI
+
+# Publishes via PyPI Trusted Publishing (OIDC) — NO API token stored anywhere.
+# One-time setup on pypi.org (must be done by the project owner):
+#   pypi.org → Your account → Publishing → Add a new pending publisher:
+#     PyPI project name: tokenmizer
+#     Owner:             Shweta-Mishra-ai
+#     Repository:        tokenmizer
+#     Workflow name:     release.yml
+#     Environment:       pypi
+# Then create a GitHub Release (tag v0.2.4 etc.) and this workflow publishes.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests first — never publish a broken build
+        run: |
+          pip install -e ".[dev]"
+          pytest tests/ -q
+          ruff check tokenmizer/ tests/
+
+      - name: Build sdist + wheel
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # required for Trusted Publishing — no secrets used
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
