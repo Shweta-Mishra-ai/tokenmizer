@@ -261,7 +261,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.2.4",
+    version="0.2.5",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -945,14 +945,4 @@ async def get_resume(session_id: str, level: str = "standard"):
         }
         text = resume_map.get(level, ckpt.resume_standard)
         return {
-            "session_id": session_id,
-            "checkpoint_id": ckpt.checkpoint_id,
-            "level": level,
-            "resume_context": text,
-            "token_count": count_tokens(text),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Resume failed for {session_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Resume failed: {str(e)}")
+         

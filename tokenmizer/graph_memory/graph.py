@@ -315,11 +315,37 @@ class GraphMemory:
                 )
                 self._processed_hashes = set()
 
+            # CRITICAL: restore enum types on load. asdict() serializes
+            # NodeType/NodeStatus (str-Enums) to plain strings; without
+            # converting back, every reloaded node has type/status as `str`.
+            # Because they're str-Enums, equality checks still pass — which
+            # HID this bug — but any `.value` access crashes ('str' object
+            # has no attribute 'value'). Concretely: after a server restart,
+            # every checkpoint of a reloaded session returned HTTP 500.
+            # Found by the MCP e2e check, not by unit tests, because unit
+            # tests reloaded graphs but never then called `.type.value`.
             for nd in nodes_data:
                 nd.pop("_evicted", None)
+                try:
+                    nd["type"] = NodeType(nd["type"])
+                    nd["status"] = NodeStatus(nd["status"])
+                except (ValueError, KeyError) as conv_err:
+                    logger.warning(
+                        f"Skipping node with unknown type/status during load "
+                        f"for {self.session_id}: {conv_err} — {nd.get('id')}"
+                    )
+                    continue
                 n = MemoryNode(**{k: v for k, v in nd.items() if k != "_evicted"})
                 self._nodes[n.id] = n
             for ed in edges_data:
+                try:
+                    ed["type"] = EdgeType(ed["type"])
+                except (ValueError, KeyError) as conv_err:
+                    logger.warning(
+                        f"Skipping edge with unknown type during load "
+                        f"for {self.session_id}: {conv_err}"
+                    )
+                    continue
                 self._edges.append(MemoryEdge(**ed))
         except (sqlite3.DatabaseError, sqlite3.OperationalError) as e:
             logger.warning(f"Corrupted DB for {self.session_id} — starting fresh: {e}")

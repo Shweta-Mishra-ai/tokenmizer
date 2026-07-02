@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.5] — 2026-07-02 — restart no longer breaks checkpoints
+
+### Critical
+- **`graph_memory/graph.py`:** `_load()` rebuilt nodes/edges from SQLite
+  without converting `type`/`status` strings back to their str-Enum types.
+  Str-Enum equality kept passing (which hid the bug from every unit test),
+  but any `.value` access crashed — concretely, **after a server restart,
+  checkpointing any reloaded session returned HTTP 500**, and resume paths
+  touching `.value` were equally broken. Enums are now restored on load;
+  nodes/edges with unrecognized types (forward-compat) are skipped with a
+  warning instead of killing the whole load. Found by the new MCP e2e
+  check, not unit tests — reloaded graphs were never checkpoint-ed in tests
+  before. Four regression tests added.
+
+### MCP server
+- `serverInfo.version` no longer hardcoded (was stale "0.2.3").
+- `resume_session` no longer claims "No checkpoint found" when a checkpoint
+  exists but its graph was empty — the two cases now produce distinct,
+  accurate messages.
+- NEW `scripts/mcp_e2e_check.py`: boots the real proxy in-process, spawns
+  the real MCP stdio server, and exercises handshake + all 5 tools
+  end-to-end. This is the check that caught the restart bug.
+
 ## [0.2.4] — 2026-07-02 — launch-readiness fixes
 
 ### Critical — the endpoint did not work

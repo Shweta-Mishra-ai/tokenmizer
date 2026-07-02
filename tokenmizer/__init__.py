@@ -1,6 +1,6 @@
 """TokenMizer — Never lose your AI context again."""
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 __all__ = ["GraphMemory", "CheckpointManager", "get_settings"]
 
 

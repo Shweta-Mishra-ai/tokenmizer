@@ -207,7 +207,16 @@ def handle_resume_session(args: dict) -> str:
     ctx = result.get("resume_context", "")
     tokens = result.get("token_count", 0)
     if not ctx:
-        return f"No checkpoint found for session '{session_id}'. Start a session and checkpoint it first."
+        # A checkpoint EXISTS (the API 404s via "error" above when none does) —
+        # its graph was just empty at checkpoint time. Saying "no checkpoint
+        # found" here would be wrong and send the user debugging the wrong
+        # thing.
+        return (
+            f"Checkpoint {result.get('checkpoint_id', '?')} exists for "
+            f"'{session_id}' but its graph was empty (no session activity "
+            f"had been recorded when it was created). Chat through the proxy "
+            f"with this session_id, then checkpoint again."
+        )
     return (
         f"[TokenMizer Resume — session: {session_id} — {tokens} tokens]\n\n"
         f"{ctx}\n\n"
@@ -333,12 +342,13 @@ def run_stdio_server():
         params = req.get("params", {})
 
         if method == "initialize":
+            from tokenmizer import __version__
             send({
                 "jsonrpc": "2.0", "id": req_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "tokenmizer", "version": "0.2.3"},
+                    "serverInfo": {"name": "tokenmizer", "version": __version__},
                 },
             })
 
