@@ -198,3 +198,87 @@ class TestDirectMutationRequiresForce:
             "force=True is required after any direct node mutation, or the "
             "dirty-flag optimization silently drops the write"
         )
+
+
+class TestEnumRestorationOnLoad:
+    """
+    Regression tests for the restart-breaks-everything bug (v0.2.4 e2e find):
+
+    asdict() serializes NodeType/NodeStatus/EdgeType (str-Enums) to plain
+    strings; _load() rebuilt nodes WITHOUT converting back. str-Enum equality
+    (`n.type == NodeType.TASK`) still passed on reloaded graphs — hiding the
+    bug from every existing test — but `.type.value` crashed with
+    "'str' object has no attribute 'value'". Net effect: after any server
+    restart, checkpointing a reloaded session returned HTTP 500.
+    """
+
+    def test_reloaded_node_types_are_real_enums(self, graph, tmp_path):
+        graph.add_node(NodeType.DECISION, "Use PostgreSQL", status=NodeStatus.COMPLETED)
+        graph._persist(force=True)
+
+        reloaded = GraphMemory("dirty-flag-test-session", storage_dir=str(tmp_path))
+        node = next(iter(reloaded._nodes.values()))
+        assert isinstance(node.type, NodeType), type(node.type)
+        assert isinstance(node.status, NodeStatus), type(node.status)
+        # The exact access pattern that crashed checkpoint creation:
+        assert node.type.value == "decision"
+        assert node.status.value == "completed"
+
+    def test_reloaded_edge_types_are_real_enums(self, graph, tmp_path):
+        n1 = graph.add_node(NodeType.TASK, "Implement login")
+        n2 = graph.add_node(NodeType.FILE, "src/auth.py")
+        graph.add_edge(n1, n2, EdgeType.IMPLEMENTS)
+        graph._persist(force=True)
+
+        reloaded = GraphMemory("dirty-flag-test-session", storage_dir=str(tmp_path))
+        assert reloaded._edges, "edge did not survive reload"
+        assert isinstance(reloaded._edges[0].type, EdgeType)
+        assert reloaded._edges[0].type.value == "implements"
+
+    def test_checkpoint_of_reloaded_graph_does_not_crash(self, graph, tmp_path):
+        """Full restart simulation: persist -> fresh GraphMemory ->
+        CheckpointManager.create() — the exact path that 500'd."""
+        from tokenmizer.checkpoints.manager import CheckpointManager
+
+        graph.add_node(NodeType.GOAL, "Build auth service")
+        graph.add_node(NodeType.DECISION, "Use PostgreSQL",
+                       status=NodeStatus.COMPLETED)
+        graph._persist(force=True)
+
+        reloaded = GraphMemory("dirty-flag-test-session", storage_dir=str(tmp_path))
+        mgr = CheckpointManager(storage_dir=str(tmp_path))
+        ckpt = mgr.create(
+            session_id="dirty-flag-test-session",
+            messages=[], graph=reloaded, context_pct=0.5, trigger="manual",
+        )
+        assert ckpt.checkpoint_id
+        snapshot_types = {n["type"] for n in ckpt.graph_snapshot["nodes"]}
+        assert "decision" in snapshot_types
+
+    def test_unknown_node_type_is_skipped_not_fatal(self, graph, tmp_path):
+        """Forward-compat: a node with an unrecognized type (e.g. written by
+        a newer version) must not take down the whole graph load."""
+        import json as _json
+        import sqlite3 as _sqlite3
+
+        graph.add_node(NodeType.TASK, "Implement login")
+        graph._persist(force=True)
+
+        # Corrupt one node's type directly in SQLite
+        conn = _sqlite3.connect(str(graph._db_path))
+        row = conn.execute(
+            "SELECT nodes_json FROM graphs WHERE session_id=?",
+            ("dirty-flag-test-session",),
+        ).fetchone()
+        nodes = _json.loads(row[0])
+        nodes.append({**nodes[0], "id": "corrupt01", "type": "from_the_future"})
+        conn.execute(
+            "UPDATE graphs SET nodes_json=? WHERE session_id=?",
+            (_json.dumps(nodes), "dirty-flag-test-session"),
+        )
+        conn.commit()
+        conn.close()
+
+        reloaded = GraphMemory("dirty-flag-test-session", storage_dir=str(tmp_path))
+        assert "corrupt01" not in reloaded._nodes          # bad node skipped
+        assert len(reloaded._nodes) == 1                   # good node survived
