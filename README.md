@@ -118,6 +118,14 @@ response = client.chat.completions.create(
 )
 ```
 
+> **⚠️ Streaming is not supported yet.** Set `stream: false` (or leave it unset —
+> that's the default) in every request. Requests with `stream: true` return
+> `HTTP 501`. True SSE streaming is planned for v0.3.
+>
+> **Cursor:** Settings → Models → your model entry → disable "Stream responses"
+> **Continue.dev:** in `config.json`, set `"streamResponses": false` for the
+> TokenMizer provider entry
+
 ---
 
 ## Claude Code Integration
@@ -150,7 +158,7 @@ Add to `~/.claude/settings.json`:
 {
   "mcpServers": {
     "tokenmizer": {
-      "command": "python",
+      "command": "python3",
       "args": ["-m", "tokenmizer.mcp.server"],
       "env": { "TOKENMIZER_URL": "http://localhost:8000" }
     }

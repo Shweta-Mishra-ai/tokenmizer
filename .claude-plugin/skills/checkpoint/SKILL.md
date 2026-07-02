@@ -27,7 +27,7 @@ Tell the user to start it first:
 ```bash
 tokenmizer serve
 # or
-python -m tokenmizer.api.app
+python3 -m tokenmizer.api.app
 ```
 
 ## Session ID rules

@@ -122,6 +122,11 @@ class SemanticCache:
         self._hit_exact = 0
         self._hit_semantic = 0
         self._miss = 0
+        # FIXED: this was missing entirely. api/app.py's /api/cache/stats endpoint
+        # calls `_cache._preference_store.to_system_context()` — without this
+        # attribute that call raised AttributeError on every single request to
+        # that endpoint, unconditionally.
+        self._preference_store = PreferenceStore()
 
     def _key(self, prompt: str, scope: str = "__shared__") -> str:
         """Include scope in key — session-specific entries don't collide across sessions."""
@@ -228,20 +233,26 @@ class SemanticCache:
 
         Scoping rules (safe-by-default):
         - If prompt is sensitive → always session-scoped (never shared)
-        - If session_id provided → session-scoped (safe default)
-        - Only short, generic prompts with NO session_id go to shared cache
+        - If prompt is NOT sensitive → always shared, regardless of session_id
           (e.g. "what is a JWT", "explain async/await")
+
+        FIXED — real bug, not cosmetic: the old logic scoped non-sensitive
+        prompts to `session_id` whenever one was provided, but `get()` only
+        ever checks the caller's OWN session_id key or the `__shared__` key.
+        A non-sensitive prompt stored by session A under scope "session-A"
+        could never be found by session B's lookup (session B checks
+        "session-B" then "__shared__" — "session-A" is neither). Cross-session
+        cache sharing for generic queries was silently, permanently broken.
+        The session_id parameter is still used for the SENSITIVITY branch —
+        it just must not also gate the shared-scope decision.
         """
         is_sensitive = self._is_session_sensitive(prompt)
 
         if is_sensitive:
             # Sensitive content: always scoped to session, never shared
             scope = session_id or "__private__"
-        elif session_id:
-            # Session provided: scope to session — safe default
-            scope = session_id
         else:
-            # No session_id + not sensitive: safe to share (generic how-to queries)
+            # Not sensitive: always shared, so any session's get() can find it.
             scope = "__shared__"
 
         # Scoped key: sensitive responses keyed by session, generic by content

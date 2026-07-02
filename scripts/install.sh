@@ -211,11 +211,16 @@ if command -v claude &>/dev/null; then
       cp "$MCP_FILE" "${MCP_FILE}.bak"
       warn "Backed up existing settings to ${MCP_FILE}.bak"
     fi
+    # FIXED: this hardcoded "python" instead of using the $PYTHON variable
+    # already detected earlier in this same script (line ~33) — meaning the
+    # careful python3/python3.11/python3.10 detection done above was wasted;
+    # the .mcp.json it wrote would break on any Debian/Ubuntu box where only
+    # python3 exists, exactly the case this script otherwise handles correctly.
     cat > .mcp.json << JSON
 {
   "mcpServers": {
     "tokenmizer": {
-      "command": "python",
+      "command": "${PYTHON}",
       "args": ["-m", "tokenmizer.mcp.server"],
       "env": { "TOKENMIZER_URL": "http://localhost:8000" }
     }

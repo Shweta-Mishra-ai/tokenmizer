@@ -259,7 +259,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.2.0",
+    version="0.2.3",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -708,7 +708,7 @@ async def stats(session_id: Optional[str] = None):
 async def cache_stats():
     stats = _cache.stats()
     # Include preference context for completeness (was previously unused)
-    stats["preference_context"] = _cache._preferences.to_system_context()
+    stats["preference_context"] = _cache._preference_store.to_system_context()
     return stats
 
 

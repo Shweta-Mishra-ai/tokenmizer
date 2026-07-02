@@ -15,13 +15,13 @@ Tools exposed:
   - get_savings_stats     see token savings analytics
 
 Run standalone:
-  python -m tokenmizer.mcp.server
+  python3 -m tokenmizer.mcp.server
 
 Or via MCP stdio transport (for Claude Code .mcp.json):
   {
     "mcpServers": {
       "tokenmizer": {
-        "command": "python",
+        "command": "python3",
         "args": ["-m", "tokenmizer.mcp.server"],
         "env": { "TOKENMIZER_URL": "http://localhost:8000" }
       }
@@ -338,7 +338,7 @@ def run_stdio_server():
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "tokenmizer", "version": "0.2.0"},
+                    "serverInfo": {"name": "tokenmizer", "version": "0.2.3"},
                 },
             })
 

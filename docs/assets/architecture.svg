@@ -165,5 +165,5 @@
   <circle cx="270" cy="534" r="3" fill="#94a3b8"/>
   <text x="280" y="538" fill="#303040" font-family="'JetBrains Mono',monospace" font-size="8">ARCHIVED</text>
   <text x="450" y="538" text-anchor="middle" fill="#1e2040" font-family="'JetBrains Mono',monospace" font-size="7.5">All layers independently togglable · tokenmizer.yaml</text>
-  <text x="820" y="538" text-anchor="end" fill="#1e2040" font-family="'JetBrains Mono',monospace" font-size="7.5">v0.1.0-alpha · MIT</text>
+  <text x="820" y="538" text-anchor="end" fill="#1e2040" font-family="'JetBrains Mono',monospace" font-size="7.5">v0.2.3 · MIT</text>
 </svg>

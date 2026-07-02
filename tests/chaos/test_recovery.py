@@ -35,8 +35,21 @@ class TestCorruptedGraph:
 
         # Should load what it can
         g2 = GraphMemory("partial-session", storage_dir=str(tmp_path))
-        # Nodes should still be there even if hashes are corrupted
-        assert len(g2._nodes) >= 0  # at minimum, doesn't crash
+        # FIXED: this used to assert `len(g2._nodes) >= 0`, which is always
+        # true (length can never be negative) — the test ran and "passed"
+        # while masking a real bug: corrupted processed_hashes caused the
+        # ENTIRE _load() to abort before the node-population loop ran, so
+        # a perfectly valid nodes_json got silently discarded too. The
+        # node added before corruption MUST survive — that's the whole
+        # point of "partial write recovery".
+        assert len(g2._nodes) == 1, (
+            f"Node written before hash corruption was lost on reload — "
+            f"got {len(g2._nodes)} nodes, expected 1. This means "
+            f"GraphMemory._load() is letting an unrelated processed_hashes "
+            f"parse failure wipe out valid nodes_json data."
+        )
+        labels = [n.label for n in g2._nodes.values()]
+        assert "Task before corruption" in labels, f"Wrong node survived: {labels}"
 
     def test_add_node_after_load_failure(self, tmp_path):
         """Even if load fails, we should be able to add nodes."""
@@ -61,7 +74,15 @@ class TestCheckpointChaos:
             context_pct=0.0,
         )
         assert ckpt is not None
-        assert ckpt.resume_standard == "" or len(ckpt.resume_standard) >= 0
+        # FIXED: this was `assert ckpt.resume_standard == "" or len(...) >= 0`,
+        # which is mathematically always true (len() can't be negative) — same
+        # vacuous pattern as the bug fixed above in this file. resume_standard
+        # must at minimum be a string (not None, not an exception object) for
+        # an empty-graph checkpoint.
+        assert isinstance(ckpt.resume_standard, str), (
+            f"resume_standard should be a string even for an empty session, "
+            f"got {type(ckpt.resume_standard)}"
+        )
 
     def test_checkpoint_with_no_messages(self, tmp_path):
         """Checkpoint with messages=[] should not crash."""

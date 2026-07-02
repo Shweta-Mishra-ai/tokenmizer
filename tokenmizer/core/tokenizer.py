@@ -1,6 +1,12 @@
 """
-Accurate token counting using tiktoken.
-Replaces every `len(text) // 4` in the codebase.
+Accurate token counting.
+
+- OpenAI/compatible models: tiktoken (model-specific encoding or cl100k_base fallback)
+- Anthropic/Claude models: tiktoken is the WRONG tokenizer — Claude uses a different
+  vocabulary and previously every Claude request was counted with an OpenAI encoder,
+  which is inaccurate (typically 5-20% off, worse on code-heavy content). This module
+  now routes Claude models through the Anthropic SDK's local tokenizer when available,
+  and only falls back to the tiktoken approximation if the SDK doesn't expose one.
 """
 from __future__ import annotations
 
@@ -21,10 +27,53 @@ def _get_encoding(model: str):
         return None
 
 
+def is_claude_model(model: str) -> bool:
+    """True if this is an Anthropic/Claude model — needs the Anthropic tokenizer,
+    not tiktoken."""
+    return "claude" in model.lower() or "anthropic" in model.lower()
+
+
+def _count_with_anthropic_sdk(text: str) -> int | None:
+    """
+    Try the Anthropic SDK's local tokenizer.
+    Older SDK (<0.20): anthropic.count_tokens(text)
+    Some intermediate versions: anthropic.tokenizer.count_tokens(text)
+    Newer SDK versions removed the local tokenizer entirely (requires an API call) —
+    in that case this returns None and the caller falls back to a tiktoken estimate.
+    """
+    try:
+        import anthropic as _anthropic
+        if hasattr(_anthropic, "count_tokens"):
+            return int(_anthropic.count_tokens(text))
+        if hasattr(_anthropic, "tokenizer") and hasattr(_anthropic.tokenizer, "count_tokens"):
+            return int(_anthropic.tokenizer.count_tokens(text))
+    except Exception:
+        pass
+    return None
+
+
 def count_tokens(text: str, model: str = "gpt-4o") -> int:
-    """Accurate token count. Falls back to char/4 if tiktoken not installed."""
+    """
+    Accurate token count for the given model.
+
+    Claude/Anthropic models: tries the Anthropic SDK's local tokenizer first, falls
+    back to a cl100k_base (tiktoken) approximation if the SDK doesn't expose one —
+    this approximation carries a documented error margin, see module docstring.
+    All other models: tiktoken with the correct model-specific encoding.
+    Falls back to char/4 if tiktoken is not installed at all.
+    """
     if not text:
         return 0
+
+    if is_claude_model(model):
+        sdk_count = _count_with_anthropic_sdk(text)
+        if sdk_count is not None:
+            return sdk_count
+        enc = _get_encoding("gpt-4o")  # closest available approximation
+        if enc is not None:
+            return len(enc.encode(text, disallowed_special=()))
+        return max(1, len(text) // _FALLBACK_RATIO)
+
     enc = _get_encoding(model)
     if enc is None:
         return max(1, len(text) // _FALLBACK_RATIO)

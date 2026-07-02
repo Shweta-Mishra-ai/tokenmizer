@@ -126,7 +126,7 @@ tokenmizer serve &
 ```bash
 # User-level (works in every project):
 claude mcp add tokenmizer --transport stdio \
-  python -m tokenmizer.mcp.server
+  python3 -m tokenmizer.mcp.server
 
 # Or edit ~/.claude/settings.json directly:
 ```
@@ -135,7 +135,7 @@ claude mcp add tokenmizer --transport stdio \
 {
   "mcpServers": {
     "tokenmizer": {
-      "command": "python",
+      "command": "python3",
       "args": ["-m", "tokenmizer.mcp.server"],
       "env": {
         "TOKENMIZER_URL": "http://localhost:8000"
