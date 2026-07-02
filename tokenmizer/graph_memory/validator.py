@@ -68,12 +68,12 @@ class ValidationResult:
 class GraphValidator:
     """
     Validates and scores node candidates before graph insertion.
-    
+
     Confidence scoring:
       - starts at 0.5 (neutral)
       - boosted by: specific language, file paths, keywords, context
       - penalised by: short labels, generic words, noise patterns
-    
+
     Threshold: accept if confidence >= 0.5 (configurable)
     """
 

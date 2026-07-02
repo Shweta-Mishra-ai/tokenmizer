@@ -58,11 +58,11 @@ class OutputTrimmer:
     def trim(self, text: str, level: str = "standard") -> tuple[str, int]:
         """
         Remove structural filler from LLM output.
-        
+
         Args:
             text: raw LLM response
             level: "lite" (openings only) | "standard" | "aggressive"
-        
+
         Returns:
             (trimmed_text, tokens_saved)
         """

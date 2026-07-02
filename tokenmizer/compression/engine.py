@@ -309,7 +309,7 @@ class FileContentFilter:
 
     def filter_csv(self, content: str) -> str:
         """Send schema + first N rows instead of full CSV."""
-        lines = [l for l in content.splitlines() if l.strip()]
+        lines = [line for line in content.splitlines() if line.strip()]
         if len(lines) <= self.MAX_CSV_ROWS + 1:
             return content
         header = lines[0]

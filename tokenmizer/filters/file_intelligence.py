@@ -414,9 +414,9 @@ class JSONExtractor:
             data = json.loads(content)
         except json.JSONDecodeError:
             # Try JSONL
-            lines = [l.strip() for l in content.splitlines() if l.strip()]
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
             try:
-                data = [json.loads(l) for l in lines[:1000]]
+                data = [json.loads(line) for line in lines[:1000]]
             except Exception:
                 truncated, was_cut = _truncate_to_budget(content, token_budget)
                 return FileExtractionResult(
@@ -474,7 +474,7 @@ class JSONExtractor:
         elif isinstance(data, list) and data:
             lines.append(f"  {prefix}[]: array({len(data)})")
             lines.append(self._extract_schema(data[0], f"{prefix}[]", max_depth, depth + 1))
-        return "\n".join(l for l in lines if l)
+        return "\n".join(line for line in lines if line)
 
 
 # ── PDF extractor ─────────────────────────────────────────────────────────────
@@ -810,7 +810,7 @@ class TextExtractor:
 class FileIntelligence:
     """
     Main entry point. Auto-detects file type and applies correct strategy.
-    
+
     Usage in app.py:
         fi = FileIntelligence()
         result = fi.process(content, filename, token_budget=500, query=user_query)
@@ -834,7 +834,7 @@ class FileIntelligence:
     ) -> FileExtractionResult:
         """
         Process any file. Returns extracted content within token_budget.
-        
+
         Args:
             content: raw file bytes or text string
             filename: original filename (used for type detection)
@@ -875,7 +875,7 @@ class FileIntelligence:
         Detects patterns like:
           - "Here is my CSV file: <large content>"
           - Multi-line data blocks embedded in user messages
-        
+
         Returns (processed_messages, total_tokens_saved)
         """
         total_saved = 0
@@ -949,8 +949,8 @@ class FileIntelligence:
                 start += 1
 
             sample = lines[start:start + 5]
-            comma_counts = [l.count(",") for l in sample if l]
-            tab_counts = [l.count("\t") for l in sample if l]
+            comma_counts = [line.count(",") for line in sample if line]
+            tab_counts = [line.count("\t") for line in sample if line]
             avg_commas = sum(comma_counts) / max(1, len(comma_counts))
             avg_tabs = sum(tab_counts) / max(1, len(tab_counts))
 

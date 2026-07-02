@@ -30,18 +30,18 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from tokenmizer.graph_memory.types import (
-    NodeType,
-    NodeStatus,
-    EdgeType,
-    MemoryNode,
-    MemoryEdge,
-    DecisionTransition,
-)
 from tokenmizer.graph_memory.helpers import (
     _content_to_text,
-    _infer_trigger,
     _extract_evidence_from_text,
+    _infer_trigger,
+)
+from tokenmizer.graph_memory.types import (
+    DecisionTransition,
+    EdgeType,
+    MemoryEdge,
+    MemoryNode,
+    NodeStatus,
+    NodeType,
 )
 
 __all__ = [

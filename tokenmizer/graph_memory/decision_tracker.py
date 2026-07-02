@@ -126,17 +126,17 @@ def find_contradicting_decisions(
     """
     Find existing decision nodes that cover the same topic as the new decision.
     Returns list of node IDs to mark as SUPERSEDED (history preserved, never deleted).
-    
+
     Only returns decisions that:
     1. Are currently COMPLETED (active)
     2. Cover the same topic bucket
     3. Are NOT the same decision (not a duplicate)
-    
+
     Args:
         new_label: label of the incoming decision
         new_summary: rationale of the incoming decision
         existing_nodes: current graph nodes
-    
+
     Returns:
         List of node IDs to supersede
     """
