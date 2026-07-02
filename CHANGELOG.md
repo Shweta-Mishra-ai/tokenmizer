@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6] — 2026-07-02 — MCP registry readiness
+
+- NEW console script `tokenmizer-mcp` — runs the MCP stdio server directly
+  (no `python3 -m tokenmizer.mcp.server` incantation needed in client configs).
+- README carries the `mcp-name` ownership marker required by the official
+  MCP registry's PyPI package validation.
+
 ## [0.2.5] — 2026-07-02 — restart no longer breaks checkpoints
 
 ### Critical

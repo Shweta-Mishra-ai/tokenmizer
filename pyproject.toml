@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tokenmizer"
-version = "0.2.5"
+version = "0.2.6"
 description = "Reduce AI context loss by 2x. Graph-backed checkpoint and resume for any LLM session."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -73,6 +73,7 @@ all = [
 
 [project.scripts]
 tokenmizer = "tokenmizer.cli:app"
+tokenmizer-mcp = "tokenmizer.mcp.server:run_stdio_server"
 
 [project.urls]
 Homepage = "https://github.com/Shweta-Mishra-ai/tokenmizer"

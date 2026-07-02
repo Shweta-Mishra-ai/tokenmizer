@@ -152,19 +152,22 @@ Then use skills directly:
 
 ### Option B — MCP server
 
+mcp-name: io.github.Shweta-Mishra-ai/tokenmizer
+
 Add to `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "tokenmizer": {
-      "command": "python3",
-      "args": ["-m", "tokenmizer.mcp.server"],
+      "command": "tokenmizer-mcp",
       "env": { "TOKENMIZER_URL": "http://localhost:8000" }
     }
   }
 }
 ```
+
+(`tokenmizer-mcp` is installed with the package; `python3 -m tokenmizer.mcp.server` also works.)
 
 ---
 
