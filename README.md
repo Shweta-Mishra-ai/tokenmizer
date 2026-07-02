@@ -11,6 +11,8 @@
   </p>
 
   <p>
+    <a href="https://pypi.org/project/tokenmizer"><img src="https://img.shields.io/pypi/v/tokenmizer?color=7c6af7&style=flat-square" alt="PyPI"/></a>
+    <a href="https://pypi.org/project/tokenmizer"><img src="https://img.shields.io/pypi/pyversions/tokenmizer?color=5ee7c8&style=flat-square"/></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4ade80?style=flat-square"/></a>
     <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/actions"><img src="https://img.shields.io/github/actions/workflow/status/Shweta-Mishra-ai/tokenmizer/ci.yml?branch=main&style=flat-square&color=4ade80"/></a>
     <img src="https://img.shields.io/badge/Claude%20Code-Plugin-7c6af7?style=flat-square&logo=anthropic"/>
@@ -71,22 +73,16 @@ History is **never deleted**. "Why did we switch from React to Next.js?" — alw
 
 ### 1. Install
 
-> Not yet published to PyPI — install from source (PyPI release is on the
-> roadmap; the `pip install tokenmizer` short form will work after that).
-
 ```bash
-git clone https://github.com/Shweta-Mishra-ai/tokenmizer
-cd tokenmizer
-
 # Recommended
-pip install -e ".[anthropic,cache]"
+pip install "tokenmizer[anthropic,cache]"
 
 # All providers
-pip install -e ".[anthropic,openai,gemini,cohere,cache]"
+pip install "tokenmizer[anthropic,openai,gemini,cohere,cache]"
 
 # No key? Use Ollama (free, local)
 brew install ollama && ollama pull llama3
-pip install -e .
+pip install tokenmizer
 ```
 
 ### 2. Set your API key
