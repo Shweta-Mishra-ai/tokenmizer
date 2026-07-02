@@ -1,14 +1,8 @@
 """
 TokenMizer — main FastAPI application.
 
-All fixes applied:
-- tiktoken accurate token counting everywhere
-- API key authentication on all non-health endpoints
-- State backend (Redis or in-memory, not module-level dicts)
-- Layer 5 (context router) properly wired or removed
-- CORS restricted to configured origins
-- Checkpoint extraction uses full message history
-- No dead code
+OpenAI-compatible proxy: POST /v1/chat/completions plus session/graph
+management endpoints. See README API Reference.
 """
 from __future__ import annotations
 
@@ -231,17 +225,25 @@ def _set_context_used(session_id: str, tokens: int) -> None:
 
 # ── Context window sizes ──────────────────────────────────────────────────────
 
+# Newest Claude models (fable-5, opus-4-8, sonnet-5, haiku-4-5) all match the
+# "claude" prefix entry. Add a specific entry ONLY if a model's window differs.
 _CONTEXT_WINDOWS = {
-    "claude": 200_000, "claude-sonnet": 200_000, "claude-opus": 200_000,
+    "claude-fable-5": 200_000, "claude-opus-4-8": 200_000,
+    "claude-sonnet": 200_000, "claude-opus": 200_000, "claude-haiku": 200_000,
+    "claude": 200_000,
     "gpt-4o": 128_000, "gpt-4": 128_000, "gpt-3.5": 16_000,
     "gemini": 1_000_000, "deepseek": 64_000,
 }
 
 
 def _context_window(model: str) -> int:
-    for k, v in _CONTEXT_WINDOWS.items():
-        if k in model.lower():
-            return v
+    # Longest key first — so "claude-fable-5" wins over the "claude" catch-all
+    # if their values ever diverge. (Previously dict order decided; the broad
+    # "claude" key shadowed every specific entry.)
+    m = model.lower()
+    for k in sorted(_CONTEXT_WINDOWS, key=len, reverse=True):
+        if k in m:
+            return _CONTEXT_WINDOWS[k]
     return 128_000
 
 
@@ -259,7 +261,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.2.3",
+    version="0.2.4",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -277,22 +279,48 @@ app.add_middleware(
 # ── Request / Response models ─────────────────────────────────────────────────
 
 class ChatMessage(BaseModel):
+    """OpenAI-style message. `content` accepts a plain string OR a list of
+    content blocks (multimodal format). Blocks are normalized to text —
+    TokenMizer is a text proxy; non-text blocks (images) are dropped with
+    their text parts preserved."""
     role: str
-    content: str
+    content: str | list | None = ""
+
+    def text(self) -> str:
+        from tokenmizer.graph_memory.helpers import _content_to_text
+        return _content_to_text(self.content)
 
 
 class ChatRequest(BaseModel):
+    """OpenAI-compatible request. Sampling params (temperature, top_p, stop)
+    are forwarded to the provider. Unknown fields are accepted and ignored
+    (extra='allow') so standard OpenAI clients never get a 422 — but only
+    the fields below influence the call."""
+    model_config = {"extra": "allow"}
+
     model: Optional[str] = None
     messages: list[ChatMessage]
     max_tokens: Optional[int] = 4096
     stream: Optional[bool] = False
     session_id: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    stop: Optional[str | list[str]] = None
 
 
-# ── Main endpoint ─────────────────────────────────────────────────────────────
+def _sampling_kwargs(req: "ChatRequest") -> dict:
+    """Sampling params to forward to the provider (only ones explicitly set)."""
+    kw: dict = {}
+    if req.temperature is not None:
+        kw["temperature"] = req.temperature
+    if req.top_p is not None:
+        kw["top_p"] = req.top_p
+    if req.stop is not None:
+        kw["stop"] = req.stop
+    return kw
 
-@app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key), Depends(injection_guard)])
-# ── chat_completions helpers (split from 272-line monolith) ─────────────────
+
+# ── chat_completions helpers ──────────────────────────────────────────────────
 
 
 async def _check_rate_limit(request: Request) -> None:
@@ -553,6 +581,7 @@ async def _call_provider(
         resp  = await provider.chat(
             messages=messages, model=model,
             max_tokens=req.max_tokens or 4096, stream=False,
+            **_sampling_kwargs(req),
         )
     except Exception as e:
         logger.error(f"Provider error: {e}")
@@ -580,6 +609,7 @@ async def _call_provider(
     return response_text, input_tokens, output_tokens, latency_ms
 
 
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key), Depends(injection_guard)])
 async def chat_completions(req: ChatRequest, request: Request):
     """
     Main proxy endpoint — orchestrates all 6 layers.
@@ -606,7 +636,7 @@ async def chat_completions(req: ChatRequest, request: Request):
     #   - checkpoint storage (SQLite) and the graph DB itself
     # Redacting once here means every downstream path is safe by construction
     # instead of relying on each call site to remember to redact.
-    raw_messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    raw_messages = [{"role": m.role, "content": m.text()} for m in req.messages]
     raw_messages = redact_messages(raw_messages)
     messages     = raw_messages[:]
     user_query   = next(
@@ -801,33 +831,6 @@ async def get_transitions(session_id: str):
         "count": len(graph.get_transitions()),
     }
 
-
-
-async def manual_checkpoint(session_id: str, model: str = ""):
-    """Manually trigger a checkpoint for a session."""
-    try:
-        graph = await _get_graph_async(session_id)
-        if not graph._nodes:
-            raise HTTPException(status_code=404, detail="No graph data found for session")
-        ckpt = _checkpoint_mgr.create(
-            session_id=session_id,
-            messages=[],
-            graph=graph,
-            context_pct=0.0,
-            trigger="manual",
-            model=model,
-        )
-        return {
-            "checkpoint_id": ckpt.checkpoint_id,
-            "resume_tokens": ckpt.resume_tokens,
-            "node_count": len(ckpt.graph_snapshot.get("nodes", [])),
-            "resume_standard": ckpt.resume_standard,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Manual checkpoint failed for {session_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Checkpoint failed: {str(e)}")
 
 
 @app.post("/api/checkpoint", dependencies=[Depends(verify_api_key)])

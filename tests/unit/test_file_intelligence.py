@@ -168,7 +168,7 @@ from pathlib import Path
 class MyClass:
     def __init__(self, name: str):
         self.name = name
-    
+
     def process(self):
         # lots of implementation
         result = []

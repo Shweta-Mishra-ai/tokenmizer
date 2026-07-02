@@ -43,7 +43,7 @@ class TestNodeDeduplication:
 
     def test_status_does_not_downgrade(self, graph):
         id1 = graph.add_node(NodeType.TASK, "Implement auth", NodeStatus.COMPLETED)
-        id2 = graph.add_node(NodeType.TASK, "Implement auth", NodeStatus.PENDING)
+        graph.add_node(NodeType.TASK, "Implement auth", NodeStatus.PENDING)
         assert graph._nodes[id1].status == NodeStatus.COMPLETED
 
 

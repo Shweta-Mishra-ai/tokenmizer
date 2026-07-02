@@ -32,7 +32,16 @@ from __future__ import annotations
 import logging
 import re
 
-# FastAPI imported lazily — _scan_messages works without it
+# Request must be importable at module scope: injection_guard is a FastAPI
+# dependency and its `request` parameter MUST carry a resolvable `Request`
+# annotation. Without it, FastAPI treats `request` as a required string
+# QUERY parameter and every POST /v1/chat/completions gets a 422
+# ("query.request missing") — the endpoint is dead for all clients.
+# _scan_messages still works without fastapi installed (fallback below).
+try:
+    from fastapi import Request
+except ImportError:  # pragma: no cover — non-FastAPI usage of _scan_messages
+    Request = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +101,7 @@ def _scan_messages(messages: list[dict]) -> bool:
     return False
 
 
-async def injection_guard(request) -> None:
+async def injection_guard(request: Request) -> None:
     """FastAPI dependency. Raises 400 on a matched denylist phrase.
 
     FIXED: previously raised 429 (Too Many Requests), which is semantically

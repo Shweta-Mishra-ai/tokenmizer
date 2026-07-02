@@ -16,6 +16,7 @@ Extended during the audit/fix pass to cover:
     the injection filter completely, regardless of what text was inside).
 """
 import pytest
+
 from tokenmizer.security.redaction import redact, redact_messages, redact_node
 
 
@@ -186,6 +187,7 @@ class TestInjectionDetection:
         injection-flagged request will fail identically on every retry —
         400 (Bad Request) is the correct, non-misleading status code."""
         from fastapi import HTTPException
+
         from tokenmizer.security.middleware import injection_guard
 
         class FakeURL:
@@ -226,6 +228,7 @@ class TestAuthFailClosed:
     @pytest.mark.asyncio
     async def test_settings_error_fails_closed_not_open(self, monkeypatch):
         from fastapi import HTTPException
+
         import tokenmizer.security.auth as auth_module
 
         def broken_get_settings():
@@ -270,6 +273,7 @@ class TestAuthFailClosed:
     @pytest.mark.asyncio
     async def test_invalid_key_rejected(self, monkeypatch):
         from fastapi import HTTPException
+
         import tokenmizer.security.auth as auth_module
 
         class FakeSettings:
