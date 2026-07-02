@@ -945,4 +945,14 @@ async def get_resume(session_id: str, level: str = "standard"):
         }
         text = resume_map.get(level, ckpt.resume_standard)
         return {
-         
+            "session_id": session_id,
+            "checkpoint_id": ckpt.checkpoint_id,
+            "level": level,
+            "resume_context": text,
+            "token_count": count_tokens(text),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Resume failed for {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Resume failed: {str(e)}")
