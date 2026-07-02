@@ -765,8 +765,9 @@ async def get_graph_obsidian(session_id: str):
     Download graph as Obsidian Canvas (.canvas) file.
     Save as <any-name>.canvas inside your Obsidian vault and open directly.
     """
-    from fastapi.responses import Response as _Resp
     import json as _json
+
+    from fastapi.responses import Response as _Resp
     graph = await _get_graph_async(session_id)
     canvas = graph.to_obsidian_canvas()
     filename = f"tokenmizer-{session_id[:12]}.canvas"

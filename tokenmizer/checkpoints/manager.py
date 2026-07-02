@@ -178,7 +178,7 @@ class CheckpointManager:
 
     def _build_critical(self, graph: GraphMemory, next_action: str) -> str:
         """~100 tokens. Only open blockers + critical decisions."""
-        from tokenmizer.graph_memory.graph import NodeType, NodeStatus
+        from tokenmizer.graph_memory.graph import NodeStatus, NodeType
         lines = []
 
         open_errors = [n for n in graph._nodes.values()
@@ -214,7 +214,7 @@ class CheckpointManager:
 
     def _build_full(self, graph: GraphMemory, messages: list[dict], next_action: str) -> str:
         """~600 tokens. Deep resume with environment, schemas, dependencies."""
-        from tokenmizer.graph_memory.graph import NodeType, NodeStatus
+        from tokenmizer.graph_memory.graph import NodeStatus, NodeType
         parts = [self._build_standard(graph, "")]
 
         env_nodes = [n for n in graph._nodes.values() if n.type == NodeType.ENVIRONMENT]

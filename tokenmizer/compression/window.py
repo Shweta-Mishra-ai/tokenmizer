@@ -52,7 +52,7 @@ class SmartMessageWindow:
     ) -> tuple[list[dict], int]:
         """
         Apply smart windowing to messages.
-        
+
         Returns:
             (windowed_messages, tokens_saved)
         """
