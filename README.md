@@ -85,24 +85,44 @@ History is **never deleted**. "Why did we switch from React to Next.js?" — alw
 
 ### 1. Install
 
+Works on **Windows, macOS, and Linux** (Python 3.10+). Same command everywhere:
+
 ```bash
 # Recommended
 pip install "tokenmizer[anthropic,cache]"
 
 # All providers
 pip install "tokenmizer[anthropic,openai,gemini,cohere,cache]"
-
-# No key? Use Ollama (free, local)
-brew install ollama && ollama pull llama3
-pip install tokenmizer
 ```
+
+<details>
+<summary><b>No API key? Use Ollama (free, local)</b></summary>
+
+```bash
+# macOS:   brew install ollama
+# Windows: winget install Ollama.Ollama   (or download from ollama.com)
+# Linux:   curl -fsSL https://ollama.com/install.sh | sh
+
+ollama pull llama3
+pip install tokenmizer
+# then set provider: ollama in tokenmizer.yaml
+```
+</details>
 
 ### 2. Set your API key
 
+**macOS / Linux (bash, zsh):**
 ```bash
 export TOKENMIZER_ANTHROPIC_API_KEY=sk-ant-...
-# or: TOKENMIZER_OPENAI_API_KEY, TOKENMIZER_GEMINI_API_KEY, etc.
 ```
+
+**Windows (PowerShell):**
+```powershell
+$env:TOKENMIZER_ANTHROPIC_API_KEY = "sk-ant-..."      # current session
+setx TOKENMIZER_ANTHROPIC_API_KEY "sk-ant-..."         # persistent (new terminals)
+```
+
+Other providers: `TOKENMIZER_OPENAI_API_KEY`, `TOKENMIZER_GEMINI_API_KEY`, etc. — full table in [Supported Providers](#supported-providers).
 
 ### 3. Start
 
@@ -158,11 +178,11 @@ Then use skills directly:
 /tokenmizer:stats                      → token savings report
 ```
 
-### Option B — MCP server
+### Option B — MCP server (Claude Desktop, Claude Code, Cursor, VS Code, Zed)
 
 mcp-name: io.github.Shweta-Mishra-ai/tokenmizer
 
-Add to `~/.claude/settings.json`:
+Add this `mcpServers` block to your client's MCP config file:
 
 ```json
 {
@@ -175,7 +195,20 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-(`tokenmizer-mcp` is installed with the package; `python3 -m tokenmizer.mcp.server` also works.)
+Where the config file lives:
+
+| Client | Config file |
+|---|---|
+| **Claude Desktop** (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
+| **Claude Desktop** (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| **Claude Code** | `.mcp.json` in your project, or `~/.claude/settings.json` |
+| **Cursor** | Settings → MCP → Add server (same JSON) |
+| **VS Code / Zed** | their MCP settings — same `command` + `env` |
+
+Then restart the client. Keep `tokenmizer serve` running for the
+checkpoint/resume/stats tools (file analysis works without it).
+If `tokenmizer-mcp` isn't on your PATH, use `"command": "python"`,
+`"args": ["-m", "tokenmizer.mcp.server"]` instead.
 
 ---
 
