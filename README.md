@@ -26,6 +26,10 @@
     <a href="#claude-code-integration"><b>Claude Code</b></a> ·
     <a href="#contributing"><b>Contributing</b></a>
   </p>
+
+  <img src="docs/assets/demo.gif" width="860" alt="TokenMizer demo: 40-turn session checkpointed at 87% context, resumed next day in 233 tokens"/>
+  <br/>
+  <sub>Real run: 25-node graph, checkpoint <code>ckpt_21a0959c3ddf</code>, 233-token resume. Regenerate with <code>python scripts/gen_demo_gif.py</code>.</sub>
 </div>
 
 ---
