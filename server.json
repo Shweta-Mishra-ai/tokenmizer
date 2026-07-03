@@ -1,27 +1,32 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Shweta-Mishra-ai/tokenmizer",
-  "description": "An MCP server that provides [describe what your server does]",
+  "description": "Graph-backed session memory for LLMs: checkpoint, resume, file analysis, token-savings stats.",
   "repository": {
     "url": "https://github.com/Shweta-Mishra-ai/tokenmizer",
     "source": "github"
   },
-  "version": "1.0.0",
+  "version": "0.2.6",
   "packages": [
     {
       "registryType": "pypi",
-      "identifier": "tokenmizer\"\r",
-      "version": "1.0.0",
-      "transport": {
-        "type": "stdio"
-      },
+      "identifier": "tokenmizer",
+      "version": "0.2.6",
+      "transport": { "type": "stdio" },
       "environmentVariables": [
         {
-          "description": "Your API key for the service",
-          "isRequired": true,
+          "name": "TOKENMIZER_URL",
+          "description": "Base URL of the running TokenMizer proxy (default http://localhost:8000)",
+          "isRequired": false,
           "format": "string",
-          "isSecret": true,
-          "name": "YOUR_API_KEY"
+          "isSecret": false
+        },
+        {
+          "name": "TOKENMIZER_API_KEY",
+          "description": "API key if the proxy has auth enabled",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
         }
       ]
     }

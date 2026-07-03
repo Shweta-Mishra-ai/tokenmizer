@@ -12,11 +12,19 @@
 
   <p>
     <a href="https://pypi.org/project/tokenmizer"><img src="https://img.shields.io/pypi/v/tokenmizer?color=7c6af7&style=flat-square" alt="PyPI"/></a>
-    <a href="https://pypi.org/project/tokenmizer"><img src="https://img.shields.io/pypi/pyversions/tokenmizer?color=5ee7c8&style=flat-square"/></a>
+    <a href="https://pypi.org/project/tokenmizer"><img src="https://img.shields.io/pypi/dm/tokenmizer?color=5ee7c8&style=flat-square" alt="Downloads"/></a>
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/actions"><img src="https://img.shields.io/github/actions/workflow/status/Shweta-Mishra-ai/tokenmizer/ci.yml?branch=main&style=flat-square&color=4ade80" alt="CI"/></a>
+    <a href="https://registry.modelcontextprotocol.io/v0/servers?search=tokenmizer"><img src="https://img.shields.io/badge/MCP%20Registry-published-5ee7c8?style=flat-square" alt="MCP Registry"/></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4ade80?style=flat-square"/></a>
-    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/actions"><img src="https://img.shields.io/github/actions/workflow/status/Shweta-Mishra-ai/tokenmizer/ci.yml?branch=main&style=flat-square&color=4ade80"/></a>
-    <img src="https://img.shields.io/badge/Claude%20Code-Plugin-7c6af7?style=flat-square&logo=anthropic"/>
-    <img src="https://img.shields.io/badge/MCP-Compatible-5ee7c8?style=flat-square"/>
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/stargazers"><img src="https://img.shields.io/github/stars/Shweta-Mishra-ai/tokenmizer?style=flat-square&color=f9d84a" alt="Stars"/></a>
+  </p>
+
+  <p>
+    <a href="#quick-start"><b>Quick Start</b></a> ·
+    <a href="#how-tokenmizer-solves-it"><b>How it works</b></a> ·
+    <a href="#benchmarks"><b>Benchmarks</b></a> ·
+    <a href="#claude-code-integration"><b>Claude Code</b></a> ·
+    <a href="#contributing"><b>Contributing</b></a>
   </p>
 </div>
 
@@ -430,15 +438,48 @@ tokenmizer stats
 
 ---
 
+## Roadmap
+
+| Version | Focus |
+|---|---|
+| **v0.3** | SSE streaming passthrough (checkpoint on stream close) |
+| v0.4 | Cross-session memory · embedding-based edge linking |
+| v0.5 | Per-node storage schema (scale past 200-node graphs) |
+| Research | Real-transcript benchmark suite → paper ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research)) |
+
+Have a use case that doesn't fit? [Open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/new/choose) — extraction misses have their own issue template.
+
+---
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Graph extraction contributions are the highest priority.
+Contributions welcome — this project merges fast (median PR review < 1 day).
 
 ```bash
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
+cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -v && ruff check tokenmizer/
+pytest tests/ -v && ruff check tokenmizer/     # 218 tests, must stay green
+python scripts/mcp_e2e_check.py                # full-pipeline e2e check
 ```
+
+**Highest-impact areas right now:**
+
+1. **Graph extraction quality** — real-world transcripts where extraction misses tasks/decisions (file an [extraction-miss issue](.github/ISSUE_TEMPLATE/extraction_miss.md) even if you don't fix it — the failing transcript itself is the contribution)
+2. **SSE streaming** (v0.3 headline feature)
+3. **Benchmark sessions** — add a real session + ground truth to `benchmarks/`
+
+Every PR runs the full CI gauntlet (tests × 3 Python versions, lint, Docker build). See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [TESTING.md](TESTING.md) for the test architecture.
+
+---
+
+## Support the project
+
+TokenMizer is built and maintained by one person. If it saved you tokens, time, or a lost session:
+
+- ⭐ **[Star the repo](https://github.com/Shweta-Mishra-ai/tokenmizer)** — the single best way to help others find it
+- 🐛 [Report a bug](https://github.com/Shweta-Mishra-ai/tokenmizer/issues) — especially extraction misses
+- 📣 Share your before/after token numbers (`tokenmizer stats`) — real usage data shapes the roadmap
 
 ---
 
@@ -450,4 +491,6 @@ MIT © [Shweta Mishra](https://github.com/Shweta-Mishra-ai)
 
 <div align="center">
   <sub>Built for developers who spend too much time re-explaining their projects to AI.</sub>
+  <br/><br/>
+  <a href="https://github.com/Shweta-Mishra-ai/tokenmizer"><img src="https://img.shields.io/github/stars/Shweta-Mishra-ai/tokenmizer?style=social" alt="GitHub stars"/></a>
 </div>
