@@ -261,7 +261,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.3.0",
+    version="0.3.1",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -860,6 +860,15 @@ async def get_graph_viz(session_id: str):
     """
     graph = await _get_graph_async(session_id)
     return graph.to_vis_json()
+
+
+@app.get("/api/graph/{session_id}/html", dependencies=[Depends(verify_api_key)])
+async def get_graph_html(session_id: str):
+    """Shareable standalone interactive graph — open in a browser, drag/zoom,
+    screenshot, share. Self-contained dark-theme D3 force layout."""
+    from tokenmizer.graph_memory.visualization import to_share_html
+    graph = await _get_graph_async(session_id)
+    return HTMLResponse(to_share_html(graph))
 
 
 @app.get("/api/graph/{session_id}/obsidian", dependencies=[Depends(verify_api_key)])

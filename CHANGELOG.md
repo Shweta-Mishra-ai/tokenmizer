@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1] — 2026-07-03 — shareable graph visualization
+
+- NEW `GET /api/graph/{session_id}/html` — self-contained dark interactive
+  force-graph page (D3): drag, zoom, glow-styled typed nodes, legend, live
+  stats header. Open in any browser, screenshot, share. Your session's
+  memory, visible.
+
 ## [0.3.0] — 2026-07-02 — true SSE streaming
 
 - **`stream: true` now works** — real passthrough streaming in OpenAI

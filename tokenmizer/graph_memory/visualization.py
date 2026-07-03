@@ -226,3 +226,88 @@ def to_obsidian_canvas(graph: "GraphMemory") -> dict:
     })
 
     return {"nodes": canvas_nodes, "edges": canvas_edges}
+
+
+# ── Shareable standalone HTML (the "look at my session's brain" artifact) ────
+
+_SHARE_HTML_TEMPLATE = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>TokenMizer — __SESSION__</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<style>
+ body{margin:0;background:#0d1117;color:#c9d1d9;font:14px/1.4 'Segoe UI',system-ui,sans-serif;overflow:hidden}
+ #hdr{position:fixed;top:0;left:0;right:0;padding:14px 22px;display:flex;gap:18px;align-items:baseline;
+      background:linear-gradient(#0d1117ee,#0d111700);z-index:2;pointer-events:none}
+ #hdr b{font-size:18px;color:#e6edf3}
+ #hdr .stat{color:#8b949e}#hdr .stat i{color:#5ee7c8;font-style:normal;font-weight:600}
+ #legend{position:fixed;bottom:44px;left:22px;z-index:2;display:flex;flex-wrap:wrap;gap:10px;max-width:70vw}
+ #legend span{display:flex;align-items:center;gap:5px;color:#8b949e;font-size:12px}
+ #legend i{width:10px;height:10px;border-radius:50%;display:inline-block}
+ #ftr{position:fixed;bottom:12px;left:22px;color:#484f58;font-size:12px;z-index:2}
+ #ftr a{color:#7c6af7;text-decoration:none}
+ .node text{fill:#c9d1d9;font-size:11px;pointer-events:none;text-shadow:0 1px 3px #000}
+ svg{cursor:grab}svg:active{cursor:grabbing}
+</style></head><body>
+<div id="hdr"><b>🧠 __SESSION__</b>
+ <span class="stat"><i>__NODES__</i> nodes</span>
+ <span class="stat"><i>__EDGES__</i> edges</span>
+ <span class="stat"><i>__DECISIONS__</i> decisions tracked</span></div>
+<div id="legend"></div>
+<div id="ftr">session memory graph · <a href="https://github.com/Shweta-Mishra-ai/tokenmizer">TokenMizer</a> · pip install tokenmizer</div>
+<script>
+const data = __DATA__;
+const COLOR = __COLORS__;
+const W=innerWidth,H=innerHeight;
+const svg=d3.select("body").append("svg").attr("width",W).attr("height",H);
+const defs=svg.append("defs");
+const glow=defs.append("filter").attr("id","glow");
+glow.append("feGaussianBlur").attr("stdDeviation","4").attr("result","b");
+const m=glow.append("feMerge");m.append("feMergeNode").attr("in","b");m.append("feMergeNode").attr("in","SourceGraphic");
+const g=svg.append("g");
+svg.call(d3.zoom().scaleExtent([0.2,4]).on("zoom",e=>g.attr("transform",e.transform)));
+const link=g.selectAll("line").data(data.edges).join("line")
+ .attr("stroke",d=>d.color||"#30363d").attr("stroke-opacity",0.45).attr("stroke-width",1.2);
+const node=g.selectAll("g.node").data(data.nodes).join("g").attr("class","node")
+ .call(d3.drag().on("start",(e,d)=>{if(!e.active)sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y})
+ .on("drag",(e,d)=>{d.fx=e.x;d.fy=e.y})
+ .on("end",(e,d)=>{if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null}));
+node.append("circle").attr("r",d=>d.size||10).attr("fill",d=>COLOR[d.type]||"#8b949e")
+ .attr("fill-opacity",d=>d.opacity??0.9).attr("filter","url(#glow)")
+ .append("title").text(d=>d.type+": "+d.label+(d.summary?" — "+d.summary:""));
+node.append("text").attr("dx",d=>(d.size||10)+4).attr("dy",4)
+ .text(d=>d.label.length>34?d.label.slice(0,32)+"…":d.label);
+const sim=d3.forceSimulation(data.nodes)
+ .force("link",d3.forceLink(data.edges).id(d=>d.id).distance(90).strength(0.4))
+ .force("charge",d3.forceManyBody().strength(-260))
+ .force("center",d3.forceCenter(W/2,H/2))
+ .force("collide",d3.forceCollide().radius(d=>(d.size||10)+14))
+ .on("tick",()=>{link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y)
+ .attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
+ node.attr("transform",d=>`translate(${d.x},${d.y})`)});
+const types=[...new Set(data.nodes.map(d=>d.type))];
+d3.select("#legend").selectAll("span").data(types).join("span")
+ .html(t=>`<i style="background:${COLOR[t]||"#8b949e"}"></i>${t}`);
+</script></body></html>
+"""
+
+
+def to_share_html(graph: "GraphMemory") -> str:
+    """Self-contained dark interactive force-graph HTML — open in any
+    browser, drag/zoom, screenshot, share. The viral artifact."""
+    import json as _json
+
+    vis = graph.to_vis_json()
+    nodes = vis.get("nodes", [])
+    edges = vis.get("edges", [])
+    # d3.forceLink needs source/target keys
+    for e in edges:
+        e.setdefault("source", e.get("from") or e.get("source_id"))
+        e.setdefault("target", e.get("to") or e.get("target_id"))
+    decisions = sum(1 for n in nodes if n.get("type") == "decision")
+    html = (_SHARE_HTML_TEMPLATE
+            .replace("__SESSION__", graph.session_id)
+            .replace("__NODES__", str(len(nodes)))
+            .replace("__EDGES__", str(len(edges)))
+            .replace("__DECISIONS__", str(decisions))
+            .replace("__DATA__", _json.dumps({"nodes": nodes, "edges": edges}))
+            .replace("__COLORS__", _json.dumps(_TYPE_COLOR)))
+    return html

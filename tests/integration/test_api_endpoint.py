@@ -190,3 +190,18 @@ class TestHealthAndDocs:
         r = c.get("/health")
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
+
+    def test_graph_share_html(self, client):
+        """Shareable graph page: real HTML with D3 + the session's nodes."""
+        c, _ = client
+        # Put something in the graph via the pipeline first
+        c.post("/v1/chat/completions", json={
+            "messages": [{"role": "user",
+                          "content": "Decided: use PostgreSQL for the html-viz session"}],
+            "session_id": "html-viz-test",
+        })
+        r = c.get("/api/graph/html-viz-test/html")
+        assert r.status_code == 200
+        assert "text/html" in r.headers["content-type"]
+        assert "d3" in r.text and "forceSimulation" in r.text
+        assert "html-viz-test" in r.text
