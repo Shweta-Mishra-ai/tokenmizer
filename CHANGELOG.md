@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0] — 2026-07-02 — true SSE streaming
+
+- **`stream: true` now works** — real passthrough streaming in OpenAI
+  `chat.completion.chunk` SSE format for Anthropic, OpenAI, DeepSeek,
+  Mistral, OpenRouter, Grok (OpenAI-compatible base) and Ollama. Cursor,
+  Continue.dev and every streaming client can now point at TokenMizer
+  without config changes.
+- All input-side layers (file intelligence, compression, graph memory,
+  context injection) apply to streamed requests; output trimming is
+  skipped in stream mode by design. Cache hits stream as a single chunk;
+  post-stream analytics + cache writes preserved.
+- Providers without passthrough support return an explicit 501 (never a
+  fake buffered stream). Mid-stream provider failures emit an SSE `error`
+  event instead of silently truncating.
+
 ## [0.2.6] — 2026-07-02 — MCP registry readiness
 
 - NEW console script `tokenmizer-mcp` — runs the MCP stdio server directly

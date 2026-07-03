@@ -16,7 +16,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from tokenmizer.analytics.engine import AnalyticsEngine
@@ -261,7 +261,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.2.6",
+    version="0.3.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -558,17 +558,6 @@ async def _call_provider(
             output_tokens = count_tokens(cached.response, model)
             return cached.response, 0, output_tokens, 0.0
 
-    # Streaming check
-    if req.stream:
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "Streaming is not yet supported by the TokenMizer proxy. "
-                "Set stream=False in your request, or connect directly to "
-                "your provider for streaming. True SSE streaming is planned for v0.3."
-            ),
-        )
-
     # LLM call
     # NOTE: `messages` is already redacted — redaction now happens once at
     # ingestion in chat_completions() so every downstream consumer (this call,
@@ -607,6 +596,83 @@ async def _call_provider(
                    session_id=session_id)
 
     return response_text, input_tokens, output_tokens, latency_ms
+
+
+def _stream_response(req, messages, model, user_content, session_id,
+                     savings, orig_input_tokens) -> StreamingResponse:
+    """True SSE passthrough (OpenAI chat.completion.chunk format).
+
+    Cache hits stream as a single chunk. After the stream closes, analytics
+    and the semantic-cache write run on the accumulated text — same
+    bookkeeping as the non-stream path, minus output trimming.
+    """
+    import json as _json
+
+    from tokenmizer.providers.providers import BaseProvider, ProviderError
+
+    provider = _get_provider()
+    if getattr(type(provider), "chat_stream", None) is BaseProvider.chat_stream:
+        raise HTTPException(
+            status_code=501,
+            detail=(f"Streaming passthrough is not implemented for provider "
+                    f"'{settings.provider}' yet (supported: anthropic, openai, "
+                    f"deepseek, mistral, openrouter, grok, ollama). "
+                    f"Set stream=false for this provider."),
+        )
+
+    resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+
+    def _chunk(delta: dict, finish: str | None = None) -> str:
+        return "data: " + _json.dumps({
+            "id": resp_id, "object": "chat.completion.chunk",
+            "created": created, "model": model, "session_id": session_id,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }) + "\n\n"
+
+    async def _gen():
+        full_text = ""
+        t0 = time.monotonic()
+        yield _chunk({"role": "assistant"})
+        try:
+            cached = (_cache.get(user_content, session_id=session_id)
+                      if settings.cache.enabled and user_content else None)
+            if cached:
+                full_text = cached.response
+                yield _chunk({"content": full_text})
+            else:
+                async for piece in provider.chat_stream(
+                    messages=messages, model=model,
+                    max_tokens=req.max_tokens or 4096,
+                    **_sampling_kwargs(req),
+                ):
+                    full_text += piece
+                    yield _chunk({"content": piece})
+        except ProviderError as e:
+            # Mid-stream failure: SSE can't change the status code anymore —
+            # emit an explicit error event instead of silently truncating.
+            yield "data: " + _json.dumps({"error": {"message": str(e), "type": "provider_error"}}) + "\n\n"
+        yield _chunk({}, finish="stop")
+        yield "data: [DONE]\n\n"
+
+        # Post-stream bookkeeping
+        latency_ms = (time.monotonic() - t0) * 1000
+        output_tokens = count_tokens(full_text, model)
+        input_tokens = count_messages_tokens(messages, model)
+        if settings.cache.enabled and user_content and full_text:
+            _cache.set(user_content, full_text, input_tokens=input_tokens,
+                       output_tokens=output_tokens, session_id=session_id)
+        _analytics.record(
+            session_id=session_id, provider=settings.provider, model=model,
+            input_tokens_original=orig_input_tokens,
+            input_tokens_sent=input_tokens, output_tokens=output_tokens,
+            tokens_saved=sum(savings.values()), latency_ms=latency_ms,
+            cache_hit=False, layer_savings=savings,
+        )
+
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key), Depends(injection_guard)])
@@ -661,6 +727,13 @@ async def chat_completions(req: ChatRequest, request: Request):
         messages, checkpoint_status = await _update_graph(
             session_id, graph, raw_messages, messages, model, savings, user_query
         )
+
+    # Streaming: true SSE passthrough (v0.3). Output-trimming is skipped in
+    # stream mode (can't trim tokens that already left the building) — all
+    # input-side layers (file intel, compression, graph context) still apply.
+    if req.stream:
+        return _stream_response(req, messages, model, user_content,
+                                session_id, savings, orig_input_tokens)
 
     # Layer 5: call provider (or return cache hit)
     response_text, input_tokens_actual, output_tokens, latency_ms = await _call_provider(

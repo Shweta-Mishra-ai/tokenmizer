@@ -107,6 +107,21 @@ class BaseProvider(ABC):
 
         raise ProviderError(self.__class__.__name__, "max_retries", "All retry attempts exhausted", retryable=False)
 
+    def chat_stream(self, messages: list[dict], model: str = "",
+                    max_tokens: int = 4096, system: str = "", **kwargs):
+        """Async generator yielding text chunks as the provider produces them.
+
+        Providers that support true streaming override this. The base
+        implementation raises so the API layer can return a clear 501 for
+        providers where passthrough streaming isn't implemented yet, instead
+        of silently degrading to a fake (buffered) stream.
+        """
+        raise ProviderError(
+            self.__class__.__name__, "stream_not_supported",
+            f"Streaming passthrough not implemented for {self.__class__.__name__}",
+            retryable=False,
+        )
+
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 
@@ -179,6 +194,37 @@ class AnthropicProvider(BaseProvider):
             retryable = e.status_code in (500, 502, 503, 529)
             raise ProviderError("anthropic", f"http_{e.status_code}", str(e), retryable=retryable)
 
+    async def chat_stream(self, messages: list[dict], model: str = "",
+                          max_tokens: int = 4096, system: str = "", **kwargs):
+        """True SSE passthrough — yields text chunks as Anthropic streams them."""
+        try:
+            import anthropic
+        except ImportError:
+            raise ImportError("pip install anthropic")
+        model = model or self.default_model
+        client = anthropic.AsyncAnthropic(api_key=self.api_key)
+
+        sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
+        if system:
+            sys_parts.insert(0, system)
+        conv = [m for m in messages if m.get("role") != "system"]
+        kwargs_clean = _sampling(kwargs)
+        if "stop" in kwargs_clean:
+            kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
+        if sys_parts:
+            kwargs_clean["system"] = "\n\n".join(sys_parts)
+
+        try:
+            async with client.messages.stream(
+                model=model, messages=conv, max_tokens=max_tokens, **kwargs_clean
+            ) as s:
+                async for chunk in s.text_stream:
+                    yield chunk
+        except anthropic.RateLimitError as e:
+            raise ProviderError("anthropic", "rate_limit", str(e), retryable=True)
+        except anthropic.APIStatusError as e:
+            raise ProviderError("anthropic", f"http_{e.status_code}", str(e), retryable=False)
+
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 
@@ -236,6 +282,37 @@ class OpenAIProvider(BaseProvider):
             err = str(e).lower()
             retryable = "rate" in err or "server" in err or "timeout" in err
             raise ProviderError("openai", "api_error", str(e), retryable=retryable)
+
+    async def chat_stream(self, messages: list[dict], model: str = "",
+                          max_tokens: int = 4096, system: str = "", **kwargs):
+        """True SSE passthrough for OpenAI and all OpenAI-compatible providers
+        (DeepSeek, Mistral, OpenRouter, Grok inherit this)."""
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            raise ImportError("pip install openai")
+        model = model or self.default_model
+        client = AsyncOpenAI(
+            api_key=self.api_key,
+            **({"base_url": self._base_url} if self._base_url else {}),
+        )
+        all_messages = messages[:]
+        if system:
+            all_messages = [{"role": "system", "content": system}] + all_messages
+        try:
+            stream = await client.chat.completions.create(
+                model=model, messages=all_messages, max_tokens=max_tokens,
+                stream=True, **_sampling(kwargs),
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+                if delta:
+                    yield delta
+        except Exception as e:
+            err = str(e).lower()
+            retryable = "rate" in err or "server" in err or "timeout" in err
+            raise ProviderError(self.__class__.__name__.lower().replace("provider", ""),
+                                "api_error", str(e), retryable=retryable)
 
 
 # ── DeepSeek ──────────────────────────────────────────────────────────────────
@@ -426,6 +503,37 @@ class OllamaProvider(BaseProvider):
                 )
             except Exception as e:
                 raise ProviderError("ollama", "api_error", str(e), retryable=True)
+
+    async def chat_stream(self, messages: list[dict], model: str = "",
+                          max_tokens: int = 4096, system: str = "", **kwargs):
+        """Streaming passthrough for local Ollama models."""
+        import json as _json
+
+        import httpx
+        model = model or self.default_model
+        all_messages = messages[:]
+        if system:
+            all_messages = [{"role": "system", "content": system}] + all_messages
+        payload = {"model": model, "messages": all_messages, "stream": True,
+                   "options": {"num_predict": max_tokens}}
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream("POST", f"{self._base_url}/api/chat",
+                                         json=payload) as r:
+                    r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        if not line.strip():
+                            continue
+                        data = _json.loads(line)
+                        chunk = data.get("message", {}).get("content", "")
+                        if chunk:
+                            yield chunk
+                        if data.get("done"):
+                            break
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("ollama", "api_error", str(e), retryable=True)
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
