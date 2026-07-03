@@ -45,39 +45,24 @@ def add(lines, ms):
 
 
 add([("$ pip install tokenmizer", FG, bold),
-     ("Successfully installed tokenmizer-0.2.6", GREEN, font),
-     ("", FG, font),
-     ("$ export TOKENMIZER_ANTHROPIC_API_KEY=sk-ant-...", FG, bold),
      ("$ tokenmizer serve", FG, bold),
-     ("  Proxy:     http://localhost:8000/v1/chat/completions", CYAN, font),
-     ("  Dashboard: http://localhost:8000", CYAN, font),
+     ("  Proxy: http://localhost:8000/v1  (point any OpenAI client here)", CYAN, font),
      ("", FG, font),
-     ("# point any OpenAI-compatible client at localhost:8000 -", DIM, font),
-     ("# one line changed, zero code rewritten", DIM, font)], 2600)
-
-add([("session: fastapi-auth            model: claude-fable-5", DIM, font),
-     ("", FG, font),
-     ("you > Let's build a FastAPI auth service with JWT + PostgreSQL", FG, font),
-     ("ai  > Decided: PostgreSQL (concurrent writes). Files: api/auth.py ...", DIM, font),
-     ("you > Use bcrypt and Python 3.12", FG, font),
-     ("ai  > Decided: bcrypt (industry standard) ...", DIM, font),
-     ("you > Login returns 422, fix it", FG, font),
-     ("ai  > Fixed: missing email validation in LoginRequest ...", DIM, font),
-     ("you > Add refresh tokens with Redis", FG, font),
-     ("ai  > Decided: Redis for refresh tokens (faster revocation) ...", DIM, font),
+     ("session: fastapi-auth", DIM, font),
+     ("you > Build a FastAPI auth service with JWT + PostgreSQL", FG, font),
+     ("you > Use bcrypt / fix the 422 / add Redis refresh tokens ...", FG, font),
      ("            ... 40 turns later ...", YELLOW, bold),
      ("", FG, font),
-     ("  context window: 87% full", YELLOW, bold)], 3200)
+     ("  context window: 87% full", YELLOW, bold)], 2400)
 
 add([("  context window: 87% full", YELLOW, bold),
      ("", FG, font),
      ("  * auto-checkpoint triggered *", PURPLE, bold),
      ("", FG, font),
-     ("  graph: 25 nodes extracted (tasks / decisions / files / errors)", FG, font),
+     ("  graph: 25 nodes (tasks / decisions / files / errors)", FG, font),
      ("  checkpoint: ckpt_21a0959c3ddf   saved to SQLite", GREEN, font),
-     ("  resume size: 233 tokens", GREEN, bold),
      ("", FG, font),
-     ("  session history: ~5,800 tokens -> 233 tokens", CYAN, bold)], 3000)
+     ("  ~5,800 tokens of history  ->  233 tokens", CYAN, bold)], 2400)
 
 add([("  -- next day, fresh session --", DIM, font),
      ("", FG, font),
@@ -86,12 +71,11 @@ add([("  -- next day, fresh session --", DIM, font),
      ("Goal: a FastAPI auth service with JWT and PostgreSQL", GREEN, font),
      ("Working on: rate limiting with slowapi", FG, font),
      ("Done: tests/test_auth.py (12 tests passing) | 422 login fix", FG, font),
-     ("Decided: PostgreSQL | bcrypt | Python 3.12 |", FG, font),
-     ("         Redis for refresh tokens (faster revocation)", FG, font),
+     ("Decided: PostgreSQL | bcrypt | Python 3.12 | Redis refresh tokens", FG, font),
      ("Changes: 'Use Redis' -> 'Redis for refresh token storage'", YELLOW, font),
      ("Continue from: Write the tests", CYAN, font),
      ("", FG, font),
-     ("  [233 tokens - paste into any new session and keep going]", DIM, font)], 4200)
+     ("  [233 tokens - paste anywhere, keep going]", DIM, font)], 3400)
 
 im = Image.new("RGB", (W, H), BG)
 d = ImageDraw.Draw(im)
@@ -100,7 +84,7 @@ d.text((W // 2 - 260, H // 2 - 70), "never re-explain your project again", font=
 d.text((W // 2 - 215, H // 2 - 20), "~5,800 tokens  ->  233 tokens resume", font=big, fill=GREEN)
 d.text((W // 2 - 130, H // 2 + 40), "pip install tokenmizer", font=bold, fill=PURPLE)
 frames.append(im)
-durs.append(3500)
+durs.append(2600)
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 frames[0].save(OUT, save_all=True, append_images=frames[1:],
