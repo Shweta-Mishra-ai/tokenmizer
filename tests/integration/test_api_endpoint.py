@@ -126,7 +126,40 @@ class TestChatCompletionsE2E:
         assert kwargs.get("temperature") == 0.0
         assert kwargs.get("top_p") == 0.9
 
-    def test_stream_returns_501_with_clear_message(self, client):
+    def test_streaming_returns_sse_chunks(self, client):
+        """v0.3: stream=true must return true SSE passthrough in OpenAI
+        chat.completion.chunk format, ending with data: [DONE]."""
+        c, fake = client
+
+        async def fake_stream(**kwargs):
+            for piece in ("Hello", " streamed", " world"):
+                yield piece
+
+        fake.chat_stream = fake_stream
+        r = c.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "stream me a story please"}],
+            "stream": True,
+        })
+        assert r.status_code == 200, r.text
+        assert "text/event-stream" in r.headers["content-type"]
+        body = r.text
+        assert "chat.completion.chunk" in body
+        assert '"content": "Hello"' in body
+        assert '"content": " streamed"' in body
+        assert '"finish_reason": "stop"' in body
+        assert body.rstrip().endswith("data: [DONE]")
+
+    def test_streaming_unsupported_provider_returns_501(self, client, monkeypatch):
+        """Providers without chat_stream override must get a clear 501,
+        not a fake buffered stream."""
+        from tokenmizer.api import app as app_module
+        from tokenmizer.providers.providers import BaseProvider
+
+        class NoStreamProvider(BaseProvider):
+            async def _call(self, *a, **k):  # pragma: no cover
+                raise NotImplementedError
+
+        monkeypatch.setattr(app_module, "_get_provider", lambda: NoStreamProvider())
         c, _ = client
         r = c.post("/v1/chat/completions", json={
             "messages": [{"role": "user", "content": "hi"}],

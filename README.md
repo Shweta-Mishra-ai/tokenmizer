@@ -130,13 +130,9 @@ response = client.chat.completions.create(
 )
 ```
 
-> **⚠️ Streaming is not supported yet.** Set `stream: false` (or leave it unset —
-> that's the default) in every request. Requests with `stream: true` return
-> `HTTP 501`. True SSE streaming is planned for v0.3.
->
-> **Cursor:** Settings → Models → your model entry → disable "Stream responses"
-> **Continue.dev:** in `config.json`, set `"streamResponses": false` for the
-> TokenMizer provider entry
+> ✅ **Streaming works** (v0.3+): `stream: true` gives real SSE passthrough for
+> Anthropic, OpenAI, DeepSeek, Mistral, OpenRouter, Grok and Ollama. Cursor and
+> Continue.dev work with default settings — no config changes needed.
 
 ---
 
