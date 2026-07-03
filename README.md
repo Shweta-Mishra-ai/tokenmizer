@@ -83,6 +83,67 @@ History is **never deleted**. "Why did we switch from React to Next.js?" — alw
 
 ## Quick Start
 
+<details>
+<summary><b>🟢 Complete step-by-step setup (start here if you're new — 5 minutes, no code reading needed)</b></summary>
+
+<br/>
+
+**Step 0 — Check Python** (need 3.10 or newer)
+
+Open a terminal (Windows: press Win, type "PowerShell", Enter · Mac: Cmd+Space, type "Terminal"):
+
+```
+python --version
+```
+
+You should see `Python 3.10` or higher. If not: install from [python.org/downloads](https://python.org/downloads) (Windows: tick **"Add Python to PATH"** during install).
+
+**Step 1 — Install TokenMizer**
+
+```
+pip install "tokenmizer[anthropic,cache]"
+```
+
+✅ You should see: `Successfully installed tokenmizer-...`
+
+**Step 2 — Add your API key** (get one at [console.anthropic.com](https://console.anthropic.com) → API Keys)
+
+Windows PowerShell:
+```powershell
+setx TOKENMIZER_ANTHROPIC_API_KEY "sk-ant-YOUR-KEY"
+```
+then **close and reopen** the terminal.
+
+Mac/Linux:
+```bash
+export TOKENMIZER_ANTHROPIC_API_KEY=sk-ant-YOUR-KEY
+```
+
+*(No key? Use free local Ollama instead — see "No API key?" below.)*
+
+**Step 3 — Start TokenMizer**
+
+```
+tokenmizer serve
+```
+
+✅ You should see: `Proxy: http://localhost:8000/v1/chat/completions`
+Leave this terminal open — TokenMizer runs here.
+
+**Step 4 — Verify it's alive**
+
+Open [http://localhost:8000](http://localhost:8000) in your browser → the TokenMizer dashboard appears. That's it — the proxy works.
+
+**Step 5 — Connect your tool** (pick yours)
+
+- **Cursor:** Settings → Models → OpenAI API → Base URL: `http://localhost:8000/v1`
+- **Claude Desktop / Claude Code:** see [Claude Code Integration](#claude-code-integration) below (copy one JSON block, restart the app)
+- **Your own Python code:** see "Use — change one line" below
+
+**Something failed?** `pip` not found → reinstall Python with "Add to PATH". Port 8000 busy → `tokenmizer serve --port 8001`. Anything else → [open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues) with the error text — median response < 1 day.
+
+</details>
+
 ### 1. Install
 
 Works on **Windows, macOS, and Linux** (Python 3.10+). Same command everywhere:
