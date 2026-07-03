@@ -313,6 +313,7 @@ TOKENMIZER_API_KEY=strong-key docker-compose up
 | `/api/checkpoint` | POST | Manual checkpoint |
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
 | `/api/graph/{id}` | GET | Session graph stats |
+| `/api/graph/{id}/html` | GET | **Interactive graph page** — open, drag, zoom, share |
 | `/api/stats` | GET | Token savings analytics |
 | `/health` | GET | Health check |
 | `/docs` | GET | Swagger UI |
