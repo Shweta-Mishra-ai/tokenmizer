@@ -265,6 +265,17 @@ Where the config file lives:
 | **Claude Code** | `.mcp.json` in your project, or `~/.claude/settings.json` |
 | **Cursor** | Settings → MCP → Add server (same JSON) |
 | **VS Code / Zed** | their MCP settings — same `command` + `env` |
+| **OpenAI Codex CLI** | `~/.codex/config.toml` — TOML format, see below |
+
+<details>
+<summary>Codex CLI config (TOML, not JSON)</summary>
+
+```toml
+[mcp_servers.tokenmizer]
+command = "tokenmizer-mcp"
+env = { TOKENMIZER_URL = "http://localhost:8000" }
+```
+</details>
 
 Then restart the client. Keep `tokenmizer serve` running for the
 checkpoint/resume/stats tools (file analysis works without it).
@@ -587,5 +598,5 @@ MIT © [Shweta Mishra](https://github.com/Shweta-Mishra-ai)
 <div align="center">
   <sub>Built for developers who spend too much time re-explaining their projects to AI.</sub>
   <br/><br/>
-  <a href="https://github.com/Shweta-Mishra-ai/tokenmizer"><img src="https://img.shields.io/github/stars/Shweta-Mishra-ai/tokenmizer?style=social" alt="GitHub stars"/></a>
+  <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/stargazers"><img src="https://img.shields.io/github/stars/Shweta-Mishra-ai/tokenmizer?style=flat-square&color=f9d84a&label=%E2%AD%90%20Star%20on%20GitHub" alt="GitHub stars"/></a>
 </div>
