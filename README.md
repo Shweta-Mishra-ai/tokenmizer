@@ -76,9 +76,15 @@ Your App  →  TokenMizer (:8000)  →  Claude / GPT / Gemini / any LLM
 | 🟢 `ACTIVE` | Current — in effect | ✅ Always |
 | 🟡 `SUPERSEDED` | Replaced by newer decision | ⚠️ 7 days |
 | 🔴 `INVALIDATED` | Explicitly wrong/cancelled | ⚠️ Always (warning) |
-| ⬜ `ARCHIVED` | Old but valid, not relevant | ❌ Never |
+| ⬜ `ARCHIVED` | Superseded >7 days ago — aged out | ❌ Never |
 
 History is **never deleted**. "Why did we switch from React to Next.js?" — always answerable.
+
+> Honesty note (2026-07-10 audit): before v0.3.2, `ARCHIVED` was advertised
+> here but **unreachable** — the decay/prune/query logic all handled it, yet
+> no code path ever set it. Superseded decisions now age into `ARCHIVED`
+> automatically after 7 days (`GraphMemory.ARCHIVE_SUPERSEDED_AFTER_DAYS`),
+> which is what makes the "⚠️ 7 days" row above actually true.
 
 ---
 
@@ -379,7 +385,13 @@ default_model: claude-sonnet-4-6
 graph_checkpoint:
   enabled: true
   trigger_at_percent: 0.85
-  use_llm_extraction: false     # true = 80%+ recall, needs key (~$0.001/turn)
+  use_llm_extraction: false     # true = hybrid LLM+heuristic extraction
+                                # (needs a provider key, ~$0.001/turn).
+                                # NOTE: before v0.3.2 this flag silently did
+                                # nothing — the call site passed provider_fn
+                                # to the wrong function and raised TypeError
+                                # on every turn, falling back to heuristics.
+                                # Fixed + regression-tested; see CHANGELOG.
 
 compression:
   enabled: true
@@ -419,7 +431,7 @@ TOKENMIZER_API_KEY=strong-key docker-compose up
 | `/api/checkpoint` | POST | Manual checkpoint |
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
 | `/api/graph/{id}` | GET | Session graph stats |
-| `/api/graph/{id}/html` | GET | **Interactive graph page** — open, drag, zoom, share |
+| `/api/graph/{id}/html` | GET | **Interactive graph page** — decision-history timeline, supersession arcs, type/status filters, search, zoom/pan, PNG export. Zero external dependencies (works offline) |
 | `/api/stats` | GET | Token savings analytics |
 | `/health` | GET | Health check |
 | `/docs` | GET | Swagger UI |
@@ -432,7 +444,13 @@ TOKENMIZER_API_KEY=strong-key docker-compose up
 - Secret/PII redaction applied once at ingestion, before graph storage,
   checkpoint storage, AND every LLM call (main chat *and* the background
   extraction model — these are separate, the redaction gap between them
-  was a real bug, now fixed)
+  was a real bug, now fixed). Patterns cover Anthropic/OpenAI/Google/
+  GitHub/AWS/Slack/Stripe/JWT/OpenRouter/HF/xAI keys, URL-embedded
+  credentials (`postgres://user:pass@host` — a 2026-07 audit gap, fixed),
+  and generic `key=`/`password=` assignments. Best-effort by nature —
+  an unrecognized format with no keyword context can still slip through.
+  The checkpoint layer independently re-redacts what it persists
+  (defense-in-depth, added in the same audit).
 - Session-isolated cache (sensitive data never shared across sessions)
 - Basic prompt-injection keyword filter — catches copy-pasted jailbreak
   templates only; **not** a security boundary against a motivated
@@ -566,7 +584,7 @@ Contributions welcome — this project merges fast (median PR review < 1 day).
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -v && ruff check tokenmizer/     # 218 tests, must stay green
+pytest tests/ -v && ruff check tokenmizer/     # 262 tests, must stay green
 python scripts/mcp_e2e_check.py                # full-pipeline e2e check
 ```
 

@@ -137,6 +137,29 @@ class TestRedaction:
         cleaned = redact_messages(messages)  # must not raise
         assert "sk-proj" not in cleaned[0]["content"][1]
 
+    # ── AUDIT FIX (2026-07-10): coverage gaps found in the redaction audit ──
+
+    def test_connection_string_password_redacted(self):
+        """A DATABASE_URL password matched NO pattern before this fix —
+        no 'password=' literal, no recognized token prefix."""
+        text = "set DATABASE_URL=postgres://admin:Tr0ub4dor3@db.internal:5432/prod"
+        result = redact(text)
+        assert "Tr0ub4dor3" not in result
+        assert "db.internal" in result, "host must survive — only creds redacted"
+
+    def test_connection_string_no_password_untouched(self):
+        text = "connect to https://db.internal:5432/prod for details"
+        assert "db.internal:5432" in redact(text)
+
+    def test_openrouter_key_redacted(self):
+        assert "abcDEF" not in redact("key: sk-or-v1-abcDEF1234567890abcDEF1234567890")
+
+    def test_huggingface_token_redacted(self):
+        assert "AbCdEf" not in redact("hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
+
+    def test_xai_key_redacted(self):
+        assert "SECRETGROKKEY" not in redact("xai-SECRETGROKKEY12345678901234")
+
 
 class TestInjectionDetection:
     """

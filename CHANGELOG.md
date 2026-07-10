@@ -1,5 +1,160 @@
 # Changelog
 
+## [0.3.2] — 2026-07-10 — full-repo audit: graph memory, MCP server, visualization
+
+### Critical — the LLM extraction path never worked
+- **`api/app.py`:** the background extraction called
+  `HybridExtractor(provider_fn=_pfn)` — a kwarg `__init__` never accepted —
+  so it raised `TypeError` on EVERY call, and even without that,
+  `ext.extract(_msgs)` omitted `provider_fn`, which defaults to `None` and
+  skips the LLM pass. Net effect: **`use_llm_extraction: true` has never
+  once produced an LLM extraction** — every call raised, was caught by the
+  broad except, and logged as if it were a transient provider failure.
+  Fixed (`HybridExtractor()` + `extract(_msgs, provider_fn=_pfn)`) with a
+  regression test that replicates the exact call pattern.
+
+### Graph memory — topic classifier
+- **"Go" the verb collided with Go the language:** "Go with tRPC for the
+  API layer" classified as `language` (first-single-word-hit-wins never
+  reached "trpc"), so a later "use gRPC instead" never superseded it.
+  Bare "go" removed from language keywords; unambiguous forms kept
+  ("golang", "in go", "use go", ...).
+- **Vocabulary drift:** hybrid_extractor.py knew supabase/clerk/etc., the
+  classifier didn't — those decisions classified as None and supersession
+  silently never fired. New buckets: backend_platform, auth_provider,
+  payments, observability, state_management, package_manager, styling.
+- **Multi-topic decisions collapsed to one topic:** "Use FastAPI with
+  SQLAlchemy and PostgreSQL" returned only `web_framework`; a later
+  Postgres→SQLite switch was never detected as contradicting it. New
+  `classify_topics()` returns ALL matched topics; contradiction detection
+  is now set-intersection. Bigrams match first and consume their words
+  ("session store" no longer leaks a spurious `auth_mechanism`).
+  `classify_topic()` kept as a backward-compatible wrapper.
+- **`ARCHIVED` was unreachable:** documented, fully wired into decay/
+  prune/query logic — and nothing ever set it. The README advertised a
+  4-state model whose 4th state could not occur. SUPERSEDED decisions now
+  age into ARCHIVED after 7 days (from supersession time, not creation).
+- `/api/decision/invalidate` substring-matched across ALL decision nodes
+  regardless of status — a short label could flip already-SUPERSEDED
+  history nodes to INVALIDATED, destroying their supersession record.
+  Now only ACTIVE decisions are eligible, and the response lists exactly
+  which nodes were affected.
+
+### MCP server — hardened like a client integration
+- **`isError` was string-sniffing** (`result_text.startswith("❌")`): a
+  missing required argument produced `"Tool error: 'session_id'"` with
+  `isError: false` — MCP clients saw a *successful* result. Handlers now
+  return `(text, is_error)` structurally; missing/invalid args produce
+  typed validation errors with `isError: true`.
+- **Three server-killer inputs fixed:** an exception inside `initialize`
+  crashed the whole stdio loop with no JSON-RPC error (client hung, then
+  watched the subprocess die); a valid-JSON-but-not-an-object line
+  (`[1,2]`) raised AttributeError and killed the loop; malformed JSON was
+  silently dropped (`continue` — the request hung forever, no log, no
+  error). Per-request try/except now returns `-32603`, non-objects get
+  `-32600`, parse failures get `-32700` + a warning log.
+- **`logger` was dead code** — defined, never called once. Every caught
+  exception was invisible to the operator. `run_stdio_server()` now
+  configures stderr logging (stdout stays protocol-only), controlled by
+  `TOKENMIZER_MCP_LOG_LEVEL`.
+- Input validation: `session_id`/`file_path` presence+type, `level` enum,
+  `token_budget` positive-int (bool explicitly rejected — it's an int
+  subclass), non-dict `arguments`.
+- 18 new unit tests (`tests/unit/test_mcp_server.py`) covering all of the
+  above; `scripts/mcp_e2e_check.py` still ALL PASS.
+- `server.json` version synced (was 0.2.6, three releases stale).
+
+### Silent failures made visible (continuing the v0.2.x hardening)
+- `hybrid_extractor.llm_extract`: debug→warning (a provider outage
+  silently degraded every turn to heuristic-only).
+- `compression/engine.filter_json`: swallowed ALL exceptions with zero
+  logging (returned unfiltered content). Real failures now log at
+  warning; the benign not-JSON case stays quiet.
+- `graph._load_transitions`: DB corruption looked identical to the benign
+  first-run case (both debug). Corruption now warns; first-run stays debug.
+- `file_intelligence.detect_file_type`: sniff failure silently reclassified
+  files as "text" (worse extraction, no signal) — now warns. PDFs where
+  NO page yields text now warn once (scanned/image-only detection).
+- `CheckpointManager`: new `persistence_broken` flag — previously the
+  constructor swallowed a triple init failure and reported healthy while
+  every subsequent save was doomed. `get_latest()` now raises
+  `StorageError` on DB read failure instead of returning None ("no
+  checkpoint found, 404" vs "your checkpoints exist but are unreadable"
+  are different problems; callers can finally tell them apart).
+- **`_db_connect` leaked the connection when the WAL PRAGMA failed on a
+  corrupt DB file** (both graph.py and manager.py) — on Windows the open
+  handle blocked the documented delete-and-recreate recovery path
+  (WinError 32). Found because the chaos test failed for the RIGHT reason
+  once get_latest stopped swallowing errors.
+
+### Security — redaction gaps
+- URL-embedded credentials (`postgres://admin:pass@host/db`) matched NO
+  pattern — no `password=` literal, no recognized prefix. Now redacted
+  (credential part only; host survives for readability).
+- Added OpenRouter / Hugging Face / xAI / Together key patterns.
+- Checkpoint `next_action` (a raw 200-char message slice persisted to
+  SQLite) is now independently redacted — defense-in-depth so the
+  single-point-of-application assumption in chat_completions() is not the
+  only thing between a pasted key and the checkpoint DB.
+
+### Visualization — redesigned (was a generic node soup)
+- The old shareable HTML exported `transitions` (the supersession
+  history — the one thing this product tracks that a generic graph view
+  doesn't) and then never rendered them. It also loaded D3 from a CDN, so
+  the "self-contained" artifact broke offline.
+- New artifact (zero external deps, hand-rolled force layout):
+  supersession arcs (dashed red, old→new, arrowheads), a clickable
+  "Decision history" timeline panel (struck-through old label → new label
+  with trigger/reason/timestamp; click = spotlight both nodes + center),
+  glow rings on active decisions vs dashed rings + strikethrough on
+  superseded/archived, red rings on invalidated, per-type filter chips,
+  "Active only" toggle, text search, wheel-zoom/pan, one-click PNG export.
+- Verified in a real browser (not just unit-tested): filters, search,
+  timeline spotlight, and layout all exercised via DOM inspection.
+
+### CLI
+- `tokenmizer --help` crashed on Windows (cp1252) with UnicodeEncodeError
+  from the 🧠 emoji — found by dry-running the README quick start. Same
+  UTF-8 reconfigure fix the benchmark runners got in v0.2.4; the CLI had
+  been missed.
+
+### Round 2 — extraction-quality residuals (same audit, follow-up pass)
+- **Near-duplicate decision nodes merged instead of self-superseding:**
+  one message ("Decided: use React for the frontend.") could emit two
+  decision variants ("Use React" + "use React for the frontend.") via
+  different regex passes; they became two nodes and one superseded the
+  other — a bogus "Changed:" line in every resume. `_is_same_decision`
+  now recognizes containment (smaller label's words ⊆ larger's, min 2
+  words so "Use PostgreSQL" is NOT collapsed into "Switch from PostgreSQL
+  to SQLite"), and `add_node` fuzzy-merges same-decision variants: keeps
+  the existing node, upgrades to the longer label, backfills the summary,
+  never resurrects SUPERSEDED status. Verified end-to-end: the demo
+  scenario now produces exactly one transition (React→Next.js) and a
+  clean resume block.
+- **Validator now honors extractor corroboration confidence:** it used to
+  recompute confidence purely from label length/wording, so a doubly-
+  corroborated short decision (0.95) could be rejected while a verbose
+  weakly-sourced one passed. `validate()` gains `extractor_confidence`;
+  final = max(heuristic, (heuristic+extractor)/2) — monotone (evidence
+  only raises), not an override (heuristic-only 0.65 still fails a 0.65
+  threshold), and hard rejects remain absolute (0.95 cannot resurrect
+  junk). Wired from `add_node` via the existing confidence≠0.7 sentinel.
+- **`HybridExtractor.min_confidence` is no longer dead code:** extract()
+  now filters merged output by merge()'s confidence tiers — default 0.55
+  keeps every tier (behavior unchanged); 0.7 drops heuristic-only items;
+  0.9 keeps only corroborated ones. Decisions filter per-item, simple
+  lists per-category.
+- Test fixture fix: `test_prune_preserves_decisions` used ten decisions
+  differing only by a trailing digit — 83% word-overlap, which
+  `_is_same_decision` always considered the same decision; the merge fix
+  made that judgment consequential, collapsing the fixture. Replaced with
+  ten genuinely distinct decisions across different topic buckets.
+
+### Tests
+- 220 → 275 (55 new: MCP server 18, classifier+dedup 18, archival 3,
+  invalidate-scope 2, redaction 5, LLM-pass regression 1, validator
+  blending 4, min_confidence filter 4).
+
 ## [0.3.1] — 2026-07-03 — shareable graph visualization
 
 - NEW `GET /api/graph/{session_id}/html` — self-contained dark interactive
@@ -111,7 +266,9 @@
   removed; benchmark table updated to freshly measured v0.2.4 numbers with
   date and sample-size caveat.
 
-## [Unreleased] — tokenizer, cache, and version consistency fixes
+## Shipped in [0.2.4] — tokenizer, cache, and version consistency fixes
+
+(Header fixed 2026-07-10: this section was left titled "[Unreleased]" after it shipped.)
 
 ### Correctness — core value proposition
 - **`core/tokenizer.py`:** Claude/Anthropic models were counted with tiktoken
@@ -175,7 +332,9 @@
   Quick Start code example (previously only mentioned deep in the CLI
   section) — Cursor/Continue.dev users were hitting an unexplained HTTP 501.
 
-## [Unreleased] — security/correctness audit pass
+## Shipped in [0.2.4] — security/correctness audit pass
+
+(Header fixed 2026-07-10: this section was left titled "[Unreleased]" after it shipped.)
 
 Full senior-level audit covering security, silent failures, dead code,
 and benchmark honesty. See `TESTING.md` for what's verified vs. not, and

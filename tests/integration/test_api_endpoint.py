@@ -192,7 +192,13 @@ class TestHealthAndDocs:
         assert r.json()["status"] == "ok"
 
     def test_graph_share_html(self, client):
-        """Shareable graph page: real HTML with D3 + the session's nodes."""
+        """Shareable graph page: self-contained interactive HTML.
+
+        REDESIGNED (2026-07-10): no more D3-from-CDN — the artifact must
+        work offline. It must also actually render the supersession
+        history (transitions), which the old template computed and then
+        silently never used.
+        """
         c, _ = client
         # Put something in the graph via the pipeline first
         c.post("/v1/chat/completions", json={
@@ -203,5 +209,67 @@ class TestHealthAndDocs:
         r = c.get("/api/graph/html-viz-test/html")
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
-        assert "d3" in r.text and "forceSimulation" in r.text
         assert "html-viz-test" in r.text
+        # Self-contained: no external script/style loads
+        assert "<script src=" not in r.text
+        assert "https://cdn" not in r.text
+        # Supersession story is first-class now
+        assert "Decision history" in r.text
+        assert '"transitions"' in r.text
+        # Filtering / export controls present
+        assert "Active only" in r.text
+        assert "exportPng" in r.text
+
+
+class TestInvalidateDecisionScope:
+    """
+    AUDIT FIX (2026-07-10): /api/decision/invalidate previously substring-
+    matched across ALL decision nodes regardless of status — invalidating
+    "postgres" would also flip an already-SUPERSEDED postgres decision,
+    destroying its supersession history. Only ACTIVE (COMPLETED) decisions
+    are now eligible, and the response lists exactly what was affected.
+    """
+
+    def _seed_graph(self, session_id, tmp_path):
+        from tokenmizer.api import app as app_module
+        from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
+
+        # Isolated storage dir: using the app's real ./checkpoints dir made
+        # this test order-dependent — state persisted by a previous run
+        # (the INVALIDATED node) reloaded on construction and dedup kept
+        # the higher-ranked status, so no ACTIVE node existed to match.
+        g = GraphMemory(session_id, storage_dir=str(tmp_path))
+        old_id = g.add_node(NodeType.DECISION, "Use PostgreSQL for storage",
+                            NodeStatus.COMPLETED)
+        new_id = g.add_node(NodeType.DECISION, "Switch to PostgreSQL 16 with pgvector",
+                            NodeStatus.COMPLETED)
+        # add_node supersedes the first (same topic); confirm the precondition
+        assert g._nodes[old_id].status == NodeStatus.SUPERSEDED
+        app_module._graph_cache[session_id] = g
+        return g, old_id, new_id
+
+    def test_invalidate_skips_superseded_nodes(self, client, tmp_path):
+        c, _ = client
+        g, old_id, new_id = self._seed_graph("invalidate-scope-test", tmp_path)
+
+        r = c.post("/api/decision/invalidate",
+                   params={"session_id": "invalidate-scope-test",
+                           "decision_label": "postgresql",
+                           "reason": "benchmarks showed it was wrong"})
+        assert r.status_code == 200
+        body = r.json()
+
+        from tokenmizer.graph_memory.graph import NodeStatus
+        # The ACTIVE node flips; the SUPERSEDED one keeps its history.
+        assert g._nodes[new_id].status == NodeStatus.INVALIDATED
+        assert g._nodes[old_id].status == NodeStatus.SUPERSEDED
+        affected_ids = {n["node_id"] for n in body["affected_nodes"]}
+        assert affected_ids == {new_id}
+
+    def test_invalidate_no_active_match_404s(self, client, tmp_path):
+        c, _ = client
+        self._seed_graph("invalidate-404-test", tmp_path)
+        r = c.post("/api/decision/invalidate",
+                   params={"session_id": "invalidate-404-test",
+                           "decision_label": "no-such-decision"})
+        assert r.status_code == 404

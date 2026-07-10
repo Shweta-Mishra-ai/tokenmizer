@@ -24,6 +24,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The release tag (v0.3.2) must match the package version — otherwise
+      # a stale tag publishes the wrong code under the wrong number. Version
+      # pins across server.json / plugin.json / app.py are enforced by
+      # tests/unit/test_version_consistency.py in the test run below.
+      - name: Verify tag matches package version
+        run: |
+          pip install -e .
+          PKG_VERSION=$(python -c "import tokenmizer; print(tokenmizer.__version__)")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package version $PKG_VERSION"
+            exit 1
+          fi
+
       - name: Run tests first — never publish a broken build
         run: |
           pip install -e ".[dev]"

@@ -183,27 +183,52 @@ def _post(path: str, body: dict) -> dict:
 
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
+#
+# Every handler returns (text, is_error). AUDIT FIX (2026-07-10): previously
+# handlers returned bare strings and the transport decided isError by checking
+# result_text.startswith("❌") — so a KeyError from a missing required argument
+# surfaced as "Tool error: 'session_id'" with isError: FALSE, i.e. reported to
+# MCP clients as a *successful* tool result. isError is now structural.
 
-def handle_checkpoint_session(args: dict) -> str:
-    session_id = args["session_id"]
+
+class ToolInputError(ValueError):
+    """Client sent arguments that fail the tool's declared inputSchema."""
+
+
+def _require_str(args: dict, key: str) -> str:
+    val = args.get(key)
+    if not isinstance(val, str) or not val.strip():
+        raise ToolInputError(
+            f"Missing or invalid required argument '{key}' (expected a "
+            f"non-empty string, got {type(val).__name__}: {val!r})"
+        )
+    return val
+
+
+def handle_checkpoint_session(args: dict) -> tuple[str, bool]:
+    session_id = _require_str(args, "session_id")
     result = _post(f"/api/checkpoint?session_id={session_id}", {})
     if "error" in result:
-        return f"❌ Checkpoint failed: {result['error']}"
+        return f"❌ Checkpoint failed: {result['error']}", True
     return (
         f"✅ Session '{session_id}' checkpointed\n"
         f"Checkpoint ID: {result.get('checkpoint_id', 'unknown')}\n"
         f"Nodes in graph: {result.get('node_count', 0)}\n"
         f"Resume size: {result.get('resume_tokens', 0)} tokens\n\n"
         f"Resume context:\n{result.get('resume_standard', '')}"
-    )
+    ), False
 
 
-def handle_resume_session(args: dict) -> str:
-    session_id = args["session_id"]
+def handle_resume_session(args: dict) -> tuple[str, bool]:
+    session_id = _require_str(args, "session_id")
     level = args.get("level", "standard")
+    if level not in ("critical", "standard", "full"):
+        raise ToolInputError(
+            f"Invalid 'level': {level!r} (expected critical|standard|full)"
+        )
     result = _get(f"/api/resume/{session_id}?level={level}")
     if "error" in result:
-        return f"❌ Resume failed: {result['error']}"
+        return f"❌ Resume failed: {result['error']}", True
     ctx = result.get("resume_context", "")
     tokens = result.get("token_count", 0)
     if not ctx:
@@ -216,19 +241,19 @@ def handle_resume_session(args: dict) -> str:
             f"'{session_id}' but its graph was empty (no session activity "
             f"had been recorded when it was created). Chat through the proxy "
             f"with this session_id, then checkpoint again."
-        )
+        ), False
     return (
         f"[TokenMizer Resume — session: {session_id} — {tokens} tokens]\n\n"
         f"{ctx}\n\n"
         f"[Paste the above into your system prompt to resume this session]"
-    )
+    ), False
 
 
-def handle_get_graph_stats(args: dict) -> str:
-    session_id = args["session_id"]
+def handle_get_graph_stats(args: dict) -> tuple[str, bool]:
+    session_id = _require_str(args, "session_id")
     result = _get(f"/api/graph/{session_id}")
     if "error" in result:
-        return f"❌ Graph stats failed: {result['error']}"
+        return f"❌ Graph stats failed: {result['error']}", True
     by_type = result.get("by_type", {})
     by_status = result.get("by_status", {})
     lines = [
@@ -244,19 +269,26 @@ def handle_get_graph_stats(args: dict) -> str:
     lines.append("\nNode statuses:")
     for s, count in sorted(by_status.items()):
         lines.append(f"  {s}: {count}")
-    return "\n".join(lines)
+    return "\n".join(lines), False
 
 
-def handle_analyze_file(args: dict) -> str:
-    file_path = args["file_path"]
+def handle_analyze_file(args: dict) -> tuple[str, bool]:
+    file_path = _require_str(args, "file_path")
     token_budget = args.get("token_budget", 500)
+    if not isinstance(token_budget, int) or isinstance(token_budget, bool) \
+            or token_budget <= 0:
+        raise ToolInputError(
+            f"Invalid 'token_budget': {token_budget!r} (expected a positive integer)"
+        )
     query = args.get("query", "")
+    if not isinstance(query, str):
+        raise ToolInputError(f"Invalid 'query': expected string, got {type(query).__name__}")
 
     try:
         from pathlib import Path
         path = Path(file_path)
         if not path.exists():
-            return f"❌ File not found: {file_path}"
+            return f"❌ File not found: {file_path}", True
 
         content = path.read_bytes()
         from tokenmizer.filters.file_intelligence import FileIntelligence
@@ -269,15 +301,16 @@ def handle_analyze_file(args: dict) -> str:
             f"Extracted: {result.extracted_tokens} tokens | "
             f"Saved: {result.savings_pct:.0f}%\n\n"
             f"{result.content}"
-        )
+        ), False
     except Exception as e:
-        return f"❌ File analysis error: {e}"
+        logger.warning(f"analyze_file failed for {file_path}: {type(e).__name__}: {e}")
+        return f"❌ File analysis error: {type(e).__name__}: {e}", True
 
 
-def handle_get_savings_stats(args: dict) -> str:
+def handle_get_savings_stats(args: dict) -> tuple[str, bool]:
     result = _get("/api/stats")
     if "error" in result:
-        return f"❌ Stats failed: {result['error']}"
+        return f"❌ Stats failed: {result['error']}", True
     d = result.get("daily", {})
     w = result.get("weekly", {})
     breakdown = result.get("layer_breakdown", {})
@@ -293,12 +326,13 @@ def handle_get_savings_stats(args: dict) -> str:
     ]
     for layer, saved in sorted(breakdown.items()):
         lines.append(f"  {layer}: {saved:,} tokens")
-    return "\n".join(lines)
+    return "\n".join(lines), False
 
 
 # ── MCP stdio transport ───────────────────────────────────────────────────────
 
-def handle_tool_call(name: str, arguments: dict) -> str:
+def handle_tool_call(name: str, arguments: Any) -> tuple[str, bool]:
+    """Dispatch a tools/call. Returns (text, is_error) — never raises."""
     handlers = {
         "checkpoint_session": handle_checkpoint_session,
         "resume_session": handle_resume_session,
@@ -308,18 +342,87 @@ def handle_tool_call(name: str, arguments: dict) -> str:
     }
     handler = handlers.get(name)
     if not handler:
-        return f"Unknown tool: {name}"
+        # AUDIT FIX: was reported with isError false (looked like success).
+        return f"Unknown tool: {name!r}. Available: {sorted(handlers)}", True
+    if not isinstance(arguments, dict):
+        return (
+            f"Invalid arguments for tool '{name}': expected a JSON object, "
+            f"got {type(arguments).__name__}"
+        ), True
     try:
         return handler(arguments)
+    except ToolInputError as e:
+        logger.warning(f"Tool '{name}' rejected input: {e}")
+        return f"Invalid input for tool '{name}': {e}", True
     except Exception as e:
-        return f"Tool error: {e}"
+        logger.exception(f"Tool '{name}' crashed")
+        return f"Tool '{name}' internal error: {type(e).__name__}: {e}", True
+
+
+def _handle_request(req: dict, send) -> None:
+    """Handle one parsed JSON-RPC request object."""
+    req_id = req.get("id")
+    method = req.get("method", "")
+    params = req.get("params") if isinstance(req.get("params"), dict) else {}
+    is_notification = "id" not in req
+
+    if method == "initialize":
+        from tokenmizer import __version__
+        send({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "tokenmizer", "version": __version__},
+            },
+        })
+
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}})
+
+    elif method == "tools/call":
+        tool_name = params.get("name", "")
+        arguments = params.get("arguments", {})
+        result_text, is_error = handle_tool_call(tool_name, arguments)
+        send({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {
+                "content": [{"type": "text", "text": result_text}],
+                "isError": is_error,
+            },
+        })
+
+    elif method.startswith("notifications/"):
+        pass  # notifications never get a response
+
+    elif not is_notification:
+        send({"jsonrpc": "2.0", "id": req_id,
+              "error": {"code": -32601, "message": f"Method not found: {method}"}})
 
 
 def run_stdio_server():
     """
     MCP stdio transport — reads JSON-RPC from stdin, writes to stdout.
-    This is the standard MCP server protocol.
+    Newline-delimited JSON framing (one object per line, both directions).
+
+    AUDIT FIX (2026-07-10): the previous loop had three ways to die or
+    go dark with zero diagnostics:
+      1. any exception inside a handler outside tools/call (e.g. a broken
+         `initialize` import) crashed the whole process — the client hung
+         waiting for a reply, then saw the subprocess exit;
+      2. a valid-JSON-but-not-an-object line ([1,2], "hi") raised
+         AttributeError on req.get() — same crash;
+      3. malformed JSON lines were silently discarded (`continue`, no log,
+         no JSON-RPC error) — the client's request hung forever.
+    Logging goes to STDERR (stdout is the protocol channel); every failure
+    now produces both a log line and, where a request id exists, a
+    JSON-RPC error response.
     """
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=os.environ.get("TOKENMIZER_MCP_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s tokenmizer-mcp: %(message)s",
+    )
 
     def send(obj: dict):
         sys.stdout.write(json.dumps(obj) + "\n")
@@ -328,50 +431,41 @@ def run_stdio_server():
     def send_error(req_id: Any, code: int, message: str):
         send({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
 
+    logger.info(f"tokenmizer MCP stdio server started (proxy: {TOKENMIZER_URL})")
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
             req = json.loads(line)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.warning(f"Dropping malformed JSON line ({e}): {line[:200]!r}")
+            send_error(None, -32700, f"Parse error: {e}")
             continue
 
-        req_id = req.get("id")
-        method = req.get("method", "")
-        params = req.get("params", {})
+        if not isinstance(req, dict):
+            logger.warning(f"Dropping non-object JSON-RPC message: {line[:200]!r}")
+            send_error(None, -32600, "Invalid request: expected a JSON object")
+            continue
 
-        if method == "initialize":
-            from tokenmizer import __version__
-            send({
-                "jsonrpc": "2.0", "id": req_id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "tokenmizer", "version": __version__},
-                },
-            })
+        try:
+            _handle_request(req, send)
+        except (BrokenPipeError, OSError):
+            # stdout is gone — client disconnected mid-write; nothing left
+            # to reply to. Exit the loop cleanly.
+            logger.info("Client disconnected (broken pipe); shutting down")
+            return
+        except Exception as e:
+            logger.exception(f"Unhandled error in method {req.get('method')!r}")
+            try:
+                send_error(req.get("id"), -32603,
+                           f"Internal error: {type(e).__name__}: {e}")
+            except Exception:
+                logger.error("Could not send error response; shutting down")
+                return
 
-        elif method == "tools/list":
-            send({"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}})
-
-        elif method == "tools/call":
-            tool_name = params.get("name", "")
-            arguments = params.get("arguments", {})
-            result_text = handle_tool_call(tool_name, arguments)
-            send({
-                "jsonrpc": "2.0", "id": req_id,
-                "result": {
-                    "content": [{"type": "text", "text": result_text}],
-                    "isError": result_text.startswith("❌"),
-                },
-            })
-
-        elif method == "notifications/initialized":
-            pass  # acknowledge, no response needed
-
-        else:
-            send_error(req_id, -32601, f"Method not found: {method}")
+    logger.info("stdin closed; MCP server exiting")
 
 
 if __name__ == "__main__":

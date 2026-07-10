@@ -8,10 +8,22 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Windows is in the matrix because the 2026-07-10 audit found THREE
+    # Windows-only bugs Linux CI could never catch: a cp1252
+    # UnicodeEncodeError crashing `tokenmizer --help`, a leaked SQLite
+    # handle blocking corrupt-DB recovery (WinError 32), and console
+    # encoding issues in scripts. One Windows leg (latest Python only —
+    # Windows runners are slow) keeps that whole bug class from ever
+    # shipping again.
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12"]
+        include:
+          - os: windows-latest
+            python-version: "3.12"
 
     steps:
       - uses: actions/checkout@v4
@@ -20,14 +32,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          cache: pip
 
       - name: Install dependencies
         run: |
@@ -40,16 +45,21 @@ jobs:
       # Coverage threshold lives in pyproject.toml [tool.coverage.report]
       # fail_under — single source of truth, do NOT override it here.
       - name: Run tests with coverage
-        run: |
-          pytest tests/ \
-            --cov=tokenmizer \
-            --cov-report=term-missing \
-            --cov-report=xml \
-            -v
+        run: pytest tests/ --cov=tokenmizer --cov-report=term-missing --cov-report=xml -v
+
+      # Regression guard for the cp1252 crash: --help must work on a
+      # non-UTF-8 Windows console, not just under pytest's captured IO.
+      - name: CLI smoke test (Windows encoding regression)
+        if: runner.os == 'Windows'
+        run: python -m tokenmizer.cli --help
+
+      - name: MCP stdio e2e
+        if: matrix.python-version == '3.12'
+        run: python scripts/mcp_e2e_check.py
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12' && runner.os == 'Linux'
         with:
           file: ./coverage.xml
         continue-on-error: true

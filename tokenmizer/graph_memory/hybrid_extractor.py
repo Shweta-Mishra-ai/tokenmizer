@@ -279,6 +279,10 @@ class HybridExtractor:
       - Corroborated items (both passes agree) → confidence 0.95
       - LLM-only items → confidence 0.80
       - Heuristic-only items → confidence 0.65
+
+    min_confidence: items below this tier are dropped from extract()'s
+    output. Default 0.55 keeps every tier (backward compatible); 0.7
+    drops heuristic-only items; 0.9 keeps only corroborated ones.
     """
 
     def __init__(self, min_confidence: float = 0.55):
@@ -315,8 +319,18 @@ class HybridExtractor:
             raw = re.sub(r"```json\s*|```\s*", "", raw).strip()
             data = json.loads(raw)
             return self._dict_to_extracted(data)
-        except (json.JSONDecodeError, KeyError, Exception) as e:
-            logger.debug(f"LLM extraction failed: {e}")
+        except Exception as e:
+            # FIXED: was `except (json.JSONDecodeError, KeyError, Exception)`
+            # (redundant tuple — Exception covers both) logging at `debug`,
+            # which is off by default in production. A provider timeout,
+            # rate limit, or malformed JSON reply silently degraded every
+            # turn to heuristic-only extraction with zero visible trace —
+            # the same invisible-failure pattern already fixed at the
+            # api/app.py call site. Now warning, consistent with that fix.
+            logger.warning(
+                f"LLM extraction failed (falling back to heuristic-only "
+                f"for this batch): {type(e).__name__}: {e}"
+            )
             return None
 
     def _dict_to_extracted(self, data: dict) -> ExtractedData:
@@ -689,8 +703,37 @@ class HybridExtractor:
         # Pass 2: Heuristic (always runs)
         heu_result = self.heuristic_extract(messages)
 
-        # Pass 3: Merge
-        return self.merge(llm_result, heu_result)
+        # Pass 3: Merge, then filter by min_confidence
+        return self._filter_by_confidence(self.merge(llm_result, heu_result))
+
+    def _filter_by_confidence(self, merged: ExtractedData) -> ExtractedData:
+        """
+        Drop extracted items whose merge() confidence tier is below
+        self.min_confidence.
+
+        AUDIT FIX (2026-07-10, round 2): min_confidence was dead code —
+        stored in __init__ and never read again, while the class docstring
+        implied it gated inclusion. Now it does what it says. The default
+        (0.55) sits below the lowest tier (heuristic-only, 0.65), so
+        default behavior is unchanged; raising it is how you opt into
+        stricter extraction (e.g. 0.7 drops heuristic-only items, 0.9
+        keeps only corroborated ones).
+        """
+        if self.min_confidence <= 0.65:  # lowest tier — nothing can be dropped
+            return merged
+        # Decisions carry per-item confidence tags from merge()
+        merged.decisions = [
+            d for d in merged.decisions
+            if d.get("confidence", 0.65) >= self.min_confidence
+        ]
+        # Simple-list categories share one tier per category
+        for attr, tier in merged.confidence.items():
+            if attr == "decisions":
+                continue
+            if isinstance(tier, (int, float)) and tier < self.min_confidence \
+                    and isinstance(getattr(merged, attr, None), list):
+                setattr(merged, attr, [])
+        return merged
 
 
 # Singleton

@@ -63,8 +63,14 @@ _TOPIC_KEYWORDS: dict[str, list[str]] = {
                          "file storage", "object storage", "media storage"],
 
     # Language / runtime
-    "language":         ["python", "typescript", "javascript", "go", "rust",
-                         "java", "kotlin", "programming language"],
+    # AUDIT FIX (2026-07-10): bare "go" removed — the imperative verb
+    # ("Go with tRPC") collided with Go-the-language and misclassified
+    # API-style decisions as language decisions. Go is now detected only
+    # via unambiguous forms: "golang", or the bigrams below.
+    "language":         ["python", "typescript", "javascript", "golang", "rust",
+                         "java", "kotlin", "programming language",
+                         "in go", "use go", "go language", "go backend",
+                         "go service", "go rewrite"],
     "runtime":          ["node", "deno", "bun", "python version", "runtime"],
 
     # Architecture
@@ -74,6 +80,28 @@ _TOPIC_KEYWORDS: dict[str, list[str]] = {
                          "architecture", "system design"],
     "testing":          ["pytest", "jest", "vitest", "cypress", "playwright",
                          "testing framework", "test runner"],
+
+    # AUDIT FIX (2026-07-10): vocabulary gaps — hybrid_extractor.py's
+    # decision regexes knew tech names (supabase, clerk, ...) this file
+    # didn't, so those decisions classified as None and supersession
+    # silently never fired ("Use Supabase" → "Switch to Firebase" left
+    # both looking active). Buckets below close the drift.
+    "backend_platform": ["supabase", "firebase", "appwrite", "pocketbase",
+                         "convex", "amplify", "backend platform", "baas"],
+    "auth_provider":    ["clerk", "auth0", "supertokens", "keycloak",
+                         "cognito", "okta", "nextauth", "next auth",
+                         "firebase auth", "auth provider"],
+    "payments":         ["stripe", "paddle", "braintree", "lemonsqueezy",
+                         "razorpay", "payment provider", "payment gateway"],
+    "observability":    ["sentry", "datadog", "grafana", "prometheus",
+                         "honeycomb", "new relic", "error tracking",
+                         "monitoring tool"],
+    "state_management": ["redux", "zustand", "mobx", "recoil", "jotai",
+                         "pinia", "state management"],
+    "package_manager":  ["npm", "pnpm", "yarn", "poetry", "pipenv",
+                         "package manager"],
+    "styling":          ["tailwind", "styled components", "css framework",
+                         "sass", "css modules"],
 }
 
 # Reverse map: keyword → topic
@@ -83,19 +111,21 @@ for _topic, _keywords in _TOPIC_KEYWORDS.items():
         _KEYWORD_TO_TOPIC[_kw.lower()] = _topic
 
 
-def classify_topic(label: str, summary: str = "") -> Optional[str]:
+def _classify_ordered(label: str, summary: str = "") -> list[str]:
     """
-    Classify a decision label into a topic bucket.
-    Returns topic string if matched, None if unknown.
+    All topic buckets matched by a decision, in match order (bigrams first,
+    then single words, each in word order), deduplicated.
 
-    Examples:
-      "Use PostgreSQL for storage" → "database"
-      "JWT over sessions"          → "auth_mechanism"
-      "Deploy on Railway"          → "deployment"
-      "Use Next.js."               → "frontend"  (trailing period stripped)
-      "Some custom thing"          → None
+    AUDIT FIX (2026-07-10): the old classifier returned on the FIRST
+    single-word hit, so "Use FastAPI with SQLAlchemy and PostgreSQL"
+    classified only as web_framework — a later "switch Postgres to SQLite"
+    was never detected as contradicting it, leaving a stale DB decision
+    active in resume context. All matched topics are now returned.
+
+    Bigrams are matched first and consume their words so that e.g.
+    "session store" (cache_backend) doesn't also leak a spurious
+    auth_mechanism match from the bare word "session".
     """
-    # Strip trailing punctuation before classification
     label = label.rstrip(".,!?;:")
     text = (label + " " + summary).lower()
     # Remove punctuation for matching — but preserve version numbers
@@ -104,18 +134,50 @@ def classify_topic(label: str, summary: str = "") -> Optional[str]:
     text = text.replace("next.js", "nextjs").replace("node.js", "nodejs")
     words = text.split()
 
-    # Check single words first
-    for word in words:
-        if word in _KEYWORD_TO_TOPIC:
-            return _KEYWORD_TO_TOPIC[word]
+    topics: list[str] = []
+    consumed = [False] * len(words)
 
-    # Check bigrams (e.g. "task queue", "message broker")
+    # Bigrams first (consume both words on match)
     for i in range(len(words) - 1):
         bigram = words[i] + " " + words[i + 1]
         if bigram in _KEYWORD_TO_TOPIC:
-            return _KEYWORD_TO_TOPIC[bigram]
+            topic = _KEYWORD_TO_TOPIC[bigram]
+            if topic not in topics:
+                topics.append(topic)
+            consumed[i] = consumed[i + 1] = True
 
-    return None
+    # Single words on whatever the bigrams didn't consume
+    for i, word in enumerate(words):
+        if consumed[i]:
+            continue
+        if word in _KEYWORD_TO_TOPIC:
+            topic = _KEYWORD_TO_TOPIC[word]
+            if topic not in topics:
+                topics.append(topic)
+
+    return topics
+
+
+def classify_topics(label: str, summary: str = "") -> set[str]:
+    """
+    Classify a decision into ALL topic buckets it touches.
+
+    Examples:
+      "Use PostgreSQL for storage"                → {"database"}
+      "Use FastAPI with SQLAlchemy and Postgres"  → {"web_framework", "orm", "database"}
+      "Some custom thing"                         → set()
+    """
+    return set(_classify_ordered(label, summary))
+
+
+def classify_topic(label: str, summary: str = "") -> Optional[str]:
+    """
+    Backward-compatible singular form: the primary (first-matched) topic,
+    or None if nothing matched. Prefer classify_topics() in new code —
+    multi-topic decisions lose information here by construction.
+    """
+    ordered = _classify_ordered(label, summary)
+    return ordered[0] if ordered else None
 
 
 def find_contradicting_decisions(
@@ -142,10 +204,10 @@ def find_contradicting_decisions(
     """
     from tokenmizer.graph_memory.graph import NodeStatus, NodeType
 
-    new_topic = classify_topic(new_label, new_summary)
+    new_topics = classify_topics(new_label, new_summary)
 
     # If topic unknown, use word overlap as fallback
-    if new_topic is None:
+    if not new_topics:
         return _find_by_word_overlap(new_label, existing_nodes)
 
     to_supersede = []
@@ -155,8 +217,17 @@ def find_contradicting_decisions(
         if node.status not in (NodeStatus.COMPLETED,):
             continue  # already superseded/archived/invalidated — skip
 
-        existing_topic = classify_topic(node.label, node.summary)
-        if existing_topic == new_topic:
+        # AUDIT FIX (2026-07-10): topic comparison is now SET INTERSECTION,
+        # not equality of a single first-match topic. A multi-topic decision
+        # ("FastAPI + SQLAlchemy + PostgreSQL") is contradicted by a new
+        # decision touching ANY of its topics ("switch Postgres to SQLite").
+        # Trade-off (deliberate): the whole node is superseded even though
+        # its other topics (FastAPI) may still hold — the graph's granularity
+        # is one node per decision *statement*, and the supersession
+        # transition records both labels, so no information is lost; the
+        # alternative (leaving it active) showed stale decisions as current.
+        existing_topics = classify_topics(node.label, node.summary)
+        if existing_topics & new_topics:
             # Same topic — check it's not the same decision
             if not _is_same_decision(new_label, node.label):
                 to_supersede.append(node_id)
@@ -221,5 +292,18 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
     words_b = set(b.split())
     if not words_a or not words_b:
         return False
+    # AUDIT FIX (2026-07-10, round 2): containment. "Use React" and
+    # "use React for the frontend." are the same decision, but flat word
+    # overlap scores them 2/5 = 0.4 — far below the 0.82 threshold. The
+    # extractor can emit both variants from ONE message (different regex
+    # passes capture different spans), and without this check they became
+    # two nodes where one superseded the other — a self-supersession that
+    # polluted the resume context with a bogus "Changed:" line.
+    # Guard: the smaller set needs >= 2 words, so "Use PostgreSQL" is NOT
+    # collapsed into "Switch from PostgreSQL to SQLite" ({postgresql}
+    # alone would be a subset of many genuinely different decisions).
+    smaller, larger = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
+    if len(smaller) >= 2 and smaller <= larger:
+        return True
     overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
     return overlap >= 0.82

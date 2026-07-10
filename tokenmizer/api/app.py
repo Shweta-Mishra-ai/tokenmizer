@@ -261,7 +261,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.3.1",
+    version="0.3.2",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -420,8 +420,14 @@ async def _update_graph(
                                 )
                                 return {"text": r.text}
 
-                            ext = HybridExtractor(provider_fn=_pfn)
-                            extracted = await ext.extract(_msgs)
+                            # FIXED: was HybridExtractor(provider_fn=_pfn) —
+                            # a kwarg __init__ never accepted, so this raised
+                            # TypeError on EVERY call, and even fixed, extract()
+                            # was called without provider_fn (defaults None →
+                            # LLM pass skipped). The LLM extraction path never
+                            # executed once despite use_llm_extraction=true.
+                            ext = HybridExtractor()
+                            extracted = await ext.extract(_msgs, provider_fn=_pfn)
                             _g.extract_from_messages(_all, incremental=False,
                                                      extracted_data=extracted)
                             logger.debug(f"HybridExtractor complete for {_sid}")
@@ -979,19 +985,29 @@ async def invalidate_decision(session_id: str, decision_label: str, reason: str 
         from tokenmizer.graph_memory.graph import NodeStatus, NodeType
         graph = await _get_graph_async(session_id)
         label_lower = decision_label.lower().strip()
-        found = False
-        for node in graph._nodes.values():
+        # AUDIT FIX (2026-07-10): the substring match previously ran across
+        # ALL decision nodes regardless of status — a short label like
+        # "auth" could flip several nodes at once, including already-
+        # SUPERSEDED history nodes (destroying their supersession record by
+        # overwriting it with INVALIDATED). Now: only ACTIVE (COMPLETED)
+        # decisions are eligible, and the response lists exactly which
+        # nodes were affected so multi-matches are visible to the caller.
+        invalidated: list[dict] = []
+        for node_id, node in graph._nodes.items():
             if (node.type == NodeType.DECISION and
+                    node.status == NodeStatus.COMPLETED and
                     label_lower in node.label.lower()):
                 node.status = NodeStatus.INVALIDATED
                 node.summary = (
                     f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
                 )
-                found = True
-        if not found:
+                invalidated.append({"node_id": node_id, "label": node.label})
+        if not invalidated:
             raise HTTPException(
                 status_code=404,
-                detail=f"No decision matching '{decision_label}' found in session '{session_id}'"
+                detail=(f"No ACTIVE decision matching '{decision_label}' found in "
+                        f"session '{session_id}' (superseded/archived decisions "
+                        f"are not invalidatable — they are already inactive)")
             )
         graph._persist(force=True)  # direct node mutation above bypasses add_node's
                                       # dirty-tracking — force=True is required here or
@@ -1001,6 +1017,7 @@ async def invalidate_decision(session_id: str, decision_label: str, reason: str 
         return {
             "session_id": session_id,
             "invalidated": decision_label,
+            "affected_nodes": invalidated,
             "reason": reason,
             "status": "invalidated",
         }

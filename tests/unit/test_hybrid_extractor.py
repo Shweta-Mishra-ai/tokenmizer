@@ -146,3 +146,83 @@ async def test_extract_without_provider():
     # (mathematically always true). Heuristic-only extraction should still
     # find "api/auth.py", which is explicitly present in MESSAGES.
     assert len(result.files) >= 1, "Heuristic-only extraction should find at least one file"
+
+
+@pytest.mark.asyncio
+async def test_extract_llm_pass_actually_invoked_app_style():
+    """
+    REGRESSION (2026-07-10 audit): api/app.py's background extraction did
+      HybridExtractor(provider_fn=_pfn)   → TypeError (no such kwarg), and
+      ext.extract(_msgs)                  → provider_fn=None, LLM pass skipped.
+    So the LLM extraction path NEVER ran in production — every call raised,
+    was caught by the broad except, and logged as a provider failure.
+
+    This test replicates the app.py call pattern exactly as fixed:
+    construct with defaults, pass provider_fn to extract(), and assert
+    the provider was actually called and its output merged in.
+    """
+    calls = []
+
+    async def _pfn(messages, system="", max_tokens=600):
+        calls.append(len(messages))
+        return {"text": (
+            '{"goals": [], "tasks_done": [], "tasks_wip": [],'
+            ' "decisions": [{"label": "use Vitest for testing", "reason": "speed"}],'
+            ' "files": ["src/only_llm_saw_this.ts"], "errors": [],'
+            ' "dependencies": [], "environments": [], "superseded": []}'
+        )}
+
+    ext = HybridExtractor()
+    result = await ext.extract(MESSAGES, provider_fn=_pfn)
+
+    assert calls, "provider_fn was never invoked — LLM pass silently skipped"
+    assert "src/only_llm_saw_this.ts" in result.files, (
+        f"LLM-only file missing from merged output: {result.files}"
+    )
+
+
+class TestMinConfidenceFilter:
+    """
+    AUDIT round 2 (2026-07-10): min_confidence was dead code — stored in
+    __init__, never read. It now filters extract() output by merge()'s
+    confidence tiers (0.95 corroborated / 0.80 LLM-only / 0.65 heuristic-
+    only). Default 0.55 keeps everything (backward compatible).
+    """
+
+    def test_default_keeps_heuristic_only_items(self):
+        ext = HybridExtractor()  # default 0.55
+        merged = ext._filter_by_confidence(ext.merge(None, ext.heuristic_extract(MESSAGES)))
+        assert merged.files, "default threshold must not drop heuristic-only items"
+
+    def test_strict_threshold_drops_heuristic_only_category(self):
+        ext = HybridExtractor(min_confidence=0.9)
+        llm = ExtractedData(files=["api/auth.py"])          # corroborated below
+        heu = ExtractedData(files=["api/auth.py"],          # -> files tier 0.95
+                            errors=["timeout in worker"])    # -> errors tier 0.65
+        merged = ext._filter_by_confidence(ext.merge(llm, heu))
+        assert merged.files == ["api/auth.py"], "corroborated tier must survive"
+        assert merged.errors == [], "heuristic-only tier must be dropped at 0.9"
+
+    def test_per_item_decision_filtering(self):
+        ext = HybridExtractor(min_confidence=0.9)
+        llm = ExtractedData(decisions=[
+            {"label": "use bcrypt for hashing", "reason": ""},   # corroborated -> 0.95
+            {"label": "use Vitest for tests", "reason": ""},     # llm-only -> 0.80
+        ])
+        heu = ExtractedData(decisions=[
+            {"label": "use bcrypt for hashing", "reason": ""},
+            {"label": "use Redis for cache", "reason": ""},      # heuristic-only -> 0.65
+        ])
+        merged = ext._filter_by_confidence(ext.merge(llm, heu))
+        labels = [d["label"] for d in merged.decisions]
+        assert labels == ["use bcrypt for hashing"], (
+            f"only the corroborated decision survives 0.9, got {labels}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_extract_applies_filter_end_to_end(self):
+        ext = HybridExtractor(min_confidence=0.9)
+        result = await ext.extract(MESSAGES, provider_fn=None)  # all heuristic-only
+        assert result.files == [] and result.decisions == [], (
+            "heuristic-only extraction at min_confidence=0.9 must yield nothing"
+        )
