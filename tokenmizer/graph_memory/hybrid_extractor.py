@@ -320,13 +320,10 @@ class HybridExtractor:
             data = json.loads(raw)
             return self._dict_to_extracted(data)
         except Exception as e:
-            # FIXED: was `except (json.JSONDecodeError, KeyError, Exception)`
-            # (redundant tuple — Exception covers both) logging at `debug`,
-            # which is off by default in production. A provider timeout,
-            # rate limit, or malformed JSON reply silently degraded every
-            # turn to heuristic-only extraction with zero visible trace —
-            # the same invisible-failure pattern already fixed at the
-            # api/app.py call site. Now warning, consistent with that fix.
+            # Warning, not debug: a provider timeout, rate limit, or
+            # malformed reply degrades extraction to heuristic-only for the
+            # batch, and that degradation must be visible at default log
+            # levels.
             logger.warning(
                 f"LLM extraction failed (falling back to heuristic-only "
                 f"for this batch): {type(e).__name__}: {e}"
@@ -711,13 +708,10 @@ class HybridExtractor:
         Drop extracted items whose merge() confidence tier is below
         self.min_confidence.
 
-        AUDIT FIX (2026-07-10, round 2): min_confidence was dead code —
-        stored in __init__ and never read again, while the class docstring
-        implied it gated inclusion. Now it does what it says. The default
-        (0.55) sits below the lowest tier (heuristic-only, 0.65), so
-        default behavior is unchanged; raising it is how you opt into
-        stricter extraction (e.g. 0.7 drops heuristic-only items, 0.9
-        keeps only corroborated ones).
+        The default (0.55) sits below the lowest tier (heuristic-only,
+        0.65), so nothing is filtered unless the caller opts into stricter
+        extraction: 0.7 drops heuristic-only items, 0.9 keeps only
+        corroborated ones.
         """
         if self.min_confidence <= 0.65:  # lowest tier — nothing can be dropped
             return merged

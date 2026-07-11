@@ -1,6 +1,6 @@
 {
   "name": "tokenmizer",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Never lose your AI context again. Graph-backed memory, session checkpointing, and file intelligence for Claude Code and any LLM.",
   "author": {
     "name": "Shweta Mishra",

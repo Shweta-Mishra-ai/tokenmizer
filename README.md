@@ -78,13 +78,22 @@ Your App  →  TokenMizer (:8000)  →  Claude / GPT / Gemini / any LLM
 | 🔴 `INVALIDATED` | Explicitly wrong/cancelled | ⚠️ Always (warning) |
 | ⬜ `ARCHIVED` | Superseded >7 days ago — aged out | ❌ Never |
 
-History is **never deleted**. "Why did we switch from React to Next.js?" — always answerable.
+History is **never deleted**. "Why did we switch from React to Next.js?" — always answerable:
+ask `GET /api/graph/{session}/why?q=react` (or the `why_decision` MCP tool) and get the full
+old → new trail with trigger, reason, and evidence per hop.
 
-> Honesty note (2026-07-10 audit): before v0.3.2, `ARCHIVED` was advertised
-> here but **unreachable** — the decay/prune/query logic all handled it, yet
-> no code path ever set it. Superseded decisions now age into `ARCHIVED`
-> automatically after 7 days (`GraphMemory.ARCHIVE_SUPERSEDED_AFTER_DAYS`),
-> which is what makes the "⚠️ 7 days" row above actually true.
+### From Storage to Reasoning
+
+The graph doesn't just store facts — it answers questions over them:
+
+| Capability | Endpoint / Tool | What it answers |
+|---|---|---|
+| **Ontology** | `GET /api/ontology` | The formal vocabulary: node/edge types with semantics, and the status state machine (which lifecycle transitions are legal) |
+| **Causal chains** | `GET /api/graph/{id}/why?q=...` · MCP `why_decision` | "Why is X the current choice?" — walks the supersession chain with trigger/reason/evidence per hop |
+| **Reasoning view** | `GET /api/graph/{id}/reasoning` | Active decisions per topic, recent changes, decision timeline, and a consistency audit |
+| **Consistency audit** | (part of `/reasoning`) | Contradictions the tracker missed, superseded decisions with lost history, dangling references |
+
+All reasoning is deterministic and local — no LLM calls, no extra cost.
 
 ---
 
@@ -285,9 +294,14 @@ env = { TOKENMIZER_URL = "http://localhost:8000" }
 </details>
 
 Then restart the client. Keep `tokenmizer serve` running for the
-checkpoint/resume/stats tools (file analysis works without it).
+checkpoint/resume/stats/reasoning tools (file analysis works without it).
 If `tokenmizer-mcp` isn't on your PATH, use `"command": "python"`,
 `"args": ["-m", "tokenmizer.mcp.server"]` instead.
+
+**Tools exposed (6):** `checkpoint_session`, `resume_session`,
+`get_graph_stats`, `analyze_file`, `get_savings_stats`, and
+`why_decision` — ask your agent *"why did we pick X?"* and it traces the
+decision's supersession chain with reasons and evidence.
 
 ---
 
@@ -386,12 +400,8 @@ graph_checkpoint:
   enabled: true
   trigger_at_percent: 0.85
   use_llm_extraction: false     # true = hybrid LLM+heuristic extraction
-                                # (needs a provider key, ~$0.001/turn).
-                                # NOTE: before v0.3.2 this flag silently did
-                                # nothing — the call site passed provider_fn
-                                # to the wrong function and raised TypeError
-                                # on every turn, falling back to heuristics.
-                                # Fixed + regression-tested; see CHANGELOG.
+                                # (needs a provider key, ~$0.001/turn;
+                                # requires v0.3.2+ — see CHANGELOG)
 
 compression:
   enabled: true
@@ -432,6 +442,9 @@ TOKENMIZER_API_KEY=strong-key docker-compose up
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
 | `/api/graph/{id}` | GET | Session graph stats |
 | `/api/graph/{id}/html` | GET | **Interactive graph page** — decision-history timeline, supersession arcs, type/status filters, search, zoom/pan, PNG export. Zero external dependencies (works offline) |
+| `/api/graph/{id}/why?q=` | GET | **Reasoning:** causal chain behind a decision (old → new with trigger/reason/evidence) |
+| `/api/graph/{id}/reasoning` | GET | **Reasoning view:** active decisions by topic, recent changes, consistency audit |
+| `/api/ontology` | GET | Machine-readable graph ontology (types, relations, status state machine) |
 | `/api/stats` | GET | Token savings analytics |
 | `/health` | GET | Health check |
 | `/docs` | GET | Swagger UI |
@@ -442,15 +455,13 @@ TOKENMIZER_API_KEY=strong-key docker-compose up
 
 - API key auth — `TOKENMIZER_API_KEY` (constant-time comparison)
 - Secret/PII redaction applied once at ingestion, before graph storage,
-  checkpoint storage, AND every LLM call (main chat *and* the background
-  extraction model — these are separate, the redaction gap between them
-  was a real bug, now fixed). Patterns cover Anthropic/OpenAI/Google/
-  GitHub/AWS/Slack/Stripe/JWT/OpenRouter/HF/xAI keys, URL-embedded
-  credentials (`postgres://user:pass@host` — a 2026-07 audit gap, fixed),
-  and generic `key=`/`password=` assignments. Best-effort by nature —
-  an unrecognized format with no keyword context can still slip through.
-  The checkpoint layer independently re-redacts what it persists
-  (defense-in-depth, added in the same audit).
+  checkpoint storage, and every LLM call (main chat and the background
+  extraction model). Patterns cover Anthropic/OpenAI/Google/GitHub/AWS/
+  Slack/Stripe/JWT/OpenRouter/HF/xAI keys, URL-embedded credentials
+  (`postgres://user:pass@host`), and generic `key=`/`password=`
+  assignments. Best-effort by nature — an unrecognized format with no
+  keyword context can still slip through. The checkpoint layer
+  independently re-redacts what it persists (defense in depth).
 - Session-isolated cache (sensitive data never shared across sessions)
 - Basic prompt-injection keyword filter — catches copy-pasted jailbreak
   templates only; **not** a security boundary against a motivated

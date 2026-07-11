@@ -151,15 +151,10 @@ async def test_extract_without_provider():
 @pytest.mark.asyncio
 async def test_extract_llm_pass_actually_invoked_app_style():
     """
-    REGRESSION (2026-07-10 audit): api/app.py's background extraction did
-      HybridExtractor(provider_fn=_pfn)   → TypeError (no such kwarg), and
-      ext.extract(_msgs)                  → provider_fn=None, LLM pass skipped.
-    So the LLM extraction path NEVER ran in production — every call raised,
-    was caught by the broad except, and logged as a provider failure.
-
-    This test replicates the app.py call pattern exactly as fixed:
-    construct with defaults, pass provider_fn to extract(), and assert
-    the provider was actually called and its output merged in.
+    Regression guard for the api/app.py call pattern: construct with
+    defaults and pass provider_fn to extract(). Asserts the provider is
+    actually invoked and its output is merged — a call-signature drift
+    here silently disables the LLM pass.
     """
     calls = []
 
@@ -183,10 +178,9 @@ async def test_extract_llm_pass_actually_invoked_app_style():
 
 class TestMinConfidenceFilter:
     """
-    AUDIT round 2 (2026-07-10): min_confidence was dead code — stored in
-    __init__, never read. It now filters extract() output by merge()'s
-    confidence tiers (0.95 corroborated / 0.80 LLM-only / 0.65 heuristic-
-    only). Default 0.55 keeps everything (backward compatible).
+    min_confidence filters extract() output by merge()'s confidence tiers
+    (0.95 corroborated / 0.80 LLM-only / 0.65 heuristic-only). The default
+    of 0.55 keeps every tier.
     """
 
     def test_default_keeps_heuristic_only_items(self):

@@ -1,13 +1,11 @@
 """
 Version-consistency guard.
 
-WHY THIS EXISTS: version drift has shipped repeatedly in this repo —
-the 2026-07-10 audit found `server.json` at 0.2.6 (three releases stale)
-and `.claude-plugin/plugin.json` at 0.2.3 (four releases stale) while
-pyproject said 0.3.1. Any MCP registry or plugin marketplace reading
-those manifests displayed the wrong version. This test makes every
-version pin agree with `tokenmizer.__version__` so drift fails CI on the
-same push that introduces it.
+Every manifest that pins a version (pyproject, server.json, plugin.json,
+marketplace.json, the FastAPI app, the changelog) must agree with
+`tokenmizer.__version__`. Registries and marketplaces read these files
+directly, so any drift ships a wrong version string; this test fails CI
+on the push that introduces it.
 """
 import json
 import re
@@ -48,6 +46,15 @@ def test_plugin_manifest_matches_package():
         f"plugin.json pins {data['version']}, package is "
         f"{tokenmizer.__version__} — plugin marketplaces would display "
         f"the wrong version"
+    )
+
+
+def test_marketplace_manifest_matches_package():
+    data = json.loads(
+        (ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    assert data["version"] == tokenmizer.__version__, (
+        f"marketplace.json pins {data['version']}, package is "
+        f"{tokenmizer.__version__}"
     )
 
 

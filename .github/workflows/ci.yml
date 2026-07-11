@@ -8,13 +8,9 @@ on:
 
 jobs:
   test:
-    # Windows is in the matrix because the 2026-07-10 audit found THREE
-    # Windows-only bugs Linux CI could never catch: a cp1252
-    # UnicodeEncodeError crashing `tokenmizer --help`, a leaked SQLite
-    # handle blocking corrupt-DB recovery (WinError 32), and console
-    # encoding issues in scripts. One Windows leg (latest Python only —
-    # Windows runners are slow) keeps that whole bug class from ever
-    # shipping again.
+    # Windows is in the matrix to catch platform-specific regressions
+    # (console encoding, file-handle semantics) that Linux legs cannot.
+    # One leg on the latest Python only — Windows runners are slow.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -47,8 +43,8 @@ jobs:
       - name: Run tests with coverage
         run: pytest tests/ --cov=tokenmizer --cov-report=term-missing --cov-report=xml -v
 
-      # Regression guard for the cp1252 crash: --help must work on a
-      # non-UTF-8 Windows console, not just under pytest's captured IO.
+      # --help must work on a non-UTF-8 Windows console, not just under
+      # pytest's captured IO (cp1252 cannot encode the CLI's emoji output).
       - name: CLI smoke test (Windows encoding regression)
         if: runner.os == 'Windows'
         run: python -m tokenmizer.cli --help

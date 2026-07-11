@@ -228,20 +228,14 @@ def to_obsidian_canvas(graph: "GraphMemory") -> dict:
     return {"nodes": canvas_nodes, "edges": canvas_edges}
 
 
-# ── Shareable standalone HTML (the "look at my session's brain" artifact) ────
+# ── Shareable standalone HTML ─────────────────────────────────────────────────
 #
-# REDESIGNED (2026-07-10 audit): the previous version was exactly the
-# "generic Obsidian-style node soup" it claimed to beat —
-#   - to_vis_json() exported `transitions` (the supersession history, the
-#     ONE thing this product tracks that generic graph views don't), and
-#     the HTML template never used them;
-#   - superseded decisions were only lower-opacity circles;
-#   - no filtering, no search, no export;
-#   - it loaded D3 from a CDN, so the "self-contained" artifact broke
-#     offline and in network-restricted demo environments.
-# Now: zero external dependencies (hand-rolled force layout, ~2KB of JS),
-# supersession arcs + a clickable decision-history timeline, per-type
-# filter chips, active-only toggle, search, wheel-zoom/pan, PNG export.
+# Zero external dependencies by design: the artifact must render offline
+# and in network-restricted environments, so the force layout is inlined
+# (~2KB of JS) rather than loaded from a CDN. Renders the supersession
+# history as first-class content: transition arcs, a clickable decision
+# timeline, per-type filter chips, an active-only toggle, text search,
+# wheel-zoom/pan, and PNG export.
 
 _SHARE_HTML_TEMPLATE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>TokenMizer — __SESSION__</title>

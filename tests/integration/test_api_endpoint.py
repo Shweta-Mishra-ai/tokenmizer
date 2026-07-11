@@ -194,10 +194,8 @@ class TestHealthAndDocs:
     def test_graph_share_html(self, client):
         """Shareable graph page: self-contained interactive HTML.
 
-        REDESIGNED (2026-07-10): no more D3-from-CDN — the artifact must
-        work offline. It must also actually render the supersession
-        history (transitions), which the old template computed and then
-        silently never used.
+        The artifact must work offline (no CDN/external loads) and must
+        embed the supersession history (transitions) it renders.
         """
         c, _ = client
         # Put something in the graph via the pipeline first
@@ -223,11 +221,10 @@ class TestHealthAndDocs:
 
 class TestInvalidateDecisionScope:
     """
-    AUDIT FIX (2026-07-10): /api/decision/invalidate previously substring-
-    matched across ALL decision nodes regardless of status — invalidating
-    "postgres" would also flip an already-SUPERSEDED postgres decision,
-    destroying its supersession history. Only ACTIVE (COMPLETED) decisions
-    are now eligible, and the response lists exactly what was affected.
+    /api/decision/invalidate must only match ACTIVE (COMPLETED) decisions:
+    matching across all statuses would overwrite SUPERSEDED history nodes
+    and destroy their supersession record. The response must list every
+    affected node.
     """
 
     def _seed_graph(self, session_id, tmp_path):

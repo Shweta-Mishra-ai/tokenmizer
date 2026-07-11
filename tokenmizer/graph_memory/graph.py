@@ -133,9 +133,9 @@ class GraphMemory:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")  # WAL + NORMAL = safe + fast
         except Exception:
-            # AUDIT FIX (2026-07-10): same leak as checkpoints/manager.py —
-            # a corrupt DB file failed the PRAGMA and leaked the open handle,
-            # which on Windows blocked the delete-and-recreate recovery path.
+            # Close before re-raising: a failed PRAGMA (corrupt DB file)
+            # would otherwise leak the handle, and an open handle blocks
+            # the delete-and-recreate recovery path on Windows.
             conn.close()
             raise
         return conn
@@ -224,11 +224,9 @@ class GraphMemory:
             finally:
                 conn.close()
         except Exception as e:
-            # AUDIT FIX (2026-07-10): everything logged at debug here, so DB
-            # corruption or a schema mismatch looked identical to the benign
-            # first-run case — decision history silently "didn't exist".
-            # The benign case (table not created yet) stays at debug; every
-            # other failure is now visible by default.
+            # Distinguish the benign first-run case (table not created yet,
+            # debug) from real failures such as corruption or schema
+            # mismatch, which must be visible at default log levels.
             if "no such table" in str(e).lower():
                 logger.debug(f"Transition load skipped (first run, table not "
                              f"created yet): {e}")
@@ -441,15 +439,12 @@ class GraphMemory:
                 existing.summary = summary
             return node_id
 
-        # AUDIT FIX (2026-07-10, round 2): fuzzy same-decision merge.
-        # The exact-hash dedup above only catches identical normalized
-        # labels, but the extractor can emit near-duplicate decisions from
-        # ONE message ("Use React" + "use React for the frontend." — two
-        # regex passes, different capture spans). Those became two nodes,
-        # and since they share a topic, one SUPERSEDED the other — a bogus
-        # self-supersession that showed up as a noisy "Changed:" line in
-        # every resume. Merge them instead: keep the existing node, prefer
-        # the longer (more specific) label, backfill the summary.
+        # Fuzzy same-decision merge. Exact-hash dedup above only catches
+        # identical normalized labels; the extractor can emit near-duplicate
+        # variants of one decision from a single message. Left as separate
+        # nodes they share a topic and one would supersede the other — a
+        # spurious self-supersession. Merge into the existing node instead:
+        # prefer the longer (more specific) label, backfill the summary.
         if node_type == NodeType.DECISION:
             from tokenmizer.graph_memory.decision_tracker import _is_same_decision
             for ex_id, ex in self._nodes.items():
@@ -475,10 +470,10 @@ class GraphMemory:
                     return ex_id
 
         # Validate before inserting — reject noise and low-confidence nodes.
-        # confidence != 0.7 means the caller supplied an explicit value —
-        # for extraction-sourced decisions that's merge()'s corroboration
-        # tier (0.95/0.80/0.65), which the validator blends into its own
-        # score instead of ignoring (see validator.validate docstring).
+        # confidence != 0.7 (the parameter default) means the caller
+        # supplied an explicit value; for extraction-sourced decisions that
+        # is merge()'s corroboration tier, which the validator blends into
+        # its own score (see validator.validate).
         validator = _get_validator()
         result = validator.validate(
             label=label,
@@ -1034,13 +1029,10 @@ class GraphMemory:
         """
         changed: dict[str, float] = {}
 
-        # AUDIT FIX (2026-07-10): ARCHIVED was a documented status, fully
-        # wired into decay/prune/query filtering — but NOTHING ever set it.
-        # The README's 4-state model advertised a state that was unreachable.
-        # Now: SUPERSEDED decisions age into ARCHIVED once they've been
-        # superseded for ARCHIVE_SUPERSEDED_AFTER_DAYS (measured from
-        # valid_until, the moment of supersession — not node creation).
-        # This matches the README's "SUPERSEDED shown in resume ⚠ 7 days".
+        # Age SUPERSEDED decisions into ARCHIVED after
+        # ARCHIVE_SUPERSEDED_AFTER_DAYS, measured from valid_until (the
+        # moment of supersession, not node creation). This is the only
+        # code path that sets ARCHIVED.
         _now = time.time()
         for _nid, _node in self._nodes.items():
             if (_node.type == NodeType.DECISION

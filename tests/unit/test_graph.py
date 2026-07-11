@@ -203,11 +203,10 @@ class TestPersistence:
 
 class TestArchivedReachability:
     """
-    AUDIT FIX (2026-07-10): ARCHIVED was a documented, fully-wired status
-    (decay rates, prune rules, query filters all handled it) that NOTHING
-    ever set — the README advertised a 4-state model whose 4th state was
-    unreachable. SUPERSEDED decisions now age into ARCHIVED after
-    GraphMemory.ARCHIVE_SUPERSEDED_AFTER_DAYS days (from supersession time).
+    SUPERSEDED decisions age into ARCHIVED after
+    GraphMemory.ARCHIVE_SUPERSEDED_AFTER_DAYS, measured from supersession
+    time. apply_importance_decay() is the only path that sets ARCHIVED,
+    so these tests guard the state's reachability.
     """
 
     def test_superseded_decision_ages_into_archived(self, graph):

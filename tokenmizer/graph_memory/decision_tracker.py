@@ -63,10 +63,9 @@ _TOPIC_KEYWORDS: dict[str, list[str]] = {
                          "file storage", "object storage", "media storage"],
 
     # Language / runtime
-    # AUDIT FIX (2026-07-10): bare "go" removed — the imperative verb
-    # ("Go with tRPC") collided with Go-the-language and misclassified
-    # API-style decisions as language decisions. Go is now detected only
-    # via unambiguous forms: "golang", or the bigrams below.
+    # Bare "go" is intentionally absent: the imperative verb ("Go with X")
+    # is far more common in decision phrasing than the language name.
+    # Go is matched only via unambiguous forms ("golang" and the bigrams).
     "language":         ["python", "typescript", "javascript", "golang", "rust",
                          "java", "kotlin", "programming language",
                          "in go", "use go", "go language", "go backend",
@@ -81,11 +80,9 @@ _TOPIC_KEYWORDS: dict[str, list[str]] = {
     "testing":          ["pytest", "jest", "vitest", "cypress", "playwright",
                          "testing framework", "test runner"],
 
-    # AUDIT FIX (2026-07-10): vocabulary gaps — hybrid_extractor.py's
-    # decision regexes knew tech names (supabase, clerk, ...) this file
-    # didn't, so those decisions classified as None and supersession
-    # silently never fired ("Use Supabase" → "Switch to Firebase" left
-    # both looking active). Buckets below close the drift.
+    # Keep this vocabulary in sync with hybrid_extractor's decision
+    # patterns: a tech name known to extraction but not classification
+    # produces decisions that never participate in supersession.
     "backend_platform": ["supabase", "firebase", "appwrite", "pocketbase",
                          "convex", "amplify", "backend platform", "baas"],
     "auth_provider":    ["clerk", "auth0", "supertokens", "keycloak",
@@ -116,15 +113,13 @@ def _classify_ordered(label: str, summary: str = "") -> list[str]:
     All topic buckets matched by a decision, in match order (bigrams first,
     then single words, each in word order), deduplicated.
 
-    AUDIT FIX (2026-07-10): the old classifier returned on the FIRST
-    single-word hit, so "Use FastAPI with SQLAlchemy and PostgreSQL"
-    classified only as web_framework — a later "switch Postgres to SQLite"
-    was never detected as contradicting it, leaving a stale DB decision
-    active in resume context. All matched topics are now returned.
+    Multi-topic statements ("Use FastAPI with SQLAlchemy and PostgreSQL")
+    must report every topic they touch; contradiction detection compares
+    topic sets, so dropping topics here disables supersession for them.
 
-    Bigrams are matched first and consume their words so that e.g.
-    "session store" (cache_backend) doesn't also leak a spurious
-    auth_mechanism match from the bare word "session".
+    Bigrams are matched first and consume their words so that a phrase
+    match ("session store" → cache_backend) does not also produce a
+    spurious single-word match ("session" → auth_mechanism).
     """
     label = label.rstrip(".,!?;:")
     text = (label + " " + summary).lower()
@@ -217,15 +212,12 @@ def find_contradicting_decisions(
         if node.status not in (NodeStatus.COMPLETED,):
             continue  # already superseded/archived/invalidated — skip
 
-        # AUDIT FIX (2026-07-10): topic comparison is now SET INTERSECTION,
-        # not equality of a single first-match topic. A multi-topic decision
-        # ("FastAPI + SQLAlchemy + PostgreSQL") is contradicted by a new
-        # decision touching ANY of its topics ("switch Postgres to SQLite").
-        # Trade-off (deliberate): the whole node is superseded even though
-        # its other topics (FastAPI) may still hold — the graph's granularity
-        # is one node per decision *statement*, and the supersession
-        # transition records both labels, so no information is lost; the
-        # alternative (leaving it active) showed stale decisions as current.
+        # Set intersection: a multi-topic decision is contradicted by a new
+        # decision touching any of its topics. This supersedes the whole
+        # node even if its other topics still hold — granularity is one
+        # node per decision statement, and the transition record preserves
+        # both labels, whereas leaving it active would present a stale
+        # choice as current.
         existing_topics = classify_topics(node.label, node.summary)
         if existing_topics & new_topics:
             # Same topic — check it's not the same decision
@@ -292,16 +284,11 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
     words_b = set(b.split())
     if not words_a or not words_b:
         return False
-    # AUDIT FIX (2026-07-10, round 2): containment. "Use React" and
-    # "use React for the frontend." are the same decision, but flat word
-    # overlap scores them 2/5 = 0.4 — far below the 0.82 threshold. The
-    # extractor can emit both variants from ONE message (different regex
-    # passes capture different spans), and without this check they became
-    # two nodes where one superseded the other — a self-supersession that
-    # polluted the resume context with a bogus "Changed:" line.
-    # Guard: the smaller set needs >= 2 words, so "Use PostgreSQL" is NOT
-    # collapsed into "Switch from PostgreSQL to SQLite" ({postgresql}
-    # alone would be a subset of many genuinely different decisions).
+    # Containment: "Use React" and "use React for the frontend." are the
+    # same decision even though flat word overlap (2/5) is far below the
+    # threshold. The extractor can emit both variants from one message.
+    # The smaller set must have >= 2 words — a single shared word
+    # ("postgresql") is a subset of many genuinely different decisions.
     smaller, larger = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
     if len(smaller) >= 2 and smaller <= larger:
         return True
