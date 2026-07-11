@@ -1,16 +1,13 @@
 """
-Regression tests for the MCP stdio server (2026-07-10 audit).
+Regression tests for the MCP stdio server.
 
-Bugs these guard against (all confirmed live before the fix):
-  1. isError was computed via result_text.startswith("❌") — a KeyError from
-     a missing required argument surfaced as "Tool error: 'session_id'" with
-     isError FALSE, i.e. clients saw a *successful* result.
-  2. A valid-JSON-but-not-an-object line ([1,2]) crashed the whole server
-     via AttributeError on req.get().
-  3. Any exception in a handler outside tools/call (e.g. initialize) killed
-     the process with no JSON-RPC error — the client hung, then saw the
-     subprocess die.
-  4. Malformed JSON lines were silently dropped (no log, no error response).
+Invariants under test:
+  1. isError is structural — validation failures and handler crashes are
+     reported with isError: true regardless of message text.
+  2. No input terminates the read loop: malformed JSON returns -32700,
+     non-object messages return -32600, handler exceptions return -32603,
+     and subsequent requests are still served.
+  3. Required arguments are validated with typed, descriptive errors.
 """
 import io
 import json
@@ -81,14 +78,14 @@ def test_analyze_file_success_not_error(tmp_path):
 
 
 def test_handler_crash_is_error_not_exception(monkeypatch):
-    def boom(args):
-        raise RuntimeError("kaboom")
+    def failing_handler(args):
+        raise RuntimeError("simulated handler failure")
     # handle_tool_call builds its dispatch dict from module globals at call
     # time, so patching the module attribute is picked up.
-    monkeypatch.setattr(mcp, "handle_get_savings_stats", boom)
+    monkeypatch.setattr(mcp, "handle_get_savings_stats", failing_handler)
     text, is_error = mcp.handle_tool_call("get_savings_stats", {})
     assert is_error is True
-    assert "kaboom" in text or "internal error" in text.lower()
+    assert "simulated handler failure" in text or "internal error" in text.lower()
 
 
 # ── stdio transport: survives hostile input ──────────────────────────────────
@@ -120,7 +117,7 @@ def test_stdio_survives_malformed_json(monkeypatch):
     ])
     assert out[0]["error"]["code"] == -32700
     assert out[1]["id"] == 2
-    assert len(out[1]["result"]["tools"]) == 5
+    assert len(out[1]["result"]["tools"]) == 6
 
 
 def test_stdio_survives_non_object_json(monkeypatch):
@@ -159,7 +156,7 @@ def test_stdio_handler_exception_yields_jsonrpc_error(monkeypatch):
 
 
 def test_stdio_missing_arg_reports_is_error_true(monkeypatch):
-    """THE bug: missing session_id must reach the client as isError: true."""
+    """A missing required argument must reach the client as isError: true."""
     out = _run_lines(monkeypatch, [
         json.dumps({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
                     "params": {"name": "checkpoint_session", "arguments": {}}}),

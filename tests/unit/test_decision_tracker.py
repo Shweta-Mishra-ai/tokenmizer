@@ -1,14 +1,10 @@
 """
-Regression tests for the topic classifier (2026-07-10 audit).
+Tests for the decision topic classifier and same-decision detection.
 
-Confirmed misclassifications before the fix (all reproduced by execution):
-  - "Go with tRPC for the API layer"  → "language" (imperative "Go" collided
-    with Go-the-language; first-single-word-hit-wins never reached "trpc")
-  - "Use Supabase for the backend"    → None (vocabulary gap; the sibling
-    hybrid_extractor.py knew "supabase" but this file didn't)
-  - "Use Clerk for authentication"    → None (same gap)
-  - "Use FastAPI with SQLAlchemy and PostgreSQL" → only "web_framework";
-    a later Postgres→SQLite switch was never detected as contradicting it.
+Covers the known-hard cases: the imperative "Go with X" vs. Go-the-language
+ambiguity, technology names shared with the extractor vocabulary, multi-topic
+statements, bigram/single-word precedence, and near-duplicate label
+containment.
 """
 from tokenmizer.graph_memory.decision_tracker import (
     classify_topic,
@@ -112,12 +108,12 @@ def test_same_decision_not_superseded(tmp_path):
     assert old_id not in hits
 
 
-# ── AUDIT round 2 (2026-07-10): near-duplicate decision merging ──────────────
+# ── Near-duplicate decision merging ──────────────────────────────────────────
 
 def test_containment_variant_merges_not_supersedes(tmp_path):
-    """The demo bug: 'use React for the frontend.' and 'Use React' were
-    emitted from ONE message, became two nodes, and one superseded the
-    other — a bogus 'Changed:' line in every resume. They must merge."""
+    """Two label variants of one decision (emitted from a single message)
+    must merge into one node rather than supersede each other, which would
+    record a spurious decision change."""
     g = GraphMemory(session_id="t-dup", storage_dir=str(tmp_path))
     id1 = g.add_node(NodeType.DECISION, "use React for the frontend.",
                      NodeStatus.COMPLETED)

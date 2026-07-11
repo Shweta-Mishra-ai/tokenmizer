@@ -261,7 +261,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.3.2",
+    version="0.4.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -420,12 +420,9 @@ async def _update_graph(
                                 )
                                 return {"text": r.text}
 
-                            # FIXED: was HybridExtractor(provider_fn=_pfn) —
-                            # a kwarg __init__ never accepted, so this raised
-                            # TypeError on EVERY call, and even fixed, extract()
-                            # was called without provider_fn (defaults None →
-                            # LLM pass skipped). The LLM extraction path never
-                            # executed once despite use_llm_extraction=true.
+                            # provider_fn goes to extract(), not __init__ —
+                            # omitting it silently skips the LLM pass
+                            # (regression-tested in test_hybrid_extractor).
                             ext = HybridExtractor()
                             extracted = await ext.extract(_msgs, provider_fn=_pfn)
                             _g.extract_from_messages(_all, incremental=False,
@@ -877,6 +874,36 @@ async def get_graph_html(session_id: str):
     return HTMLResponse(to_share_html(graph))
 
 
+@app.get("/api/ontology", dependencies=[Depends(verify_api_key)])
+async def get_ontology():
+    """The TokenMizer graph ontology: node/edge types with semantics and
+    the status state machine. Machine-readable — what the graph CAN contain
+    and which lifecycle transitions are legal."""
+    from tokenmizer.graph_memory.ontology import ontology_dict
+    return ontology_dict()
+
+
+@app.get("/api/graph/{session_id}/why", dependencies=[Depends(verify_api_key)])
+async def get_graph_why(session_id: str, q: str):
+    """Reasoning: trace the causal chain behind a decision. Matches decision
+    nodes containing `q`, walks the supersession chain in both directions,
+    and returns the old→new trail with trigger/reason/evidence per hop,
+    plus the currently active choice."""
+    from tokenmizer.graph_memory.reasoning import why
+    graph = await _get_graph_async(session_id)
+    return why(graph, q)
+
+
+@app.get("/api/graph/{session_id}/reasoning", dependencies=[Depends(verify_api_key)])
+async def get_graph_reasoning(session_id: str):
+    """Full reasoning view over session memory: active decisions, recent
+    changes, decision history grouped by topic, and an ontology-based
+    consistency audit (contradictions, missing/dangling transitions)."""
+    from tokenmizer.graph_memory.reasoning import summarize_reasoning
+    graph = await _get_graph_async(session_id)
+    return summarize_reasoning(graph)
+
+
 @app.get("/api/graph/{session_id}/obsidian", dependencies=[Depends(verify_api_key)])
 async def get_graph_obsidian(session_id: str):
     """
@@ -985,13 +1012,10 @@ async def invalidate_decision(session_id: str, decision_label: str, reason: str 
         from tokenmizer.graph_memory.graph import NodeStatus, NodeType
         graph = await _get_graph_async(session_id)
         label_lower = decision_label.lower().strip()
-        # AUDIT FIX (2026-07-10): the substring match previously ran across
-        # ALL decision nodes regardless of status — a short label like
-        # "auth" could flip several nodes at once, including already-
-        # SUPERSEDED history nodes (destroying their supersession record by
-        # overwriting it with INVALIDATED). Now: only ACTIVE (COMPLETED)
-        # decisions are eligible, and the response lists exactly which
-        # nodes were affected so multi-matches are visible to the caller.
+        # Only ACTIVE (COMPLETED) decisions are eligible: matching across
+        # all statuses would let a short label overwrite SUPERSEDED history
+        # nodes with INVALIDATED, destroying their supersession record. The
+        # response lists every affected node so multi-matches are visible.
         invalidated: list[dict] = []
         for node_id, node in graph._nodes.items():
             if (node.type == NodeType.DECISION and

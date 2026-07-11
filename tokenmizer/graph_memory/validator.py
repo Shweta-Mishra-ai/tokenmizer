@@ -95,24 +95,18 @@ class GraphValidator:
         extractor_confidence: the corroboration-based confidence computed by
         HybridExtractor.merge() (0.95 = both LLM and heuristic found it,
         0.80 = LLM-only, 0.65 = heuristic-only), when the candidate came
-        through the extraction pipeline.
-
-        AUDIT FIX (2026-07-10, round 2): this validator used to recompute
-        confidence purely from label length/wording and IGNORE the
-        extractor's corroboration signal for the accept/reject decision —
-        so a doubly-corroborated but short decision ("Use Vitest", 0.95)
-        scored 0.60 and was rejected, while a verbose weakly-sourced one
-        passed on label length alone. Corroboration now counts as evidence:
+        through the extraction pipeline. Blended as:
 
             final = max(heuristic_score, (heuristic_score + extractor) / 2)
 
-        - monotone: extractor evidence can only RAISE the score, never
+        Properties:
+        - monotone: extractor evidence can only raise the score, never
           lower a label the heuristics already trust;
-        - equal-weight blend, not override: a corroborated candidate still
-          needs non-junk heuristics to clear the threshold, so heuristic-
-          only 0.65 does not automatically pass a 0.65 threshold;
+        - blend, not override: a corroborated candidate still needs
+          non-junk heuristics to clear the threshold (heuristic-only 0.65
+          does not automatically pass a 0.65 threshold);
         - hard rejects (noise labels/patterns) fire before this and are
-          absolute — 0.95 corroboration cannot resurrect junk.
+          absolute.
         """
         label = label.strip()
 

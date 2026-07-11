@@ -137,7 +137,7 @@ class TestRedaction:
         cleaned = redact_messages(messages)  # must not raise
         assert "sk-proj" not in cleaned[0]["content"][1]
 
-    # ── AUDIT FIX (2026-07-10): coverage gaps found in the redaction audit ──
+    # ── URL-embedded credentials and additional provider key formats ────────
 
     def test_connection_string_password_redacted(self):
         """A DATABASE_URL password matched NO pattern before this fix —

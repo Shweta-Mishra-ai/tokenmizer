@@ -8,11 +8,9 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-# AUDIT FIX (2026-07-10, found by dry-running the README quick start):
-# on Windows consoles using cp1252, the emoji in help/output text raised
-# UnicodeEncodeError — `tokenmizer --help` crashed with a traceback before
-# printing anything. Same fix the benchmark runners already got in v0.2.4;
-# the CLI itself was missed.
+# Force UTF-8 output streams: Windows consoles default to cp1252, which
+# cannot encode the emoji in help/output text and would crash the CLI
+# before printing anything.
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         try:

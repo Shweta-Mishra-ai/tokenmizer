@@ -13,6 +13,8 @@ Tools exposed:
   - get_graph_stats       see what's in the knowledge graph
   - analyze_file          run file intelligence on any file
   - get_savings_stats     see token savings analytics
+  - why_decision          trace why a decision is the current choice
+                          (supersession chain with reasons/evidence)
 
 Run standalone:
   python3 -m tokenmizer.mcp.server
@@ -146,6 +148,31 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "why_decision",
+        "description": (
+            "Reason over the session's decision history: why is something "
+            "the current choice? Traces the supersession chain (old → new "
+            "with trigger, reason, and evidence per hop) for decisions "
+            "matching the query, and reports the currently active choice. "
+            "Use when the user asks 'why did we pick X', 'what happened to "
+            "Y', or 'what was the previous approach'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session whose decision history to query",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Substring of the decision to explain (e.g. 'react', 'postgres')",
+                },
+            },
+            "required": ["session_id", "query"],
+        },
+    },
 ]
 
 
@@ -184,11 +211,9 @@ def _post(path: str, body: dict) -> dict:
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
 #
-# Every handler returns (text, is_error). AUDIT FIX (2026-07-10): previously
-# handlers returned bare strings and the transport decided isError by checking
-# result_text.startswith("❌") — so a KeyError from a missing required argument
-# surfaced as "Tool error: 'session_id'" with isError: FALSE, i.e. reported to
-# MCP clients as a *successful* tool result. isError is now structural.
+# Every handler returns (text, is_error). The error flag is structural —
+# never inferred from the text — so validation failures and crashes are
+# reported to MCP clients with isError: true regardless of message content.
 
 
 class ToolInputError(ValueError):
@@ -307,6 +332,47 @@ def handle_analyze_file(args: dict) -> tuple[str, bool]:
         return f"❌ File analysis error: {type(e).__name__}: {e}", True
 
 
+def handle_why_decision(args: dict) -> tuple[str, bool]:
+    session_id = _require_str(args, "session_id")
+    query = _require_str(args, "query")
+    from urllib.parse import quote
+    result = _get(f"/api/graph/{session_id}/why?q={quote(query)}")
+    if "error" in result:
+        return f"❌ Reasoning query failed: {result['error']}", True
+
+    matches = result.get("matches", [])
+    chain = result.get("chain", [])
+    current = result.get("current")
+
+    if not matches:
+        return (
+            f"No decision matching '{query}' found in session '{session_id}'. "
+            f"Try a shorter substring, or use get_graph_stats to see what "
+            f"the graph contains."
+        ), False
+
+    lines = [f"Decision trail for '{query}' — session: {session_id}", ""]
+    if chain:
+        for t in chain:
+            lines.append(f"  ✗ {t['from_label']}")
+            hop = f"      └─ replaced by: {t['to_label']}"
+            if t.get("reason"):
+                hop += f" — {t['reason']}"
+            lines.append(hop)
+            if t.get("evidence"):
+                lines.append(f"         evidence: {t['evidence']}")
+    else:
+        lines.append("  (no supersessions — this decision has never changed)")
+    lines.append("")
+    if current:
+        lines.append(f"  ✓ CURRENT: {current['label']}"
+                     + (f" — {current['summary']}" if current.get("summary") else ""))
+    else:
+        lines.append("  ⚠ No active decision on this topic (superseded or "
+                     "invalidated without replacement).")
+    return "\n".join(lines), False
+
+
 def handle_get_savings_stats(args: dict) -> tuple[str, bool]:
     result = _get("/api/stats")
     if "error" in result:
@@ -339,10 +405,10 @@ def handle_tool_call(name: str, arguments: Any) -> tuple[str, bool]:
         "get_graph_stats": handle_get_graph_stats,
         "analyze_file": handle_analyze_file,
         "get_savings_stats": handle_get_savings_stats,
+        "why_decision": handle_why_decision,
     }
     handler = handlers.get(name)
     if not handler:
-        # AUDIT FIX: was reported with isError false (looked like success).
         return f"Unknown tool: {name!r}. Available: {sorted(handlers)}", True
     if not isinstance(arguments, dict):
         return (
@@ -405,18 +471,10 @@ def run_stdio_server():
     MCP stdio transport — reads JSON-RPC from stdin, writes to stdout.
     Newline-delimited JSON framing (one object per line, both directions).
 
-    AUDIT FIX (2026-07-10): the previous loop had three ways to die or
-    go dark with zero diagnostics:
-      1. any exception inside a handler outside tools/call (e.g. a broken
-         `initialize` import) crashed the whole process — the client hung
-         waiting for a reply, then saw the subprocess exit;
-      2. a valid-JSON-but-not-an-object line ([1,2], "hi") raised
-         AttributeError on req.get() — same crash;
-      3. malformed JSON lines were silently discarded (`continue`, no log,
-         no JSON-RPC error) — the client's request hung forever.
-    Logging goes to STDERR (stdout is the protocol channel); every failure
-    now produces both a log line and, where a request id exists, a
-    JSON-RPC error response.
+    Robustness contract: no input may terminate the read loop. Malformed
+    JSON returns -32700, non-object messages return -32600, and handler
+    exceptions return -32603 — each with a log line. Logging goes to
+    stderr; stdout carries only protocol frames.
     """
     logging.basicConfig(
         stream=sys.stderr,

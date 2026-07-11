@@ -1,6 +1,6 @@
 {
   "name": "tokenmizer",
-  "version": "0.2.3",
+  "version": "0.4.0",
   "description": "Never lose your AI context again. Graph-backed memory, session checkpointing, and file intelligence for any LLM.",
   "homepage": "https://github.com/Shweta-Mishra-ai/tokenmizer",
   "repository": "https://github.com/Shweta-Mishra-ai/tokenmizer",

@@ -108,8 +108,8 @@ def main() -> int:
         r = rpc("tools/list", req_id=2)
         tools = {t["name"] for t in r.get("result", {}).get("tools", [])}
         expected = {"checkpoint_session", "resume_session", "get_graph_stats",
-                    "analyze_file", "get_savings_stats"}
-        check("tools/list exposes all 5 tools", tools == expected, str(tools))
+                    "analyze_file", "get_savings_stats", "why_decision"}
+        check("tools/list exposes all 6 tools", tools == expected, str(tools))
 
         # 3. Local tool (no proxy): analyze_file on a real CSV
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False,
@@ -137,8 +137,21 @@ def main() -> int:
         text = r.get("result", {}).get("content", [{}])[0].get("text", "")
         check("resume_session returns context", "TokenMizer Resume" in text, text[:160])
 
+        # Reasoning tool round-trips through the proxy. Whether the test
+        # session happens to contain a matching decision or not, a healthy
+        # server answers with a trail or a clean "no match" — never an error.
+        r = rpc("tools/call", {"name": "why_decision",
+                               "arguments": {"session_id": "mcp-e2e-test",
+                                             "query": "postgres"}}, req_id=7)
+        res = r.get("result", {})
+        text = res.get("content", [{}])[0].get("text", "")
+        check("why_decision answers without error",
+              res.get("isError") is False
+              and ("Decision trail" in text or "No decision matching" in text),
+              text[:160])
+
         # 5. Unknown method → JSON-RPC error, not crash
-        r = rpc("bogus/method", {}, req_id=7)
+        r = rpc("bogus/method", {}, req_id=8)
         check("unknown method returns -32601 error",
               r.get("error", {}).get("code") == -32601)
 

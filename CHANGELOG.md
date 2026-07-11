@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.4.0] — 2026-07-11 — from storage to reasoning: ontology + graph reasoning
+
+### New — TokenMizer Ontology
+- `tokenmizer/graph_memory/ontology.py`: the formal, machine-readable
+  vocabulary of the graph — every node type with semantics, every edge
+  type with domain/range/semantics, and the status **state machine**
+  (which lifecycle transitions are legal, e.g. COMPLETED→SUPERSEDED→
+  ARCHIVED; SUPERSEDED can never silently become COMPLETED again).
+- Served at `GET /api/ontology` for MCP clients, docs, and tooling.
+- Design principle: the ontology describes and audits, it does not gate
+  writes — graph ingestion stays permissive; violations are surfaced by
+  the consistency audit instead of causing silent data loss.
+
+### New — Graph Reasoning (`tokenmizer/graph_memory/reasoning.py`)
+- **`why()`** — "Why is X the current choice?" Walks the supersession
+  chain in both directions and returns the old→new trail with trigger,
+  reason, and evidence per hop, plus the currently active decision.
+  `GET /api/graph/{id}/why?q=react`
+- **`impact()`** — typed 1-hop neighborhood: which files/tasks/errors
+  connect to a node and via which relation.
+- **`decision_history()`** — decision timeline grouped by topic bucket.
+- **`consistency_check()`** — ontology-based audit: two active decisions
+  sharing a topic (contradictions the tracker missed), SUPERSEDED
+  decisions with no transition record (lost history), transitions
+  referencing pruned nodes.
+- **`GET /api/graph/{id}/reasoning`** — the combined reasoning view.
+- All reasoning is deterministic and local — no LLM calls.
+
+### New — MCP tool `why_decision` (6 tools now)
+- Ask your agent "why did we pick X?" — it traces the decision trail:
+  struck-through old choices, replaced-by hops with reasons/evidence,
+  and the current active choice. Covered in unit tests and the e2e check.
+
+### Changed
+- `glama.json` added (Glama MCP directory maintainer verification).
+- README: "From Storage to Reasoning" section; internal demo-script and
+  planning docs removed from the repository.
+- Version 0.4.0 everywhere (enforced by test_version_consistency).
+
 ## [0.3.2] — 2026-07-10 — full-repo audit: graph memory, MCP server, visualization
 
 ### Critical — the LLM extraction path never worked

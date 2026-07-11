@@ -49,18 +49,14 @@ _PATTERNS = [
         r'["\']?[\w\-\.\/+]{8,}',
         re.IGNORECASE,
     ),
-    # AUDIT FIX (2026-07-10): URL-embedded credentials — a DATABASE_URL like
-    # postgres://admin:S3cr3tPass@db.internal:5432/prod carried a live
-    # password that matched NO pattern above (no "password=" literal, no
-    # recognized token prefix). Redact the userinfo section of any URL that
-    # has one. Only the credential part is replaced; scheme/host survive so
-    # the message stays readable.
+    # URL-embedded credentials (postgres://user:pass@host/db): redact the
+    # userinfo section only — scheme and host survive so the message stays
+    # readable. Connection-string passwords match no keyword or provider
+    # pattern, so this rule is their only coverage.
     re.compile(r'(?<=://)[^\s/:@]+:[^\s/@]+(?=@)'),
-    # AUDIT FIX (2026-07-10): provider key formats that were missing —
-    # best-effort, documented as such (providers rotate formats):
-    # Cohere trial/prod keys are 40 alnum chars bound to a "co-" style
-    # context we can't anchor on, so we rely on the generic key=... rule
-    # for those; the below are the anchorable ones.
+    # Additional provider key formats with anchorable prefixes. Formats
+    # without a stable prefix (e.g. Cohere's plain 40-char keys) rely on
+    # the generic key=/token= rule above.
     # xAI / Grok
     re.compile(r'xai-[A-Za-z0-9]{20,}'),
     # OpenRouter

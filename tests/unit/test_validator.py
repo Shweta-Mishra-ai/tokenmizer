@@ -188,12 +188,11 @@ class TestGraphIntegration:
 
 class TestExtractorConfidenceBlending:
     """
-    AUDIT round 2 (2026-07-10): the validator used to recompute confidence
-    purely from label length/wording and IGNORE the extractor's
-    corroboration signal — a doubly-corroborated short decision
-    ("Use Vitest", 0.95) was rejected while verbose weakly-sourced ones
-    passed on label length. Corroboration now blends in:
-        final = max(heuristic, (heuristic + extractor) / 2)
+    The validator blends the extractor's corroboration confidence into its
+    own score:  final = max(heuristic, (heuristic + extractor) / 2).
+    The blend is monotone (evidence can only raise a score), is not an
+    override (weak heuristics still fail the threshold), and never applies
+    to hard-rejected labels.
     """
 
     def test_corroborated_short_decision_now_accepted(self):
