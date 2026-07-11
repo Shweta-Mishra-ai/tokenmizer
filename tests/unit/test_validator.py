@@ -184,3 +184,49 @@ class TestGraphIntegration:
                 # The postgres task should not have an edge to auth.py
                 assert (t2, f1) not in edges, \
                     "PostgreSQL task should NOT be linked to api/auth.py"
+
+
+class TestExtractorConfidenceBlending:
+    """
+    AUDIT round 2 (2026-07-10): the validator used to recompute confidence
+    purely from label length/wording and IGNORE the extractor's
+    corroboration signal — a doubly-corroborated short decision
+    ("Use Vitest", 0.95) was rejected while verbose weakly-sourced ones
+    passed on label length. Corroboration now blends in:
+        final = max(heuristic, (heuristic + extractor) / 2)
+    """
+
+    def test_corroborated_short_decision_now_accepted(self):
+        v = GraphValidator(min_confidence=0.65)
+        # Heuristics alone: "Vitest for tests" scores ~0.55 -> rejected
+        alone = v.validate("Vitest for tests", "decision")
+        assert not alone.accepted, (
+            f"precondition changed: heuristics alone now score "
+            f"{alone.confidence} — update this test's premise"
+        )
+        # Corroborated by both LLM and heuristic pass -> accepted
+        corroborated = v.validate("Vitest for tests", "decision",
+                                  extractor_confidence=0.95)
+        assert corroborated.accepted
+        assert corroborated.confidence > alone.confidence
+
+    def test_heuristic_only_tier_does_not_auto_pass(self):
+        """0.65 extractor tier must NOT automatically clear a 0.65
+        threshold — blending is evidence, not an override."""
+        v = GraphValidator(min_confidence=0.65)
+        r = v.validate("Vitest for tests", "decision", extractor_confidence=0.65)
+        assert not r.accepted
+
+    def test_blend_never_lowers_heuristic_score(self):
+        v = GraphValidator(min_confidence=0.50)
+        strong = "Decided to use PostgreSQL because we need concurrent writes"
+        base = v.validate(strong, "decision", summary="benchmarked")
+        blended = v.validate(strong, "decision", summary="benchmarked",
+                             extractor_confidence=0.65)
+        assert blended.confidence >= base.confidence
+
+    def test_hard_rejects_survive_high_extractor_confidence(self):
+        """0.95 corroboration cannot resurrect junk."""
+        v = GraphValidator(min_confidence=0.50)
+        r = v.validate("ok", "decision", extractor_confidence=0.95)
+        assert not r.accepted

@@ -68,6 +68,10 @@ class GraphMemory:
     Survives process restarts. One DB file per storage_dir.
     """
 
+    # Days a decision stays SUPERSEDED before aging into ARCHIVED
+    # (measured from the moment of supersession — see apply_importance_decay).
+    ARCHIVE_SUPERSEDED_AFTER_DAYS: float = 7.0
+
     def __init__(self, session_id: str, storage_dir: str = "./checkpoints"):
         self.session_id = session_id
         self._nodes: dict[str, MemoryNode] = {}
@@ -125,8 +129,15 @@ class GraphMemory:
         - check_same_thread=False: safe because we serialize via asyncio session locks
         """
         conn = sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")  # WAL + NORMAL = safe + fast
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")  # WAL + NORMAL = safe + fast
+        except Exception:
+            # AUDIT FIX (2026-07-10): same leak as checkpoints/manager.py —
+            # a corrupt DB file failed the PRAGMA and leaked the open handle,
+            # which on Windows blocked the delete-and-recreate recovery path.
+            conn.close()
+            raise
         return conn
 
     def _init_db(self) -> None:
@@ -213,7 +224,19 @@ class GraphMemory:
             finally:
                 conn.close()
         except Exception as e:
-            logger.debug(f"Transition load skipped (table may not exist yet): {e}")
+            # AUDIT FIX (2026-07-10): everything logged at debug here, so DB
+            # corruption or a schema mismatch looked identical to the benign
+            # first-run case — decision history silently "didn't exist".
+            # The benign case (table not created yet) stays at debug; every
+            # other failure is now visible by default.
+            if "no such table" in str(e).lower():
+                logger.debug(f"Transition load skipped (first run, table not "
+                             f"created yet): {e}")
+            else:
+                logger.warning(f"Transition load FAILED for session "
+                               f"{self.session_id} — decision supersession "
+                               f"history unavailable this session: "
+                               f"{type(e).__name__}: {e}")
             self._transitions = []
 
     def _persist(self, force: bool = False) -> None:
@@ -418,12 +441,50 @@ class GraphMemory:
                 existing.summary = summary
             return node_id
 
-        # Validate before inserting — reject noise and low-confidence nodes
+        # AUDIT FIX (2026-07-10, round 2): fuzzy same-decision merge.
+        # The exact-hash dedup above only catches identical normalized
+        # labels, but the extractor can emit near-duplicate decisions from
+        # ONE message ("Use React" + "use React for the frontend." — two
+        # regex passes, different capture spans). Those became two nodes,
+        # and since they share a topic, one SUPERSEDED the other — a bogus
+        # self-supersession that showed up as a noisy "Changed:" line in
+        # every resume. Merge them instead: keep the existing node, prefer
+        # the longer (more specific) label, backfill the summary.
+        if node_type == NodeType.DECISION:
+            from tokenmizer.graph_memory.decision_tracker import _is_same_decision
+            for ex_id, ex in self._nodes.items():
+                if ex.type != NodeType.DECISION or ex._evicted:
+                    continue
+                if _is_same_decision(label, ex.label):
+                    ex.touch()
+                    self._dirty = True
+                    # Same status-upgrade-only rule as the exact-dedup branch
+                    # (a COMPLETED re-add must not resurrect a SUPERSEDED node)
+                    _rank = {
+                        NodeStatus.PENDING: 0, NodeStatus.IN_PROGRESS: 1,
+                        NodeStatus.COMPLETED: 2, NodeStatus.FAILED: 3,
+                        NodeStatus.ARCHIVED: 4, NodeStatus.SUPERSEDED: 5,
+                        NodeStatus.MODIFIED: 5, NodeStatus.INVALIDATED: 6,
+                    }
+                    if _rank.get(status, 0) > _rank.get(ex.status, 0):
+                        ex.status = status
+                    if len(label) > len(ex.label) and status == ex.status:
+                        ex.label = label[:120]
+                    if summary and not ex.summary:
+                        ex.summary = summary[:300]
+                    return ex_id
+
+        # Validate before inserting — reject noise and low-confidence nodes.
+        # confidence != 0.7 means the caller supplied an explicit value —
+        # for extraction-sourced decisions that's merge()'s corroboration
+        # tier (0.95/0.80/0.65), which the validator blends into its own
+        # score instead of ignoring (see validator.validate docstring).
         validator = _get_validator()
         result = validator.validate(
             label=label,
             node_type=node_type.value,
             summary=summary,
+            extractor_confidence=confidence if confidence != 0.7 else None,
         )
         if not result.accepted:
             logger.debug(f"Node rejected: {label!r} ({result.rejection_reason})")
@@ -972,6 +1033,26 @@ class GraphMemory:
         Returns: dict of {node_id: new_importance} for changed nodes
         """
         changed: dict[str, float] = {}
+
+        # AUDIT FIX (2026-07-10): ARCHIVED was a documented status, fully
+        # wired into decay/prune/query filtering — but NOTHING ever set it.
+        # The README's 4-state model advertised a state that was unreachable.
+        # Now: SUPERSEDED decisions age into ARCHIVED once they've been
+        # superseded for ARCHIVE_SUPERSEDED_AFTER_DAYS (measured from
+        # valid_until, the moment of supersession — not node creation).
+        # This matches the README's "SUPERSEDED shown in resume ⚠ 7 days".
+        _now = time.time()
+        for _nid, _node in self._nodes.items():
+            if (_node.type == NodeType.DECISION
+                    and _node.status == NodeStatus.SUPERSEDED
+                    and not _node._evicted
+                    and _node.valid_until > 0.0
+                    and (_now - _node.valid_until) / 86400.0
+                        >= self.ARCHIVE_SUPERSEDED_AFTER_DAYS):
+                _node.status = NodeStatus.ARCHIVED
+                self._dirty = True
+                logger.debug(f"Archived long-superseded decision {_nid}: "
+                             f"{_node.label[:60]}")
 
         # Decay rates per day
         _DECAY_RATE = {

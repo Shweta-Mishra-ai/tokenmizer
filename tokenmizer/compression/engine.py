@@ -331,7 +331,18 @@ class FileContentFilter:
             if len(result) < len(content):
                 return f"[JSON cleaned — {len(content)} → {len(result)} chars]\n{result}"
             return content
-        except (json.JSONDecodeError, Exception):
+        except json.JSONDecodeError:
+            # Not (valid) JSON — expected for non-JSON content routed here;
+            # passing through unchanged is correct and not log-worthy.
+            return content
+        except Exception as e:
+            # AUDIT FIX (2026-07-10): was `except (json.JSONDecodeError,
+            # Exception): return content` — a redundant tuple that swallowed
+            # EVERY error (including bugs in _clean_json, RecursionError on
+            # pathological nesting) with zero logging. Filtering silently
+            # no-oped and the token-savings layer degraded invisibly.
+            logger.warning(f"JSON filtering failed, passing content through "
+                           f"unfiltered: {type(e).__name__}: {e}")
             return content
 
     def _clean_json(self, obj, depth: int):

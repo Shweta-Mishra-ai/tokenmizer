@@ -97,7 +97,11 @@ def detect_file_type(filename: str, content_bytes: bytes) -> str:
         if "," in head and "\n" in head:
             return "csv"
     except Exception as e:
-        logger.debug(f"File type sniff failed, defaulting to text: {e}")
+        # AUDIT FIX (2026-07-10): debug → warning. Misdetecting the type
+        # silently routes the file to the generic text extractor, which can
+        # cost the user most of the promised token savings with no signal.
+        logger.warning(f"File type sniff failed, defaulting to 'text' "
+                       f"(extraction quality degraded): {type(e).__name__}: {e}")
     return "text"
 
 
@@ -546,6 +550,16 @@ class PDFExtractor:
                 # previously this was a bare `except: pass`.
                 logger.debug(f"Failed to extract text from page {i} of {filename}: {e}")
                 page_texts.append("")
+
+        # AUDIT FIX (2026-07-10): per-page failures stay at debug (expected
+        # per-page degradation), but a PDF where NOTHING extracted means the
+        # whole analysis is empty — that must be visible by default.
+        if page_texts and not any(t.strip() for t in page_texts):
+            logger.warning(
+                f"No text extracted from ANY of {len(page_texts)} pages of "
+                f"{filename} (scanned/image-only PDF, or extraction failing "
+                f"on every page) — analysis will be near-empty"
+            )
 
         # Heading structure (lines that look like headings)
         headings = self._extract_headings(page_texts)
