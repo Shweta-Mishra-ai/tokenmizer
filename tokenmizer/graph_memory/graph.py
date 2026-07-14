@@ -415,6 +415,7 @@ class GraphMemory:
         label, summary = redact_node(label, summary)
 
         stored_label = label[:120]
+        stored_summary = summary[:300]
         norm = self._normalize_label(stored_label)
         node_id = self._node_id(node_type.value, norm)
 
@@ -436,8 +437,8 @@ class GraphMemory:
             }
             if status_rank.get(status, 0) > status_rank.get(existing.status, 0):
                 existing.status = status
-            if summary and not existing.summary:
-                existing.summary = summary
+            if stored_summary and not existing.summary:
+                existing.summary = stored_summary
             return node_id
 
         # Fuzzy same-decision merge. Exact-hash dedup above only catches
@@ -464,10 +465,10 @@ class GraphMemory:
                     }
                     if _rank.get(status, 0) > _rank.get(ex.status, 0):
                         ex.status = status
-                    if len(label) > len(ex.label) and status == ex.status:
-                        ex.label = label[:120]
-                    if summary and not ex.summary:
-                        ex.summary = summary[:300]
+                    if len(stored_label) > len(ex.label) and status == ex.status:
+                        ex.label = stored_label
+                    if stored_summary and not ex.summary:
+                        ex.summary = stored_summary
                     return ex_id
 
         # Validate before inserting — reject noise and low-confidence nodes.
@@ -499,7 +500,7 @@ class GraphMemory:
             type=node_type,
             label=stored_label,
             status=status,
-            summary=summary[:300],
+            summary=stored_summary,
             importance=importance,
             confidence=confidence if confidence != 0.7 else result.confidence,
         )
