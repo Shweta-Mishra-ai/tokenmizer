@@ -414,7 +414,8 @@ class GraphMemory:
         from tokenmizer.security.redaction import redact_node
         label, summary = redact_node(label, summary)
 
-        norm = self._normalize_label(label)
+        stored_label = label[:120]
+        norm = self._normalize_label(stored_label)
         node_id = self._node_id(node_type.value, norm)
 
         if node_id in self._nodes:
@@ -496,7 +497,7 @@ class GraphMemory:
         node = MemoryNode(
             id=node_id,
             type=node_type,
-            label=label[:120],
+            label=stored_label,
             status=status,
             summary=summary[:300],
             importance=importance,

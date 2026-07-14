@@ -46,6 +46,16 @@ class TestNodeDeduplication:
         graph.add_node(NodeType.TASK, "Implement auth", NodeStatus.PENDING)
         assert graph._nodes[id1].status == NodeStatus.COMPLETED
 
+    def test_labels_identical_after_truncation_share_node_id(self, graph):
+        label = "Implement authentication " + "A" * 150
+
+        id1 = graph.add_node(NodeType.TASK, label)
+        id2 = graph.add_node(NodeType.TASK, label[:120])
+
+        assert id1 == id2
+        assert len(graph._nodes) == 1
+        assert graph._nodes[id1].label == label[:120]
+
 
 class TestNodeTypes:
 
