@@ -579,8 +579,8 @@ tokenmizer stats
 | Version | Focus |
 |---|---|
 | **v0.3** | SSE streaming passthrough (checkpoint on stream close) |
-| v0.4 | Cross-session memory · embedding-based edge linking |
-| v0.5 | Per-node storage schema (scale past 200-node graphs) |
+| **v0.4** | Graph ontology · deterministic reasoning API (`why`, `impact`, consistency checks) |
+| v0.5 | Cross-session memory · embedding-based edge linking · per-node storage schema (scale past 200-node graphs) |
 | Research | Real-transcript benchmark suite → paper ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research)) |
 
 Have a use case that doesn't fit? [Open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/new/choose) — extraction misses have their own issue template.
@@ -595,17 +595,27 @@ Contributions welcome — this project merges fast (median PR review < 1 day).
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -v && ruff check tokenmizer/     # 262 tests, must stay green
+pytest tests/ -v && ruff check tokenmizer/     # 302 tests, must stay green
 python scripts/mcp_e2e_check.py                # full-pipeline e2e check
 ```
 
 **Highest-impact areas right now:**
 
 1. **Graph extraction quality** — real-world transcripts where extraction misses tasks/decisions (file an [extraction-miss issue](.github/ISSUE_TEMPLATE/extraction_miss.md) even if you don't fix it — the failing transcript itself is the contribution)
-2. **SSE streaming** (v0.3 headline feature)
-3. **Benchmark sessions** — add a real session + ground truth to `benchmarks/`
+2. **Decision tracker edge cases** — negation, semantic opposites, and same-decision matching are an active area (see recent merges below)
+3. **Reasoning and ontology** (`graph_memory/reasoning.py`, `graph_memory/ontology.py`) — new in v0.4, still growing
+4. **Benchmark sessions** — add a real session + ground truth to `benchmarks/`
 
-Every PR runs the full CI gauntlet (tests × 3 Python versions, lint, Docker build). See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [TESTING.md](TESTING.md) for the test architecture.
+Every PR runs the full CI gauntlet (tests × 3 Python versions on Linux, one Python version on Windows, lint, Docker build). See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [TESTING.md](TESTING.md) for the test architecture.
+
+### Contributors
+
+Thanks to everyone who has sent a fix upstream:
+
+- [**@0xfroOty**](https://github.com/0xfroOty) — negated-decision handling in the decision tracker ([#22](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/22)), `OutputTrimmer` level alignment ([#25](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/25)), streaming cache-hit analytics ([#31](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/31))
+- [**@pollychen-lab**](https://github.com/pollychen-lab) — graph node IDs derived from stored (truncated) labels ([#21](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/21)), semantic-opposite decision detection ([#26](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/26))
+
+Open a PR — [CONTRIBUTING.md](CONTRIBUTING.md) covers setup and review expectations.
 
 ---
 
