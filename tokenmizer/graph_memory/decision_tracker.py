@@ -269,6 +269,7 @@ def _find_by_word_overlap(
 
 def _is_same_decision(label_a: str, label_b: str) -> bool:
     """True if two labels are essentially the same decision (dedup check)."""
+
     def _norm(s: str) -> str:
         s = s.lower().rstrip(".,!?;:")
         # Normalize common tech name variants
@@ -278,12 +279,32 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
         return re.sub(r"\s+", " ", s).strip()
 
     a, b = _norm(label_a), _norm(label_b)
+
     if a == b:
         return True
+
     words_a = set(a.split())
     words_b = set(b.split())
+
     if not words_a or not words_b:
         return False
+
+    NEGATIONS = {
+        "not",
+        "no",
+        "never",
+        "dont",
+        "don't",
+    }
+
+    neg_a = bool(words_a & NEGATIONS)
+    neg_b = bool(words_b & NEGATIONS)
+
+    # Don't merge decisions if one is negated and the other isn't.
+    if neg_a != neg_b:
+        return False
+
+
     # Containment: "Use React" and "use React for the frontend." are the
     # same decision even though flat word overlap (2/5) is far below the
     # threshold. The extractor can emit both variants from one message.
@@ -293,4 +314,4 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
     if len(smaller) >= 2 and smaller <= larger:
         return True
     overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
-    return overlap >= 0.82
+    return overlap >=   0.82

@@ -156,6 +156,8 @@ def test_containment_needs_two_words():
     assert not _is_same_decision("PostgreSQL", "Switch from PostgreSQL to SQLite")
     assert not _is_same_decision("Use PostgreSQL", "Switch from PostgreSQL to SQLite")
     assert _is_same_decision("Use React", "use React for the frontend.")
+    assert not _is_same_decision("Use PostgreSQL", "Do not use PostgreSQL",)
+    assert _is_same_decision("Do not use Redis", "do not use Redis for caching",)
 
 
 def test_real_supersession_still_fires_after_merge_fix(tmp_path):
