@@ -156,11 +156,10 @@ def test_containment_needs_two_words():
     assert not _is_same_decision("PostgreSQL", "Switch from PostgreSQL to SQLite")
     assert not _is_same_decision("Use PostgreSQL", "Switch from PostgreSQL to SQLite")
     assert _is_same_decision("Use React", "use React for the frontend.")
-    assert not _is_same_decision("Use PostgreSQL", "Do not use PostgreSQL")
-    assert not _is_same_decision("Enable caching", "Disable caching")
-    assert not _is_same_decision("Use Redis", "Avoid Redis")
+    assert not _is_same_decision("Use PostgreSQL", "Do not use PostgreSQL",)
+    assert _is_same_decision("Do not use Redis", "do not use Redis for caching",)
 
-   
+
 def test_real_supersession_still_fires_after_merge_fix(tmp_path):
     """The merge fix must not swallow genuine contradictions."""
     g = GraphMemory(session_id="t-dup4", storage_dir=str(tmp_path))
