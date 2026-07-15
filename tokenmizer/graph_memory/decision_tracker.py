@@ -289,21 +289,41 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
     if not words_a or not words_b:
         return False
 
-    NEGATIONS = {
+    negations = {
         "not",
         "no",
         "never",
         "dont",
         "don't",
     }
+    opposite_terms = (
+        ("enable", "disable"),
+        ("enabled", "disabled"),
+        ("allow", "block"),
+        ("allowed", "blocked"),
+        ("permit", "forbid"),
+        ("permitted", "forbidden"),
+        ("use", "avoid"),
+        ("add", "remove"),
+        ("include", "exclude"),
+    )
 
-    neg_a = bool(words_a & NEGATIONS)
-    neg_b = bool(words_b & NEGATIONS)
+    neg_a = bool(words_a & negations)
+    neg_b = bool(words_b & negations)
 
     # Don't merge decisions if one is negated and the other isn't.
     if neg_a != neg_b:
         return False
 
+    for positive, negative in opposite_terms:
+        a_positive = positive in words_a
+        a_negative = negative in words_a
+        b_positive = positive in words_b
+        b_negative = negative in words_b
+        if (a_positive and b_negative and not a_negative and not b_positive) or (
+            a_negative and b_positive and not a_positive and not b_negative
+        ):
+            return False
 
     # Containment: "Use React" and "use React for the frontend." are the
     # same decision even though flat word overlap (2/5) is far below the

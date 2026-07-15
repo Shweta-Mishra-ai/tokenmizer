@@ -160,6 +160,37 @@ def test_containment_needs_two_words():
     assert _is_same_decision("Do not use Redis", "do not use Redis for caching",)
 
 
+def test_semantic_opposites_are_not_same_decision():
+    from tokenmizer.graph_memory.decision_tracker import _is_same_decision
+
+    assert not _is_same_decision(
+        "Enable JWT auth for the API",
+        "Disable JWT auth for the API",
+    )
+    assert not _is_same_decision("Allow external signups", "Block external signups")
+    assert not _is_same_decision("Use Redis", "Avoid Redis")
+    assert _is_same_decision("Disable caching", "disable caching for the API")
+
+
+def test_semantic_opposite_decisions_are_preserved(tmp_path):
+    g = GraphMemory(session_id="t-semantic-opposites", storage_dir=str(tmp_path))
+
+    enabled_id = g.add_node(
+        NodeType.DECISION,
+        "Enable JWT auth for the API",
+        NodeStatus.COMPLETED,
+    )
+    disabled_id = g.add_node(
+        NodeType.DECISION,
+        "Disable JWT auth for the API",
+        NodeStatus.COMPLETED,
+    )
+
+    assert disabled_id != enabled_id
+    assert g._nodes[enabled_id].status == NodeStatus.SUPERSEDED
+    assert g._nodes[disabled_id].status == NodeStatus.COMPLETED
+
+
 def test_real_supersession_still_fires_after_merge_fix(tmp_path):
     """The merge fix must not swallow genuine contradictions."""
     g = GraphMemory(session_id="t-dup4", storage_dir=str(tmp_path))
