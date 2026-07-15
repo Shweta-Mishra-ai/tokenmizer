@@ -55,13 +55,13 @@ _INLINE_REDUNDANCIES = [
 
 class OutputTrimmer:
 
-    def trim(self, text: str, level: str = "standard") -> tuple[str, int]:
+    def trim(self, text: str, level: str = "full") -> tuple[str, int]:
         """
         Remove structural filler from LLM output.
 
         Args:
             text: raw LLM response
-            level: "lite" (openings only) | "standard" | "aggressive"
+            level: "lite" (openings only) | "full" | "ultra"
 
         Returns:
             (trimmed_text, tokens_saved)
@@ -76,13 +76,13 @@ class OutputTrimmer:
         for pat in _OPENING_FILLERS:
             result = pat.sub("", result, count=1)
 
-        if level in ("standard", "aggressive"):
+        if level in ("full", "ultra"):
             # Closing fillers
             for pat in _CLOSING_FILLERS:
                 result = pat.sub("", result)
 
-        if level == "aggressive":
-            # Inline redundancies (only on aggressive — risky otherwise)
+        if level == "ultra":
+            # Inline redundancies (only on ultra — risky otherwise)
             for pat in _INLINE_REDUNDANCIES:
                 result = pat.sub("\n\n", result)
 
