@@ -285,6 +285,22 @@ class TestOutputTrimmer:
         assert trimmed == ""
         assert saved == 0
 
+    def test_full_level_removes_closing_fillers(self):
+        from tokenmizer.compression.output_trimmer import OutputTrimmer
+
+        t = OutputTrimmer()
+
+        text = (
+            "Certainly!\n\n"
+            "Here is your answer.\n\n"
+            "Hope this helps!"
+        )
+
+        trimmed, saved = t.trim(text, "full")
+
+        assert "Hope this helps!" not in trimmed
+        assert saved > 0
+
 
 # ── Smart window ──────────────────────────────────────────────────────────────
 
