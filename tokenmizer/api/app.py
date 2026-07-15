@@ -636,25 +636,36 @@ def _stream_response(req, messages, model, user_content, session_id,
     async def _gen():
         full_text = ""
         t0 = time.monotonic()
+        cache_hit = False
         yield _chunk({"role": "assistant"})
         try:
-            cached = (_cache.get(user_content, session_id=session_id)
-                      if settings.cache.enabled and user_content else None)
+            cached = (
+                _cache.get(user_content, session_id=session_id)
+                if settings.cache.enabled and user_content
+                else None
+            )
+
+            cache_hit = cached is not None
+
             if cached:
                 full_text = cached.response
                 yield _chunk({"content": full_text})
             else:
                 async for piece in provider.chat_stream(
-                    messages=messages, model=model,
+                    messages=messages,
+                    model=model,
                     max_tokens=req.max_tokens or 4096,
                     **_sampling_kwargs(req),
                 ):
                     full_text += piece
                     yield _chunk({"content": piece})
+
         except ProviderError as e:
             # Mid-stream failure: SSE can't change the status code anymore —
-            # emit an explicit error event instead of silently truncating.
-            yield "data: " + _json.dumps({"error": {"message": str(e), "type": "provider_error"}}) + "\n\n"
+            #emit an explicit error event instead of silently truncating.
+            yield "data: " + _json.dumps(
+                {"error": {"message": str(e), "type": "provider_error"}}
+            ) + "\n\n"
         yield _chunk({}, finish="stop")
         yield "data: [DONE]\n\n"
 
@@ -670,7 +681,7 @@ def _stream_response(req, messages, model, user_content, session_id,
             input_tokens_original=orig_input_tokens,
             input_tokens_sent=input_tokens, output_tokens=output_tokens,
             tokens_saved=sum(savings.values()), latency_ms=latency_ms,
-            cache_hit=False, layer_savings=savings,
+            cache_hit=cache_hit, layer_savings=savings,
         )
 
     return StreamingResponse(_gen(), media_type="text/event-stream",

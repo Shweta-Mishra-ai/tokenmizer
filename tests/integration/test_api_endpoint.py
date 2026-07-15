@@ -8,6 +8,7 @@ and nothing caught it because no test ever POSTed to the app. These tests
 exercise the real HTTP path so a route-registration regression can never
 ship silently again.
 """
+from time import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,6 +17,7 @@ from fastapi.testclient import TestClient
 from tokenmizer.api import app as app_module
 from tokenmizer.api.app import app
 from tokenmizer.providers.providers import LLMResponse
+from tokenmizer.semantic_cache.cache import CacheEntry
 
 
 def _fake_response(text: str = "hello from fake provider") -> LLMResponse:
@@ -148,6 +150,49 @@ class TestChatCompletionsE2E:
         assert '"content": " streamed"' in body
         assert '"finish_reason": "stop"' in body
         assert body.rstrip().endswith("data: [DONE]")
+
+    from time import time
+
+    from tokenmizer.semantic_cache.cache import CacheEntry
+
+    def test_streaming_cache_hit_recorded_in_analytics(self, client, monkeypatch):
+        c, _ = client
+
+        from tokenmizer.api import app as app_module
+
+        monkeypatch.setattr(app_module.settings.cache, "enabled", True)
+
+        monkeypatch.setattr(
+            app_module._cache,
+            "get",
+            lambda *a, **k: CacheEntry(
+                key="k",
+                prompt="p",
+                response="cached response",
+                input_tokens=1,
+                output_tokens=1,
+                created_at=time(),
+            ),
+        )
+
+        recorded = {}
+
+        monkeypatch.setattr(
+            app_module._analytics,
+            "record",
+            lambda **kwargs: recorded.update(kwargs),
+        )
+
+        r = c.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "cached"}],
+                "stream": True,
+            },
+        )
+
+        assert r.status_code == 200
+        assert recorded["cache_hit"] is True
 
     def test_streaming_unsupported_provider_returns_501(self, client, monkeypatch):
         """Providers without chat_stream override must get a clear 501,
