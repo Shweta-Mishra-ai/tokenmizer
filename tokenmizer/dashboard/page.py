@@ -230,11 +230,60 @@ Continue from: Add rate limiting to auth endpoints</div>
 </footer>
 
 <script>
+const API_KEY_STORAGE_KEY = 'tokenmizer.apiKey';
+let apiKeyPrompt = null;
+let apiKeyPromptDismissed = false;
+
+function getStoredApiKey() {
+  return sessionStorage.getItem(API_KEY_STORAGE_KEY) || '';
+}
+
+function authOptions(apiKey) {
+  return apiKey ? {headers: {Authorization: `Bearer ${apiKey}`}} : {};
+}
+
+async function requestApiKey() {
+  if (apiKeyPromptDismissed) return null;
+
+  if (!apiKeyPrompt) {
+    apiKeyPrompt = Promise.resolve()
+      .then(() => window.prompt('TokenMizer API key'))
+      .then(value => {
+        const key = (value || '').trim();
+        if (!key) {
+          apiKeyPromptDismissed = true;
+          return null;
+        }
+        sessionStorage.setItem(API_KEY_STORAGE_KEY, key);
+        return key;
+      })
+      .finally(() => {
+        apiKeyPrompt = null;
+      });
+  }
+
+  return apiKeyPrompt;
+}
+
+async function dashboardFetch(path) {
+  let apiKey = getStoredApiKey();
+  let response = await fetch(path, authOptions(apiKey));
+  if (response.status !== 401) return response;
+
+  if (apiKey) {
+    sessionStorage.removeItem(API_KEY_STORAGE_KEY);
+  }
+  apiKey = await requestApiKey();
+  if (!apiKey) return response;
+
+  return fetch(path, authOptions(apiKey));
+}
+
 async function loadStats() {
   try {
     const [statsRes, cacheRes] = await Promise.all([
-      fetch('/api/stats').catch(() => null),
-      fetch('/api/cache/stats').catch(() => null),
+      dashboardFetch('/api/stats').catch(() => null),
+      dashboardFetch('/api/cache/stats').catch(() => null),
     ]);
 
     if (statsRes && statsRes.ok) {
