@@ -1171,22 +1171,53 @@ class GraphMemory:
         if len(self._nodes) <= max_nodes:
             return 0
 
-        candidates.sort()
         to_prune = len(self._nodes) - max_nodes
 
         # If age-based pruning didn't find enough candidates (graph is fresh —
         # all nodes created recently), fall back to importance-only pruning.
         # This ensures the hard cap is always enforced even in long single-day sessions.
+        #
+        # FIXED (TM-19): this used to blanket-exclude EVERY node of type
+        # DECISION, including SUPERSEDED/ARCHIVED/INVALIDATED ones. Only
+        # ACTIVE (COMPLETED) decisions are meant to be permanently
+        # protected — a graph dominated by dead/historical decisions
+        # (all created within max_age_days, so the age-based scan above
+        # found nothing) could never be pruned down to max_nodes at all,
+        # making the "hard cap" not actually hard. Only ACTIVE decisions
+        # (and GOAL/SCHEMA, via preserve_types) are excluded here now.
         if len(candidates) < to_prune:
+            candidate_ids = {nid for _, nid in candidates}  # computed ONCE, not per iteration
             importance_candidates = [
                 (node.importance, nid)
                 for nid, node in self._nodes.items()
                 if node.type not in preserve_types
-                and node.type != NodeType.DECISION
-                and nid not in {nid for _, nid in candidates}
+                and not (node.type == NodeType.DECISION and node.status == NodeStatus.COMPLETED)
+                and nid not in candidate_ids
             ]
-            importance_candidates.sort()  # lowest importance first
             candidates.extend(importance_candidates)
+
+        # Sort ONCE, after every tier has been combined.
+        #
+        # FIXED (TM-19): this used to sort BEFORE the fallback tier's
+        # extend() above, so the two tiers' entries were never merged
+        # into one true ascending-score order — candidates[:to_prune]
+        # could prune "all age-based candidates first regardless of
+        # score, then fallback candidates appended in their own separate
+        # order," rather than truly lowest-scoring-first across both.
+        candidates.sort()
+
+        if len(candidates) < to_prune:
+            logger.warning(
+                f"prune() for session {self.session_id}: only found "
+                f"{len(candidates)} evictable node(s) but need to remove "
+                f"{to_prune} to reach max_nodes={max_nodes} — the graph is "
+                f"dominated by protected node types (active decisions, "
+                f"goals, schemas). Pruning what's available; the cap will "
+                f"remain exceeded until more nodes become eligible. Active "
+                f"decisions are intentionally never auto-pruned regardless "
+                f"of cap pressure — deleting a current choice is a bigger "
+                f"risk than a temporarily oversized graph."
+            )
 
         pruned = 0
 
