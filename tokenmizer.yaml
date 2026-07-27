@@ -68,5 +68,10 @@ memory:
   recent_turns_verbatim: 10
 
 # ── Server ───────────────────────────────────────────────────────────────────
-proxy_host: 0.0.0.0
+# 127.0.0.1 = localhost only (safe default). Set to 0.0.0.0 to accept
+# connections from other machines — only do this behind your own auth/
+# network controls (see SECURITY.md). The Docker deployment (Dockerfile /
+# docker-compose.yml) passes --host 0.0.0.0 explicitly and is unaffected
+# by this setting either way.
+proxy_host: 127.0.0.1
 proxy_port: 8000

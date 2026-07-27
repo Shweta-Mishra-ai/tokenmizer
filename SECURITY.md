@@ -102,6 +102,24 @@ Key comparison uses `hmac.compare_digest` — constant-time, immune to timing at
 
 In development mode (no key set), the proxy accepts all requests. **Do not expose the proxy to the internet without setting an API key.**
 
+### Production mode: `TOKENMIZER_ENV=production`
+
+By default (`TOKENMIZER_ENV` unset, or anything other than `production`),
+a config load failure or a missing `api_key` logs an error and falls back
+to permissive dev-mode defaults — convenient for local development, but a
+config typo in a real deployment could otherwise boot unauthenticated
+with only a log line as evidence.
+
+Set `TOKENMIZER_ENV=production` to make TokenMizer **fail closed**
+instead: it refuses to start at all (raises, non-zero exit) if:
+- `tokenmizer.yaml` fails to parse, or contains an unrecognized key (a
+  typo like `api_keys:` instead of `api_key:` is now a hard error, not a
+  silently-dropped value — see `config/settings.py`'s `extra="forbid"`), or
+- the resulting configuration has no `api_key` set at all, even if the
+  YAML file itself loaded and validated perfectly fine.
+
+Recommended for any deployment reachable outside your own machine.
+
 ---
 
 ## Prompt Injection (Basic Keyword Filter — Read the Scope)
