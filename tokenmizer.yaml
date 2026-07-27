@@ -49,6 +49,8 @@ cache:
   similarity_threshold: 0.92  # 0.90–0.98 recommended
   ttl_seconds: 3600           # 1 hour
   max_size: 10000             # LRU eviction when full
+  share_scope: session        # session (default, safe) | shared (opt-in cross-session sharing
+                               # for prompts that don't look sensitive — see SECURITY.md)
 
 # ── Terse Output ─────────────────────────────────────────────────────────────
 terse_output:

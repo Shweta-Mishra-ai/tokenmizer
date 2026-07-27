@@ -38,6 +38,16 @@ class CacheEntry:
     created_at: float
     hit_count: int = 0
     _evicted: bool = False
+    # Scope this entry was stored under: "__shared__" (readable by any
+    # session) or a specific session_id / "__private__" (readable only by
+    # that same session). Recorded on the entry itself — not just implied
+    # by which key it was filed under — so the semantic-similarity lookup
+    # (which iterates ALL entries, not just one key) can enforce the same
+    # scoping rule the exact-match lookup does. See TM-03: without this,
+    # a near-miss query could return another session's private entry
+    # purely because cosine similarity cleared the threshold, entirely
+    # bypassing scope.
+    scope: str = "__shared__"
 
     def is_expired(self, ttl_seconds: int) -> bool:
         return (time.time() - self.created_at) > ttl_seconds
@@ -111,10 +121,24 @@ class SemanticCache:
         threshold: float = 0.92,
         ttl_seconds: int = 3600,
         max_size: int = 10_000,
+        share_scope: str = "session",
     ):
+        """
+        share_scope:
+          "session" (default) — every prompt is scoped to its session_id
+            (or "__private__" if none given), regardless of whether it
+            looks sensitive. Nothing is ever shared across sessions unless
+            explicitly opted in.
+          "shared" — restores the pre-TM-03-fix behavior: non-sensitive
+            prompts (per _is_session_sensitive) are shared globally across
+            sessions; sensitive-looking ones are still session-scoped
+            regardless of this setting — the sensitivity gate is a floor,
+            not something share_scope can override.
+        """
         self.threshold = threshold
         self.ttl_seconds = ttl_seconds
         self.max_size = max_size
+        self.share_scope = share_scope
         self._exact: OrderedDict[str, CacheEntry] = OrderedDict()
         self._embeddings: dict[str, object] = {}  # key → embedding
         self._embedder = EmbeddingEngine.get()
@@ -144,19 +168,21 @@ class SemanticCache:
     def get(self, prompt: str, session_id: str = "") -> Optional[CacheEntry]:
         """
         Look up cache.
-        Checks session-scoped key first (if session_id given), then shared key.
-        This means: same-session hits always found; cross-session hits only for generic queries.
+        Checks session-scoped key first (using session_id, or "__private__"
+        when none was given — mirrors set()'s own default scope so a
+        caller that never passes session_id is still self-consistent),
+        then the shared key. Same-session hits always found; cross-session
+        hits only for entries explicitly stored under share_scope="shared".
         """
-        # Try session-scoped key first
-        if session_id:
-            session_key = self._key(prompt, session_id)
-            if session_key in self._exact:
-                entry = self._exact[session_key]
-                if not entry.is_expired(self.ttl_seconds):
-                    self._exact.move_to_end(session_key)
-                    entry.touch()
-                    self._hit_exact += 1
-                    return entry
+        # Try session-scoped (or private, if no session_id) key first
+        session_key = self._key(prompt, session_id or "__private__")
+        if session_key in self._exact:
+            entry = self._exact[session_key]
+            if not entry.is_expired(self.ttl_seconds):
+                self._exact.move_to_end(session_key)
+                entry.touch()
+                self._hit_exact += 1
+                return entry
 
         # Try shared key
         key = self._key(prompt, "__shared__")
@@ -175,6 +201,13 @@ class SemanticCache:
             return entry
 
         # 2. Semantic match
+        #
+        # FIXED (TM-03): this used to scan every entry in self._exact
+        # regardless of scope, so a private/session-scoped entry from a
+        # DIFFERENT session could be returned to a near-miss query purely
+        # on cosine similarity — bypassing whatever scope set() assigned
+        # entirely. Only entries visible to THIS caller are eligible:
+        # shared entries, or entries scoped to this exact session_id.
         if self._embedder.available:
             query_emb = self._embedder.embed(prompt)
             best_score = 0.0
@@ -182,6 +215,8 @@ class SemanticCache:
 
             for k, entry in self._exact.items():
                 if entry.is_expired(self.ttl_seconds):
+                    continue
+                if entry.scope != "__shared__" and entry.scope != (session_id or "__private__"):
                     continue
                 emb = self._embeddings.get(k)
                 if emb is None:
@@ -231,31 +266,36 @@ class SemanticCache:
         """
         Store a cache entry.
 
-        Scoping rules (safe-by-default):
-        - If prompt is sensitive → always session-scoped (never shared)
-        - If prompt is NOT sensitive → always shared, regardless of session_id
-          (e.g. "what is a JWT", "explain async/await")
+        Scoping rules (safe-by-default — see TM-03):
+        - Default (`share_scope="session"`): EVERY prompt is scoped to
+          session_id (or "__private__" if none given), sensitive or not.
+          Nothing is shared across sessions unless explicitly opted in.
+        - Opt-in (`share_scope="shared"`): non-sensitive prompts are
+          shared globally, exactly like the old default behavior — but
+          the sensitivity gate is a floor this can never override, so a
+          prompt that looks like it contains secrets/PII/business-
+          specific content stays session-scoped regardless.
 
-        FIXED — real bug, not cosmetic: the old logic scoped non-sensitive
-        prompts to `session_id` whenever one was provided, but `get()` only
-        ever checks the caller's OWN session_id key or the `__shared__` key.
-        A non-sensitive prompt stored by session A under scope "session-A"
-        could never be found by session B's lookup (session B checks
-        "session-B" then "__shared__" — "session-A" is neither). Cross-session
-        cache sharing for generic queries was silently, permanently broken.
-        The session_id parameter is still used for the SENSITIVITY branch —
-        it just must not also gate the shared-scope decision.
+        A misclassified-as-"not sensitive" prompt under share_scope="session"
+        is still safe — it's session-scoped either way. Under
+        share_scope="shared" a misclassification could still leak, which is
+        exactly why "shared" is opt-in rather than the default: the
+        five-regex sensitivity heuristic cannot enumerate everything that
+        might be confidential to someone else's business.
         """
         is_sensitive = self._is_session_sensitive(prompt)
 
-        if is_sensitive:
-            # Sensitive content: always scoped to session, never shared
-            scope = session_id or "__private__"
-        else:
-            # Not sensitive: always shared, so any session's get() can find it.
+        if self.share_scope == "shared" and not is_sensitive:
+            # Explicit opt-in AND not flagged sensitive: shared globally,
+            # so any session's get() can find it.
             scope = "__shared__"
+        else:
+            # Default, or sensitive content regardless of share_scope:
+            # scoped to this session only, never shared.
+            scope = session_id or "__private__"
 
-        # Scoped key: sensitive responses keyed by session, generic by content
+        # Scoped key: sensitive/session-only responses keyed by session,
+        # shared ones keyed by content alone.
         key = self._key(prompt, scope)
 
         # Evict if at capacity
@@ -269,6 +309,7 @@ class SemanticCache:
             input_tokens=input_tokens or count_tokens(prompt),
             output_tokens=output_tokens or count_tokens(response),
             created_at=time.time(),
+            scope=scope,
         )
         self._exact[key] = entry
         self._exact.move_to_end(key)

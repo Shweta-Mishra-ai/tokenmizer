@@ -89,6 +89,7 @@ _cache = SemanticCache(
     threshold=settings.cache.similarity_threshold,
     ttl_seconds=settings.cache.ttl_seconds,
     max_size=settings.cache.max_size,
+    share_scope=settings.cache.share_scope,
 )
 _checkpoint_mgr = CheckpointManager(storage_dir=settings.graph_checkpoint.storage_dir)
 _analytics = AnalyticsEngine()

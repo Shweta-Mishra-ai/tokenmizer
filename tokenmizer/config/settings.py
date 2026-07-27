@@ -43,6 +43,14 @@ class CacheSettings(BaseSettings):
     similarity_threshold: float = 0.92
     ttl_seconds: int = 3600
     max_size: int = 10_000
+    # "session" (default): every cached prompt is scoped to its session_id,
+    # never shared across sessions — safe by default for hosted/team use.
+    # "shared": non-sensitive prompts are shared globally across sessions
+    # (higher hit rate, but requires trusting the sensitivity heuristic in
+    # semantic_cache/cache.py::_is_session_sensitive — see TM-03). Opt in
+    # explicitly; do not flip this without understanding that heuristic's
+    # documented limits.
+    share_scope: Literal["session", "shared"] = "session"
 
 
 class TerseOutputSettings(BaseSettings):
