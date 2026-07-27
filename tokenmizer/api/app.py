@@ -696,10 +696,16 @@ async def _call_provider(
     user_content: str,
     session_id: str,
     savings: dict,
-) -> tuple[str, int, int, float]:
+) -> tuple[str, int, int, float, bool]:
     """
     Layer 3 + 5: Cache lookup → LLM call → output trim → cache write.
-    Returns (response_text, input_tokens, output_tokens, latency_ms).
+    Returns (response_text, input_tokens, output_tokens, latency_ms, cache_hit).
+
+    FIXED (TM-34): cache_hit is now returned explicitly instead of being
+    inferred downstream from `input_tokens_actual == 0` — that inference
+    would misclassify any real provider response that happens to report
+    zero input tokens as a cache hit. This function already knows exactly
+    which path it took; it should just say so.
     """
     # Cache lookup
     if settings.cache.enabled and user_content:
@@ -707,7 +713,7 @@ async def _call_provider(
         if cached:
             savings["cache"] = count_tokens(user_content, model)
             output_tokens = count_tokens(cached.response, model)
-            return cached.response, 0, output_tokens, 0.0
+            return cached.response, 0, output_tokens, 0.0, True
 
     # LLM call
     # NOTE: `messages` is already redacted — redaction now happens once at
@@ -724,8 +730,19 @@ async def _call_provider(
             **_sampling_kwargs(req),
         )
     except Exception as e:
-        logger.error(f"Provider error: {e}")
-        raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
+        # FIXED (TM-33): previously echoed str(e) verbatim into the 502
+        # response body. Provider SDK exceptions routinely embed request
+        # URLs, query params, or other internal detail that shouldn't
+        # reach an API client. Full detail is logged server-side (with a
+        # correlation id so it can be found), the client gets a generic
+        # message plus that same id.
+        correlation_id = uuid.uuid4().hex[:12]
+        logger.error(f"Provider error [{correlation_id}]: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Provider request failed (ref: {correlation_id}). "
+                   f"Check server logs for details.",
+        )
 
     response_text  = resp.text
     output_tokens  = resp.output_tokens
@@ -746,7 +763,7 @@ async def _call_provider(
                    input_tokens=input_tokens, output_tokens=output_tokens,
                    session_id=session_id)
 
-    return response_text, input_tokens, output_tokens, latency_ms
+    return response_text, input_tokens, output_tokens, latency_ms, False
 
 
 def _stream_response(req, messages, model, user_content, session_id,
@@ -875,11 +892,7 @@ async def chat_completions(req: ChatRequest, request: Request):
     # Layer 0-2: file intelligence, compression, terse injection
     messages = _apply_compression_layers(messages, settings, savings)
 
-    # Layer 3+5: cache + LLM + output trim (done before graph for latency)
-    # Graph runs in parallel-ish: heuristic extract is sync and fast,
-    # LLM extract fires async after provider returns.
     orig_input_tokens = count_messages_tokens(raw_messages, model)
-    sent_input_tokens = count_messages_tokens(messages, model)
     savings["routing"] = 0
 
     # Layer 4: graph update + context injection (mutates messages)
@@ -890,6 +903,15 @@ async def chat_completions(req: ChatRequest, request: Request):
             session_id, graph, raw_messages, messages, model, savings, user_query
         )
 
+    # FIXED (TM-11): input_tokens_sent used to be measured HERE, before
+    # _update_graph() ran — so it never reflected either the reduction
+    # from windowing or the addition from graph-context injection, both
+    # of which happen inside _update_graph(). Measuring it after means
+    # this number (reported in analytics/dashboard as "tokens actually
+    # sent") is the actual size of what's about to be sent to the
+    # provider, not a stale pre-windowing estimate.
+    sent_input_tokens = count_messages_tokens(messages, model)
+
     # Streaming: true SSE passthrough (v0.3). Output-trimming is skipped in
     # stream mode (can't trim tokens that already left the building) — all
     # input-side layers (file intel, compression, graph context) still apply.
@@ -898,10 +920,9 @@ async def chat_completions(req: ChatRequest, request: Request):
                                 session_id, savings, orig_input_tokens)
 
     # Layer 5: call provider (or return cache hit)
-    response_text, input_tokens_actual, output_tokens, latency_ms = await _call_provider(
+    response_text, input_tokens_actual, output_tokens, latency_ms, cache_hit = await _call_provider(
         req, messages, model, user_content, session_id, savings
     )
-    cache_hit = input_tokens_actual == 0 and response_text != ""
 
     # Analytics
     total_saved = sum(savings.values())
