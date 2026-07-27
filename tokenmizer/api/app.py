@@ -39,6 +39,46 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+
+def _warn_if_multi_worker_risk() -> None:
+    """
+    Best-effort startup check for a risk that cannot be fixed with an
+    in-process lock: running multiple OS worker processes (e.g. `uvicorn
+    --workers 4`) against the same storage_dir. Each worker gets its own
+    in-process `_graph_cache` and its own GraphMemory instances for the
+    same session_id — genuinely separate memory across processes — and
+    the current full-blob SQLite persist (see issue #27) means whichever
+    process saves a session last silently overwrites whatever an earlier
+    worker wrote. No amount of asyncio.Lock helps here; locks don't cross
+    process boundaries.
+
+    This can't be detected with certainty from inside a single process
+    (there's no universal "how many workers am I one of" signal), so this
+    checks a few common launcher env vars as a heuristic. A false negative
+    (multi-worker deployment this doesn't catch) is expected for unusual
+    launch setups — the goal is to catch the common case loudly rather
+    than stay silent about a real risk, not to guarantee detection.
+    """
+    import os
+    for var in ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS"):
+        val = os.environ.get(var, "").strip()
+        if val.isdigit() and int(val) > 1:
+            logger.warning(
+                f"{var}={val} suggests multiple worker processes. "
+                "TokenMizer's SQLite-backed graph/checkpoint storage is "
+                "NOT safe for concurrent multi-process writers to the "
+                "same session — the last process to persist a session "
+                "silently overwrites what an earlier one wrote (tracked "
+                "as issue #27, which will move to per-row persistence). "
+                "Until that lands: run a single worker per storage_dir, or "
+                "route each session_id to a fixed worker (e.g. consistent "
+                "hashing at your load balancer)."
+            )
+            return
+
+
+_warn_if_multi_worker_risk()
+
 # ── Singletons ────────────────────────────────────────────────────────────────
 _provider = None
 _compression = CompressionPipeline(
@@ -60,6 +100,26 @@ _rate_limiter = get_rate_limiter(rate=60, per_seconds=60, burst=10)
 _SESSION_LOCK_MAX = 1000
 _session_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
 
+# Strong references to in-flight background tasks (e.g. the LLM
+# extraction pass scheduled by _update_graph). asyncio.create_task()'s own
+# docs warn that a task with no reference held anywhere is eligible for
+# garbage collection before it completes, silently dropping whatever it
+# was doing — for the background extraction task, that would mean the
+# graph quietly stops gaining nodes from this path with no error at all.
+# Each task removes itself via the done-callback, so this set never grows
+# unbounded.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _track_background_task(coro) -> asyncio.Task:
+    """asyncio.create_task() + strong-reference retention in one call —
+    use this instead of a bare create_task() for any fire-and-forget task
+    that must not be garbage-collected before it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
     """
@@ -79,14 +139,18 @@ def _get_session_lock(session_id: str) -> asyncio.Lock:
     _session_locks[session_id] = lock
 
     if len(_session_locks) > _SESSION_LOCK_MAX:
-        # Find oldest unheld lock to evict (iterate from front)
+        # Find oldest unheld lock to evict (iterate from front). Note: the
+        # trailing "already back under cap" check that used to sit here
+        # was unreachable dead code — the only way `len()` changes inside
+        # this loop is the `del` immediately above, which is followed by
+        # an unconditional `break` in the same branch, so that second
+        # check could never be reached with a smaller length than when
+        # the loop started.
         for old_id in list(_session_locks.keys()):
             if old_id == session_id:
                 continue
             if not _session_locks[old_id].locked():
                 del _session_locks[old_id]
-                break
-            if len(_session_locks) <= _SESSION_LOCK_MAX:
                 break
 
     return lock
@@ -139,7 +203,28 @@ def _get_provider():
 # ── Graph helpers (state-backend backed) ─────────────────────────────────────
 
 # In-process graph cache — avoids SQLite reload on every request.
-# Thread-safe: each session_id maps to one GraphMemory, protected by _get_session_lock().
+#
+# Concurrency note (corrected — the previous comment here overstated its
+# own mechanism): concurrent asyncio coroutines mutating the SAME
+# GraphMemory object do not actually corrupt its dicts, but not because of
+# `_get_session_lock()` — that lock is only acquired by the background
+# LLM-extraction task, not by the request-handling path. The real reason
+# it's safe is that GraphMemory's mutation methods (add_node, add_edge,
+# extract_from_messages, etc.) contain no internal `await`, and CPython's
+# cooperative scheduler only switches between coroutines at await points —
+# so two coroutines' calls into the same object can never interleave
+# mid-method. This was verified empirically (not assumed) during the
+# audit: concurrent add_node() calls across 50 coroutines never dropped a
+# node. What IS a real risk — and what `_graph_cache_touch()` below
+# actually guards against — is EVICTING a GraphMemory instance (and force-
+# persisting its current state) while a request or the background task
+# still holds that session's lock, i.e. is actively using it. If that
+# instance is evicted and the session is re-fetched, a fresh GraphMemory
+# reloads from disk; the original evicted instance's in-flight mutation
+# can then persist AFTER the new instance already started writing,
+# silently clobbering it. So eviction must skip any session whose lock is
+# currently held — mirroring the same rule `_session_locks` already
+# applies to itself in `_get_session_lock()` above.
 
 # LRU-bounded cache of GraphMemory objects (evicts least-recently-used).
 # Graph data is persisted to SQLite, so eviction just frees memory —
@@ -150,11 +235,34 @@ _graph_cache: "OrderedDict[str, GraphMemory]" = OrderedDict()
 _graph_cache_lock = asyncio.Lock()  # guards dict creation — prevents TOCTOU race
 
 
+def _find_evictable_graph_id() -> Optional[str]:
+    """First (most-LRU) session_id in _graph_cache whose lock is not
+    currently held, or None if every remaining entry is in-flight. See the
+    concurrency note above for why this check exists."""
+    for sid in _graph_cache:  # OrderedDict: iteration order == LRU order
+        lock = _session_locks.get(sid)
+        if lock is None or not lock.locked():
+            return sid
+    return None
+
+
 def _graph_cache_touch(session_id: str) -> None:
-    """Move session to end (most-recently-used) and evict oldest if over cap."""
+    """Move session to end (most-recently-used) and evict oldest unheld
+    entries if over cap. If every entry over the cap is currently
+    in-flight (its session lock is held), eviction is skipped for this
+    call rather than risk evicting/force-persisting a session mid-use —
+    the cache will simply run one entry over cap until something frees up,
+    which is a far smaller cost than silent cross-instance data loss."""
     _graph_cache.move_to_end(session_id)
     while len(_graph_cache) > _GRAPH_CACHE_MAX:
-        evicted_id, evicted_graph = _graph_cache.popitem(last=False)
+        evicted_id = _find_evictable_graph_id()
+        if evicted_id is None:
+            logger.debug(
+                "Graph cache over cap but every entry is in-flight "
+                "(session lock held) — skipping eviction this call"
+            )
+            break
+        evicted_graph = _graph_cache.pop(evicted_id)
         # Ensure pending writes are flushed before dropping from memory.
         #
         # FIXED: previously a failed flush here was caught, logged at
@@ -428,7 +536,7 @@ async def _update_graph(
                             )
                             _analytics.record_silent_failure("llm_extraction")
 
-                asyncio.create_task(_background_extract())
+                _track_background_task(_background_extract())
             else:
                 graph.extract_from_messages(raw_messages, incremental=True)
         else:
