@@ -589,6 +589,20 @@ async def _update_graph(
                     f"[Relevant session context]\n{ctx_block}\n\n"
                     f"{messages[sys_idx]['content']}"
                 )
+            else:
+                # FIXED (TM-10): previously had no else branch here — a
+                # request with no system message did the graph query,
+                # built the context block, and threw it away. A system
+                # message was only guaranteed to exist because layer 2
+                # (terse-output injection) happens to add one, and only
+                # when settings.terse_output.enabled is True — a
+                # completely unrelated setting. Turning THAT off silently
+                # disabled graph context injection too, with no error and
+                # no indication anything was skipped.
+                messages.insert(0, {
+                    "role": "system",
+                    "content": f"[Relevant session context]\n{ctx_block}",
+                })
 
     # Context occupancy — measured directly from what will actually be
     # sent to the provider THIS turn (post file-intelligence/compression/
@@ -1146,35 +1160,87 @@ async def list_checkpoints(session_id: str):
     return _checkpoint_mgr.list_checkpoints(session_id)
 
 
+_INVALIDATE_MIN_LABEL_LEN = 3  # matches validator.py's own noise-pattern floor (<=3 chars = noise)
+
+
 @app.post("/api/decision/invalidate", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
-async def invalidate_decision(session_id: str, decision_label: str, reason: str = ""):
+async def invalidate_decision(
+    session_id: str,
+    decision_label: Optional[str] = None,
+    node_id: Optional[str] = None,
+    reason: str = "",
+):
     """
     Mark a decision as INVALIDATED (red) — explicitly wrong or cancelled.
     Use when a decision was made that turned out to be incorrect.
     History is preserved; decision is flagged as a warning in future resumes.
+
+    Provide EITHER node_id (precise — targets exactly one node, e.g. an
+    id copied from /api/graph/{session_id}/viz or /transitions) OR
+    decision_label (fuzzy — word-boundary substring match against active
+    decision labels; may match more than one node, all of which are
+    returned in affected_nodes).
+
+    FIXED (TM-13): decision_label used to be matched with a raw substring
+    check (`label_lower in node.label.lower()`) and had no minimum
+    length — `decision_label=""` is a substring of every label, so an
+    empty (or accidentally-empty, e.g. a client bug that sends "") value
+    invalidated EVERY active decision in the session in one call. A short
+    label caused a milder version of the same problem: "sql" would match
+    "PostgreSQL" AND "SQLAlchemy" AND any future "MySQL" decision as a
+    side effect of literal substring containment, not because they're
+    actually related. Fixed by requiring a minimum length and matching on
+    a WORD-BOUNDARY substring instead of a raw one.
     """
+    if node_id is None and (decision_label is None or
+                            len(decision_label.strip()) < _INVALIDATE_MIN_LABEL_LEN):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"decision_label must be at least {_INVALIDATE_MIN_LABEL_LEN} "
+                    f"characters (a shorter value matches too many unrelated "
+                    f"decisions to safely invalidate) — or pass node_id for a "
+                    f"precise, single-node match."),
+        )
     try:
+        import re
+
         from tokenmizer.graph_memory.graph import NodeStatus, NodeType
         graph = await _get_graph_async(session_id)
-        label_lower = decision_label.lower().strip()
-        # Only ACTIVE (COMPLETED) decisions are eligible: matching across
-        # all statuses would let a short label overwrite SUPERSEDED history
-        # nodes with INVALIDATED, destroying their supersession record. The
-        # response lists every affected node so multi-matches are visible.
+
         invalidated: list[dict] = []
-        for node_id, node in graph._nodes.items():
-            if (node.type == NodeType.DECISION and
-                    node.status == NodeStatus.COMPLETED and
-                    label_lower in node.label.lower()):
+
+        if node_id is not None:
+            node = graph._nodes.get(node_id)
+            if (node is not None and node.type == NodeType.DECISION
+                    and node.status == NodeStatus.COMPLETED):
                 node.status = NodeStatus.INVALIDATED
                 node.summary = (
                     f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
                 )
                 invalidated.append({"node_id": node_id, "label": node.label})
+        else:
+            label_lower = decision_label.lower().strip()
+            pattern = re.compile(r'\b' + re.escape(label_lower) + r'\b')
+            # Only ACTIVE (COMPLETED) decisions are eligible: matching
+            # across all statuses would let a label overwrite SUPERSEDED
+            # history nodes with INVALIDATED, destroying their
+            # supersession record. The response lists every affected node
+            # so multi-matches are visible.
+            for nid, node in graph._nodes.items():
+                if (node.type == NodeType.DECISION and
+                        node.status == NodeStatus.COMPLETED and
+                        pattern.search(node.label.lower())):
+                    node.status = NodeStatus.INVALIDATED
+                    node.summary = (
+                        f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
+                    )
+                    invalidated.append({"node_id": nid, "label": node.label})
+
         if not invalidated:
+            target = node_id if node_id is not None else decision_label
             raise HTTPException(
                 status_code=404,
-                detail=(f"No ACTIVE decision matching '{decision_label}' found in "
+                detail=(f"No ACTIVE decision matching '{target}' found in "
                         f"session '{session_id}' (superseded/archived decisions "
                         f"are not invalidatable — they are already inactive)")
             )
@@ -1195,7 +1261,7 @@ async def invalidate_decision(session_id: str, decision_label: str, reason: str 
             )
         return {
             "session_id": session_id,
-            "invalidated": decision_label,
+            "invalidated": node_id if node_id is not None else decision_label,
             "affected_nodes": invalidated,
             "reason": reason,
             "status": "invalidated",
