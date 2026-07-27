@@ -590,9 +590,12 @@ class HybridExtractor:
         # established correct pattern. Fixed to match: normalize only for
         # set membership / corroboration detection, always emit the
         # ORIGINAL (first-seen, original-case) string into the output.
-        for attr in ["goals", "tasks_done", "tasks_wip", "tasks_todo",
-                     "files", "errors", "dependencies", "environments",
-                     "endpoints", "schemas"]:
+        # FIXED (TM-14): use the dataclass-derived field list, same as
+        # _deduplicate() below, instead of a second hand-maintained copy
+        # of it — two independent lists that both need to stay in sync
+        # with ExtractedData's fields is exactly how "endpoints"/"schemas"
+        # drifted out of _deduplicate() in the first place.
+        for attr in self._simple_list_field_names():
             llm_raw = list(getattr(llm, attr))
             heu_raw = list(getattr(heuristic, attr))
 
@@ -609,11 +612,25 @@ class HybridExtractor:
             corroborated = bool(llm_keys & heu_keys)
             llm_only     = bool(llm_keys - heu_keys)
 
-            combined = (
-                [llm_by_norm[k] for k in (llm_keys & heu_keys)] +   # prefer LLM casing when corroborated
-                [llm_by_norm[k] for k in (llm_keys - heu_keys)] +
-                [heu_by_norm[k] for k in (heu_keys - llm_keys)]
-            )
+            # FIXED (TM-18): this used to build `combined` from set
+            # difference/intersection operations (llm_keys & heu_keys,
+            # etc.) — Python's string-hash randomization (on by default)
+            # means set iteration order isn't stable across process runs,
+            # so when more than 15 items were found, WHICH 15 survived
+            # combined[:15] changed between runs of the IDENTICAL input.
+            # The same conversation processed on two different workers
+            # could produce different graphs. Fixed by iterating the
+            # already-insertion-ordered llm_by_norm/heu_by_norm dicts
+            # directly: every LLM item (corroborated or not) in the LLM's
+            # own order, then heuristic-only items in the heuristic's own
+            # order — a pure, deterministic function of input order.
+            combined: list[str] = []
+            for k, v in llm_by_norm.items():
+                combined.append(v)  # prefer LLM casing when corroborated
+            for k, v in heu_by_norm.items():
+                if k not in llm_keys:
+                    combined.append(v)
+
             setattr(merged, attr, combined[:15])
             merged.confidence[attr] = (
                 0.95 if corroborated else
@@ -663,11 +680,41 @@ class HybridExtractor:
         """Normalize for dedup comparison."""
         return re.sub(r'\s+', ' ', s.lower().strip())[:60]
 
+    # Fields on ExtractedData that are lists of DICTS, not lists of plain
+    # strings — these can't go through the string-normalize-and-dedup
+    # loop below and are copied through as-is instead.
+    _DICT_LIST_FIELDS = frozenset({"decisions", "superseded", "evidence"})
+    # Non-list field — per-category confidence scores, set by merge(), not by dedup.
+    _NON_LIST_FIELDS = frozenset({"confidence"})
+
+    @classmethod
+    def _simple_list_field_names(cls) -> list[str]:
+        """Every ExtractedData field that's a plain list[str] — derived
+        from the dataclass itself rather than hand-maintained here.
+
+        FIXED (TM-14): _deduplicate() used to hardcode this list
+        ("goals", "tasks_done", ... "environments") and silently dropped
+        "endpoints", "schemas", and "evidence" — added to ExtractedData
+        at some point after this hardcoded list was written, and never
+        added here to match. _deduplicate() is the path taken whenever
+        the LLM pass is absent, which is the SHIPPED DEFAULT
+        (use_llm_extraction=False) — so two of the nine documented node
+        types (ENDPOINT, SCHEMA) and all decision evidence were
+        unreachable out of the box. Deriving the field list from
+        dataclasses.fields() means a future field addition to
+        ExtractedData can't silently create the same gap again.
+        """
+        import dataclasses
+        return [
+            f.name for f in dataclasses.fields(ExtractedData)
+            if f.name not in cls._DICT_LIST_FIELDS
+            and f.name not in cls._NON_LIST_FIELDS
+        ]
+
     def _deduplicate(self, data: ExtractedData) -> ExtractedData:
         """Deduplicate within heuristic results."""
         result = ExtractedData()
-        for attr in ["goals", "tasks_done", "tasks_wip", "tasks_todo",
-                     "files", "errors", "dependencies", "environments"]:
+        for attr in self._simple_list_field_names():
             seen = set()
             deduped = []
             for item in getattr(data, attr):
@@ -678,6 +725,7 @@ class HybridExtractor:
             setattr(result, attr, deduped[:15])
         result.decisions = data.decisions
         result.superseded = data.superseded
+        result.evidence = data.evidence
         return result
 
     # ── Main entry ────────────────────────────────────────────────────────────
