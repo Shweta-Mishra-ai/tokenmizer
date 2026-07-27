@@ -1093,28 +1093,46 @@ class GraphMemory:
 
             rate = _DECAY_RATE.get((node.status, node.type), 0.0)
             if rate == 0.0:
+                # Not currently in a decaying (status, type) bucket — keep
+                # last_decayed_at current so a LATER transition into a
+                # decaying bucket (e.g. IN_PROGRESS -> COMPLETED) isn't
+                # charged decay for time spent in a non-decaying state.
+                node.last_decayed_at = _now
                 continue
 
             age_days = node.age_days()
 
-            # Grace period: no decay in first N days
+            # Grace period: no decay in first N days of the node's life.
+            # Governs whether decay should START at all — still based on
+            # absolute age (via updated_at), separate from the elapsed-
+            # since-last-decay measure below that governs how MUCH decay
+            # applies once it's started.
             grace = {
                 NodeType.TASK:  3.0,
                 NodeType.ERROR: 1.0,
             }.get(node.type, 0.0)
 
             if age_days <= grace:
+                node.last_decayed_at = _now
                 continue
 
-            # Apply decay: importance *= (1 - rate) ^ days_since_grace
-            effective_days = age_days - grace
-            decay_factor = max(0.5, (1.0 - rate) ** effective_days)
+            # Decay magnitude: elapsed time SINCE THIS NODE'S LAST DECAY
+            # APPLICATION, not absolute age. This is what makes repeated
+            # calls (once per chat turn) idempotent per unit of real time
+            # instead of compounding per call — see the field docstring
+            # on MemoryNode.last_decayed_at.
+            elapsed_days = max(0.0, (_now - node.last_decayed_at) / 86400.0)
+            if elapsed_days <= 0.0:
+                continue  # called again with no real time elapsed — nothing to do
+
+            decay_factor = max(0.5, (1.0 - rate) ** elapsed_days)
             new_importance = max(0.10, round(node.importance * decay_factor, 3))
 
             if abs(new_importance - node.importance) > 0.005:
                 node.importance = new_importance
                 changed[nid] = new_importance
                 self._dirty = True
+            node.last_decayed_at = _now
 
         return changed
 

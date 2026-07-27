@@ -64,6 +64,19 @@ class MemoryNode:
     updated_at: float = field(default_factory=time.time)
     valid_from: float = field(default_factory=time.time)   # when this fact became true
     valid_until: float = field(default=0.0)                # 0.0 = currently valid
+    # FIXED (TM-07): apply_importance_decay() used to compute decay
+    # magnitude from age_days() (absolute age since updated_at) and
+    # multiply it into the CURRENT importance every time it ran — but it
+    # runs once per chat turn, and nothing recorded when decay was last
+    # applied. Since age barely changes between turns seconds apart, the
+    # same decay factor got reapplied to an already-decayed value on
+    # every turn, collapsing importance to the floor within a handful of
+    # turns regardless of real elapsed time. last_decayed_at tracks the
+    # last time THIS node's importance was actually decayed, so decay
+    # magnitude is computed from elapsed time since then, not from
+    # absolute node age — repeated calls with no real time passing decay
+    # by approximately nothing, as they should.
+    last_decayed_at: float = field(default_factory=time.time)
     _evicted: bool = field(default=False, repr=False)
 
     def is_valid_at(self, t: float) -> bool:
