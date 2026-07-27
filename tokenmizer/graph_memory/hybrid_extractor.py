@@ -125,6 +125,38 @@ _DECISION_PASSIVE = re.compile(
     re.IGNORECASE,
 )
 
+# FIXED (TM-01) — the single most severe finding in the audit: none of
+# the decision passes above checked for negation. "We are NOT using
+# Redis" matched Pass 1's verb list ("using") and Pass 3's tech-name list
+# ("redis") independently — both blind to the preceding "NOT" — and both
+# produced "Use Redis" as an extracted decision: the literal opposite of
+# what was said. This became critical in combination with
+# SmartMessageWindow, which replaces older conversation turns with the
+# graph's context block, deleting the original sentence and leaving only
+# the fabricated "Decided: Use Redis" in what the model actually sees.
+#
+# Scoped to the current CLAUSE (back to the nearest sentence boundary),
+# not the whole message — an unrelated negation in an earlier, different
+# sentence ("The old code didn't have caching. Use Redis for the
+# session cache.") must not suppress a later, legitimate decision.
+_NEGATION_WORDS = re.compile(
+    r"\b(?:not|never|avoid(?:ed|ing)?|without|no\s+longer|"
+    r"don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|couldn'?t|shouldn'?t|"
+    r"isn'?t|aren'?t|wasn'?t|weren'?t)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_negated_context(content: str, match_start: int) -> bool:
+    """True if `match_start` in `content` falls inside a negated clause."""
+    clause_start = 0
+    for i in range(match_start - 1, -1, -1):
+        if content[i] in ".!?\n":
+            clause_start = i + 1
+            break
+    return bool(_NEGATION_WORDS.search(content[clause_start:match_start]))
+
+
 # Pass 5: config decisions — "expires in 15 minutes", "cost factor 12"
 _DECISION_CONFIG = re.compile(
     r'\b(?:expire[sd]? in|cost factor|timeout of|limit of|max(?:imum)? of|'
@@ -406,6 +438,8 @@ class HybridExtractor:
 
         # Decision Pass 1: explicit verb
         for m in _DECISION.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
             label = m.group(1).strip()[:80]
             norm  = self._normalize(label)
             if norm not in seen_decisions and len(norm) > 4:
@@ -414,6 +448,8 @@ class HybridExtractor:
 
         # Decision Pass 2: header format
         for m in _DECISION_HEADER.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
             label = m.group(1).strip()[:80]
             norm  = self._normalize(label)
             if norm not in seen_decisions:
@@ -422,6 +458,8 @@ class HybridExtractor:
 
         # Decision Pass 3: tech names
         for m in _DECISION_FOR.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
             label = "Use " + m.group(1).strip()[:60]
             norm  = self._normalize(label)
             if norm not in seen_decisions:
@@ -430,6 +468,8 @@ class HybridExtractor:
 
         # Decision Pass 4: passive (bcrypt with cost factor 12)
         for m in _DECISION_PASSIVE.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
             label = "Use " + m.group(1).strip()[:60]
             norm  = self._normalize(label)
             if norm not in seen_decisions:
