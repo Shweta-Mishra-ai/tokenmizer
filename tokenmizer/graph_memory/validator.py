@@ -134,6 +134,25 @@ class GraphValidator:
         confidence = 0.50  # baseline
 
         # Length signals: longer = more specific = higher confidence
+        #
+        # NOTE (TM-29): this used to have a further `elif char_len > 40:
+        # confidence += 0.05` branch documented as "diminishing returns
+        # on very long labels" — but it was checked AFTER `elif char_len
+        # > 20`, and every label over 40 chars is also over 20, so that
+        # branch could never be reached; every long label has always
+        # gotten the flat +0.10 in practice. Making the diminishing-
+        # returns behavior actually fire (checking the longer threshold
+        # first) measurably REDUCED task-extraction recall against this
+        # repo's own memory-accuracy fixture — several legitimately
+        # long, specific task labels lost enough confidence to fall
+        # below the acceptance threshold. Since that recall regression
+        # is concrete and immediate while "diminishing returns" was never
+        # validated behavior to begin with (it never ran), the dead
+        # branch is removed rather than activated: every label over 20
+        # chars gets a flat +0.10, which is what has actually been
+        # shipping. Revisit with a real precision/recall evaluation
+        # harness (see audit roadmap) before reintroducing length-based
+        # diminishing returns.
         char_len = len(label)
         if char_len < 8:
             confidence -= 0.20
@@ -141,8 +160,6 @@ class GraphValidator:
             confidence -= 0.05
         elif char_len > 20:
             confidence += 0.10
-        elif char_len > 40:
-            confidence += 0.05  # diminishing returns on very long labels
 
         # Word count: 2–8 words is the sweet spot
         word_count = len(words)
@@ -301,12 +318,18 @@ _validator: Optional[GraphValidator] = None
 
 
 def get_validator(min_confidence: float | None = None) -> GraphValidator:
-    global _validator
+    """
+    FIXED (TM-29): an explicit min_confidence used to overwrite the
+    module-level singleton permanently — one caller passing an override
+    changed behavior for every OTHER caller that just calls
+    get_validator() with no arguments, for the rest of the process
+    lifetime. An explicit override is scoped to the caller now: it
+    returns a fresh instance WITHOUT touching the shared singleton.
+    """
     if min_confidence is not None:
-        # If explicitly passed, override or create a new validator instance
-        _validator = GraphValidator(min_confidence=min_confidence)
-        return _validator
+        return GraphValidator(min_confidence=min_confidence)
 
+    global _validator
     if _validator is None:
         try:
             from tokenmizer.config.settings import get_settings

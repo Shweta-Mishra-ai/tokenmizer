@@ -246,3 +246,30 @@ class TestArchivedReachability:
                              NodeStatus.COMPLETED)
         graph.apply_importance_decay()
         assert graph._nodes[nid].status == NodeStatus.COMPLETED
+
+
+class TestStatsExcludesEvictedNodes:
+    """Regression test for TM-35: stats() was the one place in the
+    codebase that didn't filter out _evicted nodes — query(),
+    to_context_block(), and both visualization.py exporters all do.
+    A caller comparing /api/graph/{id} (stats) against /api/graph/{id}/viz
+    (visualization) would see disagreeing node counts."""
+
+    def test_evicted_node_excluded_from_node_count(self, graph):
+        nid = graph.add_node(NodeType.TASK, "Implement the checkout flow")
+        graph.add_node(NodeType.TASK, "Implement the login flow")
+        graph._nodes[nid]._evicted = True
+
+        stats = graph.stats()
+        assert stats["node_count"] == 1
+        assert stats["by_type"]["task"] == 1
+
+    def test_evicted_node_excluded_from_by_status(self, graph):
+        nid = graph.add_node(NodeType.TASK, "Implement the checkout flow",
+                             NodeStatus.COMPLETED)
+        graph.add_node(NodeType.TASK, "Implement the login flow", NodeStatus.PENDING)
+        graph._nodes[nid]._evicted = True
+
+        stats = graph.stats()
+        assert stats["by_status"].get("completed", 0) == 0
+        assert stats["by_status"]["pending"] == 1

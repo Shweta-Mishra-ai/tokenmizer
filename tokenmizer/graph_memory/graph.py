@@ -1477,18 +1477,26 @@ class GraphMemory:
     # ── Stats ────────────────────────────────────────────────────────────────
 
     def stats(self) -> dict:
+        """
+        FIXED (TM-35): this used to count _evicted nodes into node_count/
+        by_type/by_status — every other consumer (query(),
+        to_context_block(), both visualization.py exporters) filters
+        _evicted out, so a caller comparing /api/graph/{id} (this method)
+        against /api/graph/{id}/viz would see disagreeing node counts.
+        """
         from tokenmizer.core.dto import GraphStatsDTO
+        live_nodes = [n for n in self._nodes.values() if not n._evicted]
         by_type: dict[str, int] = {}
         by_status: dict[str, int] = {}
         confidences: list[float] = []
-        for n in self._nodes.values():
+        for n in live_nodes:
             by_type[n.type.value] = by_type.get(n.type.value, 0) + 1
             by_status[n.status.value] = by_status.get(n.status.value, 0) + 1
             confidences.append(n.confidence)
         avg_confidence = round(sum(confidences) / max(1, len(confidences)), 3)
         dto = GraphStatsDTO(
             session_id=self.session_id,
-            node_count=len(self._nodes),
+            node_count=len(live_nodes),
             edge_count=len(self._edges),
             by_type=by_type,
             by_status=by_status,

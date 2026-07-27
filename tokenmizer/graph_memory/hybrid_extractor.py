@@ -422,7 +422,11 @@ class HybridExtractor:
 
         # Passive completion: full history
         for m in _TASK_DONE_PASSIVE.finditer(content):
-            task = re.sub(r'^(?:the|a|an|this|that)\\s+', '', m.group(1).strip()[:80], flags=re.IGNORECASE)
+            # FIXED (TM-21): was r'...\\s+' — a raw string, so \\s is a
+            # literal backslash-s, not the whitespace escape \s. Since no
+            # real text contains a literal backslash there, this prefix
+            # strip could never match anything and has never once fired.
+            task = re.sub(r'^(?:the|a|an|this|that)\s+', '', m.group(1).strip()[:80], flags=re.IGNORECASE)
             if len(task) > 5:
                 norm = self._normalize(task)
                 if norm not in seen_tasks:

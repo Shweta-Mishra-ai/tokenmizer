@@ -220,3 +220,20 @@ class TestMinConfidenceFilter:
         assert result.files == [] and result.decisions == [], (
             "heuristic-only extraction at min_confidence=0.9 must yield nothing"
         )
+
+
+class TestPassiveTaskPrefixStrip:
+    r"""Regression test for TM-21: the passive-completion prefix strip
+    used a doubled backslash before the whitespace escape in its regex —
+    a raw string, so it matched a literal backslash-s, not whitespace.
+    The pattern could never match anything (no real text contains a
+    literal backslash), so this prefix strip has never once fired."""
+
+    def test_leading_article_is_actually_stripped(self):
+        extractor = HybridExtractor(min_confidence=0.50)
+        messages = [{"role": "assistant", "content": "The login page is working now."}]
+        result = extractor.heuristic_extract(messages)
+        assert any(t.lower() == "login page" for t in result.tasks_done), (
+            f"expected the leading article stripped from a passive-completion "
+            f"task, got: {result.tasks_done}"
+        )
