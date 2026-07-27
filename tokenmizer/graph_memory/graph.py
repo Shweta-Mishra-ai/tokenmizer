@@ -531,6 +531,7 @@ class GraphMemory:
         if node_type == NodeType.DECISION and status == NodeStatus.COMPLETED:
             try:
                 from tokenmizer.graph_memory.decision_tracker import (
+                    find_contested_decisions,
                     find_contradicting_decisions,
                 )
                 to_supersede = find_contradicting_decisions(
@@ -581,6 +582,35 @@ class GraphMemory:
                             f"Decision transition: {old_node.label!r} → {label!r}"
                             f" | trigger: {trigger[:40]}"
                         )
+
+                # CONTESTED (TM-09): decisions sharing a topic bucket with
+                # the new one, but NOT confident enough to supersede (see
+                # _same_slot in decision_tracker.py) — e.g. "Use
+                # PostgreSQL for primary user data" and "Use SQLite for
+                # the local offline cache" both classify as "database"
+                # but plausibly serve different purposes. Rather than
+                # silently guessing (which risks destroying correct
+                # information) or silently doing nothing (which hides the
+                # ambiguity), both sides are flagged CONTESTED and linked
+                # so a human or the LLM can resolve it explicitly. No
+                # DecisionTransition is recorded — this is an unresolved
+                # conflict, not a causal replacement.
+                contested = find_contested_decisions(
+                    label, summary, self._nodes, exclude_ids=frozenset(to_supersede),
+                )
+                for other_id in contested:
+                    if other_id == node_id or other_id not in self._nodes:
+                        continue
+                    other_node = self._nodes[other_id]
+                    other_node.status = NodeStatus.CONTESTED
+                    node.status = NodeStatus.CONTESTED
+                    self.add_edge(node_id, other_id, EdgeType.CONFLICTS_WITH, weight=1.0)
+                    self.add_edge(other_id, node_id, EdgeType.CONFLICTS_WITH, weight=1.0)
+                    logger.info(
+                        f"Decision contested: {other_node.label!r} vs {label!r} "
+                        f"— same topic, different purpose; flagging both instead "
+                        f"of silently superseding one"
+                    )
             except Exception as e:
                 # Intentionally non-fatal: a bug in contradiction detection
                 # must not block creating the new decision node itself —
@@ -1328,6 +1358,33 @@ class GraphMemory:
                     entry += f" ({d.summary[:50]})"
                 parts.append(entry)
             sections.append("Decided: " + " | ".join(parts))
+
+        # ── 5b. Contested decisions — same topic, ambiguous whether one replaces
+        # the other (see NodeStatus.CONTESTED / TM-09). Surfaced explicitly
+        # rather than silently guessing which one is "current" — unlike
+        # SUPERSEDED, both sides stay visible here since destroying either
+        # one would risk losing correct information on weak evidence.
+        contested = [
+            n for n in self._nodes.values()
+            if n.type == NodeType.DECISION
+            and n.status == NodeStatus.CONTESTED
+            and not n._evicted
+        ]
+        if contested:
+            contested_ids = {n.id for n in contested}
+            seen_pairs: set[frozenset] = set()
+            lines = []
+            for e in self._edges:
+                if (e.type == EdgeType.CONFLICTS_WITH
+                        and e.source_id in contested_ids and e.target_id in contested_ids):
+                    pair = frozenset((e.source_id, e.target_id))
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    a, b = self._nodes[e.source_id], self._nodes[e.target_id]
+                    lines.append(f"{a.label[:45]!r} vs {b.label[:45]!r}")
+            if lines:
+                sections.append("Conflicting (unresolved): " + " | ".join(lines[:3]))
 
         # ── 6. Decision transitions — compact, no wasted tokens on wrong answer ─
         # Show as "Changed X → Y" not full old label — the old label is wrong,

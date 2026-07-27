@@ -83,6 +83,16 @@ EDGE_TYPES: dict[EdgeType, dict] = {
                      "Every SUPERSEDES edge should have a matching "
                      "DecisionTransition record with trigger/reason/evidence.",
     },
+    EdgeType.CONFLICTS_WITH: {
+        "domain": [NodeType.DECISION],
+        "range": [NodeType.DECISION],
+        "semantics": "Symmetric: both decisions share a topic but neither "
+                     "was confidently identified as replacing the other — "
+                     "both are marked CONTESTED rather than one being "
+                     "silently marked SUPERSEDED on ambiguous evidence. "
+                     "No DecisionTransition record — this is an unresolved "
+                     "conflict, not a causal transition.",
+    },
 }
 
 # ── Status state machine ─────────────────────────────────────────────────────
@@ -95,12 +105,18 @@ STATUS_TRANSITIONS: dict[NodeStatus, set[NodeStatus]] = {
     NodeStatus.IN_PROGRESS: {NodeStatus.COMPLETED, NodeStatus.FAILED,
                              NodeStatus.PENDING, NodeStatus.INVALIDATED},
     NodeStatus.COMPLETED:   {NodeStatus.SUPERSEDED, NodeStatus.INVALIDATED,
-                             NodeStatus.IN_PROGRESS},  # reopened work
+                             NodeStatus.IN_PROGRESS, NodeStatus.CONTESTED},
     NodeStatus.FAILED:      {NodeStatus.IN_PROGRESS, NodeStatus.COMPLETED,
                              NodeStatus.INVALIDATED},
     NodeStatus.SUPERSEDED:  {NodeStatus.ARCHIVED, NodeStatus.INVALIDATED},
     NodeStatus.INVALIDATED: set(),          # terminal — explicit human verdict
     NodeStatus.ARCHIVED:    set(),          # terminal — aged out
+    # A contested decision is resolved by an explicit human/LLM
+    # verdict — reasserting one side (back to COMPLETED), invalidating
+    # one side, or a later decision genuinely superseding it. There is no
+    # automatic resolution path; see TM-09.
+    NodeStatus.CONTESTED:   {NodeStatus.COMPLETED, NodeStatus.SUPERSEDED,
+                             NodeStatus.INVALIDATED},
 }
 
 STATUS_DESCRIPTIONS: dict[NodeStatus, str] = {
@@ -111,6 +127,8 @@ STATUS_DESCRIPTIONS: dict[NodeStatus, str] = {
     NodeStatus.SUPERSEDED:  "Replaced by a newer decision; kept in history, shown in resume ≤7 days.",
     NodeStatus.INVALIDATED: "Explicitly declared wrong/cancelled; always warned about in resume.",
     NodeStatus.ARCHIVED:    "Superseded >7 days ago; aged out of resume, retained in graph.",
+    NodeStatus.CONTESTED:   "Shares a topic with another decision but neither confidently "
+                            "replaces the other; both surfaced together, unresolved, in resume.",
 }
 
 

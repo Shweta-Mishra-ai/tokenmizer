@@ -39,6 +39,17 @@ class NodeStatus(str, Enum):
     INVALIDATED = "invalidated"   # explicitly wrong/cancelled (RED) — kept as warning
     ARCHIVED = "archived"         # old but valid, not relevant now (GRAY)
     MODIFIED = "modified"         # alias for SUPERSEDED — backward compat
+    # Two decisions share a topic bucket (e.g. both "database") but don't
+    # share enough descriptive context to confidently call one a genuine
+    # replacement of the other (e.g. "Use PostgreSQL for primary user
+    # data" vs "Use SQLite for the local offline cache" — plausibly two
+    # independent, complementary choices, not a reversal). Rather than
+    # silently guessing and marking one SUPERSEDED — destroying it from
+    # resume context on possibly-wrong evidence — both sides are flagged
+    # CONTESTED and surfaced together so a human or the LLM can resolve
+    # the ambiguity explicitly (see TM-09). Remains visible in query() and
+    # to_context_block(), unlike SUPERSEDED/ARCHIVED/INVALIDATED.
+    CONTESTED = "contested"
 
 
 class EdgeType(str, Enum):
@@ -49,6 +60,7 @@ class EdgeType(str, Enum):
     BLOCKS = "blocks"
     PART_OF = "part_of"
     SUPERSEDES = "supersedes"
+    CONFLICTS_WITH = "conflicts_with"  # symmetric — two CONTESTED decisions, see NodeStatus.CONTESTED
 
 
 @dataclass
