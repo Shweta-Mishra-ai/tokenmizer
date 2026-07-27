@@ -274,23 +274,28 @@ def _graph_cache_touch(session_id: str) -> None:
         # pitch is "never lose context." We now retry once (covers
         # transient SQLite WAL lock contention) and record the failure to
         # analytics so it's queryable via /api/stats instead of invisible.
+        #
+        # FIXED (TM-12): _persist() used to catch its own exceptions and
+        # return None unconditionally, so this try/except never actually
+        # caught anything — `persisted = True` was set on the very first
+        # call every time, the retry never ran, and the
+        # record_silent_failure metric below was dead code despite the
+        # comment above describing it as implemented. _persist() now
+        # returns bool, so the retry is driven off the actual outcome.
         persisted = False
         for attempt in range(2):
-            try:
-                evicted_graph._persist()
-                persisted = True
+            persisted = evicted_graph._persist()
+            if persisted:
                 break
-            except Exception as e:
-                if attempt == 0:
-                    logger.warning(
-                        f"Persist attempt 1 failed for evicted graph {evicted_id}, retrying: {e}"
-                    )
-                else:
-                    logger.error(
-                        f"Graph {evicted_id} evicted from cache WITHOUT persisting — "
-                        f"nodes added since last successful save are LOST: {e}"
-                    )
+            if attempt == 0:
+                logger.warning(
+                    f"Persist attempt 1 failed for evicted graph {evicted_id}, retrying"
+                )
         if not persisted:
+            logger.error(
+                f"Graph {evicted_id} evicted from cache WITHOUT persisting — "
+                f"nodes added since last successful save are LOST"
+            )
             _analytics.record_silent_failure("graph_eviction")
 
 
@@ -1173,11 +1178,21 @@ async def invalidate_decision(session_id: str, decision_label: str, reason: str 
                         f"session '{session_id}' (superseded/archived decisions "
                         f"are not invalidatable — they are already inactive)")
             )
-        graph._persist(force=True)  # direct node mutation above bypasses add_node's
-                                      # dirty-tracking — force=True is required here or
-                                      # this write is silently skipped (caught in a final
-                                      # accuracy pass; same class of bug the eviction path
-                                      # and prune() were already protected against)
+        # direct node mutation above bypasses add_node's dirty-tracking —
+        # force=True is required here or this write is silently skipped
+        # (caught in a final accuracy pass; same class of bug the
+        # eviction path and prune() were already protected against).
+        # _persist() now returns bool (TM-12) — check it, since claiming
+        # "status": "invalidated" while the write actually failed is the
+        # same silent-data-loss pattern this whole audit is about.
+        if not graph._persist(force=True):
+            raise HTTPException(
+                status_code=500,
+                detail=(f"Decision(s) marked invalidated in memory, but the "
+                        f"write to disk FAILED for session '{session_id}' — "
+                        f"the change did not persist and will be lost on "
+                        f"restart or cache eviction. Retry the request."),
+            )
         return {
             "session_id": session_id,
             "invalidated": decision_label,

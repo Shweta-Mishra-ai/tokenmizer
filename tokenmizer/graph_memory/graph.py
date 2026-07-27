@@ -237,9 +237,27 @@ class GraphMemory:
                                f"{type(e).__name__}: {e}")
             self._transitions = []
 
-    def _persist(self, force: bool = False) -> None:
+    def _persist(self, force: bool = False) -> bool:
         """
         Persist the full graph (all nodes + edges) as JSON to SQLite.
+
+        Returns True if the graph's current state is confirmed safely on
+        disk — either the write just succeeded, or nothing was dirty so
+        the last successful write already covers it — and False if a
+        write was attempted and failed.
+
+        FIXED (TM-12): this used to return None unconditionally, catching
+        and logging its own exceptions internally without ever re-raising.
+        api/app.py's graph-cache eviction path (_graph_cache_touch) wraps
+        `evicted_graph._persist()` in a try/except with a retry-once loop
+        specifically to handle transient failures — but since this method
+        never raised, that except clause could never fire, `persisted =
+        True` was set unconditionally on the very first call, and the
+        retry (plus the record_silent_failure metric it guards) was dead
+        code. A detailed comment there described that retry/alerting
+        behavior as implemented; it never executed once. Returning bool
+        lets the caller check the actual outcome instead of relying on an
+        exception that was never going to arrive.
 
         KNOWN SCALING LIMITATION (documented, not silently shipped as if
         it were fine): this rewrites EVERY node and edge as JSON on every
@@ -275,7 +293,7 @@ class GraphMemory:
         the change would silently never be saved.
         """
         if not self._dirty and not force:
-            return
+            return True
         try:
             conn = self._db_connect()
             try:
@@ -295,10 +313,12 @@ class GraphMemory:
             finally:
                 conn.close()
             self._dirty = False  # only clear on confirmed success
+            return True
         except Exception as e:
             logger.error(f"Graph persist failed for {self.session_id}: {e}")
             # _dirty stays True — next call (even non-forced) will retry
             # the full write rather than silently giving up on it forever.
+            return False
 
     def _load(self) -> None:
         try:
