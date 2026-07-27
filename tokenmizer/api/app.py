@@ -414,9 +414,23 @@ def _sampling_kwargs(req: "ChatRequest") -> dict:
 
 
 async def _check_rate_limit(request: Request) -> None:
-    """Raise 429 if client is rate-limited."""
-    client_ip = request.client.host if request.client else "unknown"
-    client_id = request.headers.get("Authorization", client_ip)
+    """
+    Raise 429 if client is rate-limited.
+
+    FIXED (TM-05): previously keyed the bucket on
+    `request.headers.get("Authorization", client_ip)` — a raw,
+    client-supplied string. A client could vary that header per request
+    (free in dev mode, where it isn't even validated) and land in a fresh
+    bucket every time, never being limited at all. `request.client.host`
+    reflects the actual TCP-level source of the connection; it isn't
+    something the caller can vary per request the way a header string can.
+
+    This doesn't yet differentiate between individual API keys (the
+    current auth model has one shared key for the whole deployment — see
+    TM-15), so per-key rate limiting isn't meaningfully possible until
+    that lands. IP-based limiting is the correct available control today.
+    """
+    client_id = request.client.host if request.client else "unknown"
     allowed, retry_after = await _rate_limiter.check(client_id)
     if not allowed:
         raise HTTPException(
@@ -931,12 +945,12 @@ async def dashboard():
 
 # ── Session / Graph endpoints ─────────────────────────────────────────────────
 
-@app.get("/api/stats", dependencies=[Depends(verify_api_key)])
+@app.get("/api/stats", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def stats(session_id: Optional[str] = None):
     return _analytics.summary()
 
 
-@app.get("/api/cache/stats", dependencies=[Depends(verify_api_key)])
+@app.get("/api/cache/stats", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def cache_stats():
     stats = _cache.stats()
     # Include preference context for completeness (was previously unused)
@@ -944,7 +958,7 @@ async def cache_stats():
     return stats
 
 
-@app.get("/api/graph/{session_id}/history", dependencies=[Depends(verify_api_key)])
+@app.get("/api/graph/{session_id}/history", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_graph_history(session_id: str, at_time: float = 0.0, top_k: int = 12):
     """
     Query graph state at a specific Unix timestamp.
@@ -974,13 +988,13 @@ async def get_graph_history(session_id: str, at_time: float = 0.0, top_k: int = 
     }
 
 
-@app.get("/api/graph/{session_id}", dependencies=[Depends(verify_api_key)])
+@app.get("/api/graph/{session_id}", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_graph(session_id: str):
     graph = await _get_graph_async(session_id)
     return graph.stats()
 
 
-@app.get("/api/graph/{session_id}/viz", dependencies=[Depends(verify_api_key)])
+@app.get("/api/graph/{session_id}/viz", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_graph_viz(session_id: str):
     """
     Return full graph as D3-compatible JSON for visualization.
@@ -991,7 +1005,7 @@ async def get_graph_viz(session_id: str):
     return graph.to_vis_json()
 
 
-@app.get("/api/graph/{session_id}/html", dependencies=[Depends(verify_api_key)])
+@app.get("/api/graph/{session_id}/html", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_graph_html(session_id: str):
     """Shareable standalone interactive graph — open in a browser, drag/zoom,
     screenshot, share. Self-contained dark-theme D3 force layout."""
@@ -1000,7 +1014,7 @@ async def get_graph_html(session_id: str):
     return HTMLResponse(to_share_html(graph))
 
 
-@app.get("/api/ontology", dependencies=[Depends(verify_api_key)])
+@app.get("/api/ontology", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_ontology():
     """The TokenMizer graph ontology: node/edge types with semantics and
     the status state machine. Machine-readable — what the graph CAN contain
@@ -1009,7 +1023,7 @@ async def get_ontology():
     return ontology_dict()
 
 
-@app.get("/api/graph/{session_id}/why", dependencies=[Depends(verify_api_key)])
+@app.get("/api/graph/{session_id}/why", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_graph_why(session_id: str, q: str):
     """Reasoning: trace the causal chain behind a decision. Matches decision
     nodes containing `q`, walks the supersession chain in both directions,
@@ -1020,7 +1034,7 @@ async def get_graph_why(session_id: str, q: str):
     return why(graph, q)
 
 
-@app.get("/api/graph/{session_id}/reasoning", dependencies=[Depends(verify_api_key)])
+@app.get("/api/graph/{session_id}/reasoning", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_graph_reasoning(session_id: str):
     """Full reasoning view over session memory: active decisions, recent
     changes, decision history grouped by topic, and an ontology-based
@@ -1030,7 +1044,7 @@ async def get_graph_reasoning(session_id: str):
     return summarize_reasoning(graph)
 
 
-@app.get("/api/graph/{session_id}/obsidian", dependencies=[Depends(verify_api_key)])
+@app.get("/api/graph/{session_id}/obsidian", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_graph_obsidian(session_id: str):
     """
     Download graph as Obsidian Canvas (.canvas) file.
@@ -1049,7 +1063,7 @@ async def get_graph_obsidian(session_id: str):
     )
 
 
-@app.get("/api/graph/{session_id}/transitions", dependencies=[Depends(verify_api_key)])
+@app.get("/api/graph/{session_id}/transitions", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_transitions(session_id: str):
     """Full decision transition history — trigger, reason, evidence, confidence_delta."""
     graph = await _get_graph_async(session_id)
@@ -1074,7 +1088,7 @@ async def get_transitions(session_id: str):
 
 
 
-@app.post("/api/checkpoint", dependencies=[Depends(verify_api_key)])
+@app.post("/api/checkpoint", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def create_manual_checkpoint(session_id: str):
     """
     Create a manual checkpoint for a session, snapshotting current graph
@@ -1122,12 +1136,12 @@ async def create_manual_checkpoint(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/checkpoints/{session_id}", dependencies=[Depends(verify_api_key)])
+@app.get("/api/checkpoints/{session_id}", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def list_checkpoints(session_id: str):
     return _checkpoint_mgr.list_checkpoints(session_id)
 
 
-@app.post("/api/decision/invalidate", dependencies=[Depends(verify_api_key)])
+@app.post("/api/decision/invalidate", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def invalidate_decision(session_id: str, decision_label: str, reason: str = ""):
     """
     Mark a decision as INVALIDATED (red) — explicitly wrong or cancelled.
@@ -1178,7 +1192,7 @@ async def invalidate_decision(session_id: str, decision_label: str, reason: str 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/resume/{session_id}", dependencies=[Depends(verify_api_key)])
+@app.get("/api/resume/{session_id}", dependencies=[Depends(verify_api_key), Depends(_check_rate_limit)])
 async def get_resume(session_id: str, level: str = "standard"):
     """Get resume context for a session. level: critical | standard | full"""
     try:
