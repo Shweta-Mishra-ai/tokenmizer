@@ -41,14 +41,14 @@ class TestNegatedStatementsProduceNoDecision:
     def test_not_using_x_is_not_extracted_as_use_x(self):
         messages = [{"role": "user", "content": "We are NOT using Redis for this."}]
         labels = _labels(messages)
-        assert not any("redis" in l.lower() for l in labels), (
+        assert not any("redis" in label.lower() for label in labels), (
             f"a negated statement was extracted as a positive decision: {labels}"
         )
 
     def test_do_not_use_x_is_not_extracted(self):
         messages = [{"role": "user", "content": "Do not use MongoDB for this project."}]
         labels = _labels(messages)
-        assert not any("mongodb" in l.lower() for l in labels), (
+        assert not any("mongodb" in label.lower() for label in labels), (
             f"'do not use X' was extracted as a decision: {labels}"
         )
 
@@ -60,23 +60,23 @@ class TestNegatedStatementsProduceNoDecision:
             "content": "We are NOT using Redis. Do not use MongoDB either.",
         }]
         labels = _labels(messages)
-        assert not any("redis" in l.lower() for l in labels), labels
-        assert not any("mongodb" in l.lower() for l in labels), labels
+        assert not any("redis" in label.lower() for label in labels), labels
+        assert not any("mongodb" in label.lower() for label in labels), labels
 
     def test_never_use_x_is_not_extracted(self):
         messages = [{"role": "user", "content": "We should never use raw SQL string formatting."}]
         labels = _labels(messages)
-        assert not any("sql" in l.lower() for l in labels), labels
+        assert not any("sql" in label.lower() for label in labels), labels
 
     def test_avoid_x_is_not_extracted(self):
         messages = [{"role": "user", "content": "Avoid using pickle for untrusted data."}]
         labels = _labels(messages)
-        assert not any("pickle" in l.lower() for l in labels), labels
+        assert not any("pickle" in label.lower() for label in labels), labels
 
     def test_without_x_is_not_extracted(self):
         messages = [{"role": "user", "content": "We deployed without Docker this time."}]
         labels = _labels(messages)
-        assert not any("docker" in l.lower() for l in labels), labels
+        assert not any("docker" in label.lower() for label in labels), labels
 
 
 class TestUnrelatedEarlierNegationDoesNotSuppressLaterDecision:
@@ -94,7 +94,7 @@ class TestUnrelatedEarlierNegationDoesNotSuppressLaterDecision:
             ),
         }]
         labels = _labels(messages)
-        assert any("redis" in l.lower() for l in labels), (
+        assert any("redis" in label.lower() for label in labels), (
             f"a negation in an unrelated EARLIER sentence suppressed a "
             f"legitimate later decision — the scope must be per-clause, "
             f"not per-message: {labels}"
@@ -113,7 +113,7 @@ class TestExistingLegitimateDecisionsStillExtracted:
             "content": "Decided to use bcrypt instead of argon2 for password hashing.",
         }]
         labels = _labels(messages)
-        assert any("bcrypt" in l.lower() for l in labels), (
+        assert any("bcrypt" in label.lower() for label in labels), (
             f"'instead of' phrasing wrongly suppressed the actual decision: {labels}"
         )
 
@@ -128,4 +128,4 @@ class TestExistingLegitimateDecisionsStillExtracted:
     def test_plain_positive_decision_unaffected(self):
         messages = [{"role": "user", "content": "Use PostgreSQL for the primary datastore."}]
         labels = _labels(messages)
-        assert any("postgresql" in l.lower() for l in labels), labels
+        assert any("postgresql" in label.lower() for label in labels), labels

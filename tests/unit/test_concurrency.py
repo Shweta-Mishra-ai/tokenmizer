@@ -126,7 +126,7 @@ class TestGraphCacheEvictionSkipsInFlightSessions:
             # Adding a 4th session pushes the cache over the cap and
             # triggers eviction. The oldest entry's lock is held, so
             # eviction must skip it and take the next-oldest instead.
-            new_g = await app_module._get_graph_async("cache-fill-new")
+            await app_module._get_graph_async("cache-fill-new")
 
             assert oldest_id in app_module._graph_cache, (
                 f"session {oldest_id!r} was evicted while its lock was "
@@ -168,7 +168,6 @@ class TestMultiWorkerRiskWarning:
     """
 
     def test_warns_when_a_known_multi_worker_env_var_is_set(self, monkeypatch, caplog):
-        import importlib
 
         from tokenmizer.api import app as app_module
 

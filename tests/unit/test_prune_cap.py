@@ -154,13 +154,21 @@ class TestCombinedCandidatesAreSortedTogether:
             graph._nodes[nid].updated_at = time.time() - 100 * 86400
 
         graph.prune(max_nodes=1, max_age_days=30)
-        # The high-importance, aged task should survive over the low-
-        # importance fresh one IF scoring is honored across both tiers.
-        # (We don't assert exactly which single node survives — many
-        # nodes compete — only that the fresh low-importance placeholder,
-        # if it was ever a fallback candidate, doesn't unfairly outlive
-        # a clearly higher-value one due to broken tier ordering.)
-        assert len(graph._nodes) <= 3  # cap roughly enforced regardless
+        # This is the actual regression check: the fresh, low-importance
+        # placeholder is the WORST candidate in the graph on any correct
+        # combined-and-sorted scoring, so it must not survive while the
+        # higher-value, high-importance aged task does. Under the old
+        # sort-before-extend bug, the fallback tier's entries were
+        # appended AFTER sorting and could survive out of true score
+        # order — this assertion would have caught that.
+        assert fresh_low_importance not in graph._nodes, (
+            "the lowest-scoring candidate across both tiers survived "
+            "pruning — fallback-tier entries are not being sorted "
+            "together with age-based ones"
+        )
+        assert old_high_importance in graph._nodes, (
+            "the highest-scoring candidate was pruned instead of kept"
+        )
 
 
 class TestPruneScalesWithoutQuadraticBlowup:

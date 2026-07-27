@@ -139,7 +139,6 @@ class TestInvalidateDecisionSurfacesPersistFailure:
     targets, just at the API layer instead of the storage layer."""
 
     def test_returns_500_when_persist_fails(self, tmp_path, monkeypatch):
-        from unittest.mock import AsyncMock
 
         from fastapi.testclient import TestClient
 

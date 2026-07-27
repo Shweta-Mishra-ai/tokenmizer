@@ -34,8 +34,6 @@ broader gaps found while implementing the fix:
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 import yaml
 
