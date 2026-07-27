@@ -55,10 +55,19 @@ class CheckpointManager:
     Stored in SQLite — survives restarts.
     """
 
-    def __init__(self, storage_dir: str = "./checkpoints"):
+    # Default cap on AUTO-triggered checkpoints retained per session. Each
+    # checkpoint snapshots the full graph as JSON (see issue #27), so an
+    # unbounded table grows without limit for any long-lived session that
+    # legitimately stays near the auto-checkpoint threshold. Manual
+    # checkpoints (an explicit user/CLI action) are never subject to this
+    # cap — only ones the auto-threshold trigger itself created.
+    DEFAULT_AUTO_RETENTION = 20
+
+    def __init__(self, storage_dir: str = "./checkpoints", auto_retention: int = DEFAULT_AUTO_RETENTION):
         self._dir = Path(storage_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._db_path = self._dir / "checkpoints.db"
+        self._auto_retention = auto_retention
         self._safe_init_db()
         self._prev_snapshots: dict[str, dict] = {}  # session_id → last snapshot
 
@@ -169,12 +178,52 @@ class CheckpointManager:
         )
 
         self._save(ckpt)
+        if trigger == "auto_threshold":
+            self._prune_auto_checkpoints(session_id)
         logger.info(
             f"Checkpoint {checkpoint_id}: session={session_id} "
             f"msgs={len(messages)} nodes={len(graph._nodes)} "
             f"context={context_pct:.0%} resume_tokens={ckpt.resume_tokens}"
         )
         return ckpt
+
+    def _prune_auto_checkpoints(self, session_id: str) -> None:
+        """
+        Cap AUTO-triggered checkpoints at self._auto_retention for this
+        session, deleting the oldest first. Never touches rows with any
+        other trigger value (manual, provider_switch, etc.) — those are
+        explicit actions and must survive regardless of how many
+        auto-threshold checkpoints follow them.
+
+        Best-effort: a failure here must not fail the checkpoint that was
+        just successfully saved — worst case the table grows one row
+        larger than intended until the next successful prune.
+        """
+        try:
+            conn = self._db_connect()
+            try:
+                rows = conn.execute(
+                    """SELECT checkpoint_id FROM checkpoints
+                       WHERE session_id=? AND trigger='auto_threshold'
+                       ORDER BY created_at DESC""",
+                    (session_id,),
+                ).fetchall()
+                stale_ids = [r[0] for r in rows[self._auto_retention:]]
+                if stale_ids:
+                    conn.executemany(
+                        "DELETE FROM checkpoints WHERE checkpoint_id=?",
+                        [(cid,) for cid in stale_ids],
+                    )
+                    conn.commit()
+                    logger.debug(
+                        f"Pruned {len(stale_ids)} old auto-checkpoint(s) for "
+                        f"session {session_id} (retention={self._auto_retention})"
+                    )
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"Auto-checkpoint retention prune failed for "
+                           f"session {session_id} (non-fatal): {e}")
 
     def _build_critical(self, graph: GraphMemory, next_action: str) -> str:
         """~100 tokens. Only open blockers + critical decisions."""

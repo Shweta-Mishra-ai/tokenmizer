@@ -34,7 +34,6 @@ from tokenmizer.security.auth import verify_api_key
 from tokenmizer.security.middleware import injection_guard
 from tokenmizer.security.redaction import redact_messages
 from tokenmizer.semantic_cache.cache import SemanticCache
-from tokenmizer.state.backend import get_state_backend
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,6 @@ _cache = SemanticCache(
 )
 _checkpoint_mgr = CheckpointManager(storage_dir=settings.graph_checkpoint.storage_dir)
 _analytics = AnalyticsEngine()
-_state = get_state_backend(settings.state_backend, settings.redis_url)
 _output_trimmer = OutputTrimmer()
 _rate_limiter = get_rate_limiter(rate=60, per_seconds=60, burst=10)
 
@@ -204,23 +202,6 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
             )
         _graph_cache_touch(session_id)
         return _graph_cache[session_id]
-
-
-def _get_context_used(session_id: str) -> int:
-    return _state.get(f"ctx:{session_id}") or 0
-
-
-def _set_context_used(session_id: str, tokens: int) -> None:
-    # FIXED: state backend `set()` now returns bool (see state/backend.py).
-    # A dropped write here under-counts context usage, which can silently
-    # cause the auto-checkpoint trigger_at_percent threshold to be missed —
-    # the proxy thinks the session has used less context than it actually
-    # has. Recording the failure makes this visible via /api/stats instead
-    # of manifesting only as "why didn't my checkpoint fire."
-    ok = _state.set(f"ctx:{session_id}", tokens, ttl=86400)
-    if not ok:
-        logger.error(f"Failed to persist context usage for session {session_id}")
-        _analytics.record_silent_failure("state_backend_set")
 
 
 # ── Context window sizes ──────────────────────────────────────────────────────
@@ -390,10 +371,7 @@ async def _update_graph(
     Returns (updated_messages, checkpoint_status) — checkpoint_status surfaces
     auto-checkpoint success/failure to the caller instead of only logging it.
     """
-    context_used   = _get_context_used(session_id)
     context_window = _context_window(model)
-    input_tokens   = count_messages_tokens(messages, model)
-    context_pct    = (context_used + input_tokens) / context_window
 
     # Extraction: heuristic sync now, LLM async in background
     if settings.graph_checkpoint.use_llm_extraction:
@@ -484,6 +462,27 @@ async def _update_graph(
                     f"{messages[sys_idx]['content']}"
                 )
 
+    # Context occupancy — measured directly from what will actually be
+    # sent to the provider THIS turn (post file-intelligence/compression/
+    # windowing/context-injection), not from a stateful accumulator.
+    #
+    # FIXED (TM-04): this used to be `(context_used + input_tokens) /
+    # window`, where context_used was a running total read from a state
+    # backend and re-written every call. Two problems, independent of any
+    # concurrency race: each `messages` list already contains the FULL
+    # running conversation (the OpenAI-style contract), so the
+    # accumulator double-counted every earlier turn's content on top of
+    # itself each subsequent turn — diverging further from real occupancy
+    # the longer a session ran. And it never reflected windowing: once
+    # the tracked value crossed trigger_at_percent it never came back
+    # down, so every later turn re-triggered a full checkpoint write
+    # (mitigated separately by the auto-retention cap below, but the root
+    # cause was the accumulator itself). Measuring the actual outgoing
+    # payload here is a pure function of `messages` — no shared mutable
+    # state, so nothing to race on, and it naturally reflects windowing
+    # having just shrunk `messages` above.
+    context_pct = count_messages_tokens(messages, model) / context_window
+
     # Auto-checkpoint
     #
     # FIXED: previously a failed auto-checkpoint was caught, logged at
@@ -502,6 +501,14 @@ async def _update_graph(
     # so it flows into the `tokenmizer.checkpoint` response field below —
     # a client that cares can check `checkpoint_failed` instead of having
     # to grep server logs to discover their context wasn't saved.
+    #
+    # Retention/frequency: CheckpointManager caps how many auto-triggered
+    # checkpoints are kept per session (oldest pruned first, manual ones
+    # never touched — see checkpoints/manager.py::_prune_auto_checkpoints).
+    # That bounds storage growth for a session that stays near the
+    # threshold for many turns; it intentionally does not suppress this
+    # turn's checkpoint attempt, since each attempt reflects this turn's
+    # real (non-accumulated) occupancy rather than noise.
     checkpoint_status = {"attempted": False, "succeeded": False, "checkpoint_id": None}
     if (context_pct >= settings.graph_checkpoint.trigger_at_percent
             and settings.graph_checkpoint.enabled):
@@ -537,7 +544,6 @@ async def _update_graph(
             checkpoint_status["error"] = str(last_error)
             _analytics.record_silent_failure("checkpoint")
 
-    _set_context_used(session_id, context_used + input_tokens)
     return messages, checkpoint_status
 
 
