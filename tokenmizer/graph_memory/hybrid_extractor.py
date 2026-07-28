@@ -140,7 +140,7 @@ _DECISION_PASSIVE = re.compile(
 # sentence ("The old code didn't have caching. Use Redis for the
 # session cache.") must not suppress a later, legitimate decision.
 _NEGATION_WORDS = re.compile(
-    r"\b(?:not|never|avoid(?:ed|ing)?|without|no\s+longer|"
+    r"\b(?:not|never|no|avoid(?:ed|ing)?|without|"
     r"don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|couldn'?t|shouldn'?t|"
     r"isn'?t|aren'?t|wasn'?t|weren'?t)\b",
     re.IGNORECASE,
@@ -279,6 +279,44 @@ _GOAL_OPENERS = re.compile(
     re.IGNORECASE,
 )
 
+# ── Endpoint / schema patterns ────────────────────────────────────────────────
+#
+# FIXED: ENDPOINT and SCHEMA are full node types (graph.py creates nodes
+# for them, to_context_block() has dedicated sections, the LLM extraction
+# prompt asks for them) but the heuristic extractor had NO patterns to
+# ever populate ExtractedData.endpoints/.schemas. Since
+# use_llm_extraction defaults to False, this meant these node types could
+# never be created at all in the shipped default configuration — a gap
+# distinct from (and upstream of) the separately-fixed bug where
+# _deduplicate() dropped these fields even when something DID populate
+# them.
+
+# "POST /api/auth/login", "GET /api/users/:id", etc.
+_ENDPOINT = re.compile(
+    r'\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[\w\-/{}:.]+)',
+)
+
+# Header format: "Schema: users table — id (UUID PK), email (unique)..."
+_SCHEMA_HEADER = re.compile(
+    r'(?:^|\n)\s*schema\s*[:\-]\s*(.{5,120})',
+    re.IGNORECASE,
+)
+
+# Inline "X table" mention — "a new sessions table to track logins".
+# Deliberately excludes common non-identifier words immediately before
+# "table" (generic phrasing like "the table below") via _SCHEMA_STOP_WORDS
+# below, and is negation-checked the same way decisions are (TM-01) — a
+# statement like "No refresh_tokens table needed" must not produce a
+# schema node claiming that table exists.
+_SCHEMA_TABLE = re.compile(
+    r'\b([a-z][a-z0-9_]*)\s+table\b',
+    re.IGNORECASE,
+)
+_SCHEMA_STOP_WORDS = frozenset({
+    "the", "a", "an", "this", "that", "data", "lookup", "routing",
+    "truth", "below", "above", "following", "same", "new",
+})
+
 
 @dataclass
 class ExtractedData:
@@ -399,6 +437,8 @@ class HybridExtractor:
         seen_decisions: set,
         seen_tasks: set,
         seen_files: set,
+        seen_endpoints: set,
+        seen_schemas: set,
     ) -> None:
         """
         Apply all 5 extraction passes to a single message.
@@ -506,6 +546,41 @@ class HybridExtractor:
                 result.files.append(f)
                 seen_files.add(f)
 
+        # Endpoints — "POST /api/auth/login"
+        for m in _ENDPOINT.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
+            ep = m.group(0).strip()
+            norm = self._normalize(ep)
+            if norm not in seen_endpoints:
+                result.endpoints.append(ep)
+                seen_endpoints.add(norm)
+
+        # Schemas — header format ("Schema: users table — ...")
+        for m in _SCHEMA_HEADER.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
+            schema = m.group(1).strip()[:100]
+            norm = self._normalize(schema)
+            if norm not in seen_schemas and len(schema) > 3:
+                result.schemas.append(schema)
+                seen_schemas.add(norm)
+
+        # Schemas — inline "X table" mention, excluding generic non-
+        # identifier words immediately before "table" and negated
+        # mentions ("No refresh_tokens table needed").
+        for m in _SCHEMA_TABLE.finditer(content):
+            word = m.group(1).lower()
+            if word in _SCHEMA_STOP_WORDS:
+                continue
+            if _is_negated_context(content, m.start()):
+                continue
+            schema = m.group(0).strip()
+            norm = self._normalize(schema)
+            if norm not in seen_schemas:
+                result.schemas.append(schema)
+                seen_schemas.add(norm)
+
         # Errors (recent only)
         if is_recent:
             for m in _ERROR.finditer(content):
@@ -570,6 +645,8 @@ class HybridExtractor:
         seen_decisions: set[str] = set()
         seen_tasks:     set[str] = set()
         seen_files:     set[str] = set()
+        seen_endpoints: set[str] = set()
+        seen_schemas:   set[str] = set()
 
         for i, msg in enumerate(messages):
             from tokenmizer.graph_memory.graph import _content_to_text
@@ -582,6 +659,7 @@ class HybridExtractor:
             self._extract_one_message(
                 content, role, i, is_recent,
                 result, seen_decisions, seen_tasks, seen_files,
+                seen_endpoints, seen_schemas,
             )
 
         return result

@@ -26,6 +26,54 @@ app = typer.Typer(
 console = Console()
 
 
+# ── Shared HTTP helpers for the stats/checkpoint/resume commands ────────────
+#
+# FIXED: `checkpoint` and `resume` used to call httpx.post/httpx.get with NO
+# error handling at all — unlike `stats`, which already wrapped its call and
+# printed a clean "Cannot reach server" message. An unreachable server (the
+# single most common real-world CLI failure mode) crashed both commands with
+# a raw, unhandled traceback instead of a clean error and exit code. Both
+# commands now go through the same two helpers `stats` already used the
+# pattern for, so all three fail the same way.
+
+def _cli_get(url: str, headers: dict, timeout: float):
+    import httpx
+    try:
+        return httpx.get(url, headers=headers, timeout=timeout)
+    except httpx.HTTPError as e:
+        console.print(f"[red]Cannot reach server: {e}[/red]")
+        raise typer.Exit(1)
+
+
+def _cli_post(url: str, headers: dict, timeout: float):
+    import httpx
+    try:
+        return httpx.post(url, headers=headers, timeout=timeout)
+    except httpx.HTTPError as e:
+        console.print(f"[red]Cannot reach server: {e}[/red]")
+        raise typer.Exit(1)
+
+
+def _require_fields(data: dict, *fields: str) -> bool:
+    """
+    FIXED: `checkpoint` and `resume` used to access response fields with
+    direct dict keys (data['checkpoint_id'], data["resume_context"]). A
+    non-200-non-404 response (auth failure, validation error, upstream 500)
+    has a different body shape than a successful one, and direct key access
+    on that raised a raw KeyError instead of surfacing what actually went
+    wrong. Returns False (and prints a clean message) if any required field
+    is missing; caller should typer.Exit(1) in that case.
+    """
+    missing = [f for f in fields if f not in data]
+    if missing:
+        console.print(
+            f"[red]Unexpected server response — missing field(s): "
+            f"{', '.join(missing)}. Raw response: {data!r}[/red]"
+        )
+        return False
+    return True
+
+
 @app.command()
 def serve(
     host: Optional[str] = typer.Option(
@@ -94,7 +142,7 @@ def stats(
     api_key: Optional[str] = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
 ):
     """Print session/global analytics."""
-    import httpx
+    from urllib.parse import quote
 
     headers = {}
     if api_key:
@@ -102,13 +150,23 @@ def stats(
 
     url = f"{server}/api/stats"
     if session_id:
-        url += f"?session_id={session_id}"
+        # FIXED: session_id used to be interpolated raw into the query
+        # string — a session_id containing '&', space, or other reserved
+        # URL characters produced a malformed or misdirected request
+        # (same class of bug already fixed in the MCP server).
+        url += f"?session_id={quote(session_id, safe='')}"
 
-    try:
-        data = httpx.get(url, headers=headers, timeout=5).json()
-    except Exception as e:
-        console.print(f"[red]Cannot reach server: {e}[/red]")
+    r = _cli_get(url, headers, timeout=5)
+    if r.status_code != 200:
+        # FIXED: previously there was no status check at all — a non-200
+        # response (e.g. an auth failure) still had `.json()` called on
+        # it, which often succeeds and returns something like
+        # {"detail": "..."}; `.get("daily", {})` on that silently
+        # returned {} and the command printed all-zero stats with no
+        # indication anything had gone wrong.
+        console.print(f"[red]Error: {r.text}[/red]")
         raise typer.Exit(1)
+    data = r.json()
 
     d = data.get("daily", {})
     console.print(Panel.fit(
@@ -128,22 +186,24 @@ def checkpoint(
     level: str = typer.Option("standard", help="Resume level: critical | standard | full"),
 ):
     """Create a manual checkpoint and show resume context."""
-    import httpx
+    from urllib.parse import quote
 
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    r = httpx.post(
-        f"{server}/api/checkpoint?session_id={session_id}",
-        headers=headers,
-        timeout=30,
+    r = _cli_post(
+        f"{server}/api/checkpoint?session_id={quote(session_id, safe='')}",
+        headers, timeout=30,
     )
     if r.status_code != 200:
         console.print(f"[red]Error: {r.text}[/red]")
         raise typer.Exit(1)
 
     data = r.json()
+    if not _require_fields(data, "checkpoint_id", "resume_tokens"):
+        raise typer.Exit(1)
+
     console.print(Panel.fit(
         f"[green]✅ Checkpoint created[/green]\n"
         f"[dim]ID:            {data['checkpoint_id']}[/dim]\n"
@@ -163,22 +223,32 @@ def resume(
     api_key: Optional[str] = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
 ):
     """Get the resume context for a session checkpoint."""
-    import httpx
+    from urllib.parse import quote
 
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    r = httpx.get(
-        f"{server}/api/resume/{session_id}?level={level}",
-        headers=headers,
-        timeout=10,
+    r = _cli_get(
+        f"{server}/api/resume/{quote(session_id, safe='')}?level={level}",
+        headers, timeout=10,
     )
     if r.status_code == 404:
         console.print(f"[yellow]No checkpoint found for session: {session_id}[/yellow]")
         raise typer.Exit(1)
+    if r.status_code != 200:
+        # FIXED: previously ONLY 404 was special-cased — any OTHER
+        # failure status (401, 500, ...) fell through to `data =
+        # r.json()` and then `data["resume_context"]`, which raised a
+        # raw KeyError on that response's different body shape instead
+        # of surfacing the actual server error.
+        console.print(f"[red]Error: {r.text}[/red]")
+        raise typer.Exit(1)
 
     data = r.json()
+    if not _require_fields(data, "resume_context", "token_count"):
+        raise typer.Exit(1)
+
     console.print(Panel(
         data["resume_context"],
         title=f"[green]Resume — {session_id[:16]}... ({data['token_count']} tokens)[/green]",

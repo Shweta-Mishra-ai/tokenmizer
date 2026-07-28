@@ -129,3 +129,16 @@ class TestExistingLegitimateDecisionsStillExtracted:
         messages = [{"role": "user", "content": "Use PostgreSQL for the primary datastore."}]
         labels = _labels(messages)
         assert any("postgresql" in label.lower() for label in labels), labels
+
+
+class TestBareNoIsRecognizedAsNegation:
+    """Regression test found while adding schema extraction: the negation
+    word list only recognized 'no longer' as a bigram, not standalone
+    'no' — so "No refresh_tokens table needed" (a very common
+    construction, at least as common as 'not X') wasn't treated as
+    negated at all."""
+
+    def test_no_x_phrasing_is_negated(self):
+        messages = [{"role": "user", "content": "No Redis caching needed for this endpoint."}]
+        labels = _labels(messages)
+        assert not any("redis" in label.lower() for label in labels), labels

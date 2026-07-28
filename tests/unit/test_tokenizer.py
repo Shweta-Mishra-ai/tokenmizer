@@ -46,3 +46,37 @@ class TestTokenizer:
         assert tokens > 0
         # The key is we're not using len(text)//4 at all
         assert tokens >= 1
+
+
+class TestAnthropicSdkFailureIsLogged:
+    """Regression test: _count_with_anthropic_sdk() caught a broad
+    Exception with a bare `pass` and no log line at all, silently
+    degrading every Claude-model token count to the tiktoken
+    approximation with zero visibility into why. The documented case
+    (SDK installed but has no local tokenizer) is expected and fine to
+    stay quiet about; an UNEXPECTED failure (SDK present, has
+    count_tokens, but it raises) must at least be logged so a maintainer
+    investigating token-count drift has a trail."""
+
+    def test_unexpected_sdk_failure_is_logged(self, caplog, monkeypatch):
+        import logging
+        import sys
+        import types
+
+        from tokenmizer.core import tokenizer as tok_module
+
+        fake_anthropic = types.ModuleType("anthropic")
+        def _boom(text):
+            raise RuntimeError("simulated SDK internal error")
+        fake_anthropic.count_tokens = _boom
+        monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+
+        with caplog.at_level(logging.DEBUG, logger="tokenmizer.core.tokenizer"):
+            result = tok_module._count_with_anthropic_sdk("hello world")
+
+        assert result is None
+        assert any("count_tokens" in r.message.lower() or "sdk" in r.message.lower()
+                  for r in caplog.records), (
+            "an unexpected Anthropic SDK failure was silently swallowed with "
+            "no log line at all"
+        )
