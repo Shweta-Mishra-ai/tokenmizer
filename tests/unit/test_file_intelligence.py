@@ -374,15 +374,26 @@ class TestSilentFailuresAreLogged:
         )
 
     def test_excel_parse_failure_is_logged(self, caplog, monkeypatch):
+        """
+        openpyxl is an OPTIONAL dependency (pip install tokenmizer[files])
+        — not guaranteed to be installed in every environment this test
+        suite runs in (it wasn't in CI, though it happened to be present
+        locally, which let this exact bug slip through once already).
+        Inject a fake module via sys.modules instead of requiring the
+        real package, so this test doesn't silently depend on whatever
+        happens to be installed locally.
+        """
         import logging
+        import sys
+        import types
 
         from tokenmizer.filters.file_intelligence import ExcelExtractor
 
+        fake_openpyxl = types.ModuleType("openpyxl")
         def _boom(*a, **k):
             raise ValueError("corrupted workbook")
-
-        import openpyxl
-        monkeypatch.setattr(openpyxl, "load_workbook", _boom)
+        fake_openpyxl.load_workbook = _boom
+        monkeypatch.setitem(sys.modules, "openpyxl", fake_openpyxl)
 
         with caplog.at_level(logging.WARNING, logger="tokenmizer.filters.file_intelligence"):
             result = ExcelExtractor().extract(b"not a real xlsx", "broken.xlsx")
