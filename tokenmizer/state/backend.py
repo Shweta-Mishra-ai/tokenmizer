@@ -6,6 +6,20 @@ RedisBackend     — production, survives restarts, works across workers
 
 Set TOKENMIZER_STATE_BACKEND=redis and TOKENMIZER_REDIS_URL=redis://...
 to enable Redis in production.
+
+STATUS (as of the TM-04 audit fix): this module currently has no caller in
+api/app.py. Its one previous caller — a `context_used` accumulator tracking
+how much context a session had used across turns — was removed outright:
+the accumulator design was wrong independent of persistence (it double-
+counted every earlier turn's content each time, since each `messages` list
+already contains the full running conversation, and it never reflected
+windowing/compaction — see api/app.py::_update_graph). Deleting the wrong
+counter was the fix; there is no replacement caller yet. This module is
+kept because a Redis-backed shared store is the right building block for
+future cross-worker coordination (e.g. a distributed session lock once
+issue #27's per-row persistence migration lands), not because anything
+here is broken. Do not treat its presence as evidence that cross-worker
+state sharing is currently wired up anywhere — it isn't.
 """
 from __future__ import annotations
 
@@ -25,15 +39,13 @@ class StateBackend(ABC):
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         """Returns True if the write succeeded, False otherwise.
 
-        FIXED: previously returned None unconditionally (success or
-        failure looked identical to every caller). The one real caller —
-        `_set_context_used()` in api/app.py, which tracks how many tokens
-        of context a session has used — had no way to know its write was
-        dropped. A dropped write under-counts context usage, which means
-        the auto-checkpoint trigger_at_percent threshold could be silently
-        missed: the proxy would think a session is using less context than
-        it actually is, and the safety-net checkpoint that's supposed to
-        fire before the context window overflows simply... wouldn't.
+        Kept explicit (not None) so a caller can distinguish "write
+        happened" from "write silently dropped" — a dropped write in a
+        shared cross-worker store should never look identical to success.
+        (This backend's one former caller, a context-usage accumulator in
+        api/app.py, was removed for unrelated reasons — see this module's
+        STATUS note above — but the bool-return contract stands on its own
+        merit for whatever the next caller turns out to be.)
         """
         ...
 

@@ -193,3 +193,37 @@ def test_tool_schemas_are_valid():
             assert req_key in schema["properties"], (
                 f"{tool['name']}: required key {req_key} not in properties"
             )
+
+
+class TestSessionIdIsUrlEncoded:
+    """Regression test for TM-37: session_id was interpolated raw into
+    query strings/paths in several tool handlers (only the `query` param
+    in why_decision was properly quote()'d). A session_id containing
+    reserved URL characters (space, '&', '#', '/') would produce a
+    malformed request or silently truncate/misdirect it."""
+
+    def _capture_get_url(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(mcp, "_get", lambda path: (captured.setdefault("path", path), {"ok": True})[1])
+        return captured
+
+    def _capture_post_url(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(mcp, "_post", lambda path, body: (captured.setdefault("path", path), {"ok": True})[1])
+        return captured
+
+    def test_checkpoint_session_encodes_session_id(self, monkeypatch):
+        captured = self._capture_post_url(monkeypatch)
+        mcp.handle_checkpoint_session({"session_id": "my project & auth"})
+        assert "my project & auth" not in captured["path"]
+        assert "%26" in captured["path"] or "+" in captured["path"] or "%20" in captured["path"]
+
+    def test_resume_session_encodes_session_id(self, monkeypatch):
+        captured = self._capture_get_url(monkeypatch)
+        mcp.handle_resume_session({"session_id": "session/with/slashes"})
+        assert "session/with/slashes" not in captured["path"]
+
+    def test_get_graph_stats_encodes_session_id(self, monkeypatch):
+        captured = self._capture_get_url(monkeypatch)
+        mcp.handle_get_graph_stats({"session_id": "session#fragment"})
+        assert "session#fragment" not in captured["path"]

@@ -147,30 +147,49 @@ class TestDecisionTracker:
 
 class TestCacheIsolation:
 
-    def test_generic_query_shared_cross_session(self):
+    def test_generic_query_not_shared_cross_session_by_default(self):
+        """
+        SUPERSEDES an earlier version of this test (see git history) that
+        asserted generic/non-sensitive queries were shared across sessions
+        by DEFAULT. That was itself the fix for a real bug at the time
+        (non-sensitive prompts were unreachable from any session at all —
+        the scope key never matched what get() looked up), but the
+        "always shared unless flagged sensitive" DEFAULT it locked in was
+        later found to be its own security issue (TM-03 in the audit): a
+        five-regex heuristic cannot enumerate everything that might be
+        confidential to a given session (e.g. "what's our enterprise churn
+        rate this quarter" matches no sensitivity pattern but is plainly
+        not meant for another tenant). The default is now session-scoped
+        for everything; cross-session sharing is opt-in — see
+        test_shared_opt_in_still_allows_generic_cross_session below for
+        that path, and test_cache_scoping.py for the full fix.
+        """
         from tokenmizer.semantic_cache.cache import SemanticCache
 
         c = SemanticCache(max_size=100)
 
-        # Session A stores a generic (non-sensitive) response
         generic = "What is the difference between TCP and UDP?"
         c.set(generic, "TCP is connection-oriented...", session_id="session-A")
 
-        # Session B should be able to retrieve it (generic = safe to share)
         result = c.get(generic, session_id="session-B")
-        # FIXED: this used to assert `result is not None or True`, which is
-        # always True regardless of the cache's actual behavior — the test
-        # ran and "passed" while masking a real bug in SemanticCache.set()
-        # where non-sensitive prompts were stored under session_id scope
-        # instead of "__shared__", making them permanently unreachable from
-        # any other session. Now that set() is fixed, this must be a real hit.
-        assert result is not None, (
-            "Non-sensitive query stored by session-A must be retrievable by "
-            "session-B — check SemanticCache.set()'s scope logic."
+        assert result is None, (
+            "generic queries must NOT be shared across sessions under the "
+            "default share_scope='session' — sharing is opt-in (TM-03)"
         )
-        assert result.response == "TCP is connection-oriented...", (
-            f"Got a hit but wrong response: {result.response!r}"
-        )
+
+    def test_shared_opt_in_still_allows_generic_cross_session(self):
+        """The old cross-session-sharing behavior is still available, but
+        only for callers who explicitly opt in via share_scope='shared'."""
+        from tokenmizer.semantic_cache.cache import SemanticCache
+
+        c = SemanticCache(max_size=100, share_scope="shared")
+
+        generic = "What is the difference between TCP and UDP?"
+        c.set(generic, "TCP is connection-oriented...", session_id="session-A")
+
+        result = c.get(generic, session_id="session-B")
+        assert result is not None
+        assert result.response == "TCP is connection-oriented..."
 
     def test_sensitive_query_isolated_to_session(self):
         from tokenmizer.semantic_cache.cache import SemanticCache

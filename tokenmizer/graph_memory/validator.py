@@ -85,12 +85,42 @@ class GraphValidator:
         label: str,
         node_type: str,
         summary: str = "",
-        source_role: str = "assistant",
+        source_role: Optional[str] = "assistant",
         extractor_confidence: float | None = None,
     ) -> ValidationResult:
         """
         Validate a candidate node.
         Returns ValidationResult with accepted=True/False and confidence score.
+
+        source_role: "assistant" (default), "user", or None. Only "assistant"
+        gets the small trust bonus below.
+
+        TM-29 background: add_node() used to never pass this through at all,
+        so every node got the assistant-trust bonus unconditionally,
+        regardless of whether a user or the assistant actually stated it —
+        including candidates extracted from a user's own message. The
+        default stays "assistant" here (rather than None/no-bonus) because
+        every node type's confidence scoring, and the 0.65 min_confidence
+        threshold itself, were empirically tuned assuming this bonus applies
+        — flipping the default to "no bonus by default" measurably regressed
+        acceptance for dependency/task/decision nodes with no source_role
+        wired at all yet, confirmed against this repo's own unit tests and
+        the memory-accuracy fixture (tests/memory_accuracy/test_retention.py)
+        before this was caught and reverted. See [[feedback_heuristic_tuning_needs_eval]]
+        for the standing rule this follows: don't flip a shared default whose
+        blast radius wasn't independently re-validated.
+
+        What's actually fixed: HybridExtractor._extract_one_message knows
+        the true role of the message each heuristic-extracted DECISION came
+        from (see hybrid_extractor.py and GraphMemory._apply_extracted) and
+        now threads it through explicitly — so a decision a USER stated no
+        longer silently gets the assistant bonus it shouldn't. Every other
+        node type, and LLM-synthesized decisions (no single-turn
+        attribution), still fall through to the "assistant" default
+        unchanged — extending real role-tracking to them is a separate,
+        larger effort (would require a broader ExtractedData schema change)
+        left for future work, not silently attempted here at the cost of a
+        confirmed recall regression.
 
         extractor_confidence: the corroboration-based confidence computed by
         HybridExtractor.merge() (0.95 = both LLM and heuristic found it,
@@ -134,6 +164,25 @@ class GraphValidator:
         confidence = 0.50  # baseline
 
         # Length signals: longer = more specific = higher confidence
+        #
+        # NOTE (TM-29): this used to have a further `elif char_len > 40:
+        # confidence += 0.05` branch documented as "diminishing returns
+        # on very long labels" — but it was checked AFTER `elif char_len
+        # > 20`, and every label over 40 chars is also over 20, so that
+        # branch could never be reached; every long label has always
+        # gotten the flat +0.10 in practice. Making the diminishing-
+        # returns behavior actually fire (checking the longer threshold
+        # first) measurably REDUCED task-extraction recall against this
+        # repo's own memory-accuracy fixture — several legitimately
+        # long, specific task labels lost enough confidence to fall
+        # below the acceptance threshold. Since that recall regression
+        # is concrete and immediate while "diminishing returns" was never
+        # validated behavior to begin with (it never ran), the dead
+        # branch is removed rather than activated: every label over 20
+        # chars gets a flat +0.10, which is what has actually been
+        # shipping. Revisit with a real precision/recall evaluation
+        # harness (see audit roadmap) before reintroducing length-based
+        # diminishing returns.
         char_len = len(label)
         if char_len < 8:
             confidence -= 0.20
@@ -141,8 +190,6 @@ class GraphValidator:
             confidence -= 0.05
         elif char_len > 20:
             confidence += 0.10
-        elif char_len > 40:
-            confidence += 0.05  # diminishing returns on very long labels
 
         # Word count: 2–8 words is the sweet spot
         word_count = len(words)
@@ -174,6 +221,7 @@ class GraphValidator:
             confidence += 0.08
 
         # Source role: assistant claims are generally more reliable than user
+        # ones — but only applied when actually known (see TM-29 note above).
         if source_role == "assistant":
             confidence += 0.05
 
@@ -301,12 +349,18 @@ _validator: Optional[GraphValidator] = None
 
 
 def get_validator(min_confidence: float | None = None) -> GraphValidator:
-    global _validator
+    """
+    FIXED (TM-29): an explicit min_confidence used to overwrite the
+    module-level singleton permanently — one caller passing an override
+    changed behavior for every OTHER caller that just calls
+    get_validator() with no arguments, for the rest of the process
+    lifetime. An explicit override is scoped to the caller now: it
+    returns a fresh instance WITHOUT touching the shared singleton.
+    """
     if min_confidence is not None:
-        # If explicitly passed, override or create a new validator instance
-        _validator = GraphValidator(min_confidence=min_confidence)
-        return _validator
+        return GraphValidator(min_confidence=min_confidence)
 
+    global _validator
     if _validator is None:
         try:
             from tokenmizer.config.settings import get_settings

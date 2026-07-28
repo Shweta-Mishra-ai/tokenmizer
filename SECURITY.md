@@ -60,22 +60,29 @@ Redacted values are replaced with `[REDACTED]` before storage or transmission.
 
 ## Cache Privacy
 
-The semantic cache applies three-tier scoping:
+**Default (`cache.share_scope: session`): nothing is ever shared across
+sessions.** Every cached prompt — sensitive-looking or not — is scoped to
+its `session_id` (or a private bucket if no session_id is given). This is
+the safe default for hosted or multi-tenant use: a five-regex heuristic
+cannot enumerate everything that might be confidential to a given
+session, so the default does not rely on it.
 
-**Blocked (never cached):**
-- API keys, passwords, tokens, connection strings
-- Content matching known secret patterns
+**Opt-in (`cache.share_scope: shared`): non-sensitive prompts are shared
+globally** across sessions for a higher cache hit rate. Even with this
+enabled, prompts matching the sensitivity heuristic below are still
+always session-scoped — the opt-in only affects prompts that DON'T match
+it:
 
-**Session-scoped (isolated per session_id):**
-- Project-specific content
-- Code from current session
-- Long prompts with embedded data
-- Any content matching privacy heuristics
+- API keys, passwords, tokens, connection strings, and anything matching
+  known secret patterns are always excluded from sharing
+- Project-specific content, code, long prompts with embedded data, and
+  anything matching the privacy heuristics in
+  `semantic_cache/cache.py::_is_session_sensitive` stay session-scoped
 
-**Cross-session shared:**
-- Generic how-to queries
-- Explanations of public concepts
-- Short, non-sensitive prompts
+Only enable `shared` if you understand and accept that heuristic's
+limits — it's a best-effort filter, not a guarantee, and a
+misclassified prompt under `shared` mode can leak across sessions in a
+way it cannot under the default.
 
 ---
 
@@ -94,6 +101,24 @@ X-API-Key: <key>
 Key comparison uses `hmac.compare_digest` — constant-time, immune to timing attacks.
 
 In development mode (no key set), the proxy accepts all requests. **Do not expose the proxy to the internet without setting an API key.**
+
+### Production mode: `TOKENMIZER_ENV=production`
+
+By default (`TOKENMIZER_ENV` unset, or anything other than `production`),
+a config load failure or a missing `api_key` logs an error and falls back
+to permissive dev-mode defaults — convenient for local development, but a
+config typo in a real deployment could otherwise boot unauthenticated
+with only a log line as evidence.
+
+Set `TOKENMIZER_ENV=production` to make TokenMizer **fail closed**
+instead: it refuses to start at all (raises, non-zero exit) if:
+- `tokenmizer.yaml` fails to parse, or contains an unrecognized key (a
+  typo like `api_keys:` instead of `api_key:` is now a hard error, not a
+  silently-dropped value — see `config/settings.py`'s `extra="forbid"`), or
+- the resulting configuration has no `api_key` set at all, even if the
+  YAML file itself loaded and validated perfectly fine.
+
+Recommended for any deployment reachable outside your own machine.
 
 ---
 

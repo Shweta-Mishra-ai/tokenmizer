@@ -37,6 +37,7 @@ import logging
 import os
 import sys
 from typing import Any
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,15 @@ TOOLS = [
                     "type": "string",
                     "description": "Unique identifier for this session (e.g. 'my-project-auth')",
                 },
-                "notes": {
-                    "type": "string",
-                    "description": "Optional notes about what was accomplished",
-                },
+                # FIXED (TM-37): a "notes" field used to be declared here
+                # ("Optional notes about what was accomplished") but was
+                # never read by handle_checkpoint_session, and
+                # POST /api/checkpoint has no parameter to carry it to
+                # even if it were read — a model calling this tool would
+                # reasonably fill in notes and have them silently
+                # discarded. Removed rather than half-wired; add back
+                # only once /api/checkpoint actually accepts and stores
+                # a notes/reason field.
             },
             "required": ["session_id"],
         },
@@ -232,7 +238,12 @@ def _require_str(args: dict, key: str) -> str:
 
 def handle_checkpoint_session(args: dict) -> tuple[str, bool]:
     session_id = _require_str(args, "session_id")
-    result = _post(f"/api/checkpoint?session_id={session_id}", {})
+    # FIXED (TM-37): session_id used to be interpolated raw into the
+    # query string — a session_id containing '&', space, or other
+    # reserved URL characters would produce a malformed or misdirected
+    # request. quote() is used consistently across every handler below,
+    # matching the one handler (why_decision) that already did this.
+    result = _post(f"/api/checkpoint?session_id={quote(session_id, safe='')}", {})
     if "error" in result:
         return f"❌ Checkpoint failed: {result['error']}", True
     return (
@@ -251,7 +262,7 @@ def handle_resume_session(args: dict) -> tuple[str, bool]:
         raise ToolInputError(
             f"Invalid 'level': {level!r} (expected critical|standard|full)"
         )
-    result = _get(f"/api/resume/{session_id}?level={level}")
+    result = _get(f"/api/resume/{quote(session_id, safe='')}?level={level}")
     if "error" in result:
         return f"❌ Resume failed: {result['error']}", True
     ctx = result.get("resume_context", "")
@@ -276,7 +287,7 @@ def handle_resume_session(args: dict) -> tuple[str, bool]:
 
 def handle_get_graph_stats(args: dict) -> tuple[str, bool]:
     session_id = _require_str(args, "session_id")
-    result = _get(f"/api/graph/{session_id}")
+    result = _get(f"/api/graph/{quote(session_id, safe='')}")
     if "error" in result:
         return f"❌ Graph stats failed: {result['error']}", True
     by_type = result.get("by_type", {})
@@ -335,8 +346,7 @@ def handle_analyze_file(args: dict) -> tuple[str, bool]:
 def handle_why_decision(args: dict) -> tuple[str, bool]:
     session_id = _require_str(args, "session_id")
     query = _require_str(args, "query")
-    from urllib.parse import quote
-    result = _get(f"/api/graph/{session_id}/why?q={quote(query)}")
+    result = _get(f"/api/graph/{quote(session_id, safe='')}/why?q={quote(query)}")
     if "error" in result:
         return f"❌ Reasoning query failed: {result['error']}", True
 

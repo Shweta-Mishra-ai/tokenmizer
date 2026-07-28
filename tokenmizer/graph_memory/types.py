@@ -39,6 +39,17 @@ class NodeStatus(str, Enum):
     INVALIDATED = "invalidated"   # explicitly wrong/cancelled (RED) — kept as warning
     ARCHIVED = "archived"         # old but valid, not relevant now (GRAY)
     MODIFIED = "modified"         # alias for SUPERSEDED — backward compat
+    # Two decisions share a topic bucket (e.g. both "database") but don't
+    # share enough descriptive context to confidently call one a genuine
+    # replacement of the other (e.g. "Use PostgreSQL for primary user
+    # data" vs "Use SQLite for the local offline cache" — plausibly two
+    # independent, complementary choices, not a reversal). Rather than
+    # silently guessing and marking one SUPERSEDED — destroying it from
+    # resume context on possibly-wrong evidence — both sides are flagged
+    # CONTESTED and surfaced together so a human or the LLM can resolve
+    # the ambiguity explicitly (see TM-09). Remains visible in query() and
+    # to_context_block(), unlike SUPERSEDED/ARCHIVED/INVALIDATED.
+    CONTESTED = "contested"
 
 
 class EdgeType(str, Enum):
@@ -49,6 +60,7 @@ class EdgeType(str, Enum):
     BLOCKS = "blocks"
     PART_OF = "part_of"
     SUPERSEDES = "supersedes"
+    CONFLICTS_WITH = "conflicts_with"  # symmetric — two CONTESTED decisions, see NodeStatus.CONTESTED
 
 
 @dataclass
@@ -64,6 +76,19 @@ class MemoryNode:
     updated_at: float = field(default_factory=time.time)
     valid_from: float = field(default_factory=time.time)   # when this fact became true
     valid_until: float = field(default=0.0)                # 0.0 = currently valid
+    # FIXED (TM-07): apply_importance_decay() used to compute decay
+    # magnitude from age_days() (absolute age since updated_at) and
+    # multiply it into the CURRENT importance every time it ran — but it
+    # runs once per chat turn, and nothing recorded when decay was last
+    # applied. Since age barely changes between turns seconds apart, the
+    # same decay factor got reapplied to an already-decayed value on
+    # every turn, collapsing importance to the floor within a handful of
+    # turns regardless of real elapsed time. last_decayed_at tracks the
+    # last time THIS node's importance was actually decayed, so decay
+    # magnitude is computed from elapsed time since then, not from
+    # absolute node age — repeated calls with no real time passing decay
+    # by approximately nothing, as they should.
+    last_decayed_at: float = field(default_factory=time.time)
     _evicted: bool = field(default=False, repr=False)
 
     def is_valid_at(self, t: float) -> bool:

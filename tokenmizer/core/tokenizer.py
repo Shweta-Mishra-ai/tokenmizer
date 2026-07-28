@@ -11,6 +11,9 @@ Accurate token counting.
 from __future__ import annotations
 
 import functools
+import logging
+
+logger = logging.getLogger(__name__)
 
 _FALLBACK_RATIO = 4  # chars per token — only used if tiktoken unavailable
 
@@ -47,8 +50,20 @@ def _count_with_anthropic_sdk(text: str) -> int | None:
             return int(_anthropic.count_tokens(text))
         if hasattr(_anthropic, "tokenizer") and hasattr(_anthropic.tokenizer, "count_tokens"):
             return int(_anthropic.tokenizer.count_tokens(text))
-    except Exception:
-        pass
+    except Exception as e:
+        # FIXED: previously a bare `except Exception: pass` — the
+        # DOCUMENTED case (SDK installed but no local count_tokens
+        # exposed, so we fall back to the tiktoken approximation) is
+        # fine to stay quiet about, but an UNEXPECTED failure (the SDK
+        # has count_tokens and it raises for some other reason) was
+        # silently degrading every Claude-model token count with zero
+        # visibility. Logged at debug — this runs on every request, so
+        # anything louder would be noisy — but no longer invisible to a
+        # maintainer investigating token-count drift.
+        logger.debug(
+            f"Anthropic SDK count_tokens call failed, falling back to "
+            f"tiktoken approximation: {type(e).__name__}: {e}"
+        )
     return None
 
 

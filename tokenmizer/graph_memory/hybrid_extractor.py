@@ -125,6 +125,38 @@ _DECISION_PASSIVE = re.compile(
     re.IGNORECASE,
 )
 
+# FIXED (TM-01) — the single most severe finding in the audit: none of
+# the decision passes above checked for negation. "We are NOT using
+# Redis" matched Pass 1's verb list ("using") and Pass 3's tech-name list
+# ("redis") independently — both blind to the preceding "NOT" — and both
+# produced "Use Redis" as an extracted decision: the literal opposite of
+# what was said. This became critical in combination with
+# SmartMessageWindow, which replaces older conversation turns with the
+# graph's context block, deleting the original sentence and leaving only
+# the fabricated "Decided: Use Redis" in what the model actually sees.
+#
+# Scoped to the current CLAUSE (back to the nearest sentence boundary),
+# not the whole message — an unrelated negation in an earlier, different
+# sentence ("The old code didn't have caching. Use Redis for the
+# session cache.") must not suppress a later, legitimate decision.
+_NEGATION_WORDS = re.compile(
+    r"\b(?:not|never|no|avoid(?:ed|ing)?|without|"
+    r"don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|couldn'?t|shouldn'?t|"
+    r"isn'?t|aren'?t|wasn'?t|weren'?t)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_negated_context(content: str, match_start: int) -> bool:
+    """True if `match_start` in `content` falls inside a negated clause."""
+    clause_start = 0
+    for i in range(match_start - 1, -1, -1):
+        if content[i] in ".!?\n":
+            clause_start = i + 1
+            break
+    return bool(_NEGATION_WORDS.search(content[clause_start:match_start]))
+
+
 # Pass 5: config decisions — "expires in 15 minutes", "cost factor 12"
 _DECISION_CONFIG = re.compile(
     r'\b(?:expire[sd]? in|cost factor|timeout of|limit of|max(?:imum)? of|'
@@ -247,6 +279,44 @@ _GOAL_OPENERS = re.compile(
     re.IGNORECASE,
 )
 
+# ── Endpoint / schema patterns ────────────────────────────────────────────────
+#
+# FIXED: ENDPOINT and SCHEMA are full node types (graph.py creates nodes
+# for them, to_context_block() has dedicated sections, the LLM extraction
+# prompt asks for them) but the heuristic extractor had NO patterns to
+# ever populate ExtractedData.endpoints/.schemas. Since
+# use_llm_extraction defaults to False, this meant these node types could
+# never be created at all in the shipped default configuration — a gap
+# distinct from (and upstream of) the separately-fixed bug where
+# _deduplicate() dropped these fields even when something DID populate
+# them.
+
+# "POST /api/auth/login", "GET /api/users/:id", etc.
+_ENDPOINT = re.compile(
+    r'\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[\w\-/{}:.]+)',
+)
+
+# Header format: "Schema: users table — id (UUID PK), email (unique)..."
+_SCHEMA_HEADER = re.compile(
+    r'(?:^|\n)\s*schema\s*[:\-]\s*(.{5,120})',
+    re.IGNORECASE,
+)
+
+# Inline "X table" mention — "a new sessions table to track logins".
+# Deliberately excludes common non-identifier words immediately before
+# "table" (generic phrasing like "the table below") via _SCHEMA_STOP_WORDS
+# below, and is negation-checked the same way decisions are (TM-01) — a
+# statement like "No refresh_tokens table needed" must not produce a
+# schema node claiming that table exists.
+_SCHEMA_TABLE = re.compile(
+    r'\b([a-z][a-z0-9_]*)\s+table\b',
+    re.IGNORECASE,
+)
+_SCHEMA_STOP_WORDS = frozenset({
+    "the", "a", "an", "this", "that", "data", "lookup", "routing",
+    "truth", "below", "above", "following", "same", "new",
+})
+
 
 @dataclass
 class ExtractedData:
@@ -367,6 +437,8 @@ class HybridExtractor:
         seen_decisions: set,
         seen_tasks: set,
         seen_files: set,
+        seen_endpoints: set,
+        seen_schemas: set,
     ) -> None:
         """
         Apply all 5 extraction passes to a single message.
@@ -390,7 +462,11 @@ class HybridExtractor:
 
         # Passive completion: full history
         for m in _TASK_DONE_PASSIVE.finditer(content):
-            task = re.sub(r'^(?:the|a|an|this|that)\\s+', '', m.group(1).strip()[:80], flags=re.IGNORECASE)
+            # FIXED (TM-21): was r'...\\s+' — a raw string, so \\s is a
+            # literal backslash-s, not the whitespace escape \s. Since no
+            # real text contains a literal backslash there, this prefix
+            # strip could never match anything and has never once fired.
+            task = re.sub(r'^(?:the|a|an|this|that)\s+', '', m.group(1).strip()[:80], flags=re.IGNORECASE)
             if len(task) > 5:
                 norm = self._normalize(task)
                 if norm not in seen_tasks:
@@ -406,34 +482,42 @@ class HybridExtractor:
 
         # Decision Pass 1: explicit verb
         for m in _DECISION.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
             label = m.group(1).strip()[:80]
             norm  = self._normalize(label)
             if norm not in seen_decisions and len(norm) > 4:
-                result.decisions.append({"label": label, "reason": ""})
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
         # Decision Pass 2: header format
         for m in _DECISION_HEADER.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
             label = m.group(1).strip()[:80]
             norm  = self._normalize(label)
             if norm not in seen_decisions:
-                result.decisions.append({"label": label, "reason": ""})
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
         # Decision Pass 3: tech names
         for m in _DECISION_FOR.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
             label = "Use " + m.group(1).strip()[:60]
             norm  = self._normalize(label)
             if norm not in seen_decisions:
-                result.decisions.append({"label": label, "reason": ""})
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
         # Decision Pass 4: passive (bcrypt with cost factor 12)
         for m in _DECISION_PASSIVE.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
             label = "Use " + m.group(1).strip()[:60]
             norm  = self._normalize(label)
             if norm not in seen_decisions:
-                result.decisions.append({"label": label, "reason": ""})
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
         # Superseded + both sides as decisions
@@ -447,7 +531,8 @@ class HybridExtractor:
                 norm = self._normalize(label)
                 if norm not in seen_decisions and len(norm) > 6:
                     reason = f"Replaced by: {new_label}" if label.endswith(old_label) else surrounding[:100]
-                    result.decisions.append({"label": label, "reason": reason, "evidence": surrounding[:120]})
+                    result.decisions.append({"label": label, "reason": reason,
+                                             "evidence": surrounding[:120], "source_role": role})
                     seen_decisions.add(norm)
 
         # Files
@@ -461,6 +546,41 @@ class HybridExtractor:
             if f not in seen_files:
                 result.files.append(f)
                 seen_files.add(f)
+
+        # Endpoints — "POST /api/auth/login"
+        for m in _ENDPOINT.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
+            ep = m.group(0).strip()
+            norm = self._normalize(ep)
+            if norm not in seen_endpoints:
+                result.endpoints.append(ep)
+                seen_endpoints.add(norm)
+
+        # Schemas — header format ("Schema: users table — ...")
+        for m in _SCHEMA_HEADER.finditer(content):
+            if _is_negated_context(content, m.start()):
+                continue
+            schema = m.group(1).strip()[:100]
+            norm = self._normalize(schema)
+            if norm not in seen_schemas and len(schema) > 3:
+                result.schemas.append(schema)
+                seen_schemas.add(norm)
+
+        # Schemas — inline "X table" mention, excluding generic non-
+        # identifier words immediately before "table" and negated
+        # mentions ("No refresh_tokens table needed").
+        for m in _SCHEMA_TABLE.finditer(content):
+            word = m.group(1).lower()
+            if word in _SCHEMA_STOP_WORDS:
+                continue
+            if _is_negated_context(content, m.start()):
+                continue
+            schema = m.group(0).strip()
+            norm = self._normalize(schema)
+            if norm not in seen_schemas:
+                result.schemas.append(schema)
+                seen_schemas.add(norm)
 
         # Errors (recent only)
         if is_recent:
@@ -526,6 +646,8 @@ class HybridExtractor:
         seen_decisions: set[str] = set()
         seen_tasks:     set[str] = set()
         seen_files:     set[str] = set()
+        seen_endpoints: set[str] = set()
+        seen_schemas:   set[str] = set()
 
         for i, msg in enumerate(messages):
             from tokenmizer.graph_memory.graph import _content_to_text
@@ -538,6 +660,7 @@ class HybridExtractor:
             self._extract_one_message(
                 content, role, i, is_recent,
                 result, seen_decisions, seen_tasks, seen_files,
+                seen_endpoints, seen_schemas,
             )
 
         return result
@@ -590,9 +713,12 @@ class HybridExtractor:
         # established correct pattern. Fixed to match: normalize only for
         # set membership / corroboration detection, always emit the
         # ORIGINAL (first-seen, original-case) string into the output.
-        for attr in ["goals", "tasks_done", "tasks_wip", "tasks_todo",
-                     "files", "errors", "dependencies", "environments",
-                     "endpoints", "schemas"]:
+        # FIXED (TM-14): use the dataclass-derived field list, same as
+        # _deduplicate() below, instead of a second hand-maintained copy
+        # of it — two independent lists that both need to stay in sync
+        # with ExtractedData's fields is exactly how "endpoints"/"schemas"
+        # drifted out of _deduplicate() in the first place.
+        for attr in self._simple_list_field_names():
             llm_raw = list(getattr(llm, attr))
             heu_raw = list(getattr(heuristic, attr))
 
@@ -609,11 +735,25 @@ class HybridExtractor:
             corroborated = bool(llm_keys & heu_keys)
             llm_only     = bool(llm_keys - heu_keys)
 
-            combined = (
-                [llm_by_norm[k] for k in (llm_keys & heu_keys)] +   # prefer LLM casing when corroborated
-                [llm_by_norm[k] for k in (llm_keys - heu_keys)] +
-                [heu_by_norm[k] for k in (heu_keys - llm_keys)]
-            )
+            # FIXED (TM-18): this used to build `combined` from set
+            # difference/intersection operations (llm_keys & heu_keys,
+            # etc.) — Python's string-hash randomization (on by default)
+            # means set iteration order isn't stable across process runs,
+            # so when more than 15 items were found, WHICH 15 survived
+            # combined[:15] changed between runs of the IDENTICAL input.
+            # The same conversation processed on two different workers
+            # could produce different graphs. Fixed by iterating the
+            # already-insertion-ordered llm_by_norm/heu_by_norm dicts
+            # directly: every LLM item (corroborated or not) in the LLM's
+            # own order, then heuristic-only items in the heuristic's own
+            # order — a pure, deterministic function of input order.
+            combined: list[str] = []
+            for k, v in llm_by_norm.items():
+                combined.append(v)  # prefer LLM casing when corroborated
+            for k, v in heu_by_norm.items():
+                if k not in llm_keys:
+                    combined.append(v)
+
             setattr(merged, attr, combined[:15])
             merged.confidence[attr] = (
                 0.95 if corroborated else
@@ -641,6 +781,16 @@ class HybridExtractor:
                     existing["reason"] = d["reason"]
                 if d.get("evidence") and not existing.get("evidence"):
                     existing["evidence"] = d["evidence"]
+                # source_role (TM-29): only the heuristic pass attributes a
+                # decision to a specific message's role — the LLM pass
+                # synthesizes across the whole conversation with no
+                # single-turn attribution, so `existing` (built from the LLM
+                # dict) never has one. Backfill it here the same way
+                # reason/evidence are, or a corroborated decision (the
+                # highest-confidence tier) would silently lose the one
+                # signal the heuristic side actually knew.
+                if d.get("source_role") and not existing.get("source_role"):
+                    existing["source_role"] = d["source_role"]
             else:
                 seen[key] = {**d, "confidence": 0.65, "_source": "heuristic"}
 
@@ -663,11 +813,41 @@ class HybridExtractor:
         """Normalize for dedup comparison."""
         return re.sub(r'\s+', ' ', s.lower().strip())[:60]
 
+    # Fields on ExtractedData that are lists of DICTS, not lists of plain
+    # strings — these can't go through the string-normalize-and-dedup
+    # loop below and are copied through as-is instead.
+    _DICT_LIST_FIELDS = frozenset({"decisions", "superseded", "evidence"})
+    # Non-list field — per-category confidence scores, set by merge(), not by dedup.
+    _NON_LIST_FIELDS = frozenset({"confidence"})
+
+    @classmethod
+    def _simple_list_field_names(cls) -> list[str]:
+        """Every ExtractedData field that's a plain list[str] — derived
+        from the dataclass itself rather than hand-maintained here.
+
+        FIXED (TM-14): _deduplicate() used to hardcode this list
+        ("goals", "tasks_done", ... "environments") and silently dropped
+        "endpoints", "schemas", and "evidence" — added to ExtractedData
+        at some point after this hardcoded list was written, and never
+        added here to match. _deduplicate() is the path taken whenever
+        the LLM pass is absent, which is the SHIPPED DEFAULT
+        (use_llm_extraction=False) — so two of the nine documented node
+        types (ENDPOINT, SCHEMA) and all decision evidence were
+        unreachable out of the box. Deriving the field list from
+        dataclasses.fields() means a future field addition to
+        ExtractedData can't silently create the same gap again.
+        """
+        import dataclasses
+        return [
+            f.name for f in dataclasses.fields(ExtractedData)
+            if f.name not in cls._DICT_LIST_FIELDS
+            and f.name not in cls._NON_LIST_FIELDS
+        ]
+
     def _deduplicate(self, data: ExtractedData) -> ExtractedData:
         """Deduplicate within heuristic results."""
         result = ExtractedData()
-        for attr in ["goals", "tasks_done", "tasks_wip", "tasks_todo",
-                     "files", "errors", "dependencies", "environments"]:
+        for attr in self._simple_list_field_names():
             seen = set()
             deduped = []
             for item in getattr(data, attr):
@@ -678,6 +858,7 @@ class HybridExtractor:
             setattr(result, attr, deduped[:15])
         result.decisions = data.decisions
         result.superseded = data.superseded
+        result.evidence = data.evidence
         return result
 
     # ── Main entry ────────────────────────────────────────────────────────────

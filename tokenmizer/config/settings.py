@@ -3,24 +3,40 @@ from __future__ import annotations
 
 from typing import List, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# ── Nested sub-configs ────────────────────────────────────────────────────────
+#
+# FIXED (TM-08): these used to subclass BaseSettings directly with no
+# env_prefix of their own, which means each one independently read BARE
+# environment variables — e.g. TerseOutputSettings() would pick up a
+# plain `LEVEL` or `ENABLED` env var from the host process. Those are
+# generic enough names that a CI system or shell profile could set them
+# for unrelated reasons and silently reconfigure the product (a stray
+# ENABLED=false in the environment could disable compression, memory, AND
+# terse output simultaneously, with zero log line). They are nested value
+# objects, not independently-configurable top-level settings — the outer
+# Settings object already provides TOKENMIZER_-prefixed, __-nested env
+# var access to every field on these (e.g.
+# TOKENMIZER_TERSE_OUTPUT__LEVEL=ultra), so plain pydantic.BaseModel is
+# both correct and sufficient.
 
-class CompressionSettings(BaseSettings):
+
+class CompressionSettings(BaseModel):
     enabled: bool = True
     engine: Literal["llmlingua2", "heuristic", "none"] = "heuristic"
     ratio: float = Field(default=0.5, ge=0.1, le=1.0)
     min_tokens_to_compress: int = 300
 
 
-class MemorySettings(BaseSettings):
+class MemorySettings(BaseModel):
     enabled: bool = True
     max_tokens_before_summary: int = 4000
     recent_turns_verbatim: int = 10
 
 
-class GraphCheckpointSettings(BaseSettings):
+class GraphCheckpointSettings(BaseModel):
     enabled: bool = True
     trigger_at_percent: float = Field(default=0.85, ge=0.5, le=0.99)
     storage_dir: str = "./checkpoints"
@@ -30,7 +46,7 @@ class GraphCheckpointSettings(BaseSettings):
     min_confidence: float = 0.65      # minimum validation confidence threshold
 
 
-class RoutingSettings(BaseSettings):
+class RoutingSettings(BaseModel):
     enabled: bool = False
     simple_model: str = "claude-haiku-4-5"
     medium_model: str = "claude-sonnet-4-6"
@@ -38,14 +54,22 @@ class RoutingSettings(BaseSettings):
     complexity_threshold: float = 0.6
 
 
-class CacheSettings(BaseSettings):
+class CacheSettings(BaseModel):
     enabled: bool = True
     similarity_threshold: float = 0.92
     ttl_seconds: int = 3600
     max_size: int = 10_000
+    # "session" (default): every cached prompt is scoped to its session_id,
+    # never shared across sessions — safe by default for hosted/team use.
+    # "shared": non-sensitive prompts are shared globally across sessions
+    # (higher hit rate, but requires trusting the sensitivity heuristic in
+    # semantic_cache/cache.py::_is_session_sensitive — see TM-03). Opt in
+    # explicitly; do not flip this without understanding that heuristic's
+    # documented limits.
+    share_scope: Literal["session", "shared"] = "session"
 
 
-class TerseOutputSettings(BaseSettings):
+class TerseOutputSettings(BaseModel):
     enabled: bool = True
     level: Literal["lite", "full", "ultra"] = "full"
 
@@ -55,7 +79,13 @@ class Settings(BaseSettings):
         env_prefix="TOKENMIZER_",
         env_nested_delimiter="__",
         env_file=".env",
-        extra="ignore",
+        # FIXED (TM-06 / closes #28): was "ignore" — a misspelled YAML key
+        # (e.g. `api_keys:` instead of `api_key:`) parsed cleanly and
+        # silently discarded the value, with no exception and no log
+        # line. "forbid" raises the same way a YAML syntax error already
+        # did, so a typo is caught by the SAME fail-closed logic in
+        # get_settings() below instead of needing separate handling.
+        extra="forbid",
     )
 
     # Provider — synced exactly with providers/registry.py
@@ -102,7 +132,12 @@ class Settings(BaseSettings):
     terse_output: TerseOutputSettings = Field(default_factory=TerseOutputSettings)
 
     # Server
-    proxy_host: str = "0.0.0.0"
+    # Was "0.0.0.0" (all interfaces) — the CLI's `serve` command didn't
+    # even read this field until this fix (see cli.py), so the old
+    # default was inert. Now that it's wired in, localhost-only is the
+    # safe default; the documented Docker deployment path is unaffected
+    # since the Dockerfile always passes --host 0.0.0.0 explicitly.
+    proxy_host: str = "127.0.0.1"
     proxy_port: int = 8000
 
     def get_api_key_for_provider(self, provider: str) -> str:
@@ -129,7 +164,25 @@ class Settings(BaseSettings):
         return cls(**data)
 
 
+class ConfigSecurityError(RuntimeError):
+    """Raised when TOKENMIZER_ENV=production and the effective config is
+    unsafe to boot with — either it failed to load at all, or it loaded
+    fine but landed on permissive defaults (e.g. no api_key). Refusing to
+    start is the point: a production deployment must never silently run
+    more permissively than the operator configured."""
+
+
 _settings: Settings | None = None
+
+
+def _is_production() -> bool:
+    """Read directly from the environment, not from a Settings field —
+    this must be checkable BEFORE we know whether Settings() can even be
+    constructed (a config load failure is exactly the case this guards
+    against), so it can't depend on the object it's deciding how to
+    handle. Matches the flag name issue #28 itself proposed."""
+    import os
+    return os.environ.get("TOKENMIZER_ENV", "").strip().lower() == "production"
 
 
 def get_settings() -> Settings:
@@ -138,10 +191,12 @@ def get_settings() -> Settings:
         import logging
         import os
         logger = logging.getLogger(__name__)
+        production = _is_production()
         yaml_path = os.environ.get("TOKENMIZER_CONFIG", "tokenmizer.yaml")
+
         if os.path.exists(yaml_path):
             try:
-                _settings = Settings.from_yaml(yaml_path)
+                loaded = Settings.from_yaml(yaml_path)
             except Exception as e:
                 # FIXED: previously this silently discarded the user's
                 # entire config file and fell back to hardcoded defaults
@@ -157,6 +212,25 @@ def get_settings() -> Settings:
                 # in tokenmizer.yaml is visible at startup instead of
                 # discovered later as "wait, why does this accept
                 # unauthenticated requests?"
+                #
+                # FIXED further (closes #28): in production, logging is
+                # not enough — a log line nobody is watching at 3am is
+                # not a safety control. TOKENMIZER_ENV=production now
+                # refuses to start at all rather than fall back.
+                if production:
+                    logger.error(
+                        f"Failed to load config from {yaml_path}: {e}. "
+                        "TOKENMIZER_ENV=production — refusing to start "
+                        "rather than fall back to permissive defaults."
+                    )
+                    raise ConfigSecurityError(
+                        f"Refusing to start: TOKENMIZER_ENV=production and "
+                        f"{yaml_path} failed to load ({type(e).__name__}: {e}). "
+                        "Fix the config file, or explicitly unset "
+                        "TOKENMIZER_ENV (or set it to a non-'production' "
+                        "value) to accept dev-mode permissive defaults "
+                        "instead."
+                    ) from e
                 logger.error(
                     f"Failed to load config from {yaml_path}: {e}. "
                     "Falling back to hardcoded defaults — this means any "
@@ -164,7 +238,28 @@ def get_settings() -> Settings:
                     "cors_origins, state_backend) are NOT applied. Fix the "
                     "YAML file and restart."
                 )
-                _settings = Settings()
+                loaded = Settings()
         else:
-            _settings = Settings()
+            loaded = Settings()
+
+        # Fail-closed floor: even when loading succeeded WITHOUT any
+        # exception, a production deployment must never boot
+        # unauthenticated. This covers the gap issue #28's literal ask
+        # (parse-failure fallback) didn't: an operator who simply never
+        # set api_key at all — no typo, no load error, just a genuine
+        # config gap — would otherwise get a perfectly "successful" boot
+        # into the same unauthenticated state.
+        if production and not loaded.api_key:
+            logger.error(
+                "TOKENMIZER_ENV=production but no api_key is configured — "
+                "refusing to start unauthenticated."
+            )
+            raise ConfigSecurityError(
+                "Refusing to start: TOKENMIZER_ENV=production but no "
+                "api_key is set (TOKENMIZER_API_KEY env var, or api_key in "
+                "tokenmizer.yaml). Set an API key, or explicitly unset "
+                "TOKENMIZER_ENV to run in development mode."
+            )
+
+        _settings = loaded
     return _settings

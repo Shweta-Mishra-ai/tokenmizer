@@ -1,8 +1,19 @@
 """
 TokenMizer — main FastAPI application.
 
-OpenAI-compatible proxy: POST /v1/chat/completions plus session/graph
-management endpoints. See README API Reference.
+OpenAI-compatible proxy: POST /v1/chat/completions, plus app setup,
+singletons, and the shared helpers (_get_graph_async, _check_rate_limit,
+_update_graph, etc.) that both this file and routes_graph.py depend on.
+See README API Reference.
+
+Session/graph inspection, checkpoint, and decision-management endpoints
+(~15 routes) live in routes_graph.py — split out to keep this file
+focused on the core proxy path. That module is imported at the bottom
+of this file and references the singletons/helpers defined here via
+`app_module.<name>` rather than importing them by value, so tests that
+monkeypatch this module's attributes (e.g. `app_module._analytics`,
+`app_module._graph_cache`) keep working unchanged regardless of which
+file actually handles a given request.
 """
 from __future__ import annotations
 
@@ -34,11 +45,50 @@ from tokenmizer.security.auth import verify_api_key
 from tokenmizer.security.middleware import injection_guard
 from tokenmizer.security.redaction import redact_messages
 from tokenmizer.semantic_cache.cache import SemanticCache
-from tokenmizer.state.backend import get_state_backend
 
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
+
+
+def _warn_if_multi_worker_risk() -> None:
+    """
+    Best-effort startup check for a risk that cannot be fixed with an
+    in-process lock: running multiple OS worker processes (e.g. `uvicorn
+    --workers 4`) against the same storage_dir. Each worker gets its own
+    in-process `_graph_cache` and its own GraphMemory instances for the
+    same session_id — genuinely separate memory across processes — and
+    the current full-blob SQLite persist (see issue #27) means whichever
+    process saves a session last silently overwrites whatever an earlier
+    worker wrote. No amount of asyncio.Lock helps here; locks don't cross
+    process boundaries.
+
+    This can't be detected with certainty from inside a single process
+    (there's no universal "how many workers am I one of" signal), so this
+    checks a few common launcher env vars as a heuristic. A false negative
+    (multi-worker deployment this doesn't catch) is expected for unusual
+    launch setups — the goal is to catch the common case loudly rather
+    than stay silent about a real risk, not to guarantee detection.
+    """
+    import os
+    for var in ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS"):
+        val = os.environ.get(var, "").strip()
+        if val.isdigit() and int(val) > 1:
+            logger.warning(
+                f"{var}={val} suggests multiple worker processes. "
+                "TokenMizer's SQLite-backed graph/checkpoint storage is "
+                "NOT safe for concurrent multi-process writers to the "
+                "same session — the last process to persist a session "
+                "silently overwrites what an earlier one wrote (tracked "
+                "as issue #27, which will move to per-row persistence). "
+                "Until that lands: run a single worker per storage_dir, or "
+                "route each session_id to a fixed worker (e.g. consistent "
+                "hashing at your load balancer)."
+            )
+            return
+
+
+_warn_if_multi_worker_risk()
 
 # ── Singletons ────────────────────────────────────────────────────────────────
 _provider = None
@@ -50,10 +100,10 @@ _cache = SemanticCache(
     threshold=settings.cache.similarity_threshold,
     ttl_seconds=settings.cache.ttl_seconds,
     max_size=settings.cache.max_size,
+    share_scope=settings.cache.share_scope,
 )
 _checkpoint_mgr = CheckpointManager(storage_dir=settings.graph_checkpoint.storage_dir)
 _analytics = AnalyticsEngine()
-_state = get_state_backend(settings.state_backend, settings.redis_url)
 _output_trimmer = OutputTrimmer()
 _rate_limiter = get_rate_limiter(rate=60, per_seconds=60, burst=10)
 
@@ -61,6 +111,26 @@ _rate_limiter = get_rate_limiter(rate=60, per_seconds=60, burst=10)
 # Max 1000 concurrent sessions; LRU eviction removes oldest UNHELD lock.
 _SESSION_LOCK_MAX = 1000
 _session_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
+
+# Strong references to in-flight background tasks (e.g. the LLM
+# extraction pass scheduled by _update_graph). asyncio.create_task()'s own
+# docs warn that a task with no reference held anywhere is eligible for
+# garbage collection before it completes, silently dropping whatever it
+# was doing — for the background extraction task, that would mean the
+# graph quietly stops gaining nodes from this path with no error at all.
+# Each task removes itself via the done-callback, so this set never grows
+# unbounded.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _track_background_task(coro) -> asyncio.Task:
+    """asyncio.create_task() + strong-reference retention in one call —
+    use this instead of a bare create_task() for any fire-and-forget task
+    that must not be garbage-collected before it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
@@ -81,14 +151,18 @@ def _get_session_lock(session_id: str) -> asyncio.Lock:
     _session_locks[session_id] = lock
 
     if len(_session_locks) > _SESSION_LOCK_MAX:
-        # Find oldest unheld lock to evict (iterate from front)
+        # Find oldest unheld lock to evict (iterate from front). Note: the
+        # trailing "already back under cap" check that used to sit here
+        # was unreachable dead code — the only way `len()` changes inside
+        # this loop is the `del` immediately above, which is followed by
+        # an unconditional `break` in the same branch, so that second
+        # check could never be reached with a smaller length than when
+        # the loop started.
         for old_id in list(_session_locks.keys()):
             if old_id == session_id:
                 continue
             if not _session_locks[old_id].locked():
                 del _session_locks[old_id]
-                break
-            if len(_session_locks) <= _SESSION_LOCK_MAX:
                 break
 
     return lock
@@ -141,7 +215,28 @@ def _get_provider():
 # ── Graph helpers (state-backend backed) ─────────────────────────────────────
 
 # In-process graph cache — avoids SQLite reload on every request.
-# Thread-safe: each session_id maps to one GraphMemory, protected by _get_session_lock().
+#
+# Concurrency note (corrected — the previous comment here overstated its
+# own mechanism): concurrent asyncio coroutines mutating the SAME
+# GraphMemory object do not actually corrupt its dicts, but not because of
+# `_get_session_lock()` — that lock is only acquired by the background
+# LLM-extraction task, not by the request-handling path. The real reason
+# it's safe is that GraphMemory's mutation methods (add_node, add_edge,
+# extract_from_messages, etc.) contain no internal `await`, and CPython's
+# cooperative scheduler only switches between coroutines at await points —
+# so two coroutines' calls into the same object can never interleave
+# mid-method. This was verified empirically (not assumed) during the
+# audit: concurrent add_node() calls across 50 coroutines never dropped a
+# node. What IS a real risk — and what `_graph_cache_touch()` below
+# actually guards against — is EVICTING a GraphMemory instance (and force-
+# persisting its current state) while a request or the background task
+# still holds that session's lock, i.e. is actively using it. If that
+# instance is evicted and the session is re-fetched, a fresh GraphMemory
+# reloads from disk; the original evicted instance's in-flight mutation
+# can then persist AFTER the new instance already started writing,
+# silently clobbering it. So eviction must skip any session whose lock is
+# currently held — mirroring the same rule `_session_locks` already
+# applies to itself in `_get_session_lock()` above.
 
 # LRU-bounded cache of GraphMemory objects (evicts least-recently-used).
 # Graph data is persisted to SQLite, so eviction just frees memory —
@@ -152,11 +247,34 @@ _graph_cache: "OrderedDict[str, GraphMemory]" = OrderedDict()
 _graph_cache_lock = asyncio.Lock()  # guards dict creation — prevents TOCTOU race
 
 
+def _find_evictable_graph_id() -> Optional[str]:
+    """First (most-LRU) session_id in _graph_cache whose lock is not
+    currently held, or None if every remaining entry is in-flight. See the
+    concurrency note above for why this check exists."""
+    for sid in _graph_cache:  # OrderedDict: iteration order == LRU order
+        lock = _session_locks.get(sid)
+        if lock is None or not lock.locked():
+            return sid
+    return None
+
+
 def _graph_cache_touch(session_id: str) -> None:
-    """Move session to end (most-recently-used) and evict oldest if over cap."""
+    """Move session to end (most-recently-used) and evict oldest unheld
+    entries if over cap. If every entry over the cap is currently
+    in-flight (its session lock is held), eviction is skipped for this
+    call rather than risk evicting/force-persisting a session mid-use —
+    the cache will simply run one entry over cap until something frees up,
+    which is a far smaller cost than silent cross-instance data loss."""
     _graph_cache.move_to_end(session_id)
     while len(_graph_cache) > _GRAPH_CACHE_MAX:
-        evicted_id, evicted_graph = _graph_cache.popitem(last=False)
+        evicted_id = _find_evictable_graph_id()
+        if evicted_id is None:
+            logger.debug(
+                "Graph cache over cap but every entry is in-flight "
+                "(session lock held) — skipping eviction this call"
+            )
+            break
+        evicted_graph = _graph_cache.pop(evicted_id)
         # Ensure pending writes are flushed before dropping from memory.
         #
         # FIXED: previously a failed flush here was caught, logged at
@@ -167,23 +285,28 @@ def _graph_cache_touch(session_id: str) -> None:
         # pitch is "never lose context." We now retry once (covers
         # transient SQLite WAL lock contention) and record the failure to
         # analytics so it's queryable via /api/stats instead of invisible.
+        #
+        # FIXED (TM-12): _persist() used to catch its own exceptions and
+        # return None unconditionally, so this try/except never actually
+        # caught anything — `persisted = True` was set on the very first
+        # call every time, the retry never ran, and the
+        # record_silent_failure metric below was dead code despite the
+        # comment above describing it as implemented. _persist() now
+        # returns bool, so the retry is driven off the actual outcome.
         persisted = False
         for attempt in range(2):
-            try:
-                evicted_graph._persist()
-                persisted = True
+            persisted = evicted_graph._persist()
+            if persisted:
                 break
-            except Exception as e:
-                if attempt == 0:
-                    logger.warning(
-                        f"Persist attempt 1 failed for evicted graph {evicted_id}, retrying: {e}"
-                    )
-                else:
-                    logger.error(
-                        f"Graph {evicted_id} evicted from cache WITHOUT persisting — "
-                        f"nodes added since last successful save are LOST: {e}"
-                    )
+            if attempt == 0:
+                logger.warning(
+                    f"Persist attempt 1 failed for evicted graph {evicted_id}, retrying"
+                )
         if not persisted:
+            logger.error(
+                f"Graph {evicted_id} evicted from cache WITHOUT persisting — "
+                f"nodes added since last successful save are LOST"
+            )
             _analytics.record_silent_failure("graph_eviction")
 
 
@@ -204,23 +327,6 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
             )
         _graph_cache_touch(session_id)
         return _graph_cache[session_id]
-
-
-def _get_context_used(session_id: str) -> int:
-    return _state.get(f"ctx:{session_id}") or 0
-
-
-def _set_context_used(session_id: str, tokens: int) -> None:
-    # FIXED: state backend `set()` now returns bool (see state/backend.py).
-    # A dropped write here under-counts context usage, which can silently
-    # cause the auto-checkpoint trigger_at_percent threshold to be missed —
-    # the proxy thinks the session has used less context than it actually
-    # has. Recording the failure makes this visible via /api/stats instead
-    # of manifesting only as "why didn't my checkpoint fire."
-    ok = _state.set(f"ctx:{session_id}", tokens, ttl=86400)
-    if not ok:
-        logger.error(f"Failed to persist context usage for session {session_id}")
-        _analytics.record_silent_failure("state_backend_set")
 
 
 # ── Context window sizes ──────────────────────────────────────────────────────
@@ -324,9 +430,23 @@ def _sampling_kwargs(req: "ChatRequest") -> dict:
 
 
 async def _check_rate_limit(request: Request) -> None:
-    """Raise 429 if client is rate-limited."""
-    client_ip = request.client.host if request.client else "unknown"
-    client_id = request.headers.get("Authorization", client_ip)
+    """
+    Raise 429 if client is rate-limited.
+
+    FIXED (TM-05): previously keyed the bucket on
+    `request.headers.get("Authorization", client_ip)` — a raw,
+    client-supplied string. A client could vary that header per request
+    (free in dev mode, where it isn't even validated) and land in a fresh
+    bucket every time, never being limited at all. `request.client.host`
+    reflects the actual TCP-level source of the connection; it isn't
+    something the caller can vary per request the way a header string can.
+
+    This doesn't yet differentiate between individual API keys (the
+    current auth model has one shared key for the whole deployment — see
+    TM-15), so per-key rate limiting isn't meaningfully possible until
+    that lands. IP-based limiting is the correct available control today.
+    """
+    client_id = request.client.host if request.client else "unknown"
     allowed, retry_after = await _rate_limiter.check(client_id)
     if not allowed:
         raise HTTPException(
@@ -390,10 +510,7 @@ async def _update_graph(
     Returns (updated_messages, checkpoint_status) — checkpoint_status surfaces
     auto-checkpoint success/failure to the caller instead of only logging it.
     """
-    context_used   = _get_context_used(session_id)
     context_window = _context_window(model)
-    input_tokens   = count_messages_tokens(messages, model)
-    context_pct    = (context_used + input_tokens) / context_window
 
     # Extraction: heuristic sync now, LLM async in background
     if settings.graph_checkpoint.use_llm_extraction:
@@ -450,7 +567,7 @@ async def _update_graph(
                             )
                             _analytics.record_silent_failure("llm_extraction")
 
-                asyncio.create_task(_background_extract())
+                _track_background_task(_background_extract())
             else:
                 graph.extract_from_messages(raw_messages, incremental=True)
         else:
@@ -483,6 +600,41 @@ async def _update_graph(
                     f"[Relevant session context]\n{ctx_block}\n\n"
                     f"{messages[sys_idx]['content']}"
                 )
+            else:
+                # FIXED (TM-10): previously had no else branch here — a
+                # request with no system message did the graph query,
+                # built the context block, and threw it away. A system
+                # message was only guaranteed to exist because layer 2
+                # (terse-output injection) happens to add one, and only
+                # when settings.terse_output.enabled is True — a
+                # completely unrelated setting. Turning THAT off silently
+                # disabled graph context injection too, with no error and
+                # no indication anything was skipped.
+                messages.insert(0, {
+                    "role": "system",
+                    "content": f"[Relevant session context]\n{ctx_block}",
+                })
+
+    # Context occupancy — measured directly from what will actually be
+    # sent to the provider THIS turn (post file-intelligence/compression/
+    # windowing/context-injection), not from a stateful accumulator.
+    #
+    # FIXED (TM-04): this used to be `(context_used + input_tokens) /
+    # window`, where context_used was a running total read from a state
+    # backend and re-written every call. Two problems, independent of any
+    # concurrency race: each `messages` list already contains the FULL
+    # running conversation (the OpenAI-style contract), so the
+    # accumulator double-counted every earlier turn's content on top of
+    # itself each subsequent turn — diverging further from real occupancy
+    # the longer a session ran. And it never reflected windowing: once
+    # the tracked value crossed trigger_at_percent it never came back
+    # down, so every later turn re-triggered a full checkpoint write
+    # (mitigated separately by the auto-retention cap below, but the root
+    # cause was the accumulator itself). Measuring the actual outgoing
+    # payload here is a pure function of `messages` — no shared mutable
+    # state, so nothing to race on, and it naturally reflects windowing
+    # having just shrunk `messages` above.
+    context_pct = count_messages_tokens(messages, model) / context_window
 
     # Auto-checkpoint
     #
@@ -502,6 +654,14 @@ async def _update_graph(
     # so it flows into the `tokenmizer.checkpoint` response field below —
     # a client that cares can check `checkpoint_failed` instead of having
     # to grep server logs to discover their context wasn't saved.
+    #
+    # Retention/frequency: CheckpointManager caps how many auto-triggered
+    # checkpoints are kept per session (oldest pruned first, manual ones
+    # never touched — see checkpoints/manager.py::_prune_auto_checkpoints).
+    # That bounds storage growth for a session that stays near the
+    # threshold for many turns; it intentionally does not suppress this
+    # turn's checkpoint attempt, since each attempt reflects this turn's
+    # real (non-accumulated) occupancy rather than noise.
     checkpoint_status = {"attempted": False, "succeeded": False, "checkpoint_id": None}
     if (context_pct >= settings.graph_checkpoint.trigger_at_percent
             and settings.graph_checkpoint.enabled):
@@ -537,7 +697,6 @@ async def _update_graph(
             checkpoint_status["error"] = str(last_error)
             _analytics.record_silent_failure("checkpoint")
 
-    _set_context_used(session_id, context_used + input_tokens)
     return messages, checkpoint_status
 
 
@@ -548,10 +707,16 @@ async def _call_provider(
     user_content: str,
     session_id: str,
     savings: dict,
-) -> tuple[str, int, int, float]:
+) -> tuple[str, int, int, float, bool]:
     """
     Layer 3 + 5: Cache lookup → LLM call → output trim → cache write.
-    Returns (response_text, input_tokens, output_tokens, latency_ms).
+    Returns (response_text, input_tokens, output_tokens, latency_ms, cache_hit).
+
+    FIXED (TM-34): cache_hit is now returned explicitly instead of being
+    inferred downstream from `input_tokens_actual == 0` — that inference
+    would misclassify any real provider response that happens to report
+    zero input tokens as a cache hit. This function already knows exactly
+    which path it took; it should just say so.
     """
     # Cache lookup
     if settings.cache.enabled and user_content:
@@ -559,7 +724,7 @@ async def _call_provider(
         if cached:
             savings["cache"] = count_tokens(user_content, model)
             output_tokens = count_tokens(cached.response, model)
-            return cached.response, 0, output_tokens, 0.0
+            return cached.response, 0, output_tokens, 0.0, True
 
     # LLM call
     # NOTE: `messages` is already redacted — redaction now happens once at
@@ -576,8 +741,19 @@ async def _call_provider(
             **_sampling_kwargs(req),
         )
     except Exception as e:
-        logger.error(f"Provider error: {e}")
-        raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
+        # FIXED (TM-33): previously echoed str(e) verbatim into the 502
+        # response body. Provider SDK exceptions routinely embed request
+        # URLs, query params, or other internal detail that shouldn't
+        # reach an API client. Full detail is logged server-side (with a
+        # correlation id so it can be found), the client gets a generic
+        # message plus that same id.
+        correlation_id = uuid.uuid4().hex[:12]
+        logger.error(f"Provider error [{correlation_id}]: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Provider request failed (ref: {correlation_id}). "
+                   f"Check server logs for details.",
+        )
 
     response_text  = resp.text
     output_tokens  = resp.output_tokens
@@ -598,7 +774,7 @@ async def _call_provider(
                    input_tokens=input_tokens, output_tokens=output_tokens,
                    session_id=session_id)
 
-    return response_text, input_tokens, output_tokens, latency_ms
+    return response_text, input_tokens, output_tokens, latency_ms, False
 
 
 def _stream_response(req, messages, model, user_content, session_id,
@@ -727,11 +903,7 @@ async def chat_completions(req: ChatRequest, request: Request):
     # Layer 0-2: file intelligence, compression, terse injection
     messages = _apply_compression_layers(messages, settings, savings)
 
-    # Layer 3+5: cache + LLM + output trim (done before graph for latency)
-    # Graph runs in parallel-ish: heuristic extract is sync and fast,
-    # LLM extract fires async after provider returns.
     orig_input_tokens = count_messages_tokens(raw_messages, model)
-    sent_input_tokens = count_messages_tokens(messages, model)
     savings["routing"] = 0
 
     # Layer 4: graph update + context injection (mutates messages)
@@ -742,6 +914,15 @@ async def chat_completions(req: ChatRequest, request: Request):
             session_id, graph, raw_messages, messages, model, savings, user_query
         )
 
+    # FIXED (TM-11): input_tokens_sent used to be measured HERE, before
+    # _update_graph() ran — so it never reflected either the reduction
+    # from windowing or the addition from graph-context injection, both
+    # of which happen inside _update_graph(). Measuring it after means
+    # this number (reported in analytics/dashboard as "tokens actually
+    # sent") is the actual size of what's about to be sent to the
+    # provider, not a stale pre-windowing estimate.
+    sent_input_tokens = count_messages_tokens(messages, model)
+
     # Streaming: true SSE passthrough (v0.3). Output-trimming is skipped in
     # stream mode (can't trim tokens that already left the building) — all
     # input-side layers (file intel, compression, graph context) still apply.
@@ -750,10 +931,9 @@ async def chat_completions(req: ChatRequest, request: Request):
                                 session_id, savings, orig_input_tokens)
 
     # Layer 5: call provider (or return cache hit)
-    response_text, input_tokens_actual, output_tokens, latency_ms = await _call_provider(
+    response_text, input_tokens_actual, output_tokens, latency_ms, cache_hit = await _call_provider(
         req, messages, model, user_content, session_id, savings
     )
-    cache_hit = input_tokens_actual == 0 and response_text != ""
 
     # Analytics
     total_saved = sum(savings.values())
@@ -815,278 +995,12 @@ async def dashboard():
 
 
 # ── Session / Graph endpoints ─────────────────────────────────────────────────
+# Graph inspection, checkpoint, and decision-management endpoints live in
+# routes_graph.py (split out to keep this file focused on the core proxy
+# path). Imported at the bottom of this module — by this point every
+# singleton/helper routes_graph.py references via `app_module.<name>`
+# (_analytics, _cache, _checkpoint_mgr, _get_graph_async, _check_rate_limit)
+# is already defined above.
+from tokenmizer.api.routes_graph import router as _graph_router  # noqa: E402
 
-@app.get("/api/stats", dependencies=[Depends(verify_api_key)])
-async def stats(session_id: Optional[str] = None):
-    return _analytics.summary()
-
-
-@app.get("/api/cache/stats", dependencies=[Depends(verify_api_key)])
-async def cache_stats():
-    stats = _cache.stats()
-    # Include preference context for completeness (was previously unused)
-    stats["preference_context"] = _cache._preference_store.to_system_context()
-    return stats
-
-
-@app.get("/api/graph/{session_id}/history", dependencies=[Depends(verify_api_key)])
-async def get_graph_history(session_id: str, at_time: float = 0.0, top_k: int = 12):
-    """
-    Query graph state at a specific Unix timestamp.
-    at_time=0.0 (default) returns current state (equivalent to /viz).
-    at_time=<unix_ts> returns which nodes were active at that point in time.
-
-    Useful for: debugging decision changes, audit trail, "what did we decide
-    at 2pm?" queries.
-    """
-    graph = await _get_graph_async(session_id)
-    if at_time == 0.0:
-        nodes = graph.query("", top_k=top_k)
-    else:
-        nodes = graph.query_at_time("", at_time=at_time, top_k=top_k)
-    return {
-        "session_id": session_id,
-        "at_time": at_time or None,
-        "nodes": [
-            {
-                "id": n.id, "label": n.label, "type": n.type.value,
-                "status": n.status.value, "importance": n.importance,
-                "valid_from": n.valid_from, "valid_until": n.valid_until or None,
-            }
-            for n in nodes
-        ],
-        "count": len(nodes),
-    }
-
-
-@app.get("/api/graph/{session_id}", dependencies=[Depends(verify_api_key)])
-async def get_graph(session_id: str):
-    graph = await _get_graph_async(session_id)
-    return graph.stats()
-
-
-@app.get("/api/graph/{session_id}/viz", dependencies=[Depends(verify_api_key)])
-async def get_graph_viz(session_id: str):
-    """
-    Return full graph as D3-compatible JSON for visualization.
-    {nodes: [...], edges: [...], meta: {...}}
-    Used by the dashboard Graph tab and any external viz tool.
-    """
-    graph = await _get_graph_async(session_id)
-    return graph.to_vis_json()
-
-
-@app.get("/api/graph/{session_id}/html", dependencies=[Depends(verify_api_key)])
-async def get_graph_html(session_id: str):
-    """Shareable standalone interactive graph — open in a browser, drag/zoom,
-    screenshot, share. Self-contained dark-theme D3 force layout."""
-    from tokenmizer.graph_memory.visualization import to_share_html
-    graph = await _get_graph_async(session_id)
-    return HTMLResponse(to_share_html(graph))
-
-
-@app.get("/api/ontology", dependencies=[Depends(verify_api_key)])
-async def get_ontology():
-    """The TokenMizer graph ontology: node/edge types with semantics and
-    the status state machine. Machine-readable — what the graph CAN contain
-    and which lifecycle transitions are legal."""
-    from tokenmizer.graph_memory.ontology import ontology_dict
-    return ontology_dict()
-
-
-@app.get("/api/graph/{session_id}/why", dependencies=[Depends(verify_api_key)])
-async def get_graph_why(session_id: str, q: str):
-    """Reasoning: trace the causal chain behind a decision. Matches decision
-    nodes containing `q`, walks the supersession chain in both directions,
-    and returns the old→new trail with trigger/reason/evidence per hop,
-    plus the currently active choice."""
-    from tokenmizer.graph_memory.reasoning import why
-    graph = await _get_graph_async(session_id)
-    return why(graph, q)
-
-
-@app.get("/api/graph/{session_id}/reasoning", dependencies=[Depends(verify_api_key)])
-async def get_graph_reasoning(session_id: str):
-    """Full reasoning view over session memory: active decisions, recent
-    changes, decision history grouped by topic, and an ontology-based
-    consistency audit (contradictions, missing/dangling transitions)."""
-    from tokenmizer.graph_memory.reasoning import summarize_reasoning
-    graph = await _get_graph_async(session_id)
-    return summarize_reasoning(graph)
-
-
-@app.get("/api/graph/{session_id}/obsidian", dependencies=[Depends(verify_api_key)])
-async def get_graph_obsidian(session_id: str):
-    """
-    Download graph as Obsidian Canvas (.canvas) file.
-    Save as <any-name>.canvas inside your Obsidian vault and open directly.
-    """
-    import json as _json
-
-    from fastapi.responses import Response as _Resp
-    graph = await _get_graph_async(session_id)
-    canvas = graph.to_obsidian_canvas()
-    filename = f"tokenmizer-{session_id[:12]}.canvas"
-    return _Resp(
-        content=_json.dumps(canvas, indent=2),
-        media_type="application/json",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
-
-@app.get("/api/graph/{session_id}/transitions", dependencies=[Depends(verify_api_key)])
-async def get_transitions(session_id: str):
-    """Full decision transition history — trigger, reason, evidence, confidence_delta."""
-    graph = await _get_graph_async(session_id)
-    return {
-        "session_id": session_id,
-        "transitions": [
-            {
-                "id": t.id,
-                "from_label": t.from_label,
-                "to_label": t.to_label,
-                "trigger": t.trigger,
-                "reason": t.reason,
-                "evidence": t.evidence,
-                "confidence_delta": t.confidence_delta,
-                "timestamp": t.timestamp,
-                "context_line": t.to_context_line(),
-            }
-            for t in graph.get_transitions()
-        ],
-        "count": len(graph.get_transitions()),
-    }
-
-
-
-@app.post("/api/checkpoint", dependencies=[Depends(verify_api_key)])
-async def create_manual_checkpoint(session_id: str):
-    """
-    Create a manual checkpoint for a session, snapshotting current graph
-    state. Used by `tokenmizer checkpoint <session-id>` (CLI) and the
-    `/tokenmizer:checkpoint` Claude Code skill.
-
-    FOUND DURING A FINAL ACCURACY PASS: this endpoint was referenced by
-    the README's API Reference table, cli.py's `checkpoint` command, AND
-    the Claude Code checkpoint skill (.claude-plugin/skills/checkpoint/
-    SKILL.md) — all three call `POST /api/checkpoint?session_id=...` —
-    but it was never actually implemented here. Every one of those three
-    callers would have gotten a 404 against the real running app. This
-    wasn't a documentation typo; it was a real, consistent gap across
-    three independent consumers that nothing caught because none of them
-    were exercised end-to-end during the original audit.
-
-    Design note: unlike the auto-checkpoint path in chat_completions(),
-    this has no live message history to extract from (a standalone HTTP
-    call has no conversation attached) — `CheckpointManager.create()` is
-    called with `messages=[]`, which is safe: extract_from_messages()
-    early-returns on an empty new-messages diff, and the checkpoint still
-    correctly snapshots whatever's ALREADY in the graph from prior chat
-    turns. Verified with a direct test before writing this (see
-    tests/unit/test_graph_persistence.py for the equivalent pattern).
-    """
-    try:
-        graph = await _get_graph_async(session_id)
-        ckpt = _checkpoint_mgr.create(
-            session_id=session_id,
-            messages=[],
-            graph=graph,
-            context_pct=0.0,
-            trigger="manual",
-        )
-        return {
-            "checkpoint_id": ckpt.checkpoint_id,
-            "session_id": session_id,
-            "node_count": len(ckpt.graph_snapshot.get("nodes", [])),
-            "resume_tokens": ckpt.resume_tokens,
-            "resume_standard": ckpt.resume_standard,
-            "trigger": ckpt.trigger,
-        }
-    except Exception as e:
-        logger.error(f"Manual checkpoint failed for session {session_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/checkpoints/{session_id}", dependencies=[Depends(verify_api_key)])
-async def list_checkpoints(session_id: str):
-    return _checkpoint_mgr.list_checkpoints(session_id)
-
-
-@app.post("/api/decision/invalidate", dependencies=[Depends(verify_api_key)])
-async def invalidate_decision(session_id: str, decision_label: str, reason: str = ""):
-    """
-    Mark a decision as INVALIDATED (red) — explicitly wrong or cancelled.
-    Use when a decision was made that turned out to be incorrect.
-    History is preserved; decision is flagged as a warning in future resumes.
-    """
-    try:
-        from tokenmizer.graph_memory.graph import NodeStatus, NodeType
-        graph = await _get_graph_async(session_id)
-        label_lower = decision_label.lower().strip()
-        # Only ACTIVE (COMPLETED) decisions are eligible: matching across
-        # all statuses would let a short label overwrite SUPERSEDED history
-        # nodes with INVALIDATED, destroying their supersession record. The
-        # response lists every affected node so multi-matches are visible.
-        invalidated: list[dict] = []
-        for node_id, node in graph._nodes.items():
-            if (node.type == NodeType.DECISION and
-                    node.status == NodeStatus.COMPLETED and
-                    label_lower in node.label.lower()):
-                node.status = NodeStatus.INVALIDATED
-                node.summary = (
-                    f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
-                )
-                invalidated.append({"node_id": node_id, "label": node.label})
-        if not invalidated:
-            raise HTTPException(
-                status_code=404,
-                detail=(f"No ACTIVE decision matching '{decision_label}' found in "
-                        f"session '{session_id}' (superseded/archived decisions "
-                        f"are not invalidatable — they are already inactive)")
-            )
-        graph._persist(force=True)  # direct node mutation above bypasses add_node's
-                                      # dirty-tracking — force=True is required here or
-                                      # this write is silently skipped (caught in a final
-                                      # accuracy pass; same class of bug the eviction path
-                                      # and prune() were already protected against)
-        return {
-            "session_id": session_id,
-            "invalidated": decision_label,
-            "affected_nodes": invalidated,
-            "reason": reason,
-            "status": "invalidated",
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Invalidate decision failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/resume/{session_id}", dependencies=[Depends(verify_api_key)])
-async def get_resume(session_id: str, level: str = "standard"):
-    """Get resume context for a session. level: critical | standard | full"""
-    try:
-        if level not in ("critical", "standard", "full"):
-            level = "standard"
-        ckpt = _checkpoint_mgr.get_latest(session_id)
-        if not ckpt:
-            raise HTTPException(status_code=404, detail="No checkpoint found for session")
-        resume_map = {
-            "critical": ckpt.resume_critical,
-            "standard": ckpt.resume_standard,
-            "full": ckpt.resume_full,
-        }
-        text = resume_map.get(level, ckpt.resume_standard)
-        return {
-            "session_id": session_id,
-            "checkpoint_id": ckpt.checkpoint_id,
-            "level": level,
-            "resume_context": text,
-            "token_count": count_tokens(text),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Resume failed for {session_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Resume failed: {str(e)}")
+app.include_router(_graph_router)

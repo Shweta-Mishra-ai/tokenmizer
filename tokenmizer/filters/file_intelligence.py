@@ -420,7 +420,16 @@ class JSONExtractor:
             lines = [line.strip() for line in content.splitlines() if line.strip()]
             try:
                 data = [json.loads(line) for line in lines[:1000]]
-            except Exception:
+            except Exception as jsonl_err:
+                # FIXED: previously a bare `except Exception:` with no log
+                # line at all — inconsistent with this file's other
+                # fallback paths (CSV parse failure, file-type sniff
+                # failure), which do log a warning. An operator watching
+                # server logs had zero visibility into this degradation.
+                logger.warning(
+                    f"JSON/JSONL parse failed for {filename}, falling back "
+                    f"to raw truncation: {type(jsonl_err).__name__}: {jsonl_err}"
+                )
                 truncated, was_cut = _truncate_to_budget(content, token_budget)
                 return FileExtractionResult(
                     file_type="json", original_size_bytes=len(content.encode()),
@@ -663,6 +672,11 @@ class ExcelExtractor:
                 strategy_used="install_hint", was_truncated=False,
             )
         except Exception as e:
+            # FIXED: previously this returned a degraded result with no
+            # server-side log line at all — the failure was visible only
+            # to whoever read the API response's content/summary field,
+            # not to an operator watching production logs.
+            logger.warning(f"Excel parse failed for {filename}: {type(e).__name__}: {e}")
             return FileExtractionResult(
                 file_type="excel", original_size_bytes=len(content_bytes),
                 original_tokens=original_tokens, extracted_tokens=30,

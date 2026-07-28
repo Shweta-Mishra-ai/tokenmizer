@@ -344,3 +344,60 @@ class TestSmartWindow:
             windowed, saved = w.apply(messages, g)
             assert saved > 0
             assert len(windowed) < len(messages)
+
+
+class TestSilentFailuresAreLogged:
+    """
+    Regression tests: two parse-failure fallback paths in this module
+    caught broad exceptions and returned a degraded result with NO log
+    line at all — inconsistent with every other fallback path in this
+    same file (CSV parse failure, file-type sniff failure), which do log
+    a warning. An operator watching server logs had zero visibility into
+    either failure mode; only the API response consumer (who may not be
+    the one troubleshooting a production deployment) could tell.
+    """
+
+    def test_jsonl_parse_failure_is_logged(self, caplog):
+        import logging
+
+        from tokenmizer.filters.file_intelligence import JSONExtractor
+
+        # Not valid JSON, not valid JSONL either (each line individually
+        # invalid) -> falls all the way through to the truncation fallback.
+        content = "{not json\nnor this one either{{{"
+        with caplog.at_level(logging.WARNING, logger="tokenmizer.filters.file_intelligence"):
+            result = JSONExtractor().extract(content, "broken.json")
+        assert result.strategy_used == "fallback_truncation"
+        assert any("json" in r.message.lower() for r in caplog.records), (
+            "JSONL parse failure fell back to truncation with no log line — "
+            "inconsistent with this file's other fallback paths"
+        )
+
+    def test_excel_parse_failure_is_logged(self, caplog, monkeypatch):
+        """
+        openpyxl is an OPTIONAL dependency (pip install tokenmizer[files])
+        — not guaranteed to be installed in every environment this test
+        suite runs in (it wasn't in CI, though it happened to be present
+        locally, which let this exact bug slip through once already).
+        Inject a fake module via sys.modules instead of requiring the
+        real package, so this test doesn't silently depend on whatever
+        happens to be installed locally.
+        """
+        import logging
+        import sys
+        import types
+
+        from tokenmizer.filters.file_intelligence import ExcelExtractor
+
+        fake_openpyxl = types.ModuleType("openpyxl")
+        def _boom(*a, **k):
+            raise ValueError("corrupted workbook")
+        fake_openpyxl.load_workbook = _boom
+        monkeypatch.setitem(sys.modules, "openpyxl", fake_openpyxl)
+
+        with caplog.at_level(logging.WARNING, logger="tokenmizer.filters.file_intelligence"):
+            result = ExcelExtractor().extract(b"not a real xlsx", "broken.xlsx")
+        assert result.strategy_used == "error"
+        assert any("excel" in r.message.lower() for r in caplog.records), (
+            "Excel parse failure returned an error result with no log line"
+        )

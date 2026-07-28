@@ -175,19 +175,149 @@ def classify_topic(label: str, summary: str = "") -> Optional[str]:
     return ordered[0] if ordered else None
 
 
+# ── Slot extraction (TM-09) ───────────────────────────────────────────────────
+#
+# Topic-bucket overlap alone is too coarse to decide "this new decision
+# replaces that old one": "Use PostgreSQL for primary user data" and "Use
+# SQLite for the local offline cache" both classify as "database", but
+# they're plausibly two independent, complementary decisions, not a
+# reversal. The "slot" is what's left of a label after removing every
+# word that's part of ANY topic-taxonomy keyword (the tech-name/category
+# vocabulary that DOESN'T distinguish purpose) and common stopwords — the
+# descriptive remainder is a proxy for "what role does this choice play,"
+# and comparing it is what separates a genuine same-purpose swap from two
+# decisions that merely share a category.
+
+_SLOT_STOP_WORDS = frozenset({
+    "use", "using", "used", "for", "the", "a", "an", "with", "as", "to",
+    "and", "or", "of", "in", "on", "is", "are", "this", "that", "we",
+    "our", "instead", "switch", "switching", "switched", "go", "went",
+    "chose", "choose", "decided", "will", "from", "away",
+})
+
+# Single-word topic keywords (e.g. "jwt", "redis", "postgresql") — an
+# unambiguous category/tech-name match wherever it appears. Excludes
+# multi-word keywords like "auth token" or "api style": those are only
+# stripped when the exact bigram occurs CONTIGUOUSLY in the text being
+# compared (see _slot_words). Splitting a bigram into individual words
+# and stripping each independently (an earlier version of this fix) was
+# wrong: "auth" and "api" are each part of some OTHER topic's bigram
+# keyword ("auth token", "api style") but are also genuinely descriptive
+# words on their own — stripping them unconditionally erased the exact
+# signal that distinguishes "Enable JWT auth for the API" from "Disable
+# JWT auth for the API" and broke that real regression test.
+_SINGLE_WORD_TOPIC_KEYWORDS: frozenset = frozenset(
+    kw for keywords in _TOPIC_KEYWORDS.values() for kw in keywords if " " not in kw
+)
+
+
+def _slot_words(label: str) -> frozenset:
+    """
+    Descriptive words in the LABEL ONLY, minus topic-taxonomy vocabulary
+    and stopwords — see module comment above.
+
+    Deliberately excludes the rationale/summary: that's the WHY a
+    decision was made, which naturally differs between any two decisions
+    regardless of whether they're about the same purpose ("good for
+    concurrent writes" vs "team is more familiar with it" — two
+    completely different rationales for what is, in fact, a genuine
+    same-purpose database swap). Including it polluted the comparison
+    and produced false CONTESTED results for ordinary decisions with a
+    stated reason on each side.
+    """
+    text = re.sub(r"[^\w\s]", " ", label.lower())
+    words = text.split()
+    consumed = [False] * len(words)
+    for i in range(len(words) - 1):
+        bigram = words[i] + " " + words[i + 1]
+        if bigram in _KEYWORD_TO_TOPIC:
+            consumed[i] = consumed[i + 1] = True
+    return frozenset(
+        w for i, w in enumerate(words)
+        if not consumed[i]
+        and len(w) > 2
+        and w not in _SLOT_STOP_WORDS
+        and w not in _SINGLE_WORD_TOPIC_KEYWORDS
+    )
+
+
+def _matched_topic_keywords(label: str, summary: str) -> frozenset:
+    """
+    The actual keyword tokens/phrases (not topic BUCKET names) matched in
+    label+summary — e.g. {"postgresql"} for "Use PostgreSQL 16 with
+    pgvector". Two decisions naming the SAME specific keyword are a
+    refinement of one choice ("PostgreSQL" -> "PostgreSQL 16 with
+    pgvector"), not a swap between alternatives — that must always count
+    as the same slot regardless of how much their surrounding descriptive
+    text overlaps, since a version bump's descriptive words (e.g.
+    "pgvector") have no reason to resemble the original's ("storage").
+    """
+    label = label.rstrip(".,!?;:")
+    text = (label + " " + summary).lower()
+    text = re.sub(r"[^\w\s\.]", " ", text)
+    text = text.replace("next.js", "nextjs").replace("node.js", "nodejs")
+    words = text.split()
+    matched: set[str] = set()
+    consumed = [False] * len(words)
+    for i in range(len(words) - 1):
+        bigram = words[i] + " " + words[i + 1]
+        if bigram in _KEYWORD_TO_TOPIC:
+            matched.add(bigram)
+            consumed[i] = consumed[i + 1] = True
+    for i, w in enumerate(words):
+        if not consumed[i] and w in _KEYWORD_TO_TOPIC:
+            matched.add(w)
+    return frozenset(matched)
+
+
+def _same_slot(new_label: str, new_summary: str, existing_label: str, existing_summary: str) -> bool:
+    """
+    True if two same-topic decisions are confidently about the SAME
+    purpose/role (a genuine replacement), False if they're merely in the
+    same category (ambiguous — see find_contested_decisions).
+
+    Two decisions naming the same specific keyword (see
+    _matched_topic_keywords) are always the same slot — a refinement of
+    one choice, not a swap. Otherwise, if EITHER side has no descriptive
+    vocabulary (e.g. a bare "Use Supabase" / "Switch to Firebase" swap
+    with no further qualifying context), there's no signal to compare
+    against — default to treating it as the same slot, matching this
+    mechanism's original, simpler design intent for plain tech swaps.
+    Otherwise require at least half of the smaller side's descriptive
+    words to overlap.
+    """
+    new_keywords = _matched_topic_keywords(new_label, new_summary)
+    existing_keywords = _matched_topic_keywords(existing_label, existing_summary)
+    if new_keywords & existing_keywords:
+        return True
+
+    new_slot = _slot_words(new_label)
+    existing_slot = _slot_words(existing_label)
+    if not new_slot or not existing_slot:
+        return True
+    overlap = len(new_slot & existing_slot) / min(len(new_slot), len(existing_slot))
+    return overlap >= 0.5
+
+
 def find_contradicting_decisions(
     new_label: str,
     new_summary: str,
     existing_nodes: dict,  # dict[str, MemoryNode]
 ) -> list[str]:
     """
-    Find existing decision nodes that cover the same topic as the new decision.
-    Returns list of node IDs to mark as SUPERSEDED (history preserved, never deleted).
+    Find existing decision nodes that CONFIDENTLY cover the same purpose
+    as the new decision. Returns list of node IDs to mark as SUPERSEDED
+    (history preserved, never deleted).
 
     Only returns decisions that:
     1. Are currently COMPLETED (active)
-    2. Cover the same topic bucket
+    2. Cover the same topic bucket AND the same descriptive "slot" (see
+       _same_slot) — topic overlap alone is no longer sufficient (TM-09)
     3. Are NOT the same decision (not a duplicate)
+
+    Same-topic decisions that DON'T pass the slot check are not silently
+    ignored — see find_contested_decisions(), which returns those
+    separately so callers can flag rather than destroy them.
 
     Args:
         new_label: label of the incoming decision
@@ -220,11 +350,58 @@ def find_contradicting_decisions(
         # choice as current.
         existing_topics = classify_topics(node.label, node.summary)
         if existing_topics & new_topics:
-            # Same topic — check it's not the same decision
-            if not _is_same_decision(new_label, node.label):
+            if _is_same_decision(new_label, node.label):
+                continue  # same decision — not a contradiction
+            if _same_slot(new_label, new_summary, node.label, node.summary):
                 to_supersede.append(node_id)
 
     return to_supersede
+
+
+def find_contested_decisions(
+    new_label: str,
+    new_summary: str,
+    existing_nodes: dict,  # dict[str, MemoryNode]
+    exclude_ids: frozenset = frozenset(),
+) -> list[str]:
+    """
+    Find existing ACTIVE decisions that share a topic with the new
+    decision but were NOT confident enough to supersede (see
+    find_contradicting_decisions / _same_slot). These should be marked
+    CONTESTED alongside the new decision rather than silently left as-is
+    (which would hide the ambiguity) or silently superseded (which would
+    destroy potentially-correct information on weak evidence).
+
+    exclude_ids: node IDs already claimed by find_contradicting_decisions
+    for this same new decision — never double-classify a node as both
+    superseded and contested.
+    """
+    from tokenmizer.graph_memory.graph import NodeStatus, NodeType
+
+    new_topics = classify_topics(new_label, new_summary)
+    if not new_topics:
+        return []
+
+    contested = []
+    for node_id, node in existing_nodes.items():
+        if node_id in exclude_ids:
+            continue
+        if node.type != NodeType.DECISION:
+            continue
+        if node.status not in (NodeStatus.COMPLETED,):
+            continue
+
+        existing_topics = classify_topics(node.label, node.summary)
+        if not (existing_topics & new_topics):
+            continue
+        if _is_same_decision(new_label, node.label):
+            continue
+        # Reaching here means topics overlapped but _same_slot said no —
+        # ambiguous, not confidently a replacement.
+        if not _same_slot(new_label, new_summary, node.label, node.summary):
+            contested.append(node_id)
+
+    return contested
 
 
 def _find_by_word_overlap(

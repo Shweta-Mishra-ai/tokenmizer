@@ -1,7 +1,7 @@
 """Unit tests — graph validator and confidence scoring."""
 import pytest
 
-from tokenmizer.graph_memory.validator import GraphValidator
+from tokenmizer.graph_memory.validator import GraphValidator, get_validator
 
 
 @pytest.fixture
@@ -229,3 +229,83 @@ class TestExtractorConfidenceBlending:
         v = GraphValidator(min_confidence=0.50)
         r = v.validate("ok", "decision", extractor_confidence=0.95)
         assert not r.accepted
+
+
+class TestCharLenDeadBranchRemoved:
+    """
+    Regression test for TM-29a. `elif char_len > 40: confidence += 0.05`
+    was dead code — the preceding `elif char_len > 20: confidence +=
+    0.10` already caught every label longer than 20 characters,
+    including all of them above 40, so the documented "diminishing
+    returns on very long labels" behavior never actually ran; every long
+    label has always gotten the flat +0.10 in practice.
+
+    Making that documented behavior actually fire (checking the longer
+    threshold first) was tried and reverted: it measurably REDUCED task-
+    extraction recall against this repo's own memory-accuracy fixture —
+    several legitimately long, specific task labels lost enough
+    confidence to drop below the acceptance threshold. Since that
+    regression is concrete and immediate while "diminishing returns" was
+    never validated behavior to begin with, the fix removes the dead
+    branch rather than activating it: labels over 20 chars keep getting
+    the flat +0.10 that has actually been shipping. This test locks in
+    that specific choice — the flat bonus for ANY length past 20 chars,
+    including well past 40 — so a future "fix" doesn't reintroduce the
+    same recall regression without a real evaluation harness to justify it.
+    """
+
+    def test_length_bonus_stays_flat_past_40_chars(self):
+        v = GraphValidator(min_confidence=0.0)
+        short_long = "Use PostgreSQL for storage"                              # 27 chars, 4 words
+        very_long = "Use PostgreSQLReplicationClusterConfiguration for storage"  # 58 chars, 4 words
+        assert len(short_long.split()) == len(very_long.split()) == 4
+        assert 20 < len(short_long) <= 40
+        assert len(very_long) > 40
+
+        r_short = v.validate(label=short_long, node_type="concept")
+        r_long = v.validate(label=very_long, node_type="concept")
+        assert r_long.confidence == r_short.confidence, (
+            f"length bonus should stay flat for any label over 20 chars "
+            f"(including well past 40) — got long={r_long.confidence} "
+            f"short={r_short.confidence}"
+        )
+
+
+class TestGetValidatorDoesNotLeakGlobalState:
+    """Regression test for TM-29b: get_validator(min_confidence=X) used
+    to permanently overwrite the module-level singleton — one caller
+    passing an explicit override changed behavior for every OTHER caller
+    that just calls get_validator() with no arguments, for the rest of
+    the process lifetime."""
+
+    def test_explicit_override_does_not_leak_to_default_calls(self, monkeypatch):
+        import tokenmizer.graph_memory.validator as validator_module
+        monkeypatch.setattr(validator_module, "_validator", None)
+
+        default_validator = get_validator()
+        default_threshold = default_validator.min_confidence
+
+        get_validator(min_confidence=0.99)  # explicit override, elsewhere
+
+        again = get_validator()  # a caller with no override
+        assert again.min_confidence == default_threshold, (
+            f"an explicit min_confidence override leaked into the default "
+            f"get_validator() call — expected {default_threshold}, got "
+            f"{again.min_confidence}"
+        )
+
+
+class TestSourceRoleIsActuallyPassed:
+    """Regression test for TM-29c: add_node() never passed source_role
+    to validator.validate(), so every node got the "assistant" default
+    bonus regardless of which role's message it was actually extracted
+    from. This test operates at the GraphValidator level directly (the
+    add_node() wiring is a separate, larger change tracked as a
+    follow-up — see PR description)."""
+
+    def test_user_role_scores_lower_than_assistant_for_identical_label(self):
+        v = GraphValidator(min_confidence=0.0)
+        label = "Refactor the auth module for clarity"
+        r_assistant = v.validate(label=label, node_type="concept", source_role="assistant")
+        r_user = v.validate(label=label, node_type="concept", source_role="user")
+        assert r_assistant.confidence > r_user.confidence

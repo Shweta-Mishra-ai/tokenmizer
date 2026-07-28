@@ -49,6 +49,8 @@ cache:
   similarity_threshold: 0.92  # 0.90–0.98 recommended
   ttl_seconds: 3600           # 1 hour
   max_size: 10000             # LRU eviction when full
+  share_scope: session        # session (default, safe) | shared (opt-in cross-session sharing
+                               # for prompts that don't look sensitive — see SECURITY.md)
 
 # ── Terse Output ─────────────────────────────────────────────────────────────
 terse_output:
@@ -66,5 +68,10 @@ memory:
   recent_turns_verbatim: 10
 
 # ── Server ───────────────────────────────────────────────────────────────────
-proxy_host: 0.0.0.0
+# 127.0.0.1 = localhost only (safe default). Set to 0.0.0.0 to accept
+# connections from other machines — only do this behind your own auth/
+# network controls (see SECURITY.md). The Docker deployment (Dockerfile /
+# docker-compose.yml) passes --host 0.0.0.0 explicitly and is unaffected
+# by this setting either way.
+proxy_host: 127.0.0.1
 proxy_port: 8000
