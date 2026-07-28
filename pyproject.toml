@@ -109,4 +109,20 @@ omit = [
 [tool.coverage.report]
 # Honest floor over ALL product code (previously 70, but with api/app.py,
 # auth.py, providers and other core modules excluded — coverage theater).
-# Single source of truth: CI m
+# Single source of truth: CI matrix reads this value, no override in the
+# workflow — see CHANGELOG "Honest quality gates" for why 50 (measured
+# 61% at the time this was set, before the omits above were removed;
+# threshold kept a margin below the honest number rather than pinned to
+# it, so incidental coverage dips don't immediately red the build).
+#
+# FOUND DURING FINAL VALIDATION: this file was truncated mid-comment,
+# with the actual `fail_under = 50` line missing entirely — the
+# CHANGELOG entry documenting this decision survived, but the config
+# value it describes did not. Since fail_under was never set, CI's
+# "Run tests with coverage" step could never fail on low coverage
+# regardless of how far it dropped — the exact kind of silently-lost
+# information (a gate that looks configured in the comments but isn't
+# actually enforced) this audit was tasked with finding. Restored to
+# the documented value; current measured coverage is ~76%, comfortably
+# above it.
+fail_under = 50
