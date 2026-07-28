@@ -11,10 +11,18 @@ Key fixes over V3:
 - Secret redaction on every write
 - SQLite persistence (survives restarts)
 
-Module layout (split for maintainability — see types.py / helpers.py):
-- types.py:   NodeType, NodeStatus, EdgeType, MemoryNode, MemoryEdge, DecisionTransition
-- helpers.py: _content_to_text, _infer_trigger, _extract_evidence_from_text
-- graph.py:   GraphMemory (this file) — all extraction/query/persistence logic
+Module layout (split for maintainability):
+- types.py:          NodeType, NodeStatus, EdgeType, MemoryNode, MemoryEdge, DecisionTransition
+- helpers.py:         _content_to_text, _infer_trigger, _extract_evidence_from_text
+- persistence.py:     SQLite init/connect, transition persistence, save/load round-trip
+- pruning.py:         importance decay + node-count cap enforcement
+- context_block.py:   the tiered, token-budgeted resume context builder
+- visualization.py:   D3 / Obsidian Canvas exports
+- graph.py (this file): GraphMemory — node/edge CRUD, extraction, query.
+  Delegates persistence/pruning/context-block/visualization work to the
+  modules above via one-line wrapper methods, so existing callers
+  (`graph._persist()`, `graph.prune()`, `graph.to_context_block()`, etc.)
+  are unaffected.
 
 All names below are re-exported here for backward compatibility:
 existing code doing `from tokenmizer.graph_memory.graph import NodeType` etc.
