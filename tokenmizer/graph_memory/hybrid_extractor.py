@@ -487,7 +487,7 @@ class HybridExtractor:
             label = m.group(1).strip()[:80]
             norm  = self._normalize(label)
             if norm not in seen_decisions and len(norm) > 4:
-                result.decisions.append({"label": label, "reason": ""})
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
         # Decision Pass 2: header format
@@ -497,7 +497,7 @@ class HybridExtractor:
             label = m.group(1).strip()[:80]
             norm  = self._normalize(label)
             if norm not in seen_decisions:
-                result.decisions.append({"label": label, "reason": ""})
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
         # Decision Pass 3: tech names
@@ -507,7 +507,7 @@ class HybridExtractor:
             label = "Use " + m.group(1).strip()[:60]
             norm  = self._normalize(label)
             if norm not in seen_decisions:
-                result.decisions.append({"label": label, "reason": ""})
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
         # Decision Pass 4: passive (bcrypt with cost factor 12)
@@ -517,7 +517,7 @@ class HybridExtractor:
             label = "Use " + m.group(1).strip()[:60]
             norm  = self._normalize(label)
             if norm not in seen_decisions:
-                result.decisions.append({"label": label, "reason": ""})
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
         # Superseded + both sides as decisions
@@ -531,7 +531,8 @@ class HybridExtractor:
                 norm = self._normalize(label)
                 if norm not in seen_decisions and len(norm) > 6:
                     reason = f"Replaced by: {new_label}" if label.endswith(old_label) else surrounding[:100]
-                    result.decisions.append({"label": label, "reason": reason, "evidence": surrounding[:120]})
+                    result.decisions.append({"label": label, "reason": reason,
+                                             "evidence": surrounding[:120], "source_role": role})
                     seen_decisions.add(norm)
 
         # Files
@@ -780,6 +781,16 @@ class HybridExtractor:
                     existing["reason"] = d["reason"]
                 if d.get("evidence") and not existing.get("evidence"):
                     existing["evidence"] = d["evidence"]
+                # source_role (TM-29): only the heuristic pass attributes a
+                # decision to a specific message's role — the LLM pass
+                # synthesizes across the whole conversation with no
+                # single-turn attribution, so `existing` (built from the LLM
+                # dict) never has one. Backfill it here the same way
+                # reason/evidence are, or a corroborated decision (the
+                # highest-confidence tier) would silently lose the one
+                # signal the heuristic side actually knew.
+                if d.get("source_role") and not existing.get("source_role"):
+                    existing["source_role"] = d["source_role"]
             else:
                 seen[key] = {**d, "confidence": 0.65, "_source": "heuristic"}
 

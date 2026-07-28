@@ -39,6 +39,31 @@ def test_heuristic_extracts_decisions():
     assert has_bcrypt, f"Expected bcrypt decision, got: {decision_labels}"
 
 
+def test_heuristic_decisions_carry_the_true_message_role():
+    """Regression test for TM-29: heuristic_extract() now attaches which
+    role's message each decision actually came from, so downstream
+    (GraphMemory._apply_extracted -> add_node -> GraphValidator.validate)
+    can stop assuming every decision is assistant-authored. MESSAGES has
+    the bcrypt decision in a "user" turn and the Redis decision in an
+    "assistant" turn — this must reflect that, not a blanket "assistant"."""
+    result = extractor.heuristic_extract(MESSAGES)
+    by_label = {d.get("label", "").lower(): d for d in result.decisions}
+
+    bcrypt_decisions = [d for label, d in by_label.items() if "bcrypt" in label]
+    assert bcrypt_decisions, f"Expected a bcrypt decision, got: {list(by_label)}"
+    assert bcrypt_decisions[0].get("source_role") == "user", (
+        "bcrypt decision came from a user-role message in MESSAGES but "
+        f"source_role was {bcrypt_decisions[0].get('source_role')!r}"
+    )
+
+    redis_decisions = [d for label, d in by_label.items() if "redis" in label]
+    assert redis_decisions, f"Expected a redis decision, got: {list(by_label)}"
+    assert redis_decisions[0].get("source_role") == "assistant", (
+        "redis decision came from an assistant-role message in MESSAGES "
+        f"but source_role was {redis_decisions[0].get('source_role')!r}"
+    )
+
+
 def test_heuristic_extracts_tasks_done():
     result = extractor.heuristic_extract(MESSAGES)
     all_tasks = result.tasks_done + result.tasks_wip

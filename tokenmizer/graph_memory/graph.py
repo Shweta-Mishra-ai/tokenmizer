@@ -159,6 +159,7 @@ class GraphMemory:
         summary: str = "",
         importance: float = 0.5,
         confidence: float = 0.7,
+        source_role: str | None = "assistant",
     ) -> str:
         from tokenmizer.security.redaction import redact_node
         label, summary = redact_node(label, summary)
@@ -230,6 +231,7 @@ class GraphMemory:
             label=label,
             node_type=node_type.value,
             summary=summary,
+            source_role=source_role,
             extractor_confidence=confidence if confidence != 0.7 else None,
         )
         if not result.accepted:
@@ -524,9 +526,21 @@ class GraphMemory:
             # Use per-item confidence from merge() if provided (corroboration signal).
             # Fallback: 0.9 for explicit decisions (high-value nodes).
             node_confidence = float(d.get("confidence", 0.9))
+            # source_role (TM-29): only heuristic-extracted decisions carry
+            # a real one — HybridExtractor._extract_one_message knows which
+            # message (and therefore which role) each decision came from.
+            # LLM-synthesized decisions have no single-turn attribution, so
+            # `d.get("source_role")` is None for them; fall back to the same
+            # "assistant" default add_node()/validate() already use for
+            # every other node type, rather than passing an explicit None
+            # that would override that default and (as confirmed by a
+            # regression this caused on the first pass, caught via the full
+            # test suite) unfairly cost LLM-sourced decisions the trust
+            # bonus every other unattributed node type still gets.
             nid = self.add_node(NodeType.DECISION, label, NodeStatus.COMPLETED,
                                 summary=summary, importance=0.9,
-                                confidence=node_confidence)
+                                confidence=node_confidence,
+                                source_role=d.get("source_role") or "assistant")
             if nid:
                 decision_ids.append(nid)
                 # Link to tasks if they share meaningful vocabulary (with alias expansion)

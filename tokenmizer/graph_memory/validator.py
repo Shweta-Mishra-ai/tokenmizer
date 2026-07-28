@@ -85,12 +85,42 @@ class GraphValidator:
         label: str,
         node_type: str,
         summary: str = "",
-        source_role: str = "assistant",
+        source_role: Optional[str] = "assistant",
         extractor_confidence: float | None = None,
     ) -> ValidationResult:
         """
         Validate a candidate node.
         Returns ValidationResult with accepted=True/False and confidence score.
+
+        source_role: "assistant" (default), "user", or None. Only "assistant"
+        gets the small trust bonus below.
+
+        TM-29 background: add_node() used to never pass this through at all,
+        so every node got the assistant-trust bonus unconditionally,
+        regardless of whether a user or the assistant actually stated it —
+        including candidates extracted from a user's own message. The
+        default stays "assistant" here (rather than None/no-bonus) because
+        every node type's confidence scoring, and the 0.65 min_confidence
+        threshold itself, were empirically tuned assuming this bonus applies
+        — flipping the default to "no bonus by default" measurably regressed
+        acceptance for dependency/task/decision nodes with no source_role
+        wired at all yet, confirmed against this repo's own unit tests and
+        the memory-accuracy fixture (tests/memory_accuracy/test_retention.py)
+        before this was caught and reverted. See [[feedback_heuristic_tuning_needs_eval]]
+        for the standing rule this follows: don't flip a shared default whose
+        blast radius wasn't independently re-validated.
+
+        What's actually fixed: HybridExtractor._extract_one_message knows
+        the true role of the message each heuristic-extracted DECISION came
+        from (see hybrid_extractor.py and GraphMemory._apply_extracted) and
+        now threads it through explicitly — so a decision a USER stated no
+        longer silently gets the assistant bonus it shouldn't. Every other
+        node type, and LLM-synthesized decisions (no single-turn
+        attribution), still fall through to the "assistant" default
+        unchanged — extending real role-tracking to them is a separate,
+        larger effort (would require a broader ExtractedData schema change)
+        left for future work, not silently attempted here at the cost of a
+        confirmed recall regression.
 
         extractor_confidence: the corroboration-based confidence computed by
         HybridExtractor.merge() (0.95 = both LLM and heuristic found it,
@@ -191,6 +221,7 @@ class GraphValidator:
             confidence += 0.08
 
         # Source role: assistant claims are generally more reliable than user
+        # ones — but only applied when actually known (see TM-29 note above).
         if source_role == "assistant":
             confidence += 0.05
 

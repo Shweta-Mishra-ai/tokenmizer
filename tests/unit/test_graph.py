@@ -113,6 +113,59 @@ class TestExtraction:
             assert "sk-ant" not in node.label
             assert "sk-ant" not in node.summary
 
+    def test_add_node_threads_source_role_to_validator(self, tmp_path):
+        """Regression test for TM-29: add_node() never passed source_role
+        to validator.validate() at all, so every node got the "assistant"
+        confidence bonus regardless of the caller's actual knowledge of
+        who stated it. Uses the default confidence=0.7 sentinel so the
+        stored node confidence is the validator's OWN computed score
+        (see add_node's `confidence if confidence != 0.7 else
+        result.confidence`) rather than an explicit override — that's
+        the only way this wiring is externally observable."""
+        g_user = GraphMemory("role-wiring-user", storage_dir=str(tmp_path / "user"))
+        nid_user = g_user.add_node(
+            NodeType.DECISION, "Use MongoDB for the catalog service",
+            NodeStatus.COMPLETED, source_role="user",
+        )
+        g_asst = GraphMemory("role-wiring-assistant", storage_dir=str(tmp_path / "asst"))
+        nid_asst = g_asst.add_node(
+            NodeType.DECISION, "Use MongoDB for the catalog service",
+            NodeStatus.COMPLETED, source_role="assistant",
+        )
+        assert nid_user and nid_asst, "both variants should be accepted"
+        assert g_asst._nodes[nid_asst].confidence > g_user._nodes[nid_user].confidence, (
+            f"assistant-sourced confidence {g_asst._nodes[nid_asst].confidence} should "
+            f"exceed user-sourced confidence {g_user._nodes[nid_user].confidence} — "
+            f"equal values mean add_node() isn't actually passing source_role through"
+        )
+
+    def test_apply_extracted_forwards_decision_source_role_to_add_node(self, graph, monkeypatch):
+        """_apply_extracted() must forward the per-item "source_role" a
+        heuristic-extracted decision dict carries through to add_node() —
+        this is the link between HybridExtractor attaching the real role
+        (test_hybrid_extractor.py) and add_node() actually using it
+        (test_add_node_threads_source_role_to_validator above). Verified
+        directly via monkeypatch since the stored node confidence alone
+        can't distinguish this — _apply_extracted passes an explicit
+        confidence override for decisions, which masks the validator's
+        own score in the final stored value."""
+        captured: list[dict] = []
+        real_add_node = graph.add_node
+
+        def _spy_add_node(*args, **kwargs):
+            captured.append(kwargs)
+            return real_add_node(*args, **kwargs)
+
+        monkeypatch.setattr(graph, "add_node", _spy_add_node)
+        graph._apply_extracted(
+            {"decisions": [{"label": "Use MongoDB for the catalog service",
+                            "reason": "", "source_role": "user"}]},
+            messages=[],
+        )
+        decision_calls = [kw for kw in captured if kw.get("source_role") is not None]
+        assert decision_calls, f"add_node was never called with source_role set: {captured}"
+        assert decision_calls[0]["source_role"] == "user"
+
 
 class TestPruning:
 
