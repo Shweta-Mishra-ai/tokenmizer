@@ -26,6 +26,7 @@ Pure code motion — no behavior changes.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -38,6 +39,30 @@ from tokenmizer.security.auth import verify_api_key
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _internal_error(context: str, e: Exception) -> HTTPException:
+    """
+    Build a 500 HTTPException for an unexpected failure without leaking
+    the raw exception text to the client.
+
+    FIXED: these three handlers (checkpoint creation, decision
+    invalidation, resume) previously did `detail=str(e)` directly —
+    `str(e)` on things like `sqlite3.OperationalError` or a filesystem
+    error routinely embeds real disk paths, and other exception types
+    can include similarly internal detail. `chat_completions()`'s own
+    provider-failure handler already avoids this (see TM-33) via a
+    correlation id: full detail goes to the server log, the client gets
+    a generic message plus the id to reference when asking for help.
+    Factored out here since the same pattern was needed at all three
+    call sites — one shared helper instead of three copies.
+    """
+    correlation_id = uuid.uuid4().hex[:12]
+    logger.error(f"{context} [{correlation_id}]: {e}")
+    return HTTPException(
+        status_code=500,
+        detail=f"{context} (ref: {correlation_id}). Check server logs for details.",
+    )
 
 
 @router.get("/api/stats", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
@@ -225,8 +250,7 @@ async def create_manual_checkpoint(session_id: str):
             "trigger": ckpt.trigger,
         }
     except Exception as e:
-        logger.error(f"Manual checkpoint failed for session {session_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _internal_error(f"Manual checkpoint failed for session {session_id}", e)
 
 
 @router.get("/api/checkpoints/{session_id}", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
@@ -343,8 +367,7 @@ async def invalidate_decision(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Invalidate decision failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise _internal_error("Invalidate decision failed", e)
 
 
 @router.get("/api/resume/{session_id}", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
@@ -372,5 +395,4 @@ async def get_resume(session_id: str, level: str = "standard"):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Resume failed for {session_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Resume failed: {str(e)}")
+        raise _internal_error(f"Resume failed for {session_id}", e)
