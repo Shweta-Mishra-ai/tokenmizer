@@ -44,6 +44,12 @@ jobs:
       - name: Lint (blocking)
         run: ruff check tokenmizer/ tests/ benchmarks/ scripts/
 
+      # The eval harness gates extraction quality: tests/unit/
+      # test_extraction_quality.py asserts F1 floors per category, and
+      # this makes the numbers themselves visible in the build log.
+      - name: Extraction eval
+        run: python -m benchmarks.eval
+
       - name: Benchmarks are runnable
         run: |
           python -m benchmarks.checkpoint_accuracy.runner

@@ -311,9 +311,21 @@ class GraphValidator:
     _DEP_PATTERN = re.compile(r'^[a-z][a-z0-9\-_]+(==|>=|<=|~=|>|<)\d', re.IGNORECASE)
     _URL_PATTERN = re.compile(r'^(GET|POST|PUT|DELETE|PATCH)\s+/')
 
+    # A label is "essentially a path" when the path IS the label, not
+    # merely its tail. Without this bound, `_FILE_PATTERN` (which anchors
+    # on the end of the string) retyped any task or decision that happened
+    # to finish with a filename — "User model in api/models.py" became a
+    # FILE node, so it vanished from completed tasks and showed up as a
+    # spurious file. Measured on the eval corpus, this alone cost several
+    # points of task recall and of file precision.
+    _MAX_PATH_LABEL_WORDS = 2
+
     def _check_type_mismatch(self, label: str, node_type: str) -> Optional[str]:
         """Return corrected type if we detect a mismatch, else None."""
-        if node_type != "file" and self._FILE_PATTERN.search(label) and "/" in label:
+        if (node_type != "file"
+                and self._FILE_PATTERN.search(label)
+                and "/" in label
+                and len(label.split()) <= self._MAX_PATH_LABEL_WORDS):
             return "file"
         if node_type != "dependency" and self._DEP_PATTERN.match(label):
             return "dependency"

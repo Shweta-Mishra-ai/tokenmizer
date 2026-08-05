@@ -125,7 +125,12 @@ tokenmizer/
 │       └── __init__.py              # StorageBackend protocol (documentation-level, not enforced — see note above)
 │
 ├── scripts/                      # mcp_e2e_check.py, gen_demo_gif.py, setup/install helpers
-├── benchmarks/                   # checkpoint_accuracy/, graph_retrieval/, persistence/, latency/
+├── benchmarks/
+│   ├── eval/                     # extraction P/R/F1 harness + labelled corpus
+│   ├── checkpoint_accuracy/      # graph vs summary baseline
+│   ├── graph_retrieval/          # category recall
+│   ├── persistence/              # write amplification + concurrency
+│   └── latency/                  # end-to-end proxy latency (needs a running server)
 └── tests/                        # 42 files — see TESTING.md for what's covered and how
 ```
 
@@ -305,6 +310,33 @@ pytest tests/unit/test_decision_tracker.py -v   # a single module
 pytest tests/memory_accuracy/ -v                # extraction-accuracy regression
 python scripts/mcp_e2e_check.py                 # MCP stdio transport, end to end
 pytest tests/ --cov=tokenmizer --cov-report=term-missing   # coverage report (no enforced floor)
+
+### Changing extraction
+
+Extraction changes must be measured, not eyeballed:
+
+```bash
+python -m benchmarks.eval              # precision / recall / F1 per category
+python -m benchmarks.eval --errors     # every miss and false positive, by session
+python -m benchmarks.eval --sweep      # how strict is "found"?
+```
+
+`tests/unit/test_extraction_quality.py` holds F1 floors that fail the
+build on a regression. If your change moves a number the wrong way, say
+so in the PR with the before/after table — a trade is fine, an unnoticed
+regression is not.
+
+Tuning a constant? Sweep it and put the table in the code comment, as
+`_MIN_CLAUSE_CHARS` does. The point is that the next person can disagree
+with the trade-off rather than with a magic number.
+
+**Adding corpus sessions is one of the most useful contributions
+available.** The committed corpus is 8 hand-written synthetic sessions;
+it is the weakest part of every extraction claim this project makes.
+Format and rules are documented in `benchmarks/eval/corpus.py`. Label
+spans that appear in the transcript, not hindsight summaries — scoring
+against "auth endpoints" when nobody said it measures paraphrasing, not
+extraction.
 ```
 
 Tests run against real SQLite in temp directories and mocked provider

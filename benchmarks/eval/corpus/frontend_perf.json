@@ -1,0 +1,60 @@
+{
+  "id": "frontend_perf",
+  "origin": "synthetic",
+  "domain": "frontend/react",
+  "notes": "Measurement-driven session with numeric evidence attached to decisions.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "The dashboard takes 4.2s to first paint. Needs to be under 1.5s."
+    },
+    {
+      "role": "assistant",
+      "content": "Profiled it. The bundle is 2.1MB. Decided: code splitting with React.lazy for the chart routes. Updated src/App.tsx and src/routes.tsx."
+    },
+    {
+      "role": "user",
+      "content": "what else is slow"
+    },
+    {
+      "role": "assistant",
+      "content": "Completed: route-level code splitting, bundle is now 780KB and first paint is 1.9s. The remaining cost is the moment.js locale bundle."
+    },
+    {
+      "role": "user",
+      "content": "swap moment for something smaller"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: date-fns instead of moment.js \u2014 tree-shakeable, saves about 230KB. Updated src/utils/format.ts and package.json."
+    },
+    {
+      "role": "user",
+      "content": "how are we doing"
+    },
+    {
+      "role": "assistant",
+      "content": "First paint is 1.3s now, under the target. Working on preloading the fonts in index.html."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "route-level code splitting"
+    ],
+    "pending_tasks": [
+      "preloading the fonts"
+    ],
+    "decisions": [
+      "code splitting with React.lazy",
+      "date-fns instead of moment.js"
+    ],
+    "files": [
+      "src/App.tsx",
+      "src/routes.tsx",
+      "src/utils/format.ts",
+      "package.json",
+      "index.html"
+    ],
+    "errors": []
+  }
+}

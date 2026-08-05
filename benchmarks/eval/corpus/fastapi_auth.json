@@ -1,0 +1,112 @@
+{
+  "id": "fastapi_auth",
+  "origin": "synthetic",
+  "domain": "backend/python",
+  "notes": "Explicit 'Completed:'/'Decided:' markers \u2014 the easy case the heuristics were written against. Ground truth relabelled to transcript spans, not hindsight summaries.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Let's build a FastAPI authentication service with JWT and PostgreSQL"
+    },
+    {
+      "role": "assistant",
+      "content": "Starting project. Creating: api/main.py, api/auth.py, api/models.py, config.py, requirements.txt"
+    },
+    {
+      "role": "user",
+      "content": "Use Python 3.12 and bcrypt for password hashing"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: Python 3.12 runtime. Decided: bcrypt for password hashing (industry standard). Completed: virtual environment setup."
+    },
+    {
+      "role": "user",
+      "content": "Implement the user model first"
+    },
+    {
+      "role": "assistant",
+      "content": "Completed: User model in api/models.py \u2014 fields: id, email, hashed_password, created_at, is_active"
+    },
+    {
+      "role": "user",
+      "content": "Now add the auth endpoints"
+    },
+    {
+      "role": "assistant",
+      "content": "Implemented: POST /api/auth/register, POST /api/auth/login (returns JWT), POST /api/auth/logout. Files updated: api/auth.py"
+    },
+    {
+      "role": "user",
+      "content": "Login keeps returning 422"
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed: 422 error \u2014 missing email validation in LoginRequest Pydantic model. Updated api/models.py. Login endpoint working now."
+    },
+    {
+      "role": "user",
+      "content": "Add refresh token support using Redis"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: Redis for refresh token storage (not DB \u2014 faster revocation). Adding: redis to requirements.txt. Working on: refresh token rotation in api/auth.py"
+    },
+    {
+      "role": "user",
+      "content": "What's the DB schema look like?"
+    },
+    {
+      "role": "assistant",
+      "content": "Schema: users table \u2014 id (UUID PK), email (unique), hashed_password, created_at, is_active. No refresh_tokens table \u2014 using Redis."
+    },
+    {
+      "role": "user",
+      "content": "Write tests"
+    },
+    {
+      "role": "assistant",
+      "content": "Created tests/test_auth.py with 12 tests: login_success, login_wrong_password, register_success, token_refresh, token_expiry, logout. All 12 passing."
+    },
+    {
+      "role": "user",
+      "content": "Add rate limiting to auth endpoints"
+    },
+    {
+      "role": "assistant",
+      "content": "Working on: rate limiting using slowapi. Will limit: 5 login attempts per minute per IP. Updating api/main.py"
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "virtual environment setup",
+      "User model in api/models.py",
+      "POST /api/auth/register",
+      "422 error",
+      "tests/test_auth.py"
+    ],
+    "pending_tasks": [
+      "refresh token rotation",
+      "rate limiting using slowapi"
+    ],
+    "decisions": [
+      "Python 3.12",
+      "bcrypt for password hashing",
+      "Redis for refresh token storage",
+      "PostgreSQL",
+      "JWT"
+    ],
+    "files": [
+      "api/main.py",
+      "api/auth.py",
+      "api/models.py",
+      "config.py",
+      "requirements.txt",
+      "tests/test_auth.py"
+    ],
+    "errors": [
+      "422 error",
+      "missing email validation"
+    ]
+  }
+}

@@ -1,5 +1,114 @@
 # Changelog
 
+## [0.6.0] — 2026-08-05 — an eval harness, a real corpus, and measured extraction
+
+Addresses the three things flagged as launch risks in 0.5.0: a
+three-session benchmark, unmeasured task recall, and hand-tuned constants
+with nothing to justify them.
+
+### New — `python -m benchmarks.eval`
+A precision/recall/F1 harness over a labelled corpus, with per-item error
+listing so a failure is diagnosable rather than just visible.
+
+**It reports precision, not only recall.** Every extraction number this
+project published before now was recall-only, which is the metric an
+extractor games by emitting more text — one node containing the whole
+transcript scores 100%. Matching is asymmetric and anchored on the
+ground-truth item, so a sprawling label cannot buy recall without paying
+for it in precision.
+
+Label quality is scored separately from correctness: truncation rate,
+multi-sentence rate, near-duplicate count. An extractor can be accurate
+and still emit labels nobody wants in a token-budgeted resume block.
+
+`--sweep` moves a constant across a range and prints the effect, so a
+threshold can be defended with a table.
+
+### New — a labelled corpus, and a way to use your own
+**8 sessions, 82 turns, 97 labelled items, 8 domains** (Go, Rust, Python,
+TypeScript, React, SQL, CI, ML) — up from 3 sessions in one style.
+
+The three original sessions were **relabelled**. Their ground truth used
+hindsight summaries ("auth endpoints", "tests") that nobody says out
+loud, so scoring against them measured paraphrasing rather than
+extraction. Labels are now spans a reader can point at in the transcript.
+
+Every session declares `origin: synthetic | real` and the harness prints
+the split, because "89% recall" means something different on hand-written
+fixtures than on captured transcripts. **The committed corpus is entirely
+synthetic.** `--corpus DIR` runs against your own labelled sessions,
+which is the only way to get a number about your workload.
+
+### Fixed — extraction defects the harness exposed
+
+| | before | after |
+|---|---|---|
+| Errors F1 | 14% | **87%** |
+| Files F1 | 74% | **91%** |
+| Completed tasks F1 | 77% | 75% |
+| Decisions F1 | 63% | 60% |
+| **Macro F1** | **59%** | **75%** |
+| Labels truncated mid-word | 23% | **8%** |
+| Labels spanning >1 sentence | 27% | **5%** |
+
+Reported in full, including the two categories that moved slightly the
+wrong way: clipping labels to one clause costs a little coverage on long
+ground-truth items, and that trade bought a 15-point macro gain and
+labels a human can read.
+
+- **Errors were scanned only in the recent window**, so a session that
+  diagnosed three failures early and spent its remaining turns fixing
+  them carried none of them forward. An error is a permanent fact —
+  a resolved one explains the code, an unresolved one is the most
+  important thing in a resume. Now scanned over full history.
+- **The error pattern required a keyword followed by a description**
+  ("Error: <text>") from a vocabulary of exception names and HTTP codes.
+  Real transcripts say "a port collision in the integration tests", "an
+  OOM on the Windows runner", "the backfill is timing out". Recall was
+  **1 of 12**. Replaced with typed-exception and symptom-phrase patterns
+  that capture the subject, not just the tail.
+- **Any task or decision whose label ended in a file path was silently
+  retyped as a FILE node** — `_check_type_mismatch` anchors on the end of
+  the string, so "User model in api/models.py" became a file. It
+  vanished from completed tasks and appeared as a spurious file, costing
+  both task recall and file precision.
+- **`wrote?` never matched "written"**, the usual way completion is
+  narrated ("I've written the connection pool").
+- **Duplicate granularity.** One mention of `scripts/backfill.py`
+  produced both it and `backfill.py`; "bcrypt for password hashing"
+  produced both it and a bare "Use bcrypt". One fact, two nodes, in a
+  block with a token budget.
+- **Captures ran to a fixed 80 characters** with no notion of where the
+  thought ended, producing labels cut mid-word and labels spanning three
+  sentences. Now clipped to one clause.
+
+### Changed — a constant chosen from a table instead of by feel
+`_MIN_CLAUSE_CHARS` governs how short a clipped label may be. Swept
+against the corpus:
+
+| min_chars | macro F1 | truncated | multi-sentence |
+|---|---|---|---|
+| 8 | 74% | 6% | 3% |
+| **22** | **75%** | **8%** | **5%** |
+| 34 | 79% | 17% | 14% |
+| 48 | 79% | 24% | 20% |
+
+F1 keeps climbing past 22 only by letting labels sprawl again — the
+defect the clipping was added to fix. 22 keeps essentially all the
+readability win and takes most of the accuracy gain. The sweep is in the
+code comment so the next person can disagree with the trade rather than
+with a magic number.
+
+### Added — tests
+`tests/unit/test_extraction_quality.py` (23 tests): clause clipping
+including the dots-inside-tokens case, both dedup rules, errors surviving
+outside the recent window, bare symptom words not being emitted alone,
+the metric's asymmetry, corpus validation, and F1 floors per category.
+Floors sit below measured values on purpose — a test pinned to today's
+exact number trains people to edit the assertion.
+
+**521 tests, ruff clean, MCP e2e green.**
+
 ## [0.5.0] — 2026-08-05 — cross-process safety, verified benchmarks, launch prep
 
 ### New — graph writes are safe across processes

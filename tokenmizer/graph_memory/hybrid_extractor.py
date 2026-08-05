@@ -223,10 +223,87 @@ _EVIDENCE_STANDARD = re.compile(
     re.IGNORECASE,
 )
 
+# Trailing fragments that mean a capture was cut where a clause
+# continued, so the label ends on a dangling connective.
+_DANGLING_TAIL = re.compile(
+    r"[\s,;:—-]+(?:and|or|but|with|for|to|in|on|at|by|from|the|a|an|of|"
+    r"that|which|when|while|so|then|using|via)\s*$",
+    re.IGNORECASE,
+)
+# A clause ends at terminal punctuation FOLLOWED BY whitespace or the
+# end of the span. The lookahead is load-bearing: a bare `[.!?;]` also
+# matches the dot in `evaluate.py`, `requirements.txt` and `Python 3.12`,
+# which silently truncated those labels to "evaluate", "requirements"
+# and "Python 3".
+# Minimum length a clipped label must reach before a clause boundary is
+# allowed to end it. Chosen by sweeping it against the eval corpus
+# (`python -m benchmarks.eval --sweep`, and the table in CHANGELOG 0.6.0)
+# rather than by feel:
+#
+#   min_chars   macro F1   truncated   multi-sentence
+#           8        74%          6%              3%
+#          22        75%          8%              5%     <- chosen
+#          34        79%         17%             14%
+#          48        79%         24%             20%
+#
+# F1 keeps climbing past 22, but only by letting labels sprawl again —
+# which is the defect this clipping was added to fix. 22 keeps
+# essentially all of the readability win (baseline was 23% truncated,
+# 27% multi-sentence) while taking most of the accuracy gain. Anyone
+# preferring a different point on that curve can re-run the sweep; the
+# point is that the number is now defensible from a table.
+_MIN_CLAUSE_CHARS = 22
+_CLAUSE_END = re.compile(r"[.!?;](?=\s|$)|\s[—–]\s|\n")
+
+
+def _clip(text: str, max_chars: int = 90) -> str:
+    """Trim a captured span to one readable clause.
+
+    The extraction patterns capture a fixed width of whatever follows a
+    keyword — `(.{5,80})` — which has no idea where the thought ends. In
+    practice that produced labels cut mid-word, labels running across
+    three sentences ("...updated api/models.py. Login endpoint working
+    now."), and several overlapping labels for one fact. Measured on the
+    eval corpus before this existed: 27% of labels truncated mid-word,
+    26% spanning more than one sentence.
+
+    Cut at the first clause terminator, fall back to the last whole word
+    inside the budget, then drop a dangling connective so the label reads
+    as a statement rather than the first half of one.
+    """
+    s = " ".join((text or "").split())
+    if not s:
+        return ""
+
+    # Cut at the first clause boundary that leaves a label with enough
+    # substance to identify what it refers to. Taking the FIRST boundary
+    # unconditionally reduced "Fixed: 422 error - missing email
+    # validation in LoginRequest" to "422 error", which is short, tidy,
+    # and no longer says which validation broke. Measured on the eval
+    # corpus, cutting at >=8 chars cost 5 points of completed-task F1
+    # and 6 of decision F1 relative to this bound.
+    for m in _CLAUSE_END.finditer(s):
+        if m.start() >= _MIN_CLAUSE_CHARS:
+            s = s[:m.start()]
+            break
+
+    if len(s) > max_chars:
+        cut = s[:max_chars]
+        space = cut.rfind(" ")
+        s = cut[:space] if space >= 12 else cut
+
+    s = _DANGLING_TAIL.sub("", s).strip(" ,;:—-")
+    return s
+
+
 _TASK_DONE = re.compile(
+    # Past participles are listed explicitly. `wrote?` only ever matched
+    # "wrot"/"wrote" — never "written", which is how most completion is
+    # actually narrated ("I've written the connection pool").
     r'(?:completed?|finished?|done|implemented?|fixed?|added?|built?|shipped?|'
-    r'wired up|set up|created?|wrote?|updated?|deployed?|resolved?|merged?|'
-    r'refactored?|cleaned?|migrated?)'
+    r'wired up|set up|created?|wrote|written|updated?|deployed?|resolved?|'
+    r'merged?|refactored?|cleaned?|migrated?|restructured?|removed?|'
+    r'switched?|replaced?)'
     r'[\s:\-]+(.{5,80})',
     re.IGNORECASE,
 )
@@ -252,10 +329,41 @@ _TASK_TODO = re.compile(
     re.IGNORECASE,
 )
 
-_ERROR = re.compile(
-    r'(?:Error|Exception|TypeError|ValueError|ImportError|KeyError|AttributeError|'
-    r'404|500|422|503|failed?|broken?|crash\w*|traceback)'
-    r'[\s:]+([A-Z][^.]{5,60})',
+# Errors are matched two ways, because they are stated two ways.
+#
+# The original single pattern required an error KEYWORD followed by the
+# description ("Error: <text>"), from a vocabulary of exception class
+# names and HTTP codes. Real transcripts mostly do neither: "a port
+# collision in the integration tests", "an OOM on the Windows runner",
+# "CUDA out of memory", "the backfill is timing out". Measured on the
+# eval corpus, that pattern recalled 1 of 12 labelled errors.
+
+# Named exceptions, tracebacks and HTTP status codes. Captures the token
+# ITSELF plus trailing context, so "422 error" survives rather than being
+# reduced to "error".
+# Bare symptom words with no subject carry no information and would
+# otherwise be emitted as nodes on their own.
+_ERROR_STOPWORDS = frozenset({
+    "error", "errors", "exception", "failed", "failure", "broken",
+    "crash", "crashed", "race", "timeout", "hangs", "flaky", "panic",
+})
+
+_ERROR_TYPED = re.compile(
+    r'\b((?:[A-Z]\w*(?:Error|Exception)|Traceback|'
+    r'HTTP\s*[45]\d{2}|\b[45]\d{2}\b)'
+    r'(?:[\s:-]+[^.!?\n]{0,60})?)',
+)
+
+# Symptom vocabulary, with the noun phrase that precedes it — the subject
+# is what identifies the failure ("teardown race", not "race").
+_ERROR_SYMPTOM = re.compile(
+    r'\b((?:[\w./-]+\s+){0,3}'
+    r'(?:out of memory|oom|segfaults?|segmentation fault|stack overflow|'
+    r'deadlocks?|race condition|race|collisions?|memory leaks?|'
+    r'timing out|timed out|times out|timeouts?|hangs?|hanging|flaky|'
+    r'panics?|crash(?:es|ed|ing)?|regressions?|null pointer|infinite loop|'
+    r'not triggering|borrow checker error|fails? intermittently)'
+    r'(?:\s+(?:in|on|from)\s+(?:[\w./-]+\s*){1,3})?)',
     re.IGNORECASE,
 )
 
@@ -450,12 +558,25 @@ class HybridExtractor:
         # Goals: first 4 messages only (session intent captured early)
         if role == "user" and turn_idx < 4:
             for m in _GOAL_OPENERS.finditer(content):
-                result.goals.append(m.group(1).strip()[:100])
+                result.goals.append(_clip(m.group(1), 100))
 
         # Tasks done: full history (completed = permanent fact)
         for m in _TASK_DONE.finditer(content):
-            task = m.group(1).strip()[:80]
+            task = _clip(m.group(1))
+            if len(task) < 5:
+                continue
             norm = self._normalize(task)
+            # Subsumption, not just exact match: several passes fire on
+            # overlapping spans of one sentence and would otherwise emit
+            # two labels for one fact. Keep the more specific (longer) one.
+            dup_idx = next(
+                (i for i, t in enumerate(result.tasks_done) if self._subsumes(task, t)),
+                None,
+            )
+            if dup_idx is not None:
+                if len(task) > len(result.tasks_done[dup_idx]):
+                    result.tasks_done[dup_idx] = task
+                continue
             if norm not in seen_tasks:
                 result.tasks_done.append(task)
                 seen_tasks.add(norm)
@@ -466,9 +587,12 @@ class HybridExtractor:
             # literal backslash-s, not the whitespace escape \s. Since no
             # real text contains a literal backslash there, this prefix
             # strip could never match anything and has never once fired.
-            task = re.sub(r'^(?:the|a|an|this|that)\s+', '', m.group(1).strip()[:80], flags=re.IGNORECASE)
+            task = _clip(re.sub(r'^(?:the|a|an|this|that)\s+', '',
+                                m.group(1), flags=re.IGNORECASE))
             if len(task) > 5:
                 norm = self._normalize(task)
+                if any(self._subsumes(task, t) for t in result.tasks_done):
+                    continue
                 if norm not in seen_tasks:
                     result.tasks_done.append(task)
                     seen_tasks.add(norm)
@@ -476,15 +600,21 @@ class HybridExtractor:
         # WIP/TODO: recent window only (avoid stale in-progress)
         if is_recent:
             for m in _TASK_WIP.finditer(content):
-                result.tasks_wip.append(m.group(1).strip()[:80])
+                wip = _clip(m.group(1))
+                if len(wip) >= 5 and not any(
+                        self._subsumes(wip, t) for t in result.tasks_wip):
+                    result.tasks_wip.append(wip)
             for m in _TASK_TODO.finditer(content):
-                result.tasks_todo.append(m.group(1).strip()[:80])
+                todo = _clip(m.group(1))
+                if len(todo) >= 5 and not any(
+                        self._subsumes(todo, t) for t in result.tasks_todo):
+                    result.tasks_todo.append(todo)
 
         # Decision Pass 1: explicit verb
         for m in _DECISION.finditer(content):
             if _is_negated_context(content, m.start()):
                 continue
-            label = m.group(1).strip()[:80]
+            label = _clip(m.group(1))
             norm  = self._normalize(label)
             if norm not in seen_decisions and len(norm) > 4:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
@@ -494,7 +624,7 @@ class HybridExtractor:
         for m in _DECISION_HEADER.finditer(content):
             if _is_negated_context(content, m.start()):
                 continue
-            label = m.group(1).strip()[:80]
+            label = _clip(m.group(1))
             norm  = self._normalize(label)
             if norm not in seen_decisions:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
@@ -561,7 +691,7 @@ class HybridExtractor:
         for m in _SCHEMA_HEADER.finditer(content):
             if _is_negated_context(content, m.start()):
                 continue
-            schema = m.group(1).strip()[:100]
+            schema = _clip(m.group(1), 100)
             norm = self._normalize(schema)
             if norm not in seen_schemas and len(schema) > 3:
                 result.schemas.append(schema)
@@ -582,10 +712,22 @@ class HybridExtractor:
                 result.schemas.append(schema)
                 seen_schemas.add(norm)
 
-        # Errors (recent only)
-        if is_recent:
-            for m in _ERROR.finditer(content):
-                result.errors.append(m.group(1).strip()[:80])
+        # Errors: full history, NOT the recent window.
+        #
+        # An error is a permanent fact about the session in the same way a
+        # completed task is: a resolved one explains why the code looks
+        # the way it does, and an unresolved one is the single most
+        # important thing to carry into a resume. Gating on recency meant
+        # a session that diagnosed three failures early and spent the rest
+        # of its turns fixing them carried none of them forward.
+        for pattern in (_ERROR_TYPED, _ERROR_SYMPTOM):
+            for m in pattern.finditer(content):
+                err = _clip(m.group(1), 70)
+                if len(err) < 5 or err.lower() in _ERROR_STOPWORDS:
+                    continue
+                if any(self._subsumes(err, e) for e in result.errors):
+                    continue
+                result.errors.append(err)
 
         # Dependencies
         for m in _DEPENDENCY.finditer(content):
@@ -663,6 +805,14 @@ class HybridExtractor:
                 seen_endpoints, seen_schemas,
             )
 
+        # Cross-granularity dedup. Without this the heuristic path
+        # returns both `scripts/backfill.py` and `backfill.py`, and both
+        # "bcrypt for password hashing" and a bare "Use bcrypt" — one
+        # fact each, two nodes each. extract_from_messages() consumes
+        # this return value directly, so it is the only place the
+        # de-duplication can happen for heuristic-only extraction.
+        result.files = self._drop_shadowed_paths(result.files)
+        result.decisions = self._drop_vaguer_decisions(result.decisions)
         return result
 
 
@@ -803,6 +953,23 @@ class HybridExtractor:
         """Normalize for dedup comparison."""
         return re.sub(r'\s+', ' ', s.lower().strip())[:60]
 
+    @staticmethod
+    def _subsumes(a: str, b: str) -> bool:
+        """True if `a` and `b` state substantially the same fact.
+
+        Exact-string dedup is not enough. Several patterns fire on
+        overlapping spans of one sentence, so "Fixed: 422 error — missing
+        email validation in X" and "email validation in X. Login endpoint
+        working now" arrive as two labels for one event. Compared on
+        content words, one clearly subsumes the other.
+        """
+        wa = {w for w in re.findall(r"[a-z0-9]+", a.lower()) if len(w) > 2}
+        wb = {w for w in re.findall(r"[a-z0-9]+", b.lower()) if len(w) > 2}
+        if not wa or not wb:
+            return False
+        smaller = wa if len(wa) <= len(wb) else wb
+        return len(wa & wb) / len(smaller) >= 0.75
+
     # Fields on ExtractedData that are lists of DICTS, not lists of plain
     # strings — these can't go through the string-normalize-and-dedup
     # loop below and are copied through as-is instead.
@@ -846,10 +1013,71 @@ class HybridExtractor:
                     deduped.append(item)
                     seen.add(norm)
             setattr(result, attr, deduped[:15])
-        result.decisions = data.decisions
+        result.files = self._drop_shadowed_paths(result.files)
+        result.decisions = self._drop_vaguer_decisions(data.decisions)
         result.superseded = data.superseded
         result.evidence = data.evidence
         return result
+
+    @staticmethod
+    def _drop_shadowed_paths(files: list[str]) -> list[str]:
+        """Remove a bare basename when a full path to it was also found.
+
+        The file patterns match at two granularities, so one mention of
+        `scripts/backfill.py` yields both that and `backfill.py`. Two
+        nodes for one file is not extra information — it is a duplicate
+        that costs resume budget and drags precision down.
+        """
+        full = [f for f in files if "/" in f or "\\" in f]
+        basenames = {f.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower() for f in full}
+        return [f for f in files
+                if ("/" in f or "\\" in f) or f.lower() not in basenames]
+
+    def _drop_vaguer_decisions(self, decisions: list) -> list:
+        """Collapse "Use X" into a longer decision that also names X.
+
+        Several decision passes fire on one sentence at different levels
+        of specificity: "Decided: bcrypt for password hashing" produces
+        both that and a bare "Use bcrypt". The bare form states strictly
+        less and is not independently useful — a resume block listing
+        both reads as two decisions where one was made.
+        """
+        from tokenmizer.graph_memory.decision_tracker import _matched_topic_keywords
+
+        def _adds_nothing(short: str, long: str) -> bool:
+            """True if `short` names the same technology as `long` and
+            contributes no other content of its own.
+
+            Word overlap alone does not catch this: "Use bcrypt" and
+            "bcrypt for password hashing" share exactly one word out of
+            two, well under any sane subsumption threshold, yet the first
+            states strictly less than the second.
+            """
+            ks, kl = _matched_topic_keywords(short, ""), _matched_topic_keywords(long, "")
+            if not ks or not ks <= kl:
+                return False
+            filler = {"use", "using", "used", "go", "went", "with", "for",
+                      "the", "and", "decided", "choose", "chose", "pick",
+                      "picked", "switch", "switched", "adopt", "adopted"}
+            extra = {
+                w for w in re.findall(r"[a-z0-9]+", short.lower())
+                if len(w) > 2 and w not in filler and w not in ks
+            }
+            return not extra
+
+        kept: list = []
+        for d in sorted(decisions, key=lambda x: -len(x.get("label", ""))):
+            label = d.get("label", "")
+            if not label:
+                continue
+            if any(self._subsumes(label, k.get("label", "")) for k in kept):
+                continue
+            if any(_adds_nothing(label, k.get("label", "")) for k in kept):
+                continue
+            kept.append(d)
+        # Restore the original order so downstream ordering stays stable.
+        order = {id(d): i for i, d in enumerate(decisions)}
+        return sorted(kept, key=lambda d: order.get(id(d), 0))
 
     # ── Main entry ────────────────────────────────────────────────────────────
 

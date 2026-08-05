@@ -1,0 +1,70 @@
+{
+  "id": "data_migration",
+  "origin": "synthetic",
+  "domain": "data/sql",
+  "notes": "Two decision reversals in one session \u2014 stresses supersession without an explicit 'switched from' marker on the second.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "We need to migrate 40M rows from MySQL to Postgres with no downtime."
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: dual-write during migration. Created migrations/001_dual_write.sql and scripts/backfill.py."
+    },
+    {
+      "role": "user",
+      "content": "dual write is too risky, use logical replication instead"
+    },
+    {
+      "role": "assistant",
+      "content": "Switching from dual-write to logical replication. Decided: pglogical for the replication layer. Updated scripts/backfill.py."
+    },
+    {
+      "role": "user",
+      "content": "pglogical needs a superuser we don't have. use AWS DMS."
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: AWS DMS instead of pglogical. Created infra/dms_task.tf."
+    },
+    {
+      "role": "user",
+      "content": "backfill is timing out on the orders table"
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed the backfill timeout by batching at 10k rows in scripts/backfill.py. Completed the orders table backfill."
+    },
+    {
+      "role": "user",
+      "content": "verify row counts match"
+    },
+    {
+      "role": "assistant",
+      "content": "Working on a row count reconciliation script. Will add scripts/verify_counts.py."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "orders table backfill",
+      "batching at 10k rows"
+    ],
+    "pending_tasks": [
+      "row count reconciliation"
+    ],
+    "decisions": [
+      "AWS DMS",
+      "logical replication",
+      "dual-write"
+    ],
+    "files": [
+      "migrations/001_dual_write.sql",
+      "scripts/backfill.py",
+      "infra/dms_task.tf"
+    ],
+    "errors": [
+      "backfill is timing out"
+    ]
+  }
+}

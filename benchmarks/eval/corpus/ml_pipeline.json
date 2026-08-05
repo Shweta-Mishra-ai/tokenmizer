@@ -1,0 +1,71 @@
+{
+  "id": "ml_pipeline",
+  "origin": "synthetic",
+  "domain": "ml/python",
+  "notes": "Terse, jargon-dense turns; multiple config files. Ground truth relabelled to transcript spans, not hindsight summaries.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Need to build a training pipeline for a text classification model"
+    },
+    {
+      "role": "assistant",
+      "content": "Building ML pipeline. Creating: train.py, data/preprocess.py, models/classifier.py, config.yaml"
+    },
+    {
+      "role": "user",
+      "content": "Use PyTorch and HuggingFace transformers"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: PyTorch for training framework. Decided: HuggingFace transformers, using bert-base-uncased. Completed: environment setup with Python 3.11."
+    },
+    {
+      "role": "user",
+      "content": "Training is too slow"
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed: Added gradient checkpointing and mixed precision (torch.cuda.amp). Training 3x faster. Updated train.py."
+    },
+    {
+      "role": "user",
+      "content": "Switch from BERT to DistilBERT \u2014 faster inference"
+    },
+    {
+      "role": "assistant",
+      "content": "Switching from bert-base-uncased to distilbert-base-uncased. Reason: 40% faster inference, only 3% accuracy drop for our task. Updated models/classifier.py and config.yaml."
+    },
+    {
+      "role": "user",
+      "content": "Add evaluation metrics"
+    },
+    {
+      "role": "assistant",
+      "content": "Completed: evaluation script in evaluate.py with precision, recall, F1, and confusion matrix. Using sklearn.metrics."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "environment setup with Python 3.11",
+      "gradient checkpointing",
+      "evaluation script in evaluate.py"
+    ],
+    "pending_tasks": [],
+    "decisions": [
+      "bert-base-uncased",
+      "mixed precision",
+      "HuggingFace"
+    ],
+    "files": [
+      "train.py",
+      "data/preprocess.py",
+      "models/classifier.py",
+      "config.yaml",
+      "evaluate.py"
+    ],
+    "errors": [
+      "CUDA out of memory"
+    ]
+  }
+}

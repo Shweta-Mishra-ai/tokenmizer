@@ -660,33 +660,54 @@ yourself. Nothing here is hand-written; if a figure and a runner
 disagree, the runner is right and the README is a bug.
 
 ```bash
+python -m benchmarks.eval                            # extraction P/R/F1
+python -m benchmarks.eval --errors                   # every miss, every false positive
+python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
-python -m benchmarks.graph_retrieval.runner          # category recall
 python -m benchmarks.persistence.runner              # storage + concurrency
-python -m benchmarks.checkpoint_accuracy.runner_v3   # merge-logic contract
-pytest tests/ -q                                     # 495 tests
+pytest tests/ -q                                     # 521 tests
 ```
+
+### Extraction quality — precision, recall and F1
+
+`python -m benchmarks.eval` scores extraction against a labelled corpus:
+**8 sessions, 82 turns, 97 labelled items, 8 domains** (Go, Rust, Python,
+TypeScript, React, SQL, CI, ML). Measured on v0.6.0:
+
+| Category | Precision | Recall | F1 |
+|---|---|---|---|
+| Files | 92% | 91% | **91%** |
+| Errors | 83% | 92% | **87%** |
+| Completed tasks | 67% | 86% | **75%** |
+| Pending tasks | 50% | 86% | **63%** |
+| Decisions | 50% | 74% | **60%** |
+| | | **macro F1** | **75%** |
+
+**Precision is reported, not just recall.** An extractor that emits the
+whole transcript as one node scores 100% recall; that is why recall-only
+extraction numbers should be distrusted, including earlier ones of ours.
+
+Label quality, scored separately because a correct-but-sprawling label
+still wastes resume budget: 8% truncated mid-word, 5% spanning more than
+one sentence, mean length 32 characters.
+
+Decisions are the weakest category on precision — the five decision
+passes over-fire, producing roughly one spurious decision for each real
+one. That is the next thing to fix, and it is visible here rather than
+hidden behind an average.
+
+**This corpus is entirely synthetic.** Eight hand-written sessions are a
+directional signal, not a claim about your workload. To get a number that
+describes yours, label a few of your own sessions in the documented
+format and run `python -m benchmarks.eval --corpus /path/to/them`.
 
 ### Memory quality — graph vs a plain summary
 
-Measured on v0.5.0, heuristic extraction only, n=3 synthetic sessions:
-
-| Method | Task Recall | Decision Recall | File Recall | Info Preserved |
-|---|---|---|---|---|
-| TokenMizer graph | 76% | 92% | 100% | **89%** |
-| Plain summary baseline | 76% | 70% | 92% | 79% |
-| **Δ advantage** | 0% | **+22%** | **+8%** | **+10%** |
-
-Average resume block: **249 tokens**, against ~1,500+ tokens of raw
-history. Per-session spread is wide (info preserved: 87% / 89% / 92%;
-Δ over summary: +0% / +13% / +17%) — **n=3 synthetic sessions is a small,
-directional sample, not a claim about your workload.** The honest summary
-is that the graph's advantage is concentrated in decision recall, which
-is what it is built for, and that it ties the summary baseline on tasks.
-
-Category recall (`graph_retrieval.runner`, single fixture session):
-goals 100%, decisions 100%, files 100%, superseded decisions 100%,
-completed tasks 67%, environments 67% — **89% overall**.
+`benchmarks/checkpoint_accuracy/runner_v2.py`, n=3 synthetic sessions:
+the graph preserves **89%** of labelled information against **79%** for a
+plain-summary baseline (Δ +10%), in an average resume block of **249
+tokens** versus ~1,500+ tokens of raw history. The advantage is
+concentrated in decision recall; on tasks it ties the baseline.
 
 ### Storage — schema v2 (per-row)
 
