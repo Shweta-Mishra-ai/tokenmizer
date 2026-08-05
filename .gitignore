@@ -6,10 +6,32 @@ build/
 .venv/
 venv/
 .pytest_cache/
+.ruff_cache/
 .coverage
+coverage.xml
+htmlcov/
+
+# Benchmark output. The runners rewrite these on every invocation; the
+# numbers that matter live in the README, sourced from a runner you can
+# re-run yourself. A stale committed result is worse than none.
+benchmark_results.json
 benchmark_v*_results.json
-# checkpoints/  # removed: conflicts with tokenmizer/checkpoints/ module
+benchmark_persistence_results.json
+
+# Runtime storage: graph/checkpoint/ownership databases and the
+# per-session lock files created beside them.
+#
+# The leading slash anchors this to the REPO ROOT, so it ignores the
+# default `storage_dir` without touching the `tokenmizer/checkpoints/`
+# source package. An earlier revision commented the rule out entirely
+# because an unanchored `checkpoints/` matched both — which is how 135
+# lock files and two result JSONs ended up committed.
+/checkpoints/
 *.db
 *.db-wal
 *.db-shm
+*.db.corrupt-*
+
 .DS_Store
+.idea/
+.vscode/

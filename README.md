@@ -3,11 +3,17 @@
 
   <h1>TokenMizer</h1>
 
-  <p><strong>Keep your AI context alive across sessions.</strong></p>
+  <p><strong>Your AI forgets why. TokenMizer remembers.</strong></p>
 
   <p>
-    Graph-backed memory · session checkpointing · intelligent compression<br/>
-    Drop-in proxy for Claude, GPT, Gemini, Grok, DeepSeek, Ollama — any LLM.
+    An OpenAI-compatible proxy that builds a <b>knowledge graph</b> of your
+    session — decisions, files, errors, goals — and replays it when the<br/>
+    context window runs out. Not a summary: a queryable graph that knows
+    <i>"we switched from MongoDB to PostgreSQL, and here is why."</i>
+  </p>
+
+  <p>
+    <sub>One line to adopt · works with Claude, GPT, Gemini, Grok, DeepSeek, Mistral, Cohere, Ollama · MIT</sub>
   </p>
 
   <p>
@@ -24,6 +30,7 @@
     <a href="#quick-start"><b>Quick Start</b></a> ·
     <a href="#how-tokenmizer-solves-it"><b>How it works</b></a> ·
     <a href="#benchmarks"><b>Benchmarks</b></a> ·
+    <a href="#durability--what-happens-when-something-breaks-mid-session"><b>Durability</b></a> ·
     <a href="#claude-code-integration"><b>Claude Code</b></a> ·
     <a href="#contributing"><b>Contributing</b></a>
   </p>

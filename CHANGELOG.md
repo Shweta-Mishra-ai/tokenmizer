@@ -85,13 +85,24 @@ directional and should read that way.
   suite exercises a real cross-version upgrade.
 
 ### Added — tests
-`tests/unit/test_multiprocess.py` (7 tests) covers the stale-writer
+`tests/unit/test_multiprocess.py` (9 tests) covers the stale-writer
 case, reconciliation not eating unpersisted work, another process's
 additions surviving, lock exclusivity across real subprocesses, distinct
 sessions not contending, hostile `session_id` values not escaping the
-lock directory, and 4-process lossless concurrency.
+lock directory, 4-process lossless concurrency, and stale-lock
+sweeping never touching a held lock.
 
-**496 tests, 77% coverage, ruff clean.**
+### Fixed — repository hygiene
+`.gitignore` had `checkpoints/` commented out ("conflicts with
+`tokenmizer/checkpoints/`"), which is what an *unanchored* pattern does.
+Anchoring it to `/checkpoints/` ignores the runtime storage directory
+without touching the source package. 135 lock files and two benchmark
+result JSONs had been committed as a result; both are now removed and
+ignored, and `sweep_stale_locks()` prunes lock files untouched for 30
+days on an hourly cycle so the directory cannot grow without bound.
+
+**498 tests, 77% coverage, ruff clean across `tokenmizer/`, `tests/`,
+`benchmarks/` and `scripts/`.**
 
 ## [0.4.2] — 2026-08-05 — per-row storage (#27), provider fixes, comment cleanup
 

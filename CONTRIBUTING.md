@@ -37,11 +37,15 @@ needed to get a change from idea to merged PR.
 
 This reflects the actual current layout — verify against `find tokenmizer -name "*.py"`
 before trusting a stale copy of this section. Two things worth knowing up
-front: `tokenmizer/agents/` is an empty package (a placeholder, not active
-code), and `tokenmizer/storage/__init__.py` documents a `StorageBackend`
-protocol that `GraphMemory`, `CheckpointManager`, and the state backend are
-each *conceptually* consistent with, but none of them formally implement —
-don't assume a shared interface exists at the type level.
+front. Three things are placeholders rather than working code, and are
+labelled as such in their own modules so nobody wires against them by
+mistake:
+
+| Path | Reality |
+|---|---|
+| `tokenmizer/agents/` | Empty package. No code. |
+| `tokenmizer/storage/__init__.py` | Documents a `StorageBackend` protocol nothing imports or formally implements. Do not assume a shared interface exists at the type level. |
+| `tokenmizer/state/backend.py` | Has **no callers**. `state_backend: redis` is accepted by config and changes nothing. |
 
 ```
 tokenmizer/
@@ -55,8 +59,9 @@ tokenmizer/
 │   ├── cli.py                    # `tokenmizer` command: serve, stats, checkpoint, resume
 │   │
 │   ├── api/
-│   │   ├── app.py                # FastAPI app — /v1/chat/completions + session/graph/reasoning endpoints
-│   │   └── rate_limiter.py       # Per-session token-bucket rate limiting
+│   │   ├── app.py                # FastAPI app — /v1/chat/completions, pipeline, durability
+│   │   ├── routes_graph.py       # Session/graph/checkpoint/reasoning endpoints
+│   │   └── rate_limiter.py       # Per-client token-bucket rate limiting
 │   │
 │   ├── config/
 │   │   └── settings.py           # pydantic-settings — TOKENMIZER_* env prefix, tokenmizer.yaml backing
@@ -82,13 +87,18 @@ tokenmizer/
 │   │   ├── validator.py           # Confidence scoring and hard-reject rules for candidate nodes
 │   │   ├── ontology.py            # Machine-readable node/edge semantics + status state machine
 │   │   ├── reasoning.py           # why() / impact() / decision_history() / consistency_check()
+│   │   ├── persistence.py         # Per-row SQLite storage (schema v2) + v1 migration
+│   │   ├── filelock.py            # Cross-process advisory lock for session writes
+│   │   ├── pruning.py             # Importance decay + node-count cap
+│   │   ├── context_block.py       # Tiered, token-budgeted resume context
+│   │   ├── helpers.py             # Content flattening, trigger/evidence inference
 │   │   └── visualization.py       # Self-contained interactive HTML graph export
 │   │
 │   ├── checkpoints/
 │   │   └── manager.py             # Checkpoint create/save/load, tiered resume blocks
 │   │
 │   ├── state/
-│   │   └── backend.py             # Redis or in-memory session state
+│   │   └── backend.py             # UNUSED — no callers; see the module docstring
 │   │
 │   ├── semantic_cache/
 │   │   └── cache.py               # Embedding-similarity response cache
@@ -98,6 +108,7 @@ tokenmizer/
 │   │
 │   ├── security/
 │   │   ├── auth.py                 # API key verification (fail-closed on config error)
+│   │   ├── ownership.py            # Session ownership — who may read/modify a session
 │   │   ├── middleware.py           # Prompt-injection keyword filter (best-effort — see SECURITY.md)
 │   │   └── redaction.py             # Secret/PII pattern redaction
 │   │
@@ -114,7 +125,7 @@ tokenmizer/
 │       └── __init__.py              # StorageBackend protocol (documentation-level, not enforced — see note above)
 │
 ├── scripts/                      # mcp_e2e_check.py, gen_demo_gif.py, setup/install helpers
-├── benchmarks/                   # checkpoint_accuracy/, graph_retrieval/, latency/
+├── benchmarks/                   # checkpoint_accuracy/, graph_retrieval/, persistence/, latency/
 └── tests/                        # 42 files — see TESTING.md for what's covered and how
 ```
 

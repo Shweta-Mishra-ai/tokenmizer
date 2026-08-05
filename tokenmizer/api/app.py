@@ -443,11 +443,21 @@ async def _flush_all_graphs(reason: str) -> tuple[int, int]:
 
 
 async def _periodic_flush() -> None:
-    """Bound hard-kill exposure by flushing dirty graphs on a timer."""
+    """Bound hard-kill exposure by flushing dirty graphs on a timer, and
+    keep the per-session lock directory from growing without bound."""
+    cycles = 0
     while True:
         try:
             await asyncio.sleep(FLUSH_INTERVAL_SECONDS)
             await _flush_all_graphs("periodic")
+            cycles += 1
+            # Roughly hourly at the default 30s interval. Lock files are
+            # empty but one is created per session touched and never
+            # removed on release, so without this the directory gains an
+            # inode per session forever.
+            if cycles % 120 == 0:
+                from tokenmizer.graph_memory.filelock import sweep_stale_locks
+                sweep_stale_locks(settings.graph_checkpoint.storage_dir)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # a flush bug must never kill the loop

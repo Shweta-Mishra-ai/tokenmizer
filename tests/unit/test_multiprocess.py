@@ -173,3 +173,40 @@ class TestConcurrentWriters:
         for w in range(workers):
             got = sum(1 for x in labels if x.startswith(f"Worker {w} "))
             assert got == per_worker, f"worker {w} lost {per_worker - got} nodes"
+
+
+class TestLockFileHousekeeping:
+    """One lock file is created per session touched and never removed on
+    release, so the directory would otherwise gain an inode per session
+    forever. A test run committed 135 of them once."""
+
+    def test_stale_locks_are_swept(self, tmp_path):
+        import os
+        import time
+
+        from tokenmizer.graph_memory.filelock import lock_files_in, sweep_stale_locks
+
+        for i in range(5):
+            with session_lock(tmp_path, f"session-{i}", timeout=1):
+                pass
+        assert len(lock_files_in(tmp_path)) == 5
+
+        old = time.time() - 40 * 86_400
+        for f in lock_files_in(tmp_path)[:3]:
+            os.utime(f, (old, old))
+
+        assert sweep_stale_locks(tmp_path) == 3
+        assert len(lock_files_in(tmp_path)) == 2, "recent locks must be kept"
+
+    def test_a_held_lock_is_never_swept(self, tmp_path):
+        import os
+        import time
+
+        from tokenmizer.graph_memory.filelock import lock_files_in, sweep_stale_locks
+
+        with session_lock(tmp_path, "busy", timeout=1):
+            for f in lock_files_in(tmp_path):
+                old = time.time() - 90 * 86_400
+                os.utime(f, (old, old))
+            assert sweep_stale_locks(tmp_path) == 0, "swept a lock that was held"
+            assert len(lock_files_in(tmp_path)) == 1

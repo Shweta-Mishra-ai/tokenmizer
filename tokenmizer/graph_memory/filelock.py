@@ -161,4 +161,60 @@ def lock_files_in(storage_dir) -> list:
     return sorted(d.glob("*.lock")) if d.exists() else []
 
 
-__all__ = ["session_lock", "LockUnavailable", "lock_files_in"]
+# Lock files are never deleted on release, so `.locks/` gains one empty
+# file per session touched, forever. Each is 0 bytes, but a long-lived
+# deployment with many sessions still accumulates inodes without bound.
+STALE_LOCK_AGE_SECONDS = 30 * 86_400
+
+
+def sweep_stale_locks(storage_dir, max_age: float = STALE_LOCK_AGE_SECONDS) -> int:
+    """Delete lock files untouched for `max_age`. Returns the count removed.
+
+    Only files we can acquire exclusively are removed, so a lock being
+    actively held is never deleted.
+
+    Residual race, stated rather than hidden: another process could have
+    the file OPEN and be blocked waiting for the lock at the moment we
+    unlink it. It would then acquire a lock on an unlinked inode while a
+    later process creates a fresh file and locks that — two writers each
+    believing they hold the session. The 30-day threshold is what makes
+    this acceptable: a session untouched for a month having a concurrent
+    writer at that exact instant is vanishingly unlikely, and the
+    consequence is one interleaved write, not corruption. Do not lower
+    the threshold without replacing this with byte-range locking on a
+    single file, which avoids the problem entirely.
+    """
+    lock_dir = Path(storage_dir) / ".locks"
+    if not lock_dir.exists():
+        return 0
+
+    cutoff = time.time() - max_age
+    removed = 0
+    for path in lock_dir.glob("*.lock"):
+        try:
+            if path.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        try:
+            with open(path, "a+b") as fh:
+                try:
+                    if _HAVE_FCNTL:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    elif _HAVE_MSVCRT:  # pragma: no cover — Windows
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:  # pragma: no cover
+                        return removed
+                except OSError:
+                    continue  # held right now — leave it alone
+                path.unlink(missing_ok=True)
+                removed += 1
+        except OSError as e:
+            logger.debug("Could not sweep lock file %s: %s", path, e)
+
+    if removed:
+        logger.info("Swept %d stale lock file(s) from %s", removed, lock_dir)
+    return removed
+
+
+__all__ = ["session_lock", "LockUnavailable", "lock_files_in", "sweep_stale_locks"]
