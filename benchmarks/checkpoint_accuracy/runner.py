@@ -146,9 +146,6 @@ def run_session_benchmark(name: str, session: dict) -> BenchmarkResult:
         )
 
     # Score
-    all_task_labels = {
-        n.label for n in g._nodes.values() if n.type == NodeType.TASK
-    }
     completed_labels = {
         n.label for n in g._nodes.values()
         if n.type == NodeType.TASK and n.status == NodeStatus.COMPLETED

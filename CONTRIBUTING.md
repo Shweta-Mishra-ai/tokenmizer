@@ -115,7 +115,7 @@ tokenmizer/
 │
 ├── scripts/                      # mcp_e2e_check.py, gen_demo_gif.py, setup/install helpers
 ├── benchmarks/                   # checkpoint_accuracy/, graph_retrieval/, latency/
-└── tests/                        # 19 files — see TESTING.md for what's covered and how
+└── tests/                        # 42 files — see TESTING.md for what's covered and how
 ```
 
 ---

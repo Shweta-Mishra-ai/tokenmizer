@@ -16,7 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12"]
+        # Must cover every version in pyproject's classifiers — claiming
+        # support for a Python we never run tests on is a false claim.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
         include:
           - os: windows-latest
             python-version: "3.12"
@@ -35,8 +37,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      # Benchmarks and scripts are linted too: an unrunnable benchmark
+      # that is referenced in the README is a broken claim, and
+      # graph_retrieval/runner.py shipped crashing on every invocation
+      # precisely because nothing checked it.
       - name: Lint (blocking)
-        run: ruff check tokenmizer/ tests/
+        run: ruff check tokenmizer/ tests/ benchmarks/ scripts/
+
+      - name: Benchmarks are runnable
+        run: |
+          python -m benchmarks.checkpoint_accuracy.runner
+          python -m benchmarks.checkpoint_accuracy.runner_v2
+          python -m benchmarks.checkpoint_accuracy.runner_v3
+          python -m benchmarks.graph_retrieval.runner
+          python -m benchmarks.persistence.runner
 
       # Coverage threshold lives in pyproject.toml [tool.coverage.report]
       # fail_under — single source of truth, do NOT override it here.
@@ -86,9 +100,11 @@ jobs:
           path: benchmark_results.json
 
   docker:
+    # Runs on PRs too, not just main. The image is the documented
+    # deployment path, and a Dockerfile that stops building is a broken
+    # deploy — finding that out only after merge is too late.
     runs-on: ubuntu-latest
     needs: test
-    if: github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4
@@ -96,12 +112,100 @@ jobs:
       - name: Build Docker image
         run: docker build -t tokenmizer:latest .
 
-      - name: Test Docker health
+      - name: Health check
         run: |
           docker run -d --name tm-test \
             -e TOKENMIZER_ANTHROPIC_API_KEY=test \
             -p 8001:8000 \
             tokenmizer:latest
-          sleep 8
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8001/health && break || sleep 1
+          done
           curl -f http://localhost:8001/health
-          docker stop tm-test
+
+      # The image bakes tiktoken's BPE vocabulary at build time so token
+      # counting never needs egress at runtime. Verify that it actually
+      # did, with the network removed — otherwise the bake could silently
+      # stop working and only surface in an air-gapped deployment.
+      - name: Token counting works with no network
+        run: |
+          docker run --rm --network none tokenmizer:latest python -c "
+          from tokenmizer.core.tokenizer import count_tokens
+          n = count_tokens('hello world this is a test', 'gpt-4o')
+          assert n > 0, 'token count returned nothing'
+          # 6 words must not land on the char/4 fallback (which would give 6)
+          assert n == 6, f'expected the real encoder, got fallback-shaped {n}'
+          print('offline token count OK:', n)
+          "
+
+      - name: Graph storage works with no network
+        run: |
+          docker run --rm --network none tokenmizer:latest python -c "
+          import tempfile
+          from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+          d = tempfile.mkdtemp()
+          g = GraphMemory('ci', storage_dir=d)
+          g.add_node(NodeType.DECISION, 'Use PostgreSQL for the user database', NodeStatus.COMPLETED)
+          assert g._persist(force=True) is True
+          assert len(GraphMemory('ci', storage_dir=d)._nodes) == 1
+          print('offline persist + reload OK')
+          "
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f tm-test || true
+
+  migration:
+    # A stored graph written by the previous release must still load.
+    # Nothing else in the suite exercises a real cross-version upgrade.
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Write a database using the PREVIOUS release
+        run: |
+          set -e
+          PREV=$(git tag --sort=-v:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -z "$PREV" ]; then
+            echo "No previous tag to migrate from — skipping."
+            exit 0
+          fi
+          echo "Seeding a database with $PREV"
+          git worktree add /tmp/prev "$PREV"
+          python -m venv /tmp/prevenv
+          /tmp/prevenv/bin/pip install -q -e /tmp/prev
+          mkdir -p /tmp/migration-data
+          /tmp/prevenv/bin/python -c "
+          from tokenmizer.graph_memory.graph import GraphMemory, NodeType, NodeStatus
+          g = GraphMemory('upgrade-test', storage_dir='/tmp/migration-data')
+          for i in range(25):
+              g.add_node(NodeType.TASK, f'Legacy task number {i} in the pipeline', NodeStatus.COMPLETED)
+          g.add_node(NodeType.DECISION, 'Use PostgreSQL for the user database', NodeStatus.COMPLETED)
+          g._persist(force=True)
+          print('seeded', len(g._nodes), 'nodes')
+          "
+
+      - name: Read it with THIS version
+        run: |
+          set -e
+          if [ ! -d /tmp/migration-data ]; then echo "nothing seeded — skipping"; exit 0; fi
+          pip install -q -e .
+          python -c "
+          from tokenmizer.graph_memory.graph import GraphMemory
+          g = GraphMemory('upgrade-test', storage_dir='/tmp/migration-data')
+          assert len(g._nodes) == 26, f'migration lost data: {len(g._nodes)}/26 nodes'
+          assert any('PostgreSQL' in n.label for n in g._nodes.values())
+          assert g._persist(force=True) is True
+          reloaded = GraphMemory('upgrade-test', storage_dir='/tmp/migration-data')
+          assert len(reloaded._nodes) == 26, 'round-trip after migration lost data'
+          print('migration from the previous release OK:', len(reloaded._nodes), 'nodes')
+          "

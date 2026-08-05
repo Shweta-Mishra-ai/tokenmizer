@@ -1,169 +1,139 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" width="900" height="560">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 620" width="940" height="620" role="img" aria-labelledby="t d">
+  <title id="t">TokenMizer architecture</title>
+  <desc id="d">An OpenAI-compatible proxy sits between your application and any LLM. Requests pass a security gate, then six pipeline layers: file intelligence, prompt compression, terse-output injection, graph memory, semantic cache and the provider prompt cache. Graph memory reads and writes per-row SQLite storage under a cross-process lock, alongside checkpoints and session ownership. An MCP server exposes checkpoint, resume and reasoning tools to editors.</desc>
+
+  <style>
+    .bg   { fill: #0b0e14; }
+    .card { fill: #11151f; stroke: #232936; stroke-width: 1.25; }
+    .lane { fill: #0e121b; stroke: #1e2431; stroke-width: 1.25; }
+    .acc  { fill: #151a26; stroke: #2b3242; stroke-width: 1.25; }
+    .h    { fill: #e8ecf4; font: 600 15px ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .t    { fill: #c3cbd9; font: 500 12.5px ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .s    { fill: #7d8798; font: 400 11px ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .tag  { fill: #0b0e14; font: 700 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .lbl  { fill: #8b94a6; font: 500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .flow { stroke: #3d4657; stroke-width: 1.6; fill: none; marker-end: url(#a); }
+    .back { stroke: #2e3546; stroke-width: 1.4; fill: none; stroke-dasharray: 4 4; marker-end: url(#a); }
+    .rw   { stroke: #5ee7c8; stroke-width: 1.6; fill: none; marker-end: url(#ag); marker-start: url(#ag); opacity: .85; }
+    .sep  { stroke: #232936; }
+    @media (prefers-color-scheme: light) {
+      .bg { fill: #f7f8fa; } .card { fill: #ffffff; stroke: #dfe3ea; }
+      .lane { fill: #f1f3f7; stroke: #dfe3ea; } .acc { fill: #eef1f6; stroke: #d5dae3; }
+      .h { fill: #10131a; } .t { fill: #3d4553; } .s { fill: #6b7383; }
+      .tag { fill: #ffffff; } .lbl { fill: #6b7383; } .sep { stroke: #dfe3ea; }
+      .flow, .back { stroke: #aeb6c4; } .rw { stroke: #17a67f; }
+    }
+  </style>
+
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#07090f"/>
-      <stop offset="100%" stop-color="#0c1020"/>
-    </linearGradient>
-    <filter id="glow"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-    <marker id="ap" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#7c6af7"/></marker>
-    <marker id="ag" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#4ade80"/></marker>
-    <marker id="at" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#5ee7c8"/></marker>
-    <marker id="ay" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#fbbf24"/></marker>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3d4657"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5ee7c8"/>
+    </marker>
   </defs>
 
-  <rect width="900" height="560" fill="url(#bg)" rx="14"/>
+  <rect class="bg" width="940" height="620" rx="14"/>
 
-  <!-- subtle dot grid -->
-  <pattern id="dots" x="0" y="0" width="24" height="24" patternUnits="userSpaceOnUse">
-    <circle cx="1" cy="1" r="0.8" fill="#ffffff" opacity="0.025"/>
-  </pattern>
-  <rect width="900" height="560" fill="url(#dots)" rx="14"/>
+  <!-- Client -->
+  <rect class="card" x="28" y="252" width="150" height="76" rx="10"/>
+  <text class="h" x="103" y="284" text-anchor="middle">Your app</text>
+  <text class="s" x="103" y="303" text-anchor="middle">OpenAI-compatible</text>
+  <text class="s" x="103" y="317" text-anchor="middle">client · SDK · CLI</text>
 
-  <!-- ── TITLE ── -->
-  <text x="450" y="38" text-anchor="middle" fill="#e8eaf6" font-family="'JetBrains Mono',monospace" font-size="15" font-weight="700" letter-spacing="4">TOKENMIZER</text>
-  <text x="450" y="56" text-anchor="middle" fill="#3d3f5a" font-family="'JetBrains Mono',monospace" font-size="9" letter-spacing="3">NEVER LOSE AI CONTEXT AGAIN</text>
+  <path class="flow" d="M178 282 L 214 282"/>
+  <text class="lbl" x="196" y="274" text-anchor="middle">POST</text>
+  <path class="back" d="M214 306 L 178 306"/>
 
-  <!-- ── CLIENT ── -->
-  <rect x="30" y="80" width="120" height="54" rx="8" fill="#111422" stroke="#252840" stroke-width="1.5"/>
-  <text x="90" y="102" text-anchor="middle" fill="#6366a0" font-family="'JetBrains Mono',monospace" font-size="8" letter-spacing="1.5">CLIENT</text>
-  <text x="90" y="118" text-anchor="middle" fill="#c4b5fd" font-family="'JetBrains Mono',monospace" font-size="10" font-weight="600">Your App</text>
-  <text x="90" y="129" text-anchor="middle" fill="#3d3f5a" font-family="'JetBrains Mono',monospace" font-size="7.5">OpenAI SDK / curl</text>
+  <!-- Proxy lane -->
+  <rect class="lane" x="216" y="34" width="470" height="552" rx="14"/>
+  <text class="h" x="236" y="62">TokenMizer proxy</text>
+  <text class="s" x="236" y="80">localhost:8000 · /v1/chat/completions</text>
 
-  <!-- request arrow down -->
-  <line x1="90" y1="134" x2="90" y2="162" stroke="#7c6af7" stroke-width="1.5" marker-end="url(#ap)"/>
-  <text x="100" y="152" fill="#4a3a8a" font-family="'JetBrains Mono',monospace" font-size="7.5">POST /v1/chat</text>
+  <!-- Security gate -->
+  <rect class="acc" x="236" y="96" width="430" height="52" rx="9"/>
+  <text class="t" x="252" y="118">Security gate</text>
+  <text class="s" x="252" y="136">rate limit · API key · session ownership · redaction once, at ingestion</text>
 
-  <!-- ── PROXY BOX ── -->
-  <rect x="30" y="164" width="550" height="340" rx="10" fill="#090c18" stroke="#1e2040" stroke-width="1.5"/>
-  <rect x="30" y="164" width="550" height="22" rx="8" fill="#0f1228"/>
-  <text x="305" y="179" text-anchor="middle" fill="#7c6af7" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="700" letter-spacing="2">TOKENMIZER PROXY  ·  :8000</text>
+  <!-- Layers -->
+  <rect class="card" x="236" y="160" width="430" height="52" rx="9"/>
+  <rect x="248" y="176" width="26" height="20" rx="5" fill="#7c6af7"/>
+  <text class="tag" x="261" y="190" text-anchor="middle">L0</text>
+  <text class="t" x="286" y="184">File intelligence</text>
+  <text class="s" x="286" y="200">CSV · PDF · Excel · JSON → schema + sample, inside a token budget</text>
 
-  <!-- Pipeline layers inside proxy -->
-  <!-- L0 -->
-  <rect x="46" y="196" width="518" height="40" rx="6" fill="#0a1220" stroke="#162040" stroke-width="1"/>
-  <rect x="46" y="196" width="4" height="40" rx="2" fill="#60a5fa"/>
-  <text x="60" y="213" fill="#60a5fa" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L0</text>
-  <text x="78" y="213" fill="#93c5fd" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">File Intelligence</text>
-  <text x="60" y="228" fill="#2a4060" font-family="'JetBrains Mono',monospace" font-size="7.5">CSV · PDF · Excel · JSON · Code  →  schema + stats + sample  ·  99%+ token reduction</text>
+  <rect class="card" x="236" y="220" width="430" height="52" rx="9"/>
+  <rect x="248" y="236" width="26" height="20" rx="5" fill="#7c6af7"/>
+  <text class="tag" x="261" y="250" text-anchor="middle">L1</text>
+  <text class="t" x="286" y="244">Prompt compression</text>
+  <text class="s" x="286" y="260">heuristic filler/dedup — fenced code passed through untouched</text>
 
-  <!-- L1 -->
-  <rect x="46" y="242" width="518" height="40" rx="6" fill="#0a1810" stroke="#163020" stroke-width="1"/>
-  <rect x="46" y="242" width="4" height="40" rx="2" fill="#4ade80"/>
-  <text x="60" y="259" fill="#4ade80" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L1</text>
-  <text x="78" y="259" fill="#86efac" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Prompt Compression</text>
-  <text x="60" y="274" fill="#1a4020" font-family="'JetBrains Mono',monospace" font-size="7.5">Heuristic pipeline  ·  LLMLingua2 (optional)  ·  quality gate 0.55  ·  15–40% savings</text>
+  <rect class="card" x="236" y="280" width="430" height="46" rx="9"/>
+  <rect x="248" y="293" width="26" height="20" rx="5" fill="#7c6af7"/>
+  <text class="tag" x="261" y="307" text-anchor="middle">L2</text>
+  <text class="t" x="286" y="301">Terse-output injection</text>
+  <text class="s" x="286" y="317">system-prompt directive to cut response padding</text>
 
-  <!-- L2 -->
-  <rect x="46" y="288" width="518" height="40" rx="6" fill="#181408" stroke="#302808" stroke-width="1"/>
-  <rect x="46" y="288" width="4" height="40" rx="2" fill="#fbbf24"/>
-  <text x="60" y="305" fill="#fbbf24" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L2</text>
-  <text x="78" y="305" fill="#fde68a" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Output Trimmer  +  Terse Injection</text>
-  <text x="60" y="320" fill="#403010" font-family="'JetBrains Mono',monospace" font-size="7.5">Remove LLM filler · inject brevity prompt  ·  5–15% output savings  ·  zero info loss</text>
+  <rect class="card" x="236" y="334" width="430" height="66" rx="9"/>
+  <rect x="248" y="356" width="26" height="20" rx="5" fill="#5ee7c8"/>
+  <text class="tag" x="261" y="370" text-anchor="middle">L4</text>
+  <text class="t" x="286" y="356">Graph memory</text>
+  <text class="s" x="286" y="372">extract nodes → smart windowing → inject relevant context</text>
+  <text class="s" x="286" y="388">auto-checkpoint at trigger_at_percent, outcome returned to caller</text>
 
-  <!-- L3 -->
-  <rect x="46" y="334" width="518" height="40" rx="6" fill="#081420" stroke="#103040" stroke-width="1"/>
-  <rect x="46" y="334" width="4" height="40" rx="2" fill="#38bdf8"/>
-  <text x="60" y="351" fill="#38bdf8" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L3</text>
-  <text x="78" y="351" fill="#7dd3fc" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Semantic Cache</text>
-  <text x="60" y="366" fill="#104060" font-family="'JetBrains Mono',monospace" font-size="7.5">Exact match (O1) → embedding similarity → miss  ·  LRU eviction  ·  session isolation</text>
+  <rect class="card" x="236" y="408" width="430" height="52" rx="9"/>
+  <rect x="248" y="424" width="26" height="20" rx="5" fill="#f9d84a"/>
+  <text class="tag" x="261" y="438" text-anchor="middle">L3</text>
+  <text class="t" x="286" y="432">Semantic cache</text>
+  <text class="s" x="286" y="448">exact + embedding match · session-scoped by default</text>
 
-  <!-- L4 -->
-  <rect x="46" y="380" width="518" height="52" rx="6" fill="#0c0820" stroke="#201840" stroke-width="1.5"/>
-  <rect x="46" y="380" width="4" height="52" rx="2" fill="#a78bfa"/>
-  <text x="60" y="398" fill="#a78bfa" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L4</text>
-  <text x="78" y="398" fill="#ddd6fe" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Graph Memory  +  Smart Window  +  Checkpoint</text>
-  <!-- status pills -->
-  <rect x="60" y="404" width="64" height="13" rx="3" fill="#0a2010"/>
-  <text x="92" y="414" text-anchor="middle" fill="#4ade80" font-family="'JetBrains Mono',monospace" font-size="7.5" font-weight="600">● ACTIVE</text>
-  <rect x="130" y="404" width="82" height="13" rx="3" fill="#201a08"/>
-  <text x="171" y="414" text-anchor="middle" fill="#fbbf24" font-family="'JetBrains Mono',monospace" font-size="7.5" font-weight="600">◐ SUPERSEDED</text>
-  <rect x="218" y="404" width="84" height="13" rx="3" fill="#200808"/>
-  <text x="260" y="414" text-anchor="middle" fill="#f87171" font-family="'JetBrains Mono',monospace" font-size="7.5" font-weight="600">✕ INVALIDATED</text>
-  <rect x="308" y="404" width="64" height="13" rx="3" fill="#141414"/>
-  <text x="340" y="414" text-anchor="middle" fill="#94a3b8" font-family="'JetBrains Mono',monospace" font-size="7.5" font-weight="600">○ ARCHIVED</text>
-  <text x="60" y="426" fill="#1e1440" font-family="'JetBrains Mono',monospace" font-size="7.5">SQLite persistence  ·  confidence scoring  ·  topic-aware superseding  ·  auto-checkpoint 85%</text>
+  <rect class="card" x="236" y="468" width="430" height="52" rx="9"/>
+  <rect x="248" y="484" width="26" height="20" rx="5" fill="#f9d84a"/>
+  <text class="tag" x="261" y="498" text-anchor="middle">L5</text>
+  <text class="t" x="286" y="492">Provider prompt cache</text>
+  <text class="s" x="286" y="508">Anthropic cache_control on prefixes over 1024 tokens</text>
 
-  <!-- L5 -->
-  <rect x="46" y="438" width="518" height="36" rx="6" fill="#08140a" stroke="#102018" stroke-width="1"/>
-  <rect x="46" y="438" width="4" height="36" rx="2" fill="#34d399"/>
-  <text x="60" y="455" fill="#34d399" font-family="'JetBrains Mono',monospace" font-size="8" font-weight="700">L5</text>
-  <text x="78" y="455" fill="#6ee7b7" font-family="'JetBrains Mono',monospace" font-size="9" font-weight="600">Provider Layer  +  Anthropic Prompt Cache</text>
-  <text x="60" y="468" fill="#0a2814" font-family="'JetBrains Mono',monospace" font-size="7.5">Unified LLMResponse DTO  ·  retry+backoff  ·  system prompt @10% cost on repeats</text>
+  <text class="s" x="236" y="548">Layer numbers match the API response fields.</text>
+  <text class="s" x="236" y="564">savings.routing is always 0 — model routing is not implemented.</text>
 
-  <!-- response arrow up -->
-  <line x1="90" y1="504" x2="90" y2="526" stroke="#5ee7c8" stroke-width="1.5"/>
-  <line x1="90" y1="504" x2="64" y2="504" stroke="#5ee7c8" stroke-width="1.5"/>
-  <line x1="64" y1="134" x2="64" y2="504" stroke="#5ee7c8" stroke-width="1.5"/>
-  <line x1="64" y1="134" x2="88" y2="134" stroke="#5ee7c8" stroke-width="1.5" marker-end="url(#at)"/>
-  <text x="40" y="330" fill="#1a3a30" font-family="'JetBrains Mono',monospace" font-size="7.5" transform="rotate(-90,40,330)">response</text>
+  <path class="flow" d="M451 212 L 451 218"/>
+  <path class="flow" d="M451 272 L 451 278"/>
+  <path class="flow" d="M451 326 L 451 332"/>
+  <path class="flow" d="M451 400 L 451 406"/>
+  <path class="flow" d="M451 460 L 451 466"/>
 
-  <!-- ── LLM PROVIDERS ── -->
-  <rect x="640" y="164" width="230" height="340" rx="10" fill="#090c18" stroke="#1a2030" stroke-width="1.5"/>
-  <rect x="640" y="164" width="230" height="22" rx="8" fill="#0f1228"/>
-  <text x="755" y="179" text-anchor="middle" fill="#4b5e7a" font-family="'JetBrains Mono',monospace" font-size="9" letter-spacing="2">LLM PROVIDERS</text>
+  <!-- Provider -->
+  <rect class="card" x="724" y="96" width="188" height="120" rx="10"/>
+  <text class="h" x="744" y="126">Any LLM</text>
+  <text class="s" x="744" y="147">Claude · GPT · Gemini</text>
+  <text class="s" x="744" y="164">Grok · DeepSeek · Mistral</text>
+  <text class="s" x="744" y="181">Cohere · OpenRouter</text>
+  <text class="s" x="744" y="198">Ollama (local)</text>
+  <path class="flow" d="M666 140 L 724 140"/>
+  <path class="back" d="M724 172 L 666 172"/>
+  <text class="lbl" x="695" y="132" text-anchor="middle">call</text>
 
-  <!-- provider list -->
-  <g font-family="'JetBrains Mono',monospace" font-size="9.5">
-    <rect x="654" y="196" width="202" height="26" rx="5" fill="#0f1420" stroke="#f9731618" stroke-width="1"/>
-    <circle cx="670" cy="209" r="4" fill="#f97316" opacity="0.8"/>
-    <text x="682" y="213" fill="#f97316" font-weight="600">Anthropic · Claude</text>
+  <!-- Storage -->
+  <rect class="card" x="724" y="300" width="188" height="180" rx="10"/>
+  <text class="h" x="744" y="330">SQLite storage</text>
+  <text class="s" x="744" y="349">one directory, every session</text>
+  <line class="sep" x1="744" y1="360" x2="892" y2="360"/>
+  <text class="t" x="744" y="381">graph_nodes</text>
+  <text class="s" x="744" y="396">one row per node</text>
+  <text class="t" x="744" y="416">graph_edges</text>
+  <text class="s" x="744" y="431">one row per edge</text>
+  <text class="t" x="744" y="451">checkpoints</text>
+  <text class="t" x="744" y="471">session_owners</text>
+  <path class="rw" d="M666 367 L 724 367"/>
+  <text class="lbl" x="695" y="359" text-anchor="middle">per-row</text>
+  <text class="lbl" x="695" y="385" text-anchor="middle">locked</text>
 
-    <rect x="654" y="228" width="202" height="26" rx="5" fill="#0f1420" stroke="#22c55e18" stroke-width="1"/>
-    <circle cx="670" cy="241" r="4" fill="#4ade80" opacity="0.8"/>
-    <text x="682" y="245" fill="#4ade80" font-weight="600">OpenAI · GPT</text>
-
-    <rect x="654" y="260" width="202" height="26" rx="5" fill="#0f1420" stroke="#3b82f618" stroke-width="1"/>
-    <circle cx="670" cy="273" r="4" fill="#60a5fa" opacity="0.8"/>
-    <text x="682" y="277" fill="#60a5fa" font-weight="600">Google · Gemini</text>
-
-    <rect x="654" y="292" width="202" height="26" rx="5" fill="#0f1420" stroke="#8b5cf618" stroke-width="1"/>
-    <circle cx="670" cy="305" r="4" fill="#a78bfa" opacity="0.8"/>
-    <text x="682" y="309" fill="#a78bfa" font-weight="600">DeepSeek</text>
-
-    <rect x="654" y="324" width="202" height="26" rx="5" fill="#0f1420" stroke="#ec489918" stroke-width="1"/>
-    <circle cx="670" cy="337" r="4" fill="#f472b6" opacity="0.8"/>
-    <text x="682" y="341" fill="#f472b6" font-weight="600">Mistral · Grok · Cohere</text>
-
-    <rect x="654" y="356" width="202" height="26" rx="5" fill="#0f1420" stroke="#06b6d418" stroke-width="1"/>
-    <circle cx="670" cy="369" r="4" fill="#22d3ee" opacity="0.8"/>
-    <text x="682" y="373" fill="#22d3ee" font-weight="600">OpenRouter</text>
-
-    <rect x="654" y="388" width="202" height="26" rx="5" fill="#0f1420" stroke="#64748b30" stroke-width="1"/>
-    <circle cx="670" cy="401" r="4" fill="#94a3b8" opacity="0.8"/>
-    <text x="682" y="405" fill="#94a3b8" font-weight="600">Ollama · Local</text>
-  </g>
-
-  <!-- arrow proxy → providers -->
-  <line x1="580" y1="340" x2="636" y2="340" stroke="#4ade80" stroke-width="1.5" marker-end="url(#ag)"/>
-  <text x="608" y="334" text-anchor="middle" fill="#1a3a20" font-family="'JetBrains Mono',monospace" font-size="7">send</text>
-
-  <!-- arrow providers → proxy -->
-  <line x1="636" y1="358" x2="580" y2="358" stroke="#5ee7c8" stroke-width="1.5" marker-end="url(#at)"/>
-  <text x="608" y="372" text-anchor="middle" fill="#1a3a30" font-family="'JetBrains Mono',monospace" font-size="7">response</text>
-
-  <!-- ── STORAGE + SECURITY side ── -->
-  <rect x="640" y="430" width="110" height="60" rx="6" fill="#090c14" stroke="#141a28" stroke-width="1"/>
-  <text x="695" y="448" text-anchor="middle" fill="#3d4060" font-family="'JetBrains Mono',monospace" font-size="7.5" letter-spacing="1">STORAGE</text>
-  <text x="695" y="462" text-anchor="middle" fill="#2a3050" font-family="'JetBrains Mono',monospace" font-size="7.5">SQLite · Redis</text>
-  <text x="695" y="475" text-anchor="middle" fill="#1e2440" font-family="'JetBrains Mono',monospace" font-size="7.5">In-memory (dev)</text>
-  <text x="695" y="483" text-anchor="middle" fill="#141830" font-family="'JetBrains Mono',monospace" font-size="7">survives restarts</text>
-
-  <rect x="760" y="430" width="110" height="60" rx="6" fill="#090c14" stroke="#141a28" stroke-width="1"/>
-  <text x="815" y="448" text-anchor="middle" fill="#3d4060" font-family="'JetBrains Mono',monospace" font-size="7.5" letter-spacing="1">SECURITY</text>
-  <text x="815" y="462" text-anchor="middle" fill="#2a3050" font-family="'JetBrains Mono',monospace" font-size="7.5">Key auth · Redaction</text>
-  <text x="815" y="475" text-anchor="middle" fill="#1e2440" font-family="'JetBrains Mono',monospace" font-size="7.5">Injection detect</text>
-  <text x="815" y="483" text-anchor="middle" fill="#141830" font-family="'JetBrains Mono',monospace" font-size="7">CORS restricted</text>
-
-  <!-- ── BOTTOM STATUS ── -->
-  <rect x="30" y="520" width="840" height="28" rx="5" fill="#07090f" stroke="#0f1220" stroke-width="1"/>
-  <circle cx="52" cy="534" r="3" fill="#4ade80" filter="url(#glow)"/>
-  <text x="62" y="538" fill="#1a3a20" font-family="'JetBrains Mono',monospace" font-size="8">ACTIVE</text>
-  <circle cx="112" cy="534" r="3" fill="#fbbf24"/>
-  <text x="122" y="538" fill="#403010" font-family="'JetBrains Mono',monospace" font-size="8">SUPERSEDED</text>
-  <circle cx="192" cy="534" r="3" fill="#f87171"/>
-  <text x="202" y="538" fill="#401010" font-family="'JetBrains Mono',monospace" font-size="8">INVALIDATED</text>
-  <circle cx="270" cy="534" r="3" fill="#94a3b8"/>
-  <text x="280" y="538" fill="#303040" font-family="'JetBrains Mono',monospace" font-size="8">ARCHIVED</text>
-  <text x="450" y="538" text-anchor="middle" fill="#1e2040" font-family="'JetBrains Mono',monospace" font-size="7.5">All layers independently togglable · tokenmizer.yaml</text>
-  <text x="820" y="538" text-anchor="end" fill="#1e2040" font-family="'JetBrains Mono',monospace" font-size="7.5">v0.2.3 · MIT</text>
+  <!-- MCP -->
+  <rect class="card" x="724" y="500" width="188" height="86" rx="10"/>
+  <text class="h" x="744" y="528">MCP server</text>
+  <text class="s" x="744" y="547">checkpoint · resume · why</text>
+  <text class="s" x="744" y="563">graph stats · analyze file</text>
+  <text class="s" x="744" y="579">Claude Code · Cursor · Zed</text>
+  <path class="rw" d="M666 520 L 724 528"/>
 </svg>

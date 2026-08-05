@@ -59,46 +59,39 @@ settings = get_settings()
 
 def _warn_if_multi_worker_risk() -> None:
     """
-    Best-effort startup check for a risk that cannot be fixed with an
-    in-process lock: running multiple OS worker processes (e.g. `uvicorn
-    --workers 4`) against the same storage_dir. Each worker gets its own
-    in-process `_graph_cache` and its own GraphMemory instances for the
-    same session_id — genuinely separate memory across processes. No
-    amount of asyncio.Lock helps here; locks don't cross process
-    boundaries.
+    Best-effort startup notice for multi-worker deployments (e.g.
+    `uvicorn --workers 4`) sharing one storage_dir.
 
-    Per-row persistence (schema v2, issue #27) removed the worst of
-    this: writers no longer exchange whole-session blobs, so two workers
-    adding different nodes to one session now merge instead of the later
-    save discarding everything the earlier one wrote. What remains is
-    narrower but real — a worker persists the node set IT knows about, so
-    if one worker prunes nodes another still holds in memory, the second
-    worker's next write reinstates them, and simultaneous edits to the
-    SAME node are last-writer-wins. Analytics, the rate limiter and the
-    semantic cache are still per-process regardless.
+    Graph writes ARE safe across processes: per-row storage plus the
+    cross-process file lock in graph_memory/filelock.py make persist a
+    locked read-modify-write, so concurrent writers merge and a stale
+    writer adopts another's deletions instead of reinstating them.
+    Measured lossless with 4 processes writing one session
+    (benchmarks/persistence/runner.py).
 
-    This can't be detected with certainty from inside a single process
-    (there's no universal "how many workers am I one of" signal), so this
-    checks a few common launcher env vars as a heuristic. A false negative
-    (multi-worker deployment this doesn't catch) is expected for unusual
-    launch setups — the goal is to catch the common case loudly rather
-    than stay silent about a real risk, not to guarantee detection.
+    What is still per-process, and therefore divergent per worker:
+    analytics counters, rate-limit buckets, and the semantic cache. Each
+    worker also keeps its own `_graph_cache`, so a session's in-memory
+    copy can be briefly stale between writes.
+
+    Not detectable with certainty from inside one process (there is no
+    universal "how many workers am I one of" signal), so this checks
+    common launcher env vars. A false negative is expected for unusual
+    launch setups; the goal is to surface the caveats in the common case.
     """
     import os
     for var in ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS"):
         val = os.environ.get(var, "").strip()
         if val.isdigit() and int(val) > 1:
             logger.warning(
-                f"{var}={val} suggests multiple worker processes. "
-                "Per-row graph storage means concurrent writers to one "
-                "session now merge rather than overwrite each other, but "
-                "multi-process is still not fully supported: pruning in "
-                "one worker can be undone by another, edits to the same "
-                "node are last-writer-wins, and analytics, rate limiting "
-                "and the semantic cache remain per-process. Prefer a "
-                "single worker per storage_dir, or route each session_id "
-                "to a fixed worker (e.g. consistent hashing at your load "
-                "balancer)."
+                f"{var}={val} suggests multiple worker processes. Graph "
+                "and checkpoint writes are cross-process safe, but "
+                "analytics, rate limiting and the semantic cache are "
+                "per-process, so those will differ per worker. Rate "
+                "limits in particular apply PER WORKER, i.e. the "
+                "effective limit is roughly N times what you configured. "
+                "Note also that flock is unreliable on NFS — keep "
+                "storage_dir on a local filesystem."
             )
             return
 
@@ -503,7 +496,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.4.2",
+    version="0.5.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",

@@ -23,6 +23,7 @@ import time
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+from tokenmizer.graph_memory.filelock import LockUnavailable, session_lock
 from tokenmizer.graph_memory.types import (
     DecisionTransition,
     EdgeType,
@@ -43,6 +44,12 @@ logger = logging.getLogger(__name__)
 # Recorded per session in graph_meta so a mixed database is readable and
 # migration can proceed one session at a time as each is next touched.
 SCHEMA_VERSION = 2
+
+# How long a writer waits for another process to finish writing the same
+# session before giving up and reporting failure. Generous relative to a
+# write (milliseconds) but bounded, so a wedged process cannot stall a
+# request indefinitely. Callers retry.
+LOCK_TIMEOUT_SECONDS = 10.0
 
 
 def quarantine_db(db_path, reason: str) -> bool:
@@ -364,7 +371,90 @@ def persist(graph: "GraphMemory", force: bool = False) -> bool:
             )
             return False
 
-    nodes, edges = _serialize_state(graph)
+    try:
+        with session_lock(graph._db_path.parent, graph.session_id,
+                          timeout=LOCK_TIMEOUT_SECONDS) as locked:
+            # Serialise INSIDE the lock and AFTER reconciliation:
+            # reconciliation can drop nodes this instance was holding
+            # stale, and serialising beforehand would write them back.
+            if locked:
+                _reconcile_with_disk(graph)
+            nodes, edges = _serialize_state(graph)
+            return _write_diff(graph, nodes, edges, force=force)
+    except LockUnavailable as e:
+        # Another process is mid-write on this same session. Writing
+        # anyway is exactly the interleaving the lock exists to prevent,
+        # so report failure and let the caller retry — every caller
+        # (eviction, periodic flush, shutdown flush) already retries or
+        # records the failure.
+        logger.warning("Persist deferred for session %s: %s", graph.session_id, e)
+        return False
+
+
+def _reconcile_with_disk(graph: "GraphMemory") -> tuple[int, int]:
+    """Merge another process's committed changes into this instance
+    before writing. Caller holds the lock. Returns (nodes, edges) dropped.
+
+    `_persisted_nodes` records what THIS process last wrote, so a row it
+    wrote that is no longer on disk was deleted by somebody else. Without
+    acting on that, a stale writer silently undoes another worker's
+    prune: worker A trims a session to 40 nodes, worker B — still holding
+    the pre-prune 100 in memory — adds one node, and its next write
+    upserts all 100 straight back. B is not misbehaving; it is faithfully
+    writing state that has since become wrong.
+
+    The merge rule, applied only to rows this instance previously wrote:
+
+      on disk, we wrote it        -> keep (ours, unchanged or updated)
+      GONE from disk, we wrote it -> another process deleted it; drop it
+                                     from memory too and do not rewrite
+      on disk, we never wrote it  -> another process added it; leave it
+                                     alone (we neither own nor delete it)
+
+    Rows this instance created but has never persisted are untouched:
+    they are new work, not stale state.
+    """
+    try:
+        conn = graph._db_connect()
+        try:
+            node_keys = {r[0] for r in conn.execute(
+                "SELECT node_id FROM graph_nodes WHERE session_id=?",
+                (graph.session_id,))}
+            edge_keys = {r[0] for r in conn.execute(
+                "SELECT edge_key FROM graph_edges WHERE session_id=?",
+                (graph.session_id,))}
+        finally:
+            conn.close()
+    except Exception as e:
+        # Non-fatal: fall back to this instance's own record. The write
+        # still runs; it may reinstate a row another process deleted,
+        # which is the pre-lock behaviour rather than a new failure.
+        logger.debug("Could not reconcile stored keys for %s: %s", graph.session_id, e)
+        return (0, 0)
+
+    dropped_nodes = [k for k in graph._persisted_nodes if k not in node_keys]
+    dropped_edges = [k for k in graph._persisted_edges if k not in edge_keys]
+
+    for k in dropped_nodes:
+        graph._persisted_nodes.pop(k, None)
+        graph._nodes.pop(k, None)
+    if dropped_edges:
+        gone = set(dropped_edges)
+        for k in dropped_edges:
+            graph._persisted_edges.pop(k, None)
+        graph._edges = [e for e in graph._edges if edge_key(e) not in gone]
+
+    if dropped_nodes or dropped_edges:
+        logger.info(
+            "Session %s: adopted another process's deletions "
+            "(%d nodes, %d edges removed from this instance)",
+            graph.session_id, len(dropped_nodes), len(dropped_edges),
+        )
+    return (len(dropped_nodes), len(dropped_edges))
+
+
+def _write_diff(graph: "GraphMemory", nodes: dict, edges: dict, *, force: bool) -> bool:
+    """Compute and apply the row-level diff. Caller holds the lock."""
     prev_nodes = {} if force else graph._persisted_nodes
     prev_edges = {} if force else graph._persisted_edges
 

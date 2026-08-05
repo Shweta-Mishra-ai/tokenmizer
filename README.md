@@ -45,29 +45,98 @@ Every AI session has a context limit. When you hit it:
 
 ## How TokenMizer Solves It
 
-TokenMizer is a **local proxy** between your app and any LLM. Every request goes through a pipeline that builds a live knowledge graph, compresses inputs, caches responses, and auto-checkpoints before context runs out.
+TokenMizer is a **local proxy** between your app and any LLM. Every
+request passes through a pipeline that builds a live knowledge graph,
+compresses inputs, caches responses, and auto-checkpoints before context
+runs out.
 
+```mermaid
+flowchart LR
+    App["Your app<br/><sub>OpenAI-compatible client</sub>"]
+    subgraph TM["TokenMizer :8000"]
+        direction TB
+        L0["<b>L0</b> File intelligence<br/><sub>CSV · PDF · Excel · JSON → schema + sample</sub>"]
+        L1["<b>L1</b> Prompt compression<br/><sub>heuristics; code blocks passed through untouched</sub>"]
+        L2["<b>L2</b> Terse-output injection"]
+        L4["<b>L4</b> Graph memory<br/><sub>extract → window → inject context</sub>"]
+        L3["<b>L3</b> Semantic cache<br/><sub>session-scoped by default</sub>"]
+        L5["<b>L5</b> Provider prompt cache<br/><sub>Anthropic, prefixes ≥1024 tokens</sub>"]
+        L0 --> L1 --> L2 --> L4 --> L3 --> L5
+    end
+    LLM["Claude · GPT · Gemini<br/>Grok · DeepSeek · Ollama"]
+    DB[("SQLite<br/><sub>graph · checkpoints · ownership</sub>")]
+
+    App -->|"POST /v1/chat/completions"| TM
+    TM --> LLM
+    LLM -.->|response| TM
+    TM -.->|"response + savings"| App
+    L4 <-->|"per-row, locked"| DB
 ```
-Your App  →  TokenMizer (:8000)  →  Claude / GPT / Gemini / any LLM
-                    │
-          ┌─────────┴──────────────┐
-          │   6-Layer Pipeline     │
-          │   L0  File Intel       │  CSV/PDF/Excel → schema + sample
-          │   L1  Compression      │  15–40% input reduction
-          │   L2  Output Trim      │  5–15% output reduction
-          │   L3  Semantic Cache   │  100% on repeated queries
-          │   L4  Graph Memory     │  session continuity
-          │   L5  Prompt Cache     │  90% on repeated system prompts
-          └────────────────────────┘
-```
+
+> **On the layer numbering:** `savings.routing` appears in API responses
+> and is always `0`. Complexity-based model routing is **not
+> implemented** — see [Not implemented, despite being configurable](#not-implemented-despite-being-configurable).
 
 ---
 
 ## Architecture
 
 <div align="center">
-  <img src="docs/assets/architecture.svg" width="860" alt="Architecture"/>
+  <img src="docs/assets/architecture.svg" width="880" alt="TokenMizer architecture: proxy pipeline, graph memory, and SQLite storage"/>
 </div>
+
+### What happens on one request
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant P as Proxy
+    participant G as GraphMemory
+    participant S as SQLite
+    participant L as LLM
+
+    C->>P: POST /v1/chat/completions (session_id)
+    P->>P: rate limit · auth · session ownership
+    P->>P: redact secrets once, at ingestion
+    P->>P: L0-L2 file intel · compress · terse
+    P->>G: extract nodes from new messages
+    G->>S: persist changed rows only (locked)
+    G-->>P: relevant context block
+    P->>L: compressed messages + graph context
+    L-->>P: completion
+    alt context >= trigger_at_percent
+        P->>S: auto-checkpoint (retry once, report outcome)
+    end
+    P-->>C: completion + usage + tokenmizer.savings
+```
+
+### Decision lifecycle
+
+The graph tracks *why* the current answer is current. A new decision in
+an occupied slot supersedes the old one and records the transition, so
+`/api/graph/{id}/why` can replay the chain.
+
+```mermaid
+stateDiagram-v2
+    [*] --> COMPLETED: decision extracted
+    COMPLETED --> SUPERSEDED: replaced by a newer decision
+    COMPLETED --> CONTESTED: same topic, purpose unclear
+    COMPLETED --> INVALIDATED: explicitly rejected
+    CONTESTED --> COMPLETED: ambiguity resolved
+    SUPERSEDED --> ARCHIVED: after 7 days
+    ARCHIVED --> [*]: prunable
+
+    note right of SUPERSEDED
+        Kept in history, hidden from resume.
+        The transition records trigger,
+        reason and evidence.
+    end note
+    note right of INVALIDATED
+        Surfaced in resume as "DO NOT REVISIT"
+        so the model does not re-propose it.
+    end note
+```
 
 ### Decision Memory — 4-State Model
 
@@ -423,9 +492,7 @@ ignored.)
 > has no callers — nothing reads from or writes to Redis. All durable
 > state (graph memory, checkpoints, session ownership) is SQLite under
 > `storage_dir`. The setting is accepted so existing configs keep
-> loading; it does not change behaviour. Tracked in issue #27, together
-> with the per-row persistence needed before multi-process operation is
-> safe.
+> loading; it does not change behaviour.
 
 ### Not implemented, despite being configurable
 
@@ -449,13 +516,33 @@ ANTHROPIC_API_KEY=sk-ant-... docker-compose up
 TOKENMIZER_API_KEY=strong-key docker-compose up
 ```
 
-The stack runs a **single worker** — session locks, the graph LRU cache,
-the rate limiter and analytics are all in-process, and graph persistence
-writes one blob per session, so concurrent writers would clobber each
-other. Scale vertically until issue #27 lands.
-
 `stop_grace_period` is set to 30s because SIGTERM triggers a shutdown
-flush (see Durability below); cutting it short is what loses data.
+flush (see [Durability](#durability--what-happens-when-something-breaks-mid-session));
+cutting it short is what loses data.
+
+### Running more than one worker
+
+Graph and checkpoint **writes are safe across processes**: storage is
+per-row and every persist is a read-modify-write under an OS-level file
+lock (`fcntl` / `msvcrt`), so concurrent writers merge and a stale
+writer adopts another's deletions instead of reinstating them. Measured
+lossless with 4 processes writing one session — see
+[Benchmarks](#storage--schema-v2-per-row).
+
+What is **still per-process**, and therefore differs per worker:
+
+| Component | Consequence of >1 worker |
+|---|---|
+| Rate limiter | Limits apply per worker — the effective limit is ~N× what you configured |
+| Analytics | `/api/stats` reflects only the worker that served the request |
+| Semantic cache | Cache hit rate drops; each worker warms its own |
+| Graph LRU cache | A session's in-memory copy can be briefly stale between writes |
+
+The image ships `--workers 1` for that reason. If you raise it, put a
+real rate limiter in front and treat `/api/stats` as per-worker.
+
+> `flock` is unreliable on NFS. Keep `storage_dir` on a local
+> filesystem if you run more than one process against it.
 
 ---
 
@@ -561,23 +648,57 @@ isolation comes from the credential, not from the id being hard to guess.
 
 ## Benchmarks
 
+Every number below comes from a committed runner you can execute
+yourself. Nothing here is hand-written; if a figure and a runner
+disagree, the runner is right and the README is a bug.
+
 ```bash
-python benchmarks/checkpoint_accuracy/runner_v2.py
-pytest tests/ -v
+python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
+python -m benchmarks.graph_retrieval.runner          # category recall
+python -m benchmarks.persistence.runner              # storage + concurrency
+python -m benchmarks.checkpoint_accuracy.runner_v3   # merge-logic contract
+pytest tests/ -q                                     # 495 tests
 ```
 
-**Benchmark v2 — Graph vs plain Summary (3 sessions, heuristic-only,
-measured 2026-07-02 on v0.2.4):**
+### Memory quality — graph vs a plain summary
+
+Measured on v0.5.0, heuristic extraction only, n=3 synthetic sessions:
 
 | Method | Task Recall | Decision Recall | File Recall | Info Preserved |
-|--------|-------------|-----------------|-------------|----------------|
-| TokenMizer Graph | 76% | 85% | 100% | **87%** |
-| Plain Summary baseline | 76% | 70% | 92% | 79% |
-| **Δ advantage** | 0% | **+15%** | **+8%** | **+8%** |
+|---|---|---|---|---|
+| TokenMizer graph | 76% | 92% | 100% | **89%** |
+| Plain summary baseline | 76% | 70% | 92% | 79% |
+| **Δ advantage** | 0% | **+22%** | **+8%** | **+10%** |
 
-Avg resume size: **254 tokens** vs ~1,500+ tokens of raw history.
-(n=3 synthetic sessions — small sample; treat as directional, reproduce
-with the command above.)
+Average resume block: **249 tokens**, against ~1,500+ tokens of raw
+history. Per-session spread is wide (info preserved: 87% / 89% / 92%;
+Δ over summary: +0% / +13% / +17%) — **n=3 synthetic sessions is a small,
+directional sample, not a claim about your workload.** The honest summary
+is that the graph's advantage is concentrated in decision recall, which
+is what it is built for, and that it ties the summary baseline on tasks.
+
+Category recall (`graph_retrieval.runner`, single fixture session):
+goals 100%, decisions 100%, files 100%, superseded decisions 100%,
+completed tasks 67%, environments 67% — **89% overall**.
+
+### Storage — schema v2 (per-row)
+
+`benchmarks/persistence/runner.py`, measured on v0.5.0:
+
+| Metric | v1 (one blob per session) | v2 (per-row) |
+|---|---|---|
+| Rows written to add 1 node to a 50-node graph | 51 | **1** (−98.0%) |
+| …to a 100-node graph | 101 | **1** (−99.0%) |
+| …to a 200-node graph | 201 | **1** (−99.5%) |
+| Rows written when a turn changes nothing | 100 | **0** |
+
+Persist latency, one added node on a 200-node graph: **median 9.3 ms,
+p95 11.7 ms**.
+
+Concurrency (4 OS processes writing one session, 25 nodes each):
+**100/100 nodes persisted, zero lost.** A stale writer holding a
+pre-prune view of the graph no longer reinstates the rows another worker
+deleted.
 
 Enable `use_llm_extraction: true` for hybrid extraction (LLM + heuristic merge).
 
@@ -668,7 +789,8 @@ tokenmizer stats
 |---|---|
 | **v0.3** | SSE streaming passthrough (checkpoint on stream close) |
 | **v0.4** | Graph ontology · deterministic reasoning API (`why`, `impact`, consistency checks) |
-| v0.5 | Cross-session memory · embedding-based edge linking · per-node storage schema (scale past 200-node graphs) |
+| **v0.5** | Per-row storage schema · cross-process write safety · session ownership · durability guarantees |
+| v0.6 | Cross-session memory · embedding-based edge linking · a real precision/recall eval harness for extraction |
 | Research | Real-transcript benchmark suite → paper ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research)) |
 
 Have a use case that doesn't fit? [Open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/new/choose) — extraction misses have their own issue template.
@@ -683,7 +805,7 @@ Contributions welcome — this project merges fast (median PR review < 1 day).
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -v && ruff check tokenmizer/     # 302 tests, must stay green
+pytest tests/ -v && ruff check tokenmizer/     # 495 tests, must stay green
 python scripts/mcp_e2e_check.py                # full-pipeline e2e check
 ```
 

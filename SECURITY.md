@@ -4,7 +4,12 @@
 
 | Version | Supported |
 |---|---|
-| 0.2.x | ✅ Active |
+| 0.5.x | ✅ Active |
+| < 0.5 | ❌ Not supported — upgrade |
+
+Only the latest minor release receives security fixes. TokenMizer is a
+single-maintainer project; backporting to older lines is not something
+that can be promised, so it is not promised.
 
 ## Reporting a Vulnerability
 
@@ -36,7 +41,7 @@ TokenMizer runs **locally on your machine**. It does not send data to any third-
 
 - Graph memory (SQLite on disk)
 - Checkpoints (SQLite on disk)
-- Cache entries (in-memory or Redis)
+- Cache entries (in-process memory)
 - All analytics
 
 ---
@@ -113,8 +118,8 @@ with only a log line as evidence.
 Set `TOKENMIZER_ENV=production` to make TokenMizer **fail closed**
 instead: it refuses to start at all (raises, non-zero exit) if:
 - `tokenmizer.yaml` fails to parse, or contains an unrecognized key (a
-  typo like `api_keys:` instead of `api_key:` is now a hard error, not a
-  silently-dropped value — see `config/settings.py`'s `extra="forbid"`), or
+  typo like `api_kye:` is a hard error, not a silently-dropped value —
+  see `config/settings.py`'s `extra="forbid"`), or
 - the resulting configuration has no `api_key` set at all, even if the
   YAML file itself loaded and validated perfectly fine.
 
@@ -174,18 +179,67 @@ Graph data and checkpoints are stored in SQLite files inside `./checkpoints/`. T
 - API keys or credentials (redacted before extraction)
 - Raw user input (only normalized, structured graph nodes)
 
-For encryption at rest (coming in v0.2.0), set:
-```yaml
-encrypt_storage: true
-encryption_key: ""  # 32-byte base64 key from env
-```
+**Encryption at rest is NOT implemented.** There is no
+`encrypt_storage` setting; an earlier version of this document showed
+one, which was never real. Use filesystem- or volume-level encryption
+(LUKS, FileVault, an encrypted Docker volume) if your data needs it.
+
+Files are created with the process umask and are not further restricted.
+On a shared host, set a restrictive umask or place `storage_dir` on a
+directory only the service user can read.
 
 ---
 
-## Known Limitations (Alpha)
+## Session Isolation
 
-- No multi-user isolation yet — all sessions share the same SQLite database
-- Graph storage is not encrypted at rest in v0.1.0
-- Session IDs are not authenticated — any caller who knows a session_id can access its graph
+A session is **claimed by the first credential that uses it**, and only
+that credential can read or modify it afterwards. This applies to the
+chat endpoint and to every session-scoped route
+(`/api/graph/{id}`, `/api/resume/{id}`, `/api/checkpoint`,
+`/api/decision/invalidate`, `/api/graph/{id}/transitions`, …).
 
-These are tracked and planned for v0.2.0.
+```yaml
+api_key: primary-key      # the deployment credential
+api_keys:                 # additional credentials...
+  - second-team-key       # ...each its own principal
+```
+
+| Configuration | Isolation |
+|---|---|
+| No key (default) | Single implicit principal — local, single-user |
+| One key | Single principal. **Single-tenant**: everyone holding the key shares one session namespace |
+| Multiple keys | Sessions are isolated per key |
+
+Two properties worth stating explicitly:
+
+- **`session_id` is not a secret.** Clients choose it in the request
+  body. Isolation comes from the credential, never from the id being
+  hard to guess. Do not put anything sensitive in a session id.
+- **Denials return 404, not 403.** A distinguishable 403 would turn the
+  session routes into an oracle for which session names exist.
+
+Principals are stored as a SHA-256 prefix of the credential, so the
+ownership table never contains a usable key.
+
+---
+
+## Known Limitations
+
+Current, and deliberately listed rather than discovered:
+
+- **Graph storage is not encrypted at rest.** Anyone with read access to
+  `storage_dir` can read every session's graph and checkpoints. Use
+  filesystem-level encryption if that matters for your data.
+- **Redaction is best-effort.** It is pattern matching. A credential in
+  an unrecognised format with no keyword context can reach the provider
+  and the graph. It reduces exposure; it does not eliminate it.
+- **The prompt-injection filter is a keyword denylist**, not a security
+  boundary — see the section above for exactly what it misses.
+- **Rate limits are per worker.** With more than one worker the
+  effective limit is roughly N× what you configured; put a real limiter
+  in front if that matters.
+- **No audit log.** There is no record of which principal read which
+  session.
+- **No key rotation support.** Changing `api_key` orphans sessions
+  claimed under the old one; they become unreachable rather than
+  reassigned.

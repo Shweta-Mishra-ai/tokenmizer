@@ -17,7 +17,6 @@ names (e.g. things only used in dataclass `asdict`/string templates).
 from __future__ import annotations
 
 import ast
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +54,7 @@ def unused_imports(tree: ast.Module, source: str) -> list[str]:
     for name, lineno in imported.items():
         if name == "annotations":
             continue
-        if name not in used_names and f"__all__" in source and name not in source.split("__all__")[1][:500]:
+        if name not in used_names and "__all__" in source and name not in source.split("__all__")[1][:500]:
             findings.append(f"line {lineno}: unused import {name!r}")
         elif name not in used_names and "__all__" not in source:
             findings.append(f"line {lineno}: unused import {name!r}")

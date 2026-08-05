@@ -1,5 +1,98 @@
 # Changelog
 
+## [0.5.0] — 2026-08-05 — cross-process safety, verified benchmarks, launch prep
+
+### New — graph writes are safe across processes
+Per-row storage (0.4.2) stopped concurrent writers from destroying whole
+sessions, but not from undoing each other. A worker holding a pre-prune
+view of a session would faithfully write its stale node set back,
+reinstating every row another worker had just deleted.
+
+`persist()` is now a read-modify-write under an OS-level advisory lock
+(`fcntl` on POSIX, `msvcrt` on Windows), one lock file per session. Under
+the lock, an instance reconciles against what is actually on disk and
+adopts another process's deletions instead of reverting them. Rows it
+created but never persisted are untouched — new work is never mistaken
+for stale state.
+
+Measured (`benchmarks/persistence/runner.py`): **4 OS processes writing
+one session, 100/100 nodes persisted, zero lost.** A stale writer no
+longer resurrects a prune.
+
+Still per-process, and now stated as such in the startup warning, the
+README and SECURITY.md: rate-limit buckets (so limits apply *per worker*),
+analytics counters, and the semantic cache.
+
+> `flock` is unreliable on NFS. Keep `storage_dir` on a local filesystem
+> for multi-process use.
+
+### New — benchmarks that produce the numbers in the README
+- `benchmarks/persistence/runner.py` measures write amplification,
+  no-op persist cost, persist latency, 4-process concurrency, and the
+  stale-writer case.
+- `benchmarks/graph_retrieval/runner.py` **was broken** — it called
+  `GraphMemory(storage_dir=...)` without the required `session_id` and
+  crashed on every run, while being referenced as a benchmark. Fixed.
+
+### Changed — README benchmark figures now match the runners
+The quoted table was measured on **v0.2.4** and no longer matched what
+the committed runner produced. Re-measured on 0.5.0:
+
+| | Task | Decision | File | Info preserved |
+|---|---|---|---|---|
+| was (v0.2.4) | 76% | 85% | 100% | 87% |
+| now (v0.5.0) | 76% | **92%** | 100% | **89%** |
+
+Per-session spread and the n=3 sample size are now stated inline rather
+than in a footnote, because a three-session synthetic benchmark is
+directional and should read that way.
+
+### Fixed — documentation that described features which do not exist
+- **SECURITY.md advertised encryption at rest**, complete with an
+  `encrypt_storage` / `encryption_key` config block. No such setting has
+  ever existed. Replaced with what to actually do (filesystem/volume
+  encryption) and a note about file permissions.
+- **SECURITY.md "Known Limitations" listed the IDOR as unfixed** ("any
+  caller who knows a session_id can access its graph") after 0.4.1 closed
+  it. Replaced with a Session Isolation section describing the real
+  model, and a limitations list that is current.
+- **USAGE.md documented Redis-backed state and multi-provider routing**
+  as production features. Neither is implemented.
+- The supported-versions table still said `0.2.x`.
+- `tokenmizer/storage/__init__.py` described a unified storage protocol
+  that nothing imports or conforms to.
+
+### Changed — packaging and release readiness
+- `py.typed` added and shipped in the wheel (PEP 561), so the type
+  annotations are actually visible to consumers instead of being
+  discarded as `Any`.
+- Classifiers: `Development Status :: 4 - Beta` (from `3 - Alpha`),
+  Python 3.13, `Typing :: Typed`, AI topic. Added `Changelog` and
+  `Security` project URLs and an explicit sdist manifest.
+- Wheel and sdist build clean and install into a fresh venv with a
+  working `tokenmizer` entry point.
+
+### Changed — CI actually verifies the deployment story
+- The Docker job now runs on **pull requests**, not only `main`.
+- New steps assert the image works **with the network removed**
+  (`--network none`): token counting must use the baked tiktoken
+  vocabulary rather than the char/4 fallback, and graph persist + reload
+  must succeed. Previously the vocabulary bake was claimed but never
+  verified, so it could have silently stopped working and only surfaced
+  in an air-gapped deployment.
+- New `migration` job seeds a database using the **previous release tag**
+  and asserts this version reads it without loss. Nothing else in the
+  suite exercises a real cross-version upgrade.
+
+### Added — tests
+`tests/unit/test_multiprocess.py` (7 tests) covers the stale-writer
+case, reconciliation not eating unpersisted work, another process's
+additions surviving, lock exclusivity across real subprocesses, distinct
+sessions not contending, hostile `session_id` values not escaping the
+lock directory, and 4-process lossless concurrency.
+
+**496 tests, 77% coverage, ruff clean.**
+
 ## [0.4.2] — 2026-08-05 — per-row storage (#27), provider fixes, comment cleanup
 
 Closes the three items left open by 0.4.1.

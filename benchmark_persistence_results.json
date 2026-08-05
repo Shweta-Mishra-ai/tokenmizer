@@ -1,0 +1,52 @@
+{
+  "write_amplification": [
+    {
+      "graph_nodes": 51,
+      "v1_rows_written": 51,
+      "v2_rows_written": 1,
+      "reduction_pct": 98.0
+    },
+    {
+      "graph_nodes": 101,
+      "v1_rows_written": 101,
+      "v2_rows_written": 1,
+      "reduction_pct": 99.0
+    },
+    {
+      "graph_nodes": 201,
+      "v1_rows_written": 201,
+      "v2_rows_written": 1,
+      "reduction_pct": 99.5
+    }
+  ],
+  "noop_persist": {
+    "v1_rows_written": 100,
+    "v2_rows_written": 0
+  },
+  "persist_latency": {
+    "samples": 30,
+    "median_ms": 8.817,
+    "p95_ms": 10.26,
+    "max_ms": 10.542
+  },
+  "concurrent_writers": {
+    "writers": 4,
+    "nodes_per_writer": 25,
+    "expected": 100,
+    "survived": 100,
+    "per_worker": {
+      "0": 25,
+      "1": 25,
+      "2": 25,
+      "3": 25
+    },
+    "elapsed_s": 0.39,
+    "lossless": true
+  },
+  "stale_writer": {
+    "rows_on_disk": 41,
+    "prune_held": true,
+    "new_node_kept": true,
+    "ok": true
+  }
+}
