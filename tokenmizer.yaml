@@ -15,6 +15,14 @@ default_model: claude-sonnet-4-6
 # api_key: ""                 # or: TOKENMIZER_API_KEY
 #                             # Empty = dev mode, no auth required
 #                             # In production: set to a strong random string
+#
+# Each credential is a separate PRINCIPAL, and a session belongs to the
+# principal that first used it — so with one key the deployment is
+# single-tenant (everyone holding it shares one session namespace), and
+# with several, sessions are isolated per key. See README "Session
+# isolation".
+# api_keys:                   # or: TOKENMIZER_API_KEYS='["k1","k2"]'
+#   - "second-team-key"
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
 cors_origins:
@@ -24,8 +32,21 @@ cors_origins:
 #   - "https://yourdomain.com"
 
 # ── State Backend ─────────────────────────────────────────────────────────────
-state_backend: memory         # memory (dev) | redis (production)
+# NOT WIRED UP. tokenmizer/state/backend.py has no callers, so `redis`
+# changes nothing: all durable state (graph memory, checkpoints, session
+# ownership) is SQLite under graph_checkpoint.storage_dir. Tracked in
+# issue #27 alongside the per-row persistence needed for multi-process.
+state_backend: memory         # memory (dev) | redis (accepted, unused)
 # redis_url: redis://localhost:6379/0
+
+# ── Rate limiting behind a proxy ──────────────────────────────────────────────
+# Rate limits key on the connecting address. Behind a load balancer that
+# is the LB, so every client shares one bucket. Enable this ONLY if a
+# proxy you control overwrites X-Forwarded-For — the header is
+# caller-supplied and spoofable, and trusting it otherwise hands clients
+# an unlimited supply of fresh buckets.
+# trust_proxy_headers: false
+# trusted_proxy_hops: 1       # how many trailing XFF entries are yours
 
 # ── Graph Memory + Checkpoints ────────────────────────────────────────────────
 graph_checkpoint:
@@ -58,8 +79,11 @@ terse_output:
   level: full                 # lite | full | ultra
 
 # ── Context Routing ───────────────────────────────────────────────────────────
+# NOT IMPLEMENTED. Nothing reads these fields — setting enabled: true
+# changes no behaviour and logs a warning at startup. Kept only so that
+# existing config files carrying a `routing:` block still load.
 routing:
-  enabled: false              # enable to route simple queries to cheaper models
+  enabled: false              # has no effect
 
 # ── Memory ───────────────────────────────────────────────────────────────────
 memory:

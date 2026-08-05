@@ -47,6 +47,21 @@ class GraphCheckpointSettings(BaseModel):
 
 
 class RoutingSettings(BaseModel):
+    """NOT IMPLEMENTED — no code reads any field below.
+
+    Complexity-based model routing was advertised as a pipeline layer
+    (the proxy even reports a `savings["routing"]` figure, hardcoded to
+    0), but there has never been an implementation: nothing reads
+    `enabled`, `simple_model`, `medium_model`, `complex_model`, or
+    `complexity_threshold`. Setting `enabled: true` does nothing at all
+    and produces no warning.
+
+    The fields are kept so that existing tokenmizer.yaml files carrying a
+    `routing:` block still load (Settings uses extra="forbid", so
+    deleting them would turn every such config into a hard startup
+    failure). get_settings() logs a warning if routing.enabled is true,
+    so nobody is left believing a switch did something.
+    """
     enabled: bool = False
     simple_model: str = "claude-haiku-4-5"
     medium_model: str = "claude-sonnet-4-6"
@@ -119,9 +134,32 @@ class Settings(BaseSettings):
 
     # Auth
     api_key: str = ""  # TOKENMIZER_API_KEY — empty = dev mode (no auth)
+    # Additional accepted credentials. Each one is a SEPARATE principal
+    # for session-ownership purposes, so different callers get genuinely
+    # isolated sessions (see security/ownership.py). With this empty, the
+    # deployment is single-tenant: every caller shares one principal and
+    # therefore one session namespace — which is the honest description
+    # of what a single shared api_key has always meant.
+    api_keys: List[str] = []
 
     # CORS
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:8000"]
+
+    # Rate limiting: trust X-Forwarded-For?
+    #
+    # Rate limits key on request.client.host, which behind a load
+    # balancer, ingress, or CDN is the PROXY's address — so every client
+    # in the world shares one 60/min bucket and one noisy tenant starves
+    # everyone. The fix is to read the forwarded client address, but
+    # X-Forwarded-For is caller-supplied and trivially spoofed, so
+    # trusting it unconditionally would hand every client an unlimited
+    # supply of fresh buckets. It must therefore be opt-in, and only
+    # enabled when a proxy you control actually overwrites the header.
+    trust_proxy_headers: bool = False
+    # How many right-hand entries of X-Forwarded-For are your own proxies.
+    # With one load balancer this is 1: the last entry is what your LB
+    # appended, and the entry before it is the real client.
+    trusted_proxy_hops: int = 1
 
     # Sub-configs
     compression: CompressionSettings = Field(default_factory=CompressionSettings)
@@ -158,10 +196,69 @@ class Settings(BaseSettings):
 
     @classmethod
     def from_yaml(cls, path: str) -> "Settings":
+        """Load settings from YAML, with environment variables taking
+        precedence over the file — the behaviour tokenmizer.yaml's own
+        header has always promised ("Environment variables always
+        override this file") and that docker-compose.yml depends on.
+
+        This used to be a plain `cls(**data)`. In pydantic-settings,
+        values passed to __init__ are the HIGHEST priority source —
+        above env vars — so the YAML silently won every conflict.
+        Because the shipped tokenmizer.yaml is COPY'd into the Docker
+        image and sets provider/state_backend/cors_origins/etc, the
+        corresponding TOKENMIZER_* variables were inert:
+
+            TOKENMIZER_PROVIDER=openai     -> provider      = anthropic
+            TOKENMIZER_STATE_BACKEND=redis -> state_backend = memory
+
+        API keys appeared to work only because those lines happen to be
+        commented out in the shipped file. Any operator who uncommented
+        one would have found their env var silently ignored.
+
+        Fix: drop from the YAML payload any key that the environment
+        also sets, so those fall through to the env source underneath.
+        """
         import yaml
         with open(path) as f:
             data = yaml.safe_load(f) or {}
-        return cls(**data)
+        if not isinstance(data, dict):
+            raise TypeError(
+                f"{path} must contain a YAML mapping at the top level, "
+                f"got {type(data).__name__}"
+            )
+        return cls(**_strip_env_overridden(data))
+
+
+_ENV_PREFIX = "TOKENMIZER_"
+_ENV_NESTED_DELIM = "__"
+
+
+def _strip_env_overridden(data: dict, _prefix: str = _ENV_PREFIX) -> dict:
+    """Remove YAML keys that an environment variable also sets, so the env
+    value wins. Mirrors the env_prefix / env_nested_delimiter scheme
+    declared in Settings.model_config.
+
+    `provider: anthropic` in YAML is dropped when TOKENMIZER_PROVIDER is
+    set; `graph_checkpoint.trigger_at_percent` is dropped when either
+    TOKENMIZER_GRAPH_CHECKPOINT (the whole object) or
+    TOKENMIZER_GRAPH_CHECKPOINT__TRIGGER_AT_PERCENT (the one field) is
+    set. Nested dicts are pruned per-key rather than wholesale, so
+    setting one nested env var does not discard its YAML siblings.
+    """
+    import os
+    out: dict = {}
+    for key, value in data.items():
+        env_name = f"{_prefix}{key}".upper()
+        if env_name in os.environ:
+            continue  # env sets this outright — let the env source supply it
+        if isinstance(value, dict):
+            pruned = _strip_env_overridden(value, f"{env_name}{_ENV_NESTED_DELIM}")
+            if pruned or not value:
+                out[key] = pruned
+            # if every sub-key was env-overridden, omit the parent entirely
+            continue
+        out[key] = value
+    return out
 
 
 class ConfigSecurityError(RuntimeError):
@@ -259,6 +356,17 @@ def get_settings() -> Settings:
                 "api_key is set (TOKENMIZER_API_KEY env var, or api_key in "
                 "tokenmizer.yaml). Set an API key, or explicitly unset "
                 "TOKENMIZER_ENV to run in development mode."
+            )
+
+        # Warn about settings that are accepted but not implemented, so a
+        # config value can never quietly mean nothing. See
+        # RoutingSettings' docstring.
+        if loaded.routing.enabled:
+            logger.warning(
+                "routing.enabled is set, but complexity-based model routing "
+                "is NOT IMPLEMENTED — no request will be routed differently. "
+                "The setting is accepted only so existing config files keep "
+                "loading. Remove it to avoid confusion."
             )
 
         _settings = loaded

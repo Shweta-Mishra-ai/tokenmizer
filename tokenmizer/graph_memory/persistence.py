@@ -40,16 +40,54 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def quarantine_db(db_path, reason: str) -> bool:
+    """
+    Move a corrupt DB file aside instead of deleting it, and report
+    whether anything was actually displaced.
+
+    This file is SHARED BY EVERY SESSION in a storage_dir — one
+    `graph_memory.db` holds every session's nodes and edges. The
+    previous behaviour on any DB-level error was
+    `db_path.unlink(missing_ok=True)`, i.e. permanently destroying every
+    session's graph because one session hit a bad read. Measured: three
+    healthy sessions, one corrupt header, and the next unrelated session
+    to connect wiped all three, with `_persistence_broken` still False
+    so /api/graph/{id} reported healthy over an empty DB.
+
+    Renaming keeps the bytes on disk. SQLite corruption is very often
+    partial, so `.recover` against the quarantined file can usually get
+    most of the graph back — impossible once it has been unlinked.
+    """
+    from pathlib import Path
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return False
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = db_path.with_name(f"{db_path.name}.corrupt-{stamp}")
+    try:
+        db_path.replace(target)
+        logger.error(
+            "Quarantined corrupt DB %s -> %s (%s). This file held EVERY "
+            "session in this storage_dir; a fresh empty DB is being created. "
+            "Recover with: sqlite3 %s '.recover' | sqlite3 %s",
+            db_path, target, reason, target, db_path,
+        )
+        return True
+    except Exception as move_err:
+        logger.error("Could not quarantine corrupt DB %s: %s", db_path, move_err)
+        return False
+
+
 def safe_init_db(graph: "GraphMemory") -> None:
-    """Initialize DB, deleting corrupt file if necessary."""
+    """Initialize DB, quarantining a corrupt file if necessary."""
     try:
         graph._init_db()
-    except Exception:
-        logger.warning(f"DB corrupt or unreadable — recreating: {graph._db_path}")
-        try:
-            graph._db_path.unlink(missing_ok=True)
-        except Exception as del_err:
-            logger.error(f"Could not delete corrupt graph DB: {del_err}")
+    except Exception as init_err:
+        if quarantine_db(graph._db_path, f"init failed: {init_err}"):
+            # Data belonging to other sessions was just displaced. Say so
+            # durably — this is the difference between "we started fresh"
+            # and "we lost everyone's memory."
+            graph._data_loss_detected = True
         try:
             graph._init_db()
         except Exception as e:
@@ -241,6 +279,27 @@ def persist(graph: "GraphMemory", force: bool = False) -> bool:
     """
     if not graph._dirty and not force:
         return True
+
+    # Refuse to write over a row we failed to READ.
+    #
+    # persist() writes the whole session as one blob, so an instance
+    # whose _load() failed (e.g. lock contention) holds an EMPTY graph
+    # that would overwrite a perfectly good stored graph with nothing —
+    # turning a transient, self-healing read failure into permanent data
+    # loss. Try the read once more; only proceed if it succeeds, so
+    # whatever is on disk is merged in before we write it back out.
+    if graph._load_failed:
+        graph._load_failed = False
+        graph._load()
+        if graph._load_failed:
+            logger.error(
+                "Refusing to persist session %s: its stored state could "
+                "not be read, and writing this instance's partial graph "
+                "would overwrite it. Retrying on the next call.",
+                graph.session_id,
+            )
+            return False
+
     try:
         conn = graph._db_connect()
         try:
@@ -336,14 +395,55 @@ def load(graph: "GraphMemory") -> None:
                 )
                 continue
             graph._edges.append(MemoryEdge(**ed))
-    except (sqlite3.DatabaseError, sqlite3.OperationalError) as e:
-        logger.warning(f"Corrupted DB for {graph.session_id} — starting fresh: {e}")
+    except sqlite3.OperationalError as e:
+        # OperationalError is a SUBCLASS of DatabaseError and covers
+        # entirely routine, transient conditions — above all "database is
+        # locked" when a concurrent writer holds the lock past our 5s
+        # busy timeout. The old handler caught DatabaseError and
+        # OperationalError together and responded by deleting the shared
+        # DB file, so ordinary write contention could destroy every
+        # session's memory. Nothing is corrupt here and nothing may be
+        # destroyed: fail this load, keep the file, let the next call
+        # retry.
+        logger.error(
+            "Could not read graph for %s (%s: %s) — the database was NOT "
+            "modified. In-memory graph is empty for this load; a retry "
+            "should succeed once contention clears.",
+            graph.session_id, type(e).__name__, e,
+        )
         graph._nodes = {}
         graph._edges = []
         graph._processed_hashes = set()
-        # Re-initialize the DB file
+        graph._load_failed = True
+        # Do NOT clear _dirty here: this instance must not persist over a
+        # row it failed to read, or a transient lock becomes real data loss.
+        return
+    except sqlite3.DatabaseError as e:
+        logger.warning(f"Corrupted DB for {graph.session_id}: {e}")
+        graph._nodes = {}
+        graph._edges = []
+        graph._processed_hashes = set()
+        # Scope the blast radius: try dropping only THIS session's row
+        # before touching a file that belongs to every other session too.
         try:
-            graph._db_path.unlink(missing_ok=True)
+            conn = graph._db_connect()
+            try:
+                conn.execute("DELETE FROM graphs WHERE session_id=?", (graph.session_id,))
+                conn.commit()
+            finally:
+                conn.close()
+            logger.warning(
+                "Recovered by dropping only session %s's row — other "
+                "sessions in %s are untouched.",
+                graph.session_id, graph._db_path,
+            )
+            graph._data_loss_detected = True
+            return
+        except Exception:
+            pass  # row-scoped recovery failed — the file itself is bad
+        try:
+            if quarantine_db(graph._db_path, f"load failed: {e}"):
+                graph._data_loss_detected = True
             graph._init_db()
         except Exception as reinit_err:
             logger.error(

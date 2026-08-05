@@ -50,6 +50,13 @@ class GraphStatsDTO:
     # is running in-memory only, with NO durable persistence whatsoever.
     # A restart will lose everything. This used to only ever appear in logs.
     persistence_broken: bool = False
+    # True if previously-persisted memory was actually destroyed during
+    # corruption recovery (this session's row dropped, or the shared DB
+    # file quarantined). persistence_broken is about future writes;
+    # this is about past data that no longer exists. A health check that
+    # only watched node_count could not tell "new session" from "we lost
+    # your memory" — this makes the difference queryable.
+    data_loss_detected: bool = False
 
 
 # ── Checkpoint layer ──────────────────────────────────────────────────────────

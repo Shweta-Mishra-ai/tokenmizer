@@ -320,10 +320,36 @@ class SemanticCache:
             if emb is not None:
                 self._embeddings[key] = emb
 
-    def invalidate(self, prompt: str) -> None:
-        key = self._key(prompt)
-        self._exact.pop(key, None)
-        self._embeddings.pop(key, None)
+    def invalidate(self, prompt: str, session_id: str = "") -> int:
+        """Remove cached entries for `prompt`. Returns how many were removed.
+
+        This used to build a single key with the DEFAULT scope
+        ("__shared__") and pop that. Under the default configuration
+        (share_scope="session") set() files every entry under the
+        session's scope instead, so the key computed here matched
+        nothing and invalidate() was a silent no-op — it reported no
+        error and removed nothing, which is the worst way for a cache
+        invalidation API to fail.
+
+        With a session_id, the session-scoped entry and the shared one
+        are both removed. Without one, every scope holding this prompt is
+        removed — "invalidate this prompt" should mean it, and a caller
+        who cannot name the scope still needs the stale answer gone.
+        """
+        removed = 0
+        if session_id:
+            candidates = [self._key(prompt, session_id), self._key(prompt, "__shared__")]
+        else:
+            # Scope is part of the key hash and can't be reversed, so
+            # match on the stored prompt instead. Entries store a 500-char
+            # prefix, so compare against the same prefix.
+            needle = prompt[:500]
+            candidates = [k for k, e in self._exact.items() if e.prompt == needle]
+        for key in candidates:
+            if self._exact.pop(key, None) is not None:
+                removed += 1
+            self._embeddings.pop(key, None)
+        return removed
 
     def clear(self) -> None:
         self._exact.clear()

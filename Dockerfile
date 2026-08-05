@@ -30,6 +30,21 @@ RUN mkdir -p /app/checkpoints
 ENV HF_HOME=/app/.hf-cache
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
+# Pre-download tiktoken's BPE vocabulary at BUILD time.
+#
+# tiktoken ships no vocabulary — it fetches one from
+# openaipublic.blob.core.windows.net the first time an encoding is
+# used. Token counting is on the hot path of every proxied request, so
+# leaving that as a runtime dependency means an air-gapped host, a
+# restrictive egress policy, or a CDN outage degrades every request's
+# token accounting (and, before the fix in core/tokenizer.py, failed
+# the requests outright). Baking the vocabulary in makes the running
+# container independent of that CDN.
+ENV TIKTOKEN_CACHE_DIR=/app/.tiktoken-cache
+RUN mkdir -p /app/.tiktoken-cache && python -c "\
+import tiktoken; \
+[tiktoken.get_encoding(e) for e in ('o200k_base', 'cl100k_base')]"
+
 # Non-root user for security
 RUN adduser --disabled-password --gecos "" appuser && \
     chown -R appuser:appuser /app

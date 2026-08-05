@@ -1,5 +1,150 @@
 # Changelog
 
+## [0.4.1] — 2026-08-05 — second audit pass: correctness, durability, isolation
+
+Findings from a full-codebase audit. Every item below was reproduced
+before being fixed and has a regression test in
+`tests/unit/test_audit_fixes.py` or `tests/unit/test_durability.py`.
+
+### Fixed — decision supersession silently discarded changes (critical)
+`_is_same_decision` merged any two decision labels sharing ≥82% of their
+words. Two decisions in the same slot differ by exactly one word — the
+technology name, which is the entire meaning — so the check got *more*
+wrong as labels got more descriptive:
+
+| Labels | Overlap | Old result |
+|---|---|---|
+| `Use MySQL` / `Use MongoDB` | 0.50 | correctly distinct |
+| `Use MySQL for the user database` / `Use MongoDB for the user database` | 0.83 | **merged** |
+
+A merged swap produced no new node, no `SUPERSEDED` status, and no
+`DecisionTransition` — so `/api/graph/{id}/why` and the `why_decision`
+MCP tool returned nothing for precisely the case they exist to answer,
+and three successive decisions collapsed into one node. Worse, once a
+decision was `SUPERSEDED` or `INVALIDATED` it permanently poisoned its
+topic slot: the replacement merged into the dead node, the
+status-upgrade-only rule refused to revive it, and the session ended up
+with **no** active decision on that topic.
+
+Decisions naming different technologies from the same topic bucket are
+now never treated as duplicates. Restatements and refinements (`Use
+PostgreSQL` → `Use PostgreSQL 16 with pgvector`) still merge, and
+re-adding a stale decision still cannot resurrect it.
+
+### Fixed — resume surfaced superseded and invalidated decisions as current
+`_build_critical` sorted *all* decision nodes by importance with no
+status filter, so the ~100-token "must-know facts" block presented
+choices the team had already moved off — and ones explicitly rejected via
+`/api/decision/invalidate` — as `KEY DECISIONS`, while the current
+decision could be crowded out. `query()` and `to_context_block()` had
+always filtered these; the checkpoint resume path, the product's core
+output, did not. All resume builders now go through one `_live_nodes()`
+filter. Invalidated decisions are surfaced separately as `DO NOT REVISIT`
+so the model doesn't re-propose them.
+
+### Fixed — token counting took the whole proxy down (critical)
+`_get_encoding` caught only `ImportError`, but tiktoken downloads its BPE
+vocabulary from a CDN on first use. Any egress restriction, proxy, or CDN
+outage raised a network error that propagated out of
+`count_messages_tokens` — on the hot path of every request — so **every
+request 500'd**, and the documented char/4 fallback was unreachable
+(it only ran when tiktoken was absent entirely). Now fails soft, caches
+the failure so it isn't retried per request, and the Dockerfile
+pre-downloads the vocabulary at build time (`TIKTOKEN_CACHE_DIR`).
+
+### Fixed — corrupt-DB recovery destroyed every session (critical)
+`graph_memory.db` and `checkpoints.db` are each shared by *every* session
+in a `storage_dir`. Recovery called `unlink()`, so a single bad read by
+one session permanently deleted everyone's memory — and
+`persistence_broken` stayed `False`, so `stats()` reported healthy over an
+emptied database. Additionally `sqlite3.OperationalError` (which includes
+routine `database is locked` contention) subclasses `DatabaseError`, so
+ordinary write contention triggered that deletion.
+
+Now: lock errors are treated as contention and destroy nothing; genuine
+corruption is scoped to the affected session's row where possible;
+otherwise the file is **quarantined by rename** so `.recover` can salvage
+it. A graph that failed to *read* refuses to *write* over the stored row,
+so a transient failure can't become permanent loss. Actual loss is
+reported as `data_loss_detected` in `GET /api/graph/{id}`.
+
+### New — mid-session durability guarantees
+See README "Durability". Shutdown (SIGTERM) now drains in-flight
+background extraction and force-persists every cached graph instead of
+logging one line and exiting; a periodic flush bounds hard-kill exposure
+to 30s; a graph whose persist fails is **kept in memory** rather than
+evicted; and sessions with an in-flight request are never evicted (the
+previous guard checked a lock only the background task ever took, so it
+was inert for request traffic).
+
+### Fixed — any caller could read or modify any session (security)
+Session-scoped routes took `session_id` straight from the URL, with a
+single shared deployment key as the only auth and no ownership model at
+all. Since clients choose their own `session_id`, reading someone else's
+session needed no guesswork, and `/api/decision/invalidate` made it a
+write primitive. Sessions are now claimed by the first principal that
+uses them; `api_keys` adds further credentials, each its own principal.
+Denied requests return 404, not 403, so the endpoints can't be used to
+probe which sessions exist. Dev mode and single-key deployments are
+behaviour-compatible.
+
+### Fixed — environment variables did not override `tokenmizer.yaml`
+`from_yaml` passed the file's contents as `__init__` kwargs — the
+highest-priority source in pydantic-settings, above env vars — so every
+key present in the shipped (and Docker-`COPY`'d) config silently beat its
+`TOKENMIZER_*` variable, contradicting that file's own header.
+`TOKENMIZER_PROVIDER=openai` resolved to `anthropic`. API keys appeared to
+work only because those lines happen to be commented out.
+
+### Fixed — streaming cached truncated responses
+On a mid-stream provider error the generator fell through to post-stream
+bookkeeping and cached whatever partial text had arrived, serving that
+truncated answer to every future matching prompt. Failed and cache-hit
+streams no longer write to the cache, and non-`ProviderError` exceptions
+are handled instead of killing the generator mid-stream.
+
+### Fixed — smaller correctness and resource bugs
+- `SemanticCache.invalidate()` was a **silent no-op** under the default
+  `share_scope="session"`: it built its key with the `"__shared__"` scope
+  that `set()` never uses. Now removes the entry and reports how many.
+- `AnalyticsEngine._records` was unbounded and appended per request (with
+  a second reference in `_by_provider`) — the only uncapped structure in
+  the codebase. Now age- and count-bounded; lifetime counters are kept
+  separately so totals don't shrink as records age out.
+- Cost figures applied one blended rate to input *and* output tokens.
+  Output costs up to 5× more, so `cost_saved_usd` was materially wrong.
+  Rates are now per-direction.
+- `CheckpointManager._prev_snapshots` held a full graph snapshot per
+  session forever; now LRU-bounded.
+- `stats()` excluded evicted nodes from `node_count` but not from
+  `edge_count` — the same inconsistency TM-35 set out to fix, left
+  half-done.
+- `CheckpointManager._db_connect` leaked the handle on a failed PRAGMA
+  (fixed in its graph twin, never propagated).
+- `SUPERSEDES` edges were inferred by word overlap against *every*
+  superseded decision, inventing causal history that `/why` then reported
+  as fact. Only the edge created alongside a real `DecisionTransition`
+  remains.
+- Rate limiting keyed on the connecting address, so every client behind a
+  load balancer shared one bucket. Opt-in `trust_proxy_headers` reads the
+  forwarded address, indexed from the right by `trusted_proxy_hops` (the
+  leftmost `X-Forwarded-For` entry is caller-controlled).
+
+### Changed — settings that did nothing now do something, or say so
+`compression.min_tokens_to_compress`, `graph_checkpoint.max_resume_tokens`,
+`graph_checkpoint.extraction_model` and `memory.enabled` were all
+documented but read by nothing; they are now honoured. `routing.*` has no
+implementation at all — it is kept so existing configs load, but logs a
+warning at startup and is labelled NOT IMPLEMENTED in the README and
+config file.
+
+### Removed — Redis from `docker-compose.yml`
+The stack ran a Redis container, gated startup on its health check, and
+persisted a volume for it. `tokenmizer/state/backend.py` has no callers —
+not a byte was ever written to Redis. Removed rather than left as
+advertised-but-fake production readiness. `stop_grace_period: 30s` added
+so the shutdown flush can complete.
+
 ## [0.4.0] — 2026-07-11 — from storage to reasoning: ontology + graph reasoning
 
 ### New — TokenMizer Ontology

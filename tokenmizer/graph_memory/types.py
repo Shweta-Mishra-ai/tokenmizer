@@ -52,6 +52,27 @@ class NodeStatus(str, Enum):
     CONTESTED = "contested"
 
 
+# Statuses meaning "no longer the current state of the world".
+#
+# Single source of truth, because the three places that need this rule
+# had drifted apart: query() filtered them inline, add_node()'s dedup
+# path did not filter at all (so a SUPERSEDED node absorbed the very
+# decision that replaced it, and the replacement was silently lost), and
+# the resume builders in checkpoints/manager.py did not filter either
+# (so resume advertised superseded and invalidated decisions as current).
+# A node in one of these statuses must never be surfaced as a live fact
+# and must never absorb a new decision via dedup/merge.
+#
+# CONTESTED is deliberately absent: it means "two live decisions conflict
+# and a human should resolve it", which is still current information.
+INACTIVE_STATUSES: frozenset = frozenset({
+    NodeStatus.SUPERSEDED,
+    NodeStatus.MODIFIED,        # alias for SUPERSEDED
+    NodeStatus.INVALIDATED,
+    NodeStatus.ARCHIVED,
+})
+
+
 class EdgeType(str, Enum):
     DEPENDS_ON = "depends_on"
     RELATED_TO = "related_to"

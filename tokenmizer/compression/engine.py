@@ -523,9 +523,17 @@ class CompressionPipeline:
         strip_comments: bool = False,
         enable_ml: bool = True,
         device: str = "cpu",
+        min_tokens_to_compress: int = 300,
     ):
         self.ratio = ratio
         self.strip_comments = strip_comments
+        # Messages below this many tokens are passed through untouched.
+        # `compression.min_tokens_to_compress` has always been a documented
+        # setting (it is spelled out in the shipped tokenmizer.yaml) but
+        # nothing ever read it — compress_messages() hardcoded 200. An
+        # operator raising it to avoid mangling short prompts got no
+        # effect and no warning. It is now honoured.
+        self.min_tokens_to_compress = min_tokens_to_compress
         # compression_ratio = output_tokens / input_tokens (lower = more compressed)
         # If ratio > threshold, ML compression had no effect — keep heuristic result
         self._quality_threshold = 0.95
@@ -652,7 +660,7 @@ class CompressionPipeline:
                 continue
 
             content = msg.get("content", "")
-            cr = self.compress_text(content, min_tokens=200)
+            cr = self.compress_text(content, min_tokens=self.min_tokens_to_compress)
             total_saved += cr.original_tokens - cr.compressed_tokens
             result.append({**msg, "content": cr.compressed_text})
 

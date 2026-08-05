@@ -15,6 +15,8 @@ Extended during the audit/fix pass to cover:
     content scanning (previously: any message with list-content bypassed
     the injection filter completely, regardless of what text was inside).
 """
+from types import SimpleNamespace
+
 import pytest
 
 from tokenmizer.security.redaction import redact, redact_messages, redact_node
@@ -290,8 +292,14 @@ class TestAuthFailClosed:
 
         class FakeRequest:
             headers = FakeHeaders({"Authorization": "Bearer test-key-123"})
+            # Real Starlette Requests always carry `.state`; verify_api_key
+            # records the caller's principal there for session-ownership
+            # checks (see security/ownership.py).
+            state = SimpleNamespace()
 
-        await auth_module.verify_api_key(FakeRequest())  # must not raise
+        req = FakeRequest()
+        await auth_module.verify_api_key(req)  # must not raise
+        assert req.state.principal, "a successful auth must establish a principal"
 
     @pytest.mark.asyncio
     async def test_invalid_key_rejected(self, monkeypatch):

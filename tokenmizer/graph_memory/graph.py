@@ -42,6 +42,7 @@ from tokenmizer.graph_memory.helpers import (
     _infer_trigger,
 )
 from tokenmizer.graph_memory.types import (
+    INACTIVE_STATUSES,
     DecisionTransition,
     EdgeType,
     MemoryEdge,
@@ -52,7 +53,7 @@ from tokenmizer.graph_memory.types import (
 
 __all__ = [
     "GraphMemory",
-    "NodeType", "NodeStatus", "EdgeType",
+    "NodeType", "NodeStatus", "EdgeType", "INACTIVE_STATUSES",
     "MemoryNode", "MemoryEdge", "DecisionTransition",
     "_content_to_text", "_infer_trigger", "_extract_evidence_from_text",
 ]
@@ -92,6 +93,18 @@ class GraphMemory:
         # True if the SQLite DB could not be reinitialized after corruption —
         # the graph is running in-memory-only with no durable persistence.
         self._persistence_broken = False
+        # True if previously-persisted data was actually destroyed or
+        # displaced during recovery (a session row dropped, or the whole
+        # shared DB file quarantined). Distinct from _persistence_broken,
+        # which is about FUTURE writes: this one says "memory that existed
+        # is gone." Both are surfaced via stats() so a health check can
+        # tell "empty because new" from "empty because we lost it."
+        self._data_loss_detected = False
+        # True if the last _load() could not read the DB at all (e.g. lock
+        # contention). The in-memory graph is empty but NOTHING was
+        # destroyed — persisting from this instance would overwrite a good
+        # row with an empty one, so _persist() refuses while this is set.
+        self._load_failed = False
         # Dirty-tracking for _persist() — see that method's docstring.
         # Starts True so the first persist() call after construction always
         # writes; cleared only after a confirmed successful write.
@@ -202,6 +215,20 @@ class GraphMemory:
             for ex_id, ex in self._nodes.items():
                 if ex.type != NodeType.DECISION or ex._evicted:
                     continue
+                # NOTE: inactive (SUPERSEDED/INVALIDATED) nodes are
+                # deliberately still eligible to absorb a match here.
+                # Re-adding a *genuine restatement* of a dead decision
+                # must be a no-op, not a revival: extraction re-scans old
+                # messages whenever _processed_hashes is capped (see
+                # extract_from_messages), so a stale "Use React" resurfacing
+                # after the team moved to Next.js must not flip the choice
+                # back. test_merge_does_not_resurrect_superseded covers this.
+                #
+                # A genuinely DIFFERENT choice in the same slot no longer
+                # reaches this branch at all — _is_same_decision now
+                # rejects competing alternatives outright, so it falls
+                # through to node creation and the supersession path
+                # rather than being swallowed by the dead node.
                 if _is_same_decision(label, ex.label):
                     ex.touch()
                     self._dirty = True
@@ -556,17 +583,21 @@ class GraphMemory:
                         if decision_words & task_words:
                             self.add_edge(nid, tid, EdgeType.RELATED_TO)
 
-                # SUPERSEDES edge: link new decision to any SUPERSEDED decision
-                # that shares topic words — enables "changed from X to Y" in resume
-                for existing_id, existing_node in list(self._nodes.items()):
-                    if (existing_id != nid
-                            and existing_node.type == NodeType.DECISION
-                            and existing_node.status == NodeStatus.SUPERSEDED):
-                        existing_words = self._expand_with_aliases(
-                            self._meaningful_words(existing_node.label)
-                        )
-                        if decision_words & existing_words:
-                            self.add_edge(nid, existing_id, EdgeType.SUPERSEDES)
+                # SUPERSEDES edges are NOT inferred by word overlap here.
+                #
+                # This used to link the new decision to EVERY superseded
+                # decision sharing any topic word — including ones it had
+                # nothing to do with, and ones superseded by a different
+                # decision entirely. In a session with a few database
+                # changes that produced a dense mesh of false causal
+                # edges, and /why walks exactly these edges to answer
+                # "why is X the current choice", so the invented edges
+                # showed up as invented history.
+                #
+                # add_node() already creates a SUPERSEDES edge for each
+                # decision this one genuinely replaced, at the moment it
+                # records the DecisionTransition — that is the only place
+                # with the evidence to justify the claim.
 
         # Files — linked to tasks only if file name appears in task description
         for f in data.get("files", []):
@@ -710,10 +741,7 @@ class GraphMemory:
             if node._evicted:
                 continue
             # Skip archived/superseded/invalidated — historical noise
-            if node.status in (
-                NodeStatus.ARCHIVED, NodeStatus.SUPERSEDED,
-                NodeStatus.MODIFIED, NodeStatus.INVALIDATED,
-            ):
+            if node.status in INACTIVE_STATUSES:
                 continue
 
             node_words = self._expand_with_aliases(
@@ -843,6 +871,16 @@ class GraphMemory:
         """
         from tokenmizer.core.dto import GraphStatsDTO
         live_nodes = [n for n in self._nodes.values() if not n._evicted]
+        # Count only edges whose BOTH endpoints are live. node_count
+        # already excluded evicted nodes (TM-35), but edge_count did not,
+        # so /api/graph/{id} still reported edges pointing at nodes that
+        # /viz doesn't render — the same inconsistency that fix set out
+        # to remove, left half-done on the edge side.
+        live_ids = {n.id for n in live_nodes}
+        live_edges = [
+            e for e in self._edges
+            if e.source_id in live_ids and e.target_id in live_ids
+        ]
         by_type: dict[str, int] = {}
         by_status: dict[str, int] = {}
         confidences: list[float] = []
@@ -854,13 +892,14 @@ class GraphMemory:
         dto = GraphStatsDTO(
             session_id=self.session_id,
             node_count=len(live_nodes),
-            edge_count=len(self._edges),
+            edge_count=len(live_edges),
             by_type=by_type,
             by_status=by_status,
             processed_messages=len(self._processed_hashes),
             avg_confidence=avg_confidence,
             decision_tracking_failures=self._decision_tracking_failures,
             persistence_broken=self._persistence_broken,
+            data_loss_detected=self._data_loss_detected,
         )
         # Return as dict for JSON serialization — DTO used for type safety at boundary
         from dataclasses import asdict

@@ -20,13 +20,62 @@ _FALLBACK_RATIO = 4  # chars per token — only used if tiktoken unavailable
 
 @functools.lru_cache(maxsize=16)
 def _get_encoding(model: str):
+    """
+    Resolve a tiktoken encoding, or None if one cannot be obtained for
+    ANY reason. Never raises.
+
+    This used to catch only ImportError. tiktoken does not ship its BPE
+    vocabulary — `encoding_for_model()` downloads it from
+    openaipublic.blob.core.windows.net on first use — so on an
+    air-gapped host, behind an egress proxy, or during a blob outage it
+    raises a network error (requests.ProxyError / ConnectionError),
+    which sailed straight past that ImportError handler and out through
+    count_tokens(). count_messages_tokens() is on the hot path of every
+    proxied request, so a transient failure to reach a third-party CDN
+    turned into a 500 on EVERY request, and the documented char/4
+    fallback below was unreachable — it only ever ran when tiktoken was
+    not installed at all.
+
+    Catching broadly here is deliberate: an approximate token count is
+    always better than a dead proxy. The result (including None) is
+    cached by lru_cache, so a failure costs one attempt per model rather
+    than a fresh network timeout on every single request.
+
+    To avoid the network entirely, pre-fetch the vocabulary at image
+    build time and point TIKTOKEN_CACHE_DIR at it — see the Dockerfile.
+    """
     try:
         import tiktoken
-        try:
-            return tiktoken.encoding_for_model(model)
-        except KeyError:
-            return tiktoken.get_encoding("cl100k_base")
     except ImportError:
+        logger.warning(
+            "tiktoken is not installed — falling back to a char/%d token "
+            "estimate. Install tiktoken for accurate counts.", _FALLBACK_RATIO
+        )
+        return None
+
+    try:
+        return tiktoken.encoding_for_model(model)
+    except KeyError:
+        pass  # unknown model name — fall through to the generic encoding
+    except Exception as e:
+        logger.warning(
+            "tiktoken could not load an encoding for model %r (%s: %s). "
+            "Falling back to a char/%d estimate for this model. If this is "
+            "a network error, the BPE vocabulary could not be downloaded — "
+            "pre-populate TIKTOKEN_CACHE_DIR to run without egress.",
+            model, type(e).__name__, e, _FALLBACK_RATIO,
+        )
+        return None
+
+    try:
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception as e:
+        logger.warning(
+            "tiktoken could not load the cl100k_base fallback encoding "
+            "(%s: %s). Using a char/%d estimate — token counts will be "
+            "approximate until this is resolved.",
+            type(e).__name__, e, _FALLBACK_RATIO,
+        )
         return None
 
 
@@ -84,15 +133,26 @@ def count_tokens(text: str, model: str = "gpt-4o") -> int:
         sdk_count = _count_with_anthropic_sdk(text)
         if sdk_count is not None:
             return sdk_count
-        enc = _get_encoding("gpt-4o")  # closest available approximation
-        if enc is not None:
-            return len(enc.encode(text, disallowed_special=()))
-        return max(1, len(text) // _FALLBACK_RATIO)
+        return _encode_len(_get_encoding("gpt-4o"), text)  # closest approximation
 
-    enc = _get_encoding(model)
+    return _encode_len(_get_encoding(model), text)
+
+
+def _encode_len(enc, text: str) -> int:
+    """Token count via `enc`, or the char/N estimate if `enc` is None or
+    the encode call itself fails. Counting tokens must never be able to
+    fail a request — the count is an optimisation input, not an answer
+    the caller asked for."""
     if enc is None:
         return max(1, len(text) // _FALLBACK_RATIO)
-    return len(enc.encode(text, disallowed_special=()))
+    try:
+        return len(enc.encode(text, disallowed_special=()))
+    except Exception as e:
+        logger.warning(
+            "Token encode failed (%s: %s) — using a char/%d estimate for "
+            "this call.", type(e).__name__, e, _FALLBACK_RATIO,
+        )
+        return max(1, len(text) // _FALLBACK_RATIO)
 
 
 def count_messages_tokens(messages: list[dict], model: str = "gpt-4o") -> int:
