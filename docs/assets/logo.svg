@@ -227,8 +227,13 @@
     NEVER LOSE AI CONTEXT
   </text>
 
-  <!-- Version badge -->
-  <rect x="204" y="410" width="92" height="20" rx="10" fill="#1e0f4a" stroke="#3b2080" stroke-width="1"/>
+  <!-- No version badge here on purpose.
+       A version baked into an image goes stale on every single release
+       and nothing catches it: this logo read "v0.2.3" while the package
+       was on 0.6.0, on the README that is the first thing anyone sees.
+       The PyPI badge in the README renders the real published version
+       from the registry, so it cannot drift. -->
+  <rect x="186" y="410" width="128" height="20" rx="10" fill="#1e0f4a" stroke="#3b2080" stroke-width="1"/>
   <text
     x="250" y="424"
     font-family="'SF Mono','Fira Code','Consolas',monospace"
@@ -237,7 +242,7 @@
     letter-spacing="1.5"
     text-anchor="middle"
     fill="#8b6fc8">
-    v0.2.3
+    GRAPH MEMORY
   </text>
 
   <!-- Outer decorative ring -->

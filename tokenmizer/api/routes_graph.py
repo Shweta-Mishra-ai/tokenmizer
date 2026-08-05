@@ -31,6 +31,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
+from pydantic import BaseModel
 
 from tokenmizer.api import app as app_module
 from tokenmizer.core.tokenizer import count_tokens
@@ -119,6 +120,56 @@ def _internal_error(context: str, e: Exception) -> HTTPException:
 @router.get("/api/stats", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def stats(session_id: Optional[str] = None):
     return app_module._analytics.summary()
+
+
+class AnalyzeRequest(BaseModel):
+    """File analysis request. Content is sent inline rather than as a
+    path: the server may be a container or a remote host, so a path the
+    CLIENT can see usually means nothing to it, and accepting one would
+    be an arbitrary-file-read primitive besides."""
+    filename: str
+    content: str
+    token_budget: int = 500
+    query: str = ""
+
+
+@router.post("/api/analyze", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+async def analyze_file(req: AnalyzeRequest):
+    """Summarise a large file into a token-budgeted digest.
+
+    The same FileIntelligence used by layer 0 of the proxy pipeline and
+    by the `analyze` plugin skill, exposed for callers that are not
+    inside Claude Code — a shell, a script, curl, another editor. The
+    README previously documented this as a known missing piece.
+    """
+    if req.token_budget <= 0 or req.token_budget > 100_000:
+        raise HTTPException(
+            status_code=422,
+            detail="token_budget must be between 1 and 100000.",
+        )
+    if not req.filename.strip():
+        raise HTTPException(status_code=422, detail="filename is required.")
+
+    try:
+        result = app_module._file_intelligence.process(
+            req.content, req.filename,
+            token_budget=req.token_budget, query=req.query,
+        )
+    except Exception as e:
+        raise _internal_error("File analysis failed", e)
+
+    return {
+        "filename": req.filename,
+        "file_type": result.file_type,
+        "original_tokens": result.original_tokens,
+        "extracted_tokens": result.extracted_tokens,
+        "tokens_saved": result.tokens_saved,
+        "savings_pct": result.savings_pct,
+        "strategy_used": result.strategy_used,
+        "was_truncated": result.was_truncated,
+        "content": result.content,
+        "summary": result.summary,
+    }
 
 
 @router.get("/api/cache/stats", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])

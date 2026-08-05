@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.6.1] — 2026-08-05 — real transcripts in the corpus, and the gaps a sweep found
+
+### Fixed — the logo advertised v0.2.3 while the package was on 0.6.0
+On the README, above the fold, the first thing anyone sees. A version
+baked into an image goes stale on every single release and nothing
+catches it, so the badge now reads "GRAPH MEMORY" instead of a number.
+The PyPI badge beside it renders the real published version live from the
+registry and cannot drift.
+
+`tests/unit/test_version_consistency.py` now fails the build if any
+committed SVG contains a version-shaped string, so this cannot recur.
+`scripts/mcp_e2e_check.py` compared the served version against a
+hardcoded `"0.2.3"` sentinel — meaningless the moment 0.2.4 shipped; it
+now compares against `tokenmizer.__version__`.
+
+### New — the eval corpus is no longer 100% synthetic
+Three sessions condensed from real TokenMizer audit work (the 0.4.2
+storage migration, the 0.5.0 concurrency work, the 0.6.0 eval harness)
+join the eight hand-written fixtures: **11 sessions, 116 turns, 122
+labelled items, 11 domains.**
+
+They are scored separately, and the harness prints the split on every
+run:
+
+| Corpus origin | Sessions | Macro F1 |
+|---|---|---|
+| Synthetic (hand-written) | 8 | **75%** |
+| Real (captured transcripts) | 3 | **65%** |
+
+**A 10-point drop from fixtures to real data.** That gap is the honest
+measure of how far the heuristics are fitted to text we wrote ourselves.
+It is now the headline number in the README rather than a footnote,
+because it is the first thing a careful reader would ask for and the
+last thing a project wanting to look good would publish.
+
+Overall on the full corpus: files F1 93%, errors 75%, completed tasks
+71%, decisions 66%, pending tasks 64%, **macro 74%**.
+
+### New — `tokenmizer analyze` and `POST /api/analyze`
+File analysis was reachable only from inside Claude Code, via the plugin
+skill. The README documented the CLI command and HTTP endpoint as a known
+missing piece; both now exist and wrap the same `FileIntelligence` the
+proxy pipeline uses.
+
+```bash
+tokenmizer analyze data.csv --token-budget 300   # local, no server, no key
+tokenmizer analyze big.json --raw > digest.txt
+```
+
+The endpoint takes `content` inline rather than a path: the server is
+usually a container or a remote host, so a client-side path means nothing
+to it — and accepting one would be an arbitrary-file-read primitive
+against the server. There is a test asserting a `file_path` payload is
+rejected.
+
+### Fixed — six endpoints existed but were undocumented
+`/api/cache/stats`, `/api/checkpoints/{id}`, `/api/graph/{id}/viz`,
+`/api/graph/{id}/history`, `/api/graph/{id}/transitions` and
+`/api/graph/{id}/obsidian` were all live and absent from the API table.
+Found by a scripted sweep that compares every route decorator against
+every endpoint the README mentions, in both directions. Both directions
+are now clean.
+
+### Added — tests
+`tokenmizer analyze` (happy path, `--raw`, missing file, directory
+instead of file, non-positive budget) and `POST /api/analyze` (budget is
+honoured, three invalid-input cases, path-payload rejection), plus the
+asset version-drift guard, plus a test that compares every route
+decorator against the README's API table in both directions.
+**533 tests, 77% coverage, ruff clean, MCP e2e green.**
+
 ## [0.6.0] — 2026-08-05 — an eval harness, a real corpus, and measured extraction
 
 Addresses the three things flagged as launch risks in 0.5.0: a

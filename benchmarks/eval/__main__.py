@@ -129,6 +129,23 @@ def report(sessions, result: dict, show_errors: bool) -> None:
         print(f"{'macro F1':<18}{'':>7}{'':>7}{sum(macro)/len(macro):>7.0%}")
     print()
 
+    # Synthetic vs real, scored separately. A corpus that mixes
+    # hand-written fixtures with captured transcripts and reports one
+    # number invites exactly the question it cannot answer: does this
+    # generalise, or did the heuristics get fitted to the fixtures?
+    by_origin = {}
+    for s in sessions:
+        by_origin.setdefault(s.origin, []).append(s)
+    if len(by_origin) > 1:
+        print("Generalisation — same extractor, scored by corpus origin")
+        print(f"  {'origin':<12}{'sessions':>9}{'macro F1':>10}")
+        for origin, group in sorted(by_origin.items()):
+            sub = evaluate(group, result["threshold"])
+            f1s = [m["f1"] for m in sub["micro"].values()]
+            macro = sum(f1s) / len(f1s) if f1s else 0.0
+            print(f"  {origin:<12}{len(group):>9}{macro:>10.0%}")
+        print()
+
     q = result["labels"]
     print("Label quality (independent of correctness)")
     print(f"  labels emitted     : {q.count}")

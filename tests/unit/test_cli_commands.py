@@ -29,6 +29,7 @@ Three real bugs found:
 from __future__ import annotations
 
 import httpx
+import pytest
 from typer.testing import CliRunner
 
 from tokenmizer.cli import app
@@ -173,3 +174,104 @@ class TestResumeCommand:
         assert result.exception is None or isinstance(result.exception, SystemExit), (
             f"non-404 error response crashed the CLI: {result.exception!r}"
         )
+
+
+class TestAnalyzeCommand:
+    """`tokenmizer analyze` and POST /api/analyze close a gap the README
+    previously documented as missing: file analysis outside Claude Code."""
+
+    def test_analyzes_a_csv(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        f = tmp_path / "data.csv"
+        f.write_text("region,revenue\n" + "\n".join(f"EMEA,{i}" for i in range(300)))
+
+        res = CliRunner().invoke(cli_app, ["analyze", str(f), "--token-budget", "200"])
+        assert res.exit_code == 0, res.output
+        assert "data.csv" in res.output
+        assert "300 rows" in res.output or "region" in res.output
+
+    def test_raw_mode_prints_only_the_summary(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        f = tmp_path / "d.csv"
+        f.write_text("a,b\n1,2\n3,4\n")
+        res = CliRunner().invoke(cli_app, ["analyze", str(f), "--raw"])
+        assert res.exit_code == 0
+        assert "tokens ->" not in res.output, "raw mode must omit the stats header"
+
+    @pytest.mark.parametrize("args,expect", [
+        (["analyze", "/nonexistent/nope.csv"], "not found"),
+        (["analyze", "/tmp"], "not a file"),
+    ])
+    def test_bad_input_exits_nonzero_with_a_reason(self, args, expect):
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        res = CliRunner().invoke(cli_app, args)
+        assert res.exit_code == 1
+        assert expect in res.output.lower()
+
+    def test_negative_budget_is_rejected(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        f = tmp_path / "d.csv"
+        f.write_text("a,b\n1,2\n")
+        res = CliRunner().invoke(cli_app, ["analyze", str(f), "--token-budget", "0"])
+        assert res.exit_code == 1
+
+
+class TestAnalyzeEndpoint:
+    def test_returns_a_budgeted_summary(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        import tokenmizer.api.app as app_module
+        from tokenmizer.security.ownership import OwnershipStore
+
+        monkeypatch.setattr(app_module, "_ownership", OwnershipStore(storage_dir=str(tmp_path)))
+        with TestClient(app_module.app) as c:
+            r = c.post("/api/analyze", json={
+                "filename": "sales.csv",
+                "content": "region,revenue\n" + "\n".join(f"EMEA,{i}" for i in range(400)),
+                "token_budget": 250,
+            })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["file_type"] == "csv"
+        assert body["extracted_tokens"] <= 250, "the budget is the contract"
+        assert body["original_tokens"] > body["extracted_tokens"]
+
+    @pytest.mark.parametrize("payload", [
+        {"filename": "x.csv", "content": "a,b\n1,2\n", "token_budget": 0},
+        {"filename": "x.csv", "content": "a,b\n1,2\n", "token_budget": 10 ** 7},
+        {"filename": "  ", "content": "a,b\n1,2\n"},
+    ])
+    def test_invalid_input_is_422(self, tmp_path, monkeypatch, payload):
+        from fastapi.testclient import TestClient
+
+        import tokenmizer.api.app as app_module
+        from tokenmizer.security.ownership import OwnershipStore
+
+        monkeypatch.setattr(app_module, "_ownership", OwnershipStore(storage_dir=str(tmp_path)))
+        with TestClient(app_module.app) as c:
+            assert c.post("/api/analyze", json=payload).status_code == 422
+
+    def test_does_not_accept_a_server_side_path(self, tmp_path, monkeypatch):
+        """Content is sent inline on purpose — accepting a path would be
+        an arbitrary-file-read primitive against the server."""
+        from fastapi.testclient import TestClient
+
+        import tokenmizer.api.app as app_module
+        from tokenmizer.security.ownership import OwnershipStore
+
+        monkeypatch.setattr(app_module, "_ownership", OwnershipStore(storage_dir=str(tmp_path)))
+        with TestClient(app_module.app) as c:
+            r = c.post("/api/analyze", json={"file_path": "/etc/passwd"})
+        assert r.status_code == 422

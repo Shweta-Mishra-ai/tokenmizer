@@ -621,6 +621,13 @@ isolation comes from the credential, not from the id being hard to guess.
 | `/v1/chat/completions` | POST | OpenAI-compatible proxy |
 | `/api/resume/{id}` | GET | Get resume context |
 | `/api/checkpoint` | POST | Manual checkpoint |
+| `/api/analyze` | POST | File → token-budgeted digest (CSV/JSON/PDF/Excel/logs/code) |
+| `/api/checkpoints/{id}` | GET | List a session's checkpoints |
+| `/api/graph/{id}/viz` | GET | Graph as D3-compatible JSON |
+| `/api/graph/{id}/history` | GET | Graph state at a point in time |
+| `/api/graph/{id}/transitions` | GET | Decision transitions, newest first |
+| `/api/graph/{id}/obsidian` | GET | Obsidian Canvas export |
+| `/api/cache/stats` | GET | Semantic cache hit rate and utilisation |
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
 | `/api/graph/{id}` | GET | Session graph stats |
 | `/api/graph/{id}/html` | GET | **Interactive graph page** — decision-history timeline, supersession arcs, type/status filters, search, zoom/pan, PNG export. Zero external dependencies (works offline) |
@@ -665,41 +672,58 @@ python -m benchmarks.eval --errors                   # every miss, every false p
 python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 521 tests
+pytest tests/ -q                                     # 533 tests
 ```
 
 ### Extraction quality — precision, recall and F1
 
 `python -m benchmarks.eval` scores extraction against a labelled corpus:
-**8 sessions, 82 turns, 97 labelled items, 8 domains** (Go, Rust, Python,
-TypeScript, React, SQL, CI, ML). Measured on v0.6.0:
+**11 sessions, 116 turns, 122 labelled items, 11 domains** (Go, Rust,
+Python, TypeScript, React, SQL, CI, ML, plus three real audit sessions).
+Measured on v0.6.1:
 
 | Category | Precision | Recall | F1 |
 |---|---|---|---|
-| Files | 92% | 91% | **91%** |
-| Errors | 83% | 92% | **87%** |
-| Completed tasks | 67% | 86% | **75%** |
-| Pending tasks | 50% | 86% | **63%** |
-| Decisions | 50% | 74% | **60%** |
-| | | **macro F1** | **75%** |
+| Files | 93% | 93% | **93%** |
+| Errors | 77% | 73% | **75%** |
+| Completed tasks | 62% | 83% | **71%** |
+| Decisions | 57% | 79% | **66%** |
+| Pending tasks | 50% | 88% | **64%** |
+| | | **macro F1** | **74%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
 whole transcript as one node scores 100% recall; that is why recall-only
 extraction numbers should be distrusted, including earlier ones of ours.
 
-Label quality, scored separately because a correct-but-sprawling label
-still wastes resume budget: 8% truncated mid-word, 5% spanning more than
-one sentence, mean length 32 characters.
+#### The number we would rather not publish
 
-Decisions are the weakest category on precision — the five decision
-passes over-fire, producing roughly one spurious decision for each real
-one. That is the next thing to fix, and it is visible here rather than
+Eight of the sessions are hand-written fixtures; three are condensed from
+real TokenMizer audit sessions. Scored separately:
+
+| Corpus origin | Sessions | Macro F1 |
+|---|---|---|
+| Synthetic (hand-written) | 8 | **75%** |
+| Real (captured transcripts) | 3 | **65%** |
+
+**A 10-point drop from fixtures to real data.** That gap is the honest
+measure of how much the heuristics are fitted to text we wrote
+ourselves, and it is printed on every run rather than kept in a drawer.
+Treat 65% as the number that describes real sessions and 75% as the
+optimistic one. Closing that gap needs more real transcripts, which is
+the single most useful contribution anyone could make here.
+
+Label quality, scored separately because a correct-but-sprawling label
+still wastes resume budget: 11% truncated mid-word, 4% spanning more than
+one sentence, mean length 35 characters.
+
+Decisions and pending tasks are the weakest on precision — the decision
+passes over-fire, producing roughly one spurious item for every two real
+ones. That is the next thing to fix, and it is visible here rather than
 hidden behind an average.
 
-**This corpus is entirely synthetic.** Eight hand-written sessions are a
-directional signal, not a claim about your workload. To get a number that
-describes yours, label a few of your own sessions in the documented
-format and run `python -m benchmarks.eval --corpus /path/to/them`.
+To get a number for *your* workload, label a few of your own sessions in
+the format documented in `benchmarks/eval/corpus.py` and run
+`python -m benchmarks.eval --corpus /path/to/them`.
 
 ### Memory quality — graph vs a plain summary
 
@@ -793,21 +817,25 @@ tokenmizer resume <session-id> [--level standard|full|critical]
 tokenmizer stats
 ```
 
-> **Note on file analysis:** `/tokenmizer:analyze` (used from inside Claude
-> Code, see [Claude Code Integration](#claude-code-integration) above) is
-> real and works — it's a plugin skill (`.claude-plugin/skills/analyze/`)
-> that calls `FileIntelligence` directly via an inline Python snippet,
-> independent of the CLI/API layer. What does **not** exist is a bare
-> `tokenmizer analyze <file>` terminal command or a `/api/analyze` HTTP
-> endpoint — useful if you want file analysis from a plain shell or a
-> non-Claude-Code tool (Cursor, a script, curl, etc.) rather than inside
-> Claude Code specifically. Found during a documentation accuracy pass:
-> an earlier version of this README listed `tokenmizer analyze <file>` in
-> this CLI section as if it were a `cli.py` command — it never was.
-> Removed from here rather than left in place pointing at something that
-> would fail. Tracked as a real, wanted gap — contributions adding a
-> `/api/analyze` endpoint + thin CLI wrapper (following the existing
-> pattern in `cli.py`) are welcome.
+> **File analysis, three ways.** `FileIntelligence` turns a large CSV /
+> JSON / PDF / Excel / log / code file into a token-budgeted digest, and
+> is reachable from all three surfaces:
+>
+> | Surface | Use it when |
+> |---|---|
+> | `tokenmizer analyze <file>` | A plain shell, a script, CI. Runs locally — no server, no API key. |
+> | `POST /api/analyze` | Another tool, curl, a remote client. Content is sent inline, never a server-side path. |
+> | `/tokenmizer:analyze` | Inside Claude Code (plugin skill). |
+>
+> ```bash
+> tokenmizer analyze data.csv --token-budget 300
+> tokenmizer analyze big.json --raw > digest.txt
+> ```
+>
+> The endpoint takes `content` inline rather than a path on purpose: the
+> server is often a container or a remote host, so a client-side path
+> means nothing to it — and accepting one would be an arbitrary-file-read
+> primitive against the server.
 
 ---
 
