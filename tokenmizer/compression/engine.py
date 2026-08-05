@@ -192,7 +192,7 @@ class WhitespaceNormalizer:
 class CommentStripper:
     """Strip comments from code blocks. ~10-30% on comment-heavy code.
 
-    CORRECTNESS FIX: the JS line-comment pattern previously matched `//`
+    the JS line-comment pattern must not match `//`
     anywhere on a line, including inside string literals — most commonly
     URLs like "https://example.com", which would get truncated to
     "https:" with everything after silently deleted. This is real code
@@ -218,7 +218,7 @@ class CommentStripper:
         String-aware line-comment stripper, shared by both Python (#) and
         JS-style (//) comments.
 
-        FIXED BUGS (found via actually running tests against this code,
+        Constraints this code must preserve (
         not just reading it):
           1. The original Python regex `^\\s*#.*$` only matched comments
              where `#` was the first non-whitespace character on the
@@ -434,7 +434,7 @@ class LLMLinguaEngine:
         """
         Compress text via LLMLingua-2, EXCLUDING code segments.
 
-        FIXED: previously the entire text — including any fenced/inline
+        The entire text — including any fenced/inline
         code — went straight into the ML compressor with only a soft
         `force_tokens` hint asking it to try to preserve a few literal
         tokens like "```" and "def ". That hint does not guarantee
@@ -589,7 +589,7 @@ class CompressionPipeline:
         # Save the heuristic-only result BEFORE running ML compression so we can
         # actually revert to it if the quality gate below rejects the ML output.
         #
-        # FIXED — this was a real bug, not cosmetic: the previous code assigned
+        # the previous code assigned
         # `text = result.compressed_text` immediately, THEN computed
         # compression_ratio from that same already-overwritten `text`. That
         # meant the "keep heuristic result" comment was describing something

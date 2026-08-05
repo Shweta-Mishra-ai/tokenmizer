@@ -1,11 +1,10 @@
 """
 Basic prompt-injection KEYWORD FILTER.
 
-HONESTY NOTE (this used to be called "prompt injection detection" — that
-name overclaimed what regex matching can do, and the project README/
-SECURITY.md repeated the overclaim as a security guarantee):
+WHAT THIS IS, PRECISELY (do not call it "prompt injection detection" —
+that name overclaims what regex matching can do):
 
-What this module actually is: a denylist of ~10 common, unsophisticated
+A denylist of ~10 common, unsophisticated
 injection phrasings ("ignore previous instructions", "reveal your system
 prompt", etc). It will catch copy-pasted jailbreak templates found on the
 open web. It will NOT catch:
@@ -86,11 +85,9 @@ def _scan_messages(messages: list[dict]) -> bool:
     """Returns True if any message matches a known unsophisticated-injection
     pattern. See module docstring for what this does NOT catch.
 
-    FIXED: previously skipped any non-str content entirely (`if not
-    isinstance(content, str): continue`), meaning multimodal messages —
-    text + image, or text wrapped in content blocks — were never scanned
-    at all, silently. An attacker only had to wrap injection text in a
-    one-element content-block list to bypass the filter completely."""
+    Every content shape is flattened before scanning. Skipping non-str
+    content would let an attacker bypass the filter completely by
+    wrapping the text in a one-element content-block list."""
     for msg in messages:
         text = _content_to_plain_text(msg.get("content"))
         if not text:
@@ -104,11 +101,9 @@ def _scan_messages(messages: list[dict]) -> bool:
 async def injection_guard(request: Request) -> None:
     """FastAPI dependency. Raises 400 on a matched denylist phrase.
 
-    FIXED: previously raised 429 (Too Many Requests), which is semantically
-    wrong and actively misleading to API consumers — 429 tells a well-behaved
-    client "retry with backoff," but retrying an injection-flagged request
-    will fail identically every time. 400 (Bad Request) is correct: the
-    request itself was rejected, not rate-limited."""
+    400, not 429: the request itself was rejected, not rate-limited.
+    A 429 would tell a well-behaved client to retry with backoff, and
+    the retry would fail identically every time."""
     try:
         from fastapi import HTTPException
     except ImportError:

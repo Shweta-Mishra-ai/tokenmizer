@@ -44,8 +44,7 @@ class RateLimiter:
         self.refill_rate = rate / per_seconds   # tokens per second
         # OrderedDict, not defaultdict: iteration order tracks LRU
         # (touched-most-recently moves to the end), which is what makes
-        # the hard-cap eviction below O(1) instead of an O(n log n) sort
-        # over every request once at cap — see FIXED note there.
+        # the hard-cap eviction below O(1) rather than a sort.
         self._buckets: "OrderedDict[str, _Bucket]" = OrderedDict()
         self._lock = asyncio.Lock()
         # Cleanup: evict stale buckets every 5 minutes
@@ -78,17 +77,11 @@ class RateLimiter:
             if now - self._last_cleanup > self._cleanup_interval:
                 self._evict_stale(now)
 
-            # Hard cap.
-            #
-            # FIXED: previously `sorted(self._buckets.items(), key=...)`
-            # over the WHOLE bucket dict, run once at cap on every single
-            # request thereafter, while holding this limiter's one global
-            # asyncio.Lock — one cheap client sending distinct client_ids
-            # could stall ALL traffic behind an O(n log n) sort on every
-            # request. Since _buckets is now an OrderedDict whose order IS
-            # LRU order (move_to_end on every touch, insertion order for
-            # new entries), eviction of the oldest entries is O(1) per
-            # entry via popitem(last=False) — no sort needed.
+            # Hard cap. Eviction must stay O(1) per entry: this runs
+            # while holding the limiter's single global lock, so a sort
+            # over the whole bucket dict would let one client sending
+            # distinct client_ids stall ALL traffic once at cap.
+            # popitem(last=False) drops the LRU entry directly.
             if len(self._buckets) > self.max_clients:
                 evict_count = max(1, self.max_clients // 10)
                 for _ in range(min(evict_count, len(self._buckets) - 1)):

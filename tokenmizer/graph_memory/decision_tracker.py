@@ -175,7 +175,7 @@ def classify_topic(label: str, summary: str = "") -> Optional[str]:
     return ordered[0] if ordered else None
 
 
-# ── Slot extraction (TM-09) ───────────────────────────────────────────────────
+# ── Slot extraction  ───────────────────────────────────────────────────
 #
 # Topic-bucket overlap alone is too coarse to decide "this new decision
 # replaces that old one": "Use PostgreSQL for primary user data" and "Use
@@ -312,7 +312,7 @@ def find_contradicting_decisions(
     Only returns decisions that:
     1. Are currently COMPLETED (active)
     2. Cover the same topic bucket AND the same descriptive "slot" (see
-       _same_slot) — topic overlap alone is no longer sufficient (TM-09)
+       _same_slot) — topic overlap alone is not sufficient
     3. Are NOT the same decision (not a duplicate)
 
     Same-topic decisions that DON'T pass the slot check are not silently

@@ -97,12 +97,12 @@ def _internal_error(context: str, e: Exception) -> HTTPException:
     Build a 500 HTTPException for an unexpected failure without leaking
     the raw exception text to the client.
 
-    FIXED: these three handlers (checkpoint creation, decision
-    invalidation, resume) previously did `detail=str(e)` directly —
+    these three handlers (checkpoint creation, decision
+    invalidation, resume) must not put `detail=str(e)` in a response —
     `str(e)` on things like `sqlite3.OperationalError` or a filesystem
     error routinely embeds real disk paths, and other exception types
     can include similarly internal detail. `chat_completions()`'s own
-    provider-failure handler already avoids this (see TM-33) via a
+    provider-failure handler already avoids this via a
     correlation id: full detail goes to the server log, the client gets
     a generic message plus the id to reference when asking for help.
     Factored out here since the same pattern was needed at all three
@@ -123,7 +123,7 @@ async def stats(session_id: Optional[str] = None):
 
 @router.get("/api/cache/stats", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def cache_stats():
-    # NOTE: this used to also return a "preference_context" field from
+    # NOTE: no "preference_context" field is returned here.
     # SemanticCache._preference_store. PreferenceStore.save() has no
     # callers anywhere in the codebase, so that field was always the
     # empty string while implying a working cross-session preference-
@@ -337,7 +337,7 @@ async def invalidate_decision(
     decision labels; may match more than one node, all of which are
     returned in affected_nodes).
 
-    FIXED (TM-13): decision_label used to be matched with a raw substring
+    decision_label must not be matched with a raw substring
     check (`label_lower in node.label.lower()`) and had no minimum
     length — `decision_label=""` is a substring of every label, so an
     empty (or accidentally-empty, e.g. a client bug that sends "") value
@@ -404,7 +404,7 @@ async def invalidate_decision(
         # force=True is required here or this write is silently skipped
         # (caught in a final accuracy pass; same class of bug the
         # eviction path and prune() were already protected against).
-        # _persist() now returns bool (TM-12) — check it, since claiming
+        # _persist() now returns bool  — check it, since claiming
         # "status": "invalidated" while the write actually failed is the
         # same silent-data-loss pattern this whole audit is about.
         if not graph._persist(force=True):

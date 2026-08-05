@@ -47,7 +47,7 @@ class NodeStatus(str, Enum):
     # silently guessing and marking one SUPERSEDED — destroying it from
     # resume context on possibly-wrong evidence — both sides are flagged
     # CONTESTED and surfaced together so a human or the LLM can resolve
-    # the ambiguity explicitly (see TM-09). Remains visible in query() and
+    # the ambiguity explicitly. Remains visible in query() and
     # to_context_block(), unlike SUPERSEDED/ARCHIVED/INVALIDATED.
     CONTESTED = "contested"
 
@@ -97,7 +97,7 @@ class MemoryNode:
     updated_at: float = field(default_factory=time.time)
     valid_from: float = field(default_factory=time.time)   # when this fact became true
     valid_until: float = field(default=0.0)                # 0.0 = currently valid
-    # FIXED (TM-07): apply_importance_decay() used to compute decay
+    # apply_importance_decay() must not compute decay
     # magnitude from age_days() (absolute age since updated_at) and
     # multiply it into the CURRENT importance every time it ran — but it
     # runs once per chat turn, and nothing recorded when decay was last

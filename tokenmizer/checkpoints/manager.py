@@ -400,7 +400,7 @@ class CheckpointManager:
         """
         Persist a checkpoint to SQLite.
 
-        FIXED: previously this caught Exception, logged it, and returned
+        This must not catch Exception, log it, and return
         None — silently. The caller (create()) had no way to know the
         save failed, so callers (including the auto-checkpoint trigger and
         the manual /api/checkpoint endpoint) would report a checkpoint as
@@ -474,7 +474,7 @@ class CheckpointManager:
         """
         Returns checkpoint metadata for a session, newest first.
 
-        FIXED: previously a DB read failure here was indistinguishable from
+        A DB read failure here must not be indistinguishable from
         "this session genuinely has zero checkpoints" — both returned `[]`
         with zero logging. A caller (e.g. the /api/checkpoints/{session_id}
         endpoint) would show an empty list to the user with no way to tell

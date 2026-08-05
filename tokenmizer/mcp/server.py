@@ -63,7 +63,7 @@ TOOLS = [
                     "type": "string",
                     "description": "Unique identifier for this session (e.g. 'my-project-auth')",
                 },
-                # FIXED (TM-37): a "notes" field used to be declared here
+                # No "notes" field is declared here
                 # ("Optional notes about what was accomplished") but was
                 # never read by handle_checkpoint_session, and
                 # POST /api/checkpoint has no parameter to carry it to
@@ -238,7 +238,7 @@ def _require_str(args: dict, key: str) -> str:
 
 def handle_checkpoint_session(args: dict) -> tuple[str, bool]:
     session_id = _require_str(args, "session_id")
-    # FIXED (TM-37): session_id used to be interpolated raw into the
+    # session_id must never be interpolated raw into the
     # query string — a session_id containing '&', space, or other
     # reserved URL characters would produce a malformed or misdirected
     # request. quote() is used consistently across every handler below,

@@ -45,17 +45,13 @@ def _get_configured_keys() -> list[str]:
 def _get_configured_key() -> str:
     """Read from settings — single source of truth, not scattered os.getenv calls.
 
-    FIXED — CRITICAL SECURITY BUG: this previously caught ANY exception
-    from get_settings() and returned "" unconditionally. verify_api_key()
-    treats an empty configured key as "dev mode — auth disabled" and lets
-    the request through with NO authentication check at all. That means
-    any transient error in settings loading (a bug, a race during startup,
-    a future refactor that adds a fallible step to get_settings()) would
-    silently and completely disable authentication on every endpoint,
-    fail-OPEN, with no log line, no alert, nothing — the worst possible
-    failure mode for an auth check. Authentication must fail CLOSED: if we
-    can't determine whether a key is configured, we must treat that as
-    "yes, a key is required" and reject the request, not wave it through.
+    Raises rather than returning "" on failure, and that distinction is
+    security-critical: verify_api_key() reads an empty configured key as
+    "dev mode, auth disabled". Swallowing an exception here would
+    therefore turn any transient settings error into authentication being
+    silently disabled on every endpoint, with no log line and no alert.
+    Auth must fail CLOSED — if we cannot determine whether a key is
+    required, assume it is.
     """
     try:
         from tokenmizer.config.settings import get_settings

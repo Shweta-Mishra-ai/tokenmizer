@@ -41,21 +41,19 @@ class GraphStatsDTO:
     by_status: dict
     processed_messages: int
     avg_confidence: float
-    # FIXED: previously decision-contradiction-check failures (the logic
-    # that tracks "Changed X → Y" in resume context) were swallowed at
-    # debug level with zero visibility. Non-zero here means that feature
-    # is degraded even though node creation itself kept working fine.
+    # Non-zero means decision-transition tracking (the "Changed X → Y"
+    # line in resume context) is degraded, even though node creation
+    # itself is still working.
     decision_tracking_failures: int = 0
     # True if SQLite could not be initialized for this session — the graph
     # is running in-memory only, with NO durable persistence whatsoever.
-    # A restart will lose everything. This used to only ever appear in logs.
+    # A restart will lose everything.
     persistence_broken: bool = False
-    # True if previously-persisted memory was actually destroyed during
-    # corruption recovery (this session's row dropped, or the shared DB
-    # file quarantined). persistence_broken is about future writes;
-    # this is about past data that no longer exists. A health check that
-    # only watched node_count could not tell "new session" from "we lost
-    # your memory" — this makes the difference queryable.
+    # True if stored memory was destroyed during corruption recovery
+    # (this session's row dropped, or the shared DB file quarantined).
+    # persistence_broken is about future writes; this is about past data
+    # that no longer exists. Without it, a health check watching
+    # node_count cannot tell "new session" from "we lost your memory".
     data_loss_detected: bool = False
 
 

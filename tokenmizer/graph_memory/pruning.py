@@ -10,8 +10,8 @@ existing callers (`graph.apply_importance_decay()`, `graph.prune()`)
 are unaffected.
 
 Pure code motion — no logic changes. See graph.py's git history for the
-reasoning behind each fix embedded in the comments below (TM-07 for the
-decay idempotence fix, TM-19 for the prune-cap enforcement fix).
+reasoning behind each fix embedded in the comments below (Background:
+decay idempotence fix, Background: prune-cap enforcement fix).
 """
 from __future__ import annotations
 
@@ -173,7 +173,7 @@ def prune(
     # all nodes created recently), fall back to importance-only pruning.
     # This ensures the hard cap is always enforced even in long single-day sessions.
     #
-    # FIXED (TM-19): this used to blanket-exclude EVERY node of type
+    # This must not blanket-exclude EVERY node of type
     # DECISION, including SUPERSEDED/ARCHIVED/INVALIDATED ones. Only
     # ACTIVE (COMPLETED) decisions are meant to be permanently
     # protected — a graph dominated by dead/historical decisions
@@ -194,7 +194,7 @@ def prune(
 
     # Sort ONCE, after every tier has been combined.
     #
-    # FIXED (TM-19): this used to sort BEFORE the fallback tier's
+    # This must not sort BEFORE the fallback tier's
     # extend() above, so the two tiers' entries were never merged
     # into one true ascending-score order — candidates[:to_prune]
     # could prune "all age-based candidates first regardless of

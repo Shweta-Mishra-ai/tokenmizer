@@ -8,19 +8,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ── Nested sub-configs ────────────────────────────────────────────────────────
 #
-# FIXED (TM-08): these used to subclass BaseSettings directly with no
-# env_prefix of their own, which means each one independently read BARE
-# environment variables — e.g. TerseOutputSettings() would pick up a
-# plain `LEVEL` or `ENABLED` env var from the host process. Those are
-# generic enough names that a CI system or shell profile could set them
-# for unrelated reasons and silently reconfigure the product (a stray
-# ENABLED=false in the environment could disable compression, memory, AND
-# terse output simultaneously, with zero log line). They are nested value
-# objects, not independently-configurable top-level settings — the outer
-# Settings object already provides TOKENMIZER_-prefixed, __-nested env
-# var access to every field on these (e.g.
-# TOKENMIZER_TERSE_OUTPUT__LEVEL=ultra), so plain pydantic.BaseModel is
-# both correct and sufficient.
+# These are plain pydantic.BaseModel, NOT BaseSettings. A BaseSettings
+# subclass without its own env_prefix reads BARE environment variables —
+# TerseOutputSettings() would pick up a plain `LEVEL` or `ENABLED` from
+# the host process, so a stray ENABLED=false could silently disable
+# compression, memory and terse output at once. They are nested value
+# objects: the outer Settings already exposes every field via
+# TOKENMIZER_-prefixed, __-nested vars (TOKENMIZER_TERSE_OUTPUT__LEVEL).
 
 
 class CompressionSettings(BaseModel):
@@ -78,7 +72,7 @@ class CacheSettings(BaseModel):
     # never shared across sessions — safe by default for hosted/team use.
     # "shared": non-sensitive prompts are shared globally across sessions
     # (higher hit rate, but requires trusting the sensitivity heuristic in
-    # semantic_cache/cache.py::_is_session_sensitive — see TM-03). Opt in
+    # semantic_cache/cache.py::_is_session_sensitive). Opt in
     # explicitly; do not flip this without understanding that heuristic's
     # documented limits.
     share_scope: Literal["session", "shared"] = "session"
@@ -94,12 +88,10 @@ class Settings(BaseSettings):
         env_prefix="TOKENMIZER_",
         env_nested_delimiter="__",
         env_file=".env",
-        # FIXED (TM-06 / closes #28): was "ignore" — a misspelled YAML key
-        # (e.g. `api_keys:` instead of `api_key:`) parsed cleanly and
-        # silently discarded the value, with no exception and no log
-        # line. "forbid" raises the same way a YAML syntax error already
-        # did, so a typo is caught by the SAME fail-closed logic in
-        # get_settings() below instead of needing separate handling.
+        # "forbid", not "ignore": a misspelled key would otherwise parse
+        # cleanly and discard the value with no exception and no log line.
+        # Forbidding raises the same way a YAML syntax error does, so a
+        # typo hits the same fail-closed path in get_settings() below.
         extra="forbid",
     )
 
@@ -201,22 +193,15 @@ class Settings(BaseSettings):
         header has always promised ("Environment variables always
         override this file") and that docker-compose.yml depends on.
 
-        This used to be a plain `cls(**data)`. In pydantic-settings,
-        values passed to __init__ are the HIGHEST priority source —
-        above env vars — so the YAML silently won every conflict.
-        Because the shipped tokenmizer.yaml is COPY'd into the Docker
-        image and sets provider/state_backend/cors_origins/etc, the
-        corresponding TOKENMIZER_* variables were inert:
+        The trap this avoids: in pydantic-settings, values passed to
+        __init__ are the HIGHEST priority source — above env vars — so a
+        plain `cls(**data)` makes the YAML win every conflict. Since the
+        shipped tokenmizer.yaml is COPY'd into the Docker image and sets
+        provider/state_backend/cors_origins, the matching TOKENMIZER_*
+        variables would be inert.
 
-            TOKENMIZER_PROVIDER=openai     -> provider      = anthropic
-            TOKENMIZER_STATE_BACKEND=redis -> state_backend = memory
-
-        API keys appeared to work only because those lines happen to be
-        commented out in the shipped file. Any operator who uncommented
-        one would have found their env var silently ignored.
-
-        Fix: drop from the YAML payload any key that the environment
-        also sets, so those fall through to the env source underneath.
+        So: drop from the YAML payload any key the environment also sets,
+        letting those fall through to the env source underneath.
         """
         import yaml
         with open(path) as f:
@@ -295,25 +280,14 @@ def get_settings() -> Settings:
             try:
                 loaded = Settings.from_yaml(yaml_path)
             except Exception as e:
-                # FIXED: previously this silently discarded the user's
-                # entire config file and fell back to hardcoded defaults
-                # with ZERO indication anything went wrong. The defaults
-                # are dev-mode-permissive: no API key required, CORS may
-                # be wider than intended, state backend is in-memory (no
-                # Redis). An operator who sets a real config — including
-                # security-relevant fields like `api_key` or
-                # `cors_origins` — could end up running with none of that
-                # applied, with no error, no warning, nothing. This is a
-                # security-relevant failure mode disguised as "graceful
-                # fallback." Logging at `error` (not silent) means a typo
-                # in tokenmizer.yaml is visible at startup instead of
-                # discovered later as "wait, why does this accept
-                # unauthenticated requests?"
-                #
-                # FIXED further (closes #28): in production, logging is
-                # not enough — a log line nobody is watching at 3am is
-                # not a safety control. TOKENMIZER_ENV=production now
-                # refuses to start at all rather than fall back.
+                # A config that fails to load must never fall back
+                # silently. The defaults are dev-mode permissive — no API
+                # key required, in-memory state — so an operator whose
+                # YAML has a typo would otherwise run with none of their
+                # security settings applied and no indication why.
+                # Logging at error makes it visible at startup; in
+                # production, logging is not a safety control, so
+                # TOKENMIZER_ENV=production refuses to start instead.
                 if production:
                     logger.error(
                         f"Failed to load config from {yaml_path}: {e}. "

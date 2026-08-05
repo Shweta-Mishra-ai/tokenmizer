@@ -93,12 +93,12 @@ class GraphMemory:
         # True if the SQLite DB could not be reinitialized after corruption —
         # the graph is running in-memory-only with no durable persistence.
         self._persistence_broken = False
-        # True if previously-persisted data was actually destroyed or
-        # displaced during recovery (a session row dropped, or the whole
-        # shared DB file quarantined). Distinct from _persistence_broken,
-        # which is about FUTURE writes: this one says "memory that existed
-        # is gone." Both are surfaced via stats() so a health check can
-        # tell "empty because new" from "empty because we lost it."
+        # True if stored data was destroyed or displaced during recovery
+        # (a session row dropped, or the shared DB file quarantined).
+        # Distinct from _persistence_broken, which is about FUTURE writes:
+        # this says "memory that existed is gone." Both are surfaced via
+        # stats() so a health check can tell "empty because new" from
+        # "empty because we lost it."
         self._data_loss_detected = False
         # True if the last _load() could not read the DB at all (e.g. lock
         # contention). The in-memory graph is empty but NOTHING was
@@ -109,6 +109,19 @@ class GraphMemory:
         # Starts True so the first persist() call after construction always
         # writes; cleared only after a confirmed successful write.
         self._dirty = True
+        # Exact serialized state last confirmed written, keyed by node id
+        # and edge key. _persist() diffs the current graph against these
+        # to write only the rows that actually changed, and to delete rows
+        # for nodes/edges that no longer exist (prune() removes nodes and
+        # rebuilds the edge list). Derived from real state rather than
+        # from mutation bookkeeping, so no mutation site can forget to
+        # register a change — see persistence.persist().
+        self._persisted_nodes: dict[str, str] = {}
+        self._persisted_edges: dict[str, str] = {}
+        self._persisted_hashes_json: str = ""
+        # True if this session's data came from the v1 blob table and is
+        # awaiting its first per-row write.
+        self._migrated_from_blob = False
         self._db_path = Path(storage_dir) / "graph_memory.db"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._safe_init_db()
@@ -122,9 +135,7 @@ class GraphMemory:
         safe_init_db(self)
 
     # ── DB ──────────────────────────────────────────────────────────────────
-    # Full implementations in persistence.py — see that module for the
-    # reasoning behind each fix (TM-12 return-value fix, partial-write
-    # recovery, enum restoration on load, etc).
+    # Full implementations in persistence.py.
 
     def _db_connect(self) -> "sqlite3.Connection":
         from tokenmizer.graph_memory.persistence import db_connect
@@ -341,8 +352,8 @@ class GraphMemory:
                             f" | trigger: {trigger[:40]}"
                         )
 
-                # CONTESTED (TM-09): decisions sharing a topic bucket with
-                # the new one, but NOT confident enough to supersede (see
+                # CONTESTED: decisions sharing a topic bucket with the
+                # new one, but NOT confident enough to supersede (see
                 # _same_slot in decision_tracker.py) — e.g. "Use
                 # PostgreSQL for primary user data" and "Use SQLite for
                 # the local offline cache" both classify as "database"
@@ -370,21 +381,14 @@ class GraphMemory:
                         f"of silently superseding one"
                     )
             except Exception as e:
-                # Intentionally non-fatal: a bug in contradiction detection
-                # must not block creating the new decision node itself —
-                # the node is more important than the supersede-tracking
-                # metadata around it.
+                # Non-fatal by design: a bug in contradiction detection
+                # must not block creating the decision node itself.
                 #
-                # FIXED: previously logged at `debug` (off by default in
-                # production), meaning this core advertised feature —
-                # "decision transition tracking" / "Changed X → Y" in
-                # resume context — could silently stop working entirely
-                # and nobody would notice until they wondered why resume
-                # context never showed any decision changes. Bumped to
-                # `warning` and counted on the instance (surfaced via
-                # stats(), see below) so persistent failures are visible
-                # to anyone inspecting graph health, not just to someone
-                # who happens to be tailing logs at warning level.
+                # Warning, not debug: transition tracking ("Changed X → Y"
+                # in resume context) could otherwise stop working entirely
+                # and only be noticed as an absence. Also counted on the
+                # instance and surfaced via stats(), so graph health is
+                # inspectable without tailing logs.
                 logger.warning(
                     f"Decision contradiction check failed for node {node_id} "
                     f"(non-fatal — node was still created): {e}"
@@ -553,17 +557,14 @@ class GraphMemory:
             # Use per-item confidence from merge() if provided (corroboration signal).
             # Fallback: 0.9 for explicit decisions (high-value nodes).
             node_confidence = float(d.get("confidence", 0.9))
-            # source_role (TM-29): only heuristic-extracted decisions carry
-            # a real one — HybridExtractor._extract_one_message knows which
-            # message (and therefore which role) each decision came from.
-            # LLM-synthesized decisions have no single-turn attribution, so
-            # `d.get("source_role")` is None for them; fall back to the same
-            # "assistant" default add_node()/validate() already use for
-            # every other node type, rather than passing an explicit None
-            # that would override that default and (as confirmed by a
-            # regression this caused on the first pass, caught via the full
-            # test suite) unfairly cost LLM-sourced decisions the trust
-            # bonus every other unattributed node type still gets.
+            # Only heuristic-extracted decisions carry a real
+            # source_role — HybridExtractor knows which message each came
+            # from. LLM-synthesized decisions have no single-turn
+            # attribution, so fall back to the same "assistant" default
+            # every other node type uses. Passing an explicit None instead
+            # would override that default and cost them the trust bonus
+            # unattributed nodes otherwise get (measured: it regressed
+            # acceptance).
             nid = self.add_node(NodeType.DECISION, label, NodeStatus.COMPLETED,
                                 summary=summary, importance=0.9,
                                 confidence=node_confidence,
@@ -583,21 +584,17 @@ class GraphMemory:
                         if decision_words & task_words:
                             self.add_edge(nid, tid, EdgeType.RELATED_TO)
 
-                # SUPERSEDES edges are NOT inferred by word overlap here.
+                # SUPERSEDES edges are deliberately NOT inferred from
+                # word overlap. Linking a decision to every superseded
+                # decision sharing a topic word invents causal history —
+                # including links to decisions replaced by something else
+                # entirely — and /why walks these edges to explain why a
+                # choice is current, so invented edges become invented
+                # explanations.
                 #
-                # This used to link the new decision to EVERY superseded
-                # decision sharing any topic word — including ones it had
-                # nothing to do with, and ones superseded by a different
-                # decision entirely. In a session with a few database
-                # changes that produced a dense mesh of false causal
-                # edges, and /why walks exactly these edges to answer
-                # "why is X the current choice", so the invented edges
-                # showed up as invented history.
-                #
-                # add_node() already creates a SUPERSEDES edge for each
-                # decision this one genuinely replaced, at the moment it
-                # records the DecisionTransition — that is the only place
-                # with the evidence to justify the claim.
+                # add_node() creates the SUPERSEDES edge for each decision
+                # this one genuinely replaced, alongside the
+                # DecisionTransition that justifies it.
 
         # Files — linked to tasks only if file name appears in task description
         for f in data.get("files", []):
@@ -863,19 +860,15 @@ class GraphMemory:
 
     def stats(self) -> dict:
         """
-        FIXED (TM-35): this used to count _evicted nodes into node_count/
-        by_type/by_status — every other consumer (query(),
-        to_context_block(), both visualization.py exporters) filters
-        _evicted out, so a caller comparing /api/graph/{id} (this method)
-        against /api/graph/{id}/viz would see disagreeing node counts.
+        Counts exclude _evicted nodes and any edge touching one, so this
+        agrees with every other consumer (query(), to_context_block(),
+        both visualization.py exporters) rather than reporting figures
+        /api/graph/{id}/viz contradicts.
         """
         from tokenmizer.core.dto import GraphStatsDTO
         live_nodes = [n for n in self._nodes.values() if not n._evicted]
-        # Count only edges whose BOTH endpoints are live. node_count
-        # already excluded evicted nodes (TM-35), but edge_count did not,
-        # so /api/graph/{id} still reported edges pointing at nodes that
-        # /viz doesn't render — the same inconsistency that fix set out
-        # to remove, left half-done on the edge side.
+        # Only edges whose BOTH endpoints are live: an edge pointing at
+        # an evicted node is not rendered by /viz either.
         live_ids = {n.id for n in live_nodes}
         live_edges = [
             e for e in self._edges

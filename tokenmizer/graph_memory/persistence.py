@@ -11,10 +11,8 @@ one-line delegating methods so existing callers (`graph._persist()`,
 api/app.py, checkpoints/manager.py, semantic_cache/cache.py, and the
 test suite) are unaffected.
 
-Pure code motion — no logic changes. See graph.py's git history for
-the reasoning behind each fix embedded in the comments below (TM-12
-for the _persist() return-value fix, plus the partial-write recovery
-and enum-restoration fixes in _load()).
+Storage is per-row (schema v2); see init_db() and persist() for the
+layout and for why change detection is derived rather than tracked.
 """
 from __future__ import annotations
 
@@ -38,6 +36,13 @@ if TYPE_CHECKING:
     from tokenmizer.graph_memory.graph import GraphMemory
 
 logger = logging.getLogger(__name__)
+
+# Storage schema version.
+#   1 — one JSON blob per session in `graphs` (nodes_json/edges_json)
+#   2 — one row per node and per edge (graph_nodes/graph_edges/graph_meta)
+# Recorded per session in graph_meta so a mixed database is readable and
+# migration can proceed one session at a time as each is next touched.
+SCHEMA_VERSION = 2
 
 
 def quarantine_db(db_path, reason: str) -> bool:
@@ -95,10 +100,9 @@ def safe_init_db(graph: "GraphMemory") -> None:
                 f"Cannot initialize DB after cleanup for {graph.session_id}: {e} "
                 "— running with in-memory graph only (data won't persist)"
             )
-            # FIXED: previously this was a dead end — logged once at
-            # startup and then silently true for the rest of the
-            # process's life with no way to query it. See _load()'s
-            # matching reinit-failure path for the same fix.
+            # Recorded on the instance, not just logged: this state
+            # persists for the rest of the process's life and must be
+            # queryable via stats().
             graph._persistence_broken = True
 
 
@@ -122,9 +126,77 @@ def db_connect(graph: "GraphMemory") -> "sqlite3.Connection":
     return conn
 
 
+def edge_key(edge: MemoryEdge) -> str:
+    """Stable identity for an edge row.
+
+    add_edge() already treats (source, target, type) as an edge's
+    identity — it refuses to append a second edge with the same triple —
+    so that triple is the natural primary key. Weight is data, not
+    identity, and a weight change is an update to the same row.
+    """
+    etype = edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+    return f"{edge.source_id}|{edge.target_id}|{etype}"
+
+
 def init_db(graph: "GraphMemory") -> None:
     conn = graph._db_connect()
     try:
+        # ── Per-row storage (schema v2) ──────────────────────────────────
+        #
+        # Replaces the single nodes_json/edges_json blob per session (v1,
+        # the `graphs` table below, kept for migration and rollback).
+        #
+        # The blob layout rewrote EVERY node and edge on every persist —
+        # once per chat turn — even when one node changed, so write cost
+        # was O(total graph) rather than O(changed). The 200-node
+        # auto-prune cap exists to bound that cost, which is to say the
+        # cap was a workaround for this schema rather than a memory
+        # policy anyone wanted.
+        #
+        # It was also why a concurrent writer could destroy a whole
+        # session: two processes holding the same session each wrote the
+        # complete blob, so the later writer's version replaced the
+        # earlier one wholesale, discarding every node the other had
+        # added. With per-row writes, disjoint changes from two writers
+        # now merge; only a genuine same-node conflict is last-writer-wins.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS graph_nodes (
+                session_id TEXT NOT NULL,
+                node_id    TEXT NOT NULL,
+                data_json  TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (session_id, node_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                session_id TEXT NOT NULL,
+                edge_key   TEXT NOT NULL,
+                data_json  TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (session_id, edge_key)
+            )
+        """)
+        # Session-level state that isn't a node or an edge.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS graph_meta (
+                session_id       TEXT PRIMARY KEY,
+                processed_hashes TEXT NOT NULL DEFAULT '[]',
+                schema_version   INTEGER NOT NULL DEFAULT 2,
+                updated_at       REAL NOT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_nodes_session "
+            "ON graph_nodes(session_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_session "
+            "ON graph_edges(session_id)"
+        )
+        # v1 blob table. Still created (an older DB may not have it) and
+        # still read by the one-time per-session migration in load(), but
+        # never written again.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graphs (
                 session_id TEXT PRIMARY KEY,
@@ -222,179 +294,327 @@ def load_transitions(graph: "GraphMemory") -> None:
         graph._transitions = []
 
 
+def _serialize_state(graph: "GraphMemory") -> tuple[dict, dict]:
+    """Current nodes and edges as {key: canonical_json}.
+
+    sort_keys makes the JSON canonical, so string equality against the
+    previously written value is a reliable "did this row change?" test.
+    """
+    nodes = {
+        nid: json.dumps(asdict(n), sort_keys=True, default=str)
+        for nid, n in graph._nodes.items()
+    }
+    edges = {
+        edge_key(e): json.dumps(asdict(e), sort_keys=True, default=str)
+        for e in graph._edges
+    }
+    return nodes, edges
+
+
 def persist(graph: "GraphMemory", force: bool = False) -> bool:
     """
-    Persist the full graph (all nodes + edges) as JSON to SQLite.
+    Persist the graph to SQLite, writing only what actually changed.
 
-    Returns True if the graph's current state is confirmed safely on
-    disk — either the write just succeeded, or nothing was dirty so
-    the last successful write already covers it — and False if a
-    write was attempted and failed.
+    Returns True if the graph's current state is confirmed on disk —
+    either the write just succeeded, or nothing changed so the last
+    successful write already covers it — and False if a write was
+    attempted and failed.
 
-    FIXED (TM-12): this used to return None unconditionally, catching
-    and logging its own exceptions internally without ever re-raising.
-    api/app.py's graph-cache eviction path (_graph_cache_touch) wraps
-    `evicted_graph._persist()` in a try/except with a retry-once loop
-    specifically to handle transient failures — but since this method
-    never raised, that except clause could never fire, `persisted =
-    True` was set unconditionally on the very first call, and the
-    retry (plus the record_silent_failure metric it guards) was dead
-    code. A detailed comment there described that retry/alerting
-    behavior as implemented; it never executed once. Returning bool
-    lets the caller check the actual outcome instead of relying on an
-    exception that was never going to arrive.
+    WHY CHANGE DETECTION IS DERIVED, NOT TRACKED
+    --------------------------------------------
+    The obvious way to write only changed rows is a dirty-set that every
+    mutation site appends to. That would be a new way to lose data
+    silently: node/edge state is mutated from at least six places
+    (add_node's dedup, fuzzy-merge and supersede branches, add_edge,
+    pruning's decay and eviction passes, and the /api/decision/invalidate
+    endpoint mutating node.status directly), and any site that forgot to
+    register would have its change quietly never reach disk. The existing
+    `force=True` parameter exists precisely because one such site was
+    already missed once.
 
-    KNOWN SCALING LIMITATION (documented, not silently shipped as if
-    it were fine): this rewrites EVERY node and edge as JSON on every
-    call, even when only 1-2 nodes actually changed. Cost is O(total
-    node count) per persist, and persist is called once per chat turn
-    in extract_from_messages(). The existing 200-node auto-prune cap
-    (see prune()) is itself evidence this was already a known
-    bottleneck — it caps the damage rather than fixing the cause.
+    So the diff is derived from state instead: serialize the graph,
+    compare each row against the exact string last written, write the
+    differences. Serialization is O(nodes) CPU with no I/O, while the
+    part that actually costs — SQLite writes, WAL appends, fsync — is
+    O(changed). Nothing can be missed, because nothing has to be
+    remembered.
 
-    Why this isn't rewritten to a proper per-node table in this pass:
-    that's a real schema migration (one row per node/edge instead of
-    one JSON blob per session), and shipping a migration without being
-    able to run it against real persisted data in this environment
-    (no app runtime available here — see repo's TESTING.md) is exactly
-    the kind of "looks fixed, silently corrupts production data" risk
-    this audit is supposed to eliminate, not introduce. Tracked as a
-    documented follow-up: migrate `graphs.nodes_json` blob storage to
-    a `graph_nodes(session_id, node_id, data_json, updated_at)` table
-    with per-node INSERT OR REPLACE, validated against a copy of real
-    checkpoint data before rollout.
-
-    What IS fixed here: a dirty flag so we skip the rewrite entirely
-    when nothing changed since the last successful persist (e.g. a
-    message produced zero new/updated nodes — common for short
-    acknowledgement turns). This doesn't fix the O(n) cost when a
-    write IS needed, but it does eliminate redundant full-rewrites,
-    which in practice is a meaningful fraction of calls.
-
-    force=True bypasses the dirty check. Required for callers that
-    mutate node/edge state directly without going through add_node()
-    (which sets the dirty flag) — e.g. the /api/decision/invalidate
-    endpoint flips `node.status` directly, then must force a write or
-    the change would silently never be saved.
+    force=True rewrites every row regardless of the diff.
     """
     if not graph._dirty and not force:
         return True
 
     # Refuse to write over a row we failed to READ.
     #
-    # persist() writes the whole session as one blob, so an instance
-    # whose _load() failed (e.g. lock contention) holds an EMPTY graph
-    # that would overwrite a perfectly good stored graph with nothing —
-    # turning a transient, self-healing read failure into permanent data
-    # loss. Try the read once more; only proceed if it succeeds, so
-    # whatever is on disk is merged in before we write it back out.
+    # An instance whose _load() failed (e.g. lock contention) holds an
+    # empty or partial graph. Under the old blob layout that would
+    # replace a good stored graph with nothing; per-row it would instead
+    # delete every row it thinks was removed — same outcome. Either way a
+    # transient, self-healing read failure must not become permanent
+    # loss. Try the read once more; only proceed if it succeeds.
     if graph._load_failed:
         graph._load_failed = False
         graph._load()
         if graph._load_failed:
             logger.error(
                 "Refusing to persist session %s: its stored state could "
-                "not be read, and writing this instance's partial graph "
+                "not be read, and writing this instance\'s partial graph "
                 "would overwrite it. Retrying on the next call.",
                 graph.session_id,
             )
             return False
 
+    nodes, edges = _serialize_state(graph)
+    prev_nodes = {} if force else graph._persisted_nodes
+    prev_edges = {} if force else graph._persisted_edges
+
+    node_upserts = [(k, v) for k, v in nodes.items() if prev_nodes.get(k) != v]
+    edge_upserts = [(k, v) for k, v in edges.items() if prev_edges.get(k) != v]
+    # Deletions always diff against what was really written last, even
+    # under force — pruning removes nodes and rebuilds the edge list, so
+    # rows that no longer exist in memory have to go.
+    node_deletes = [k for k in graph._persisted_nodes if k not in nodes]
+    edge_deletes = [k for k in graph._persisted_edges if k not in edges]
+
+    hashes_json = json.dumps(sorted(graph._processed_hashes))
+    meta_changed = force or hashes_json != graph._persisted_hashes_json
+
+    if not any((node_upserts, edge_upserts, node_deletes, edge_deletes, meta_changed)):
+        graph._dirty = False
+        return True
+
+    now = time.time()
+    sid = graph.session_id
     try:
         conn = graph._db_connect()
         try:
-            conn.execute(
-                """INSERT OR REPLACE INTO graphs
-                   (session_id, nodes_json, edges_json, processed_hashes, updated_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (
-                    graph.session_id,
-                    json.dumps([asdict(n) for n in graph._nodes.values()]),
-                    json.dumps([asdict(e) for e in graph._edges]),
-                    json.dumps(list(graph._processed_hashes)),
-                    time.time(),
-                ),
-            )
-            conn.commit()
+            # One transaction: a crash mid-write leaves the previous
+            # committed state intact rather than a half-updated graph.
+            with conn:
+                if node_upserts:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO graph_nodes "
+                        "(session_id, node_id, data_json, updated_at) VALUES (?,?,?,?)",
+                        [(sid, k, v, now) for k, v in node_upserts],
+                    )
+                if edge_upserts:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO graph_edges "
+                        "(session_id, edge_key, data_json, updated_at) VALUES (?,?,?,?)",
+                        [(sid, k, v, now) for k, v in edge_upserts],
+                    )
+                if node_deletes:
+                    conn.executemany(
+                        "DELETE FROM graph_nodes WHERE session_id=? AND node_id=?",
+                        [(sid, k) for k in node_deletes],
+                    )
+                if edge_deletes:
+                    conn.executemany(
+                        "DELETE FROM graph_edges WHERE session_id=? AND edge_key=?",
+                        [(sid, k) for k in edge_deletes],
+                    )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta "
+                    "(session_id, processed_hashes, schema_version, updated_at) "
+                    "VALUES (?,?,?,?)",
+                    (sid, hashes_json, SCHEMA_VERSION, now),
+                )
         finally:
             conn.close()
-        graph._dirty = False  # only clear on confirmed success
-        return True
     except Exception as e:
         logger.error(f"Graph persist failed for {graph.session_id}: {e}")
-        # _dirty stays True — next call (even non-forced) will retry
-        # the full write rather than silently giving up on it forever.
+        # _persisted_* is left untouched, so the next call retries exactly
+        # the same diff rather than assuming any of it landed.
         return False
+
+    graph._persisted_nodes = nodes
+    graph._persisted_edges = edges
+    graph._persisted_hashes_json = hashes_json
+    graph._dirty = False
+    logger.debug(
+        "Persisted %s: %d node upserts, %d edge upserts, %d/%d deletes "
+        "(graph has %d nodes)",
+        sid, len(node_upserts), len(edge_upserts),
+        len(node_deletes), len(edge_deletes), len(nodes),
+    )
+    return True
+
+
+def _hydrate_nodes(graph: "GraphMemory", nodes_data: list) -> None:
+    """Rebuild MemoryNode objects from stored dicts.
+
+    Enum restoration matters: asdict() writes NodeType/NodeStatus (both
+    str-Enums) as plain strings, and because they compare equal to their
+    values, a graph reloaded without conversion looks fine until
+    something reads `.type.value` and crashes — which is what made every
+    checkpoint of a reloaded session return HTTP 500 after a restart.
+    """
+    for nd in nodes_data:
+        nd.pop("_evicted", None)
+        try:
+            nd["type"] = NodeType(nd["type"])
+            nd["status"] = NodeStatus(nd["status"])
+        except (ValueError, KeyError) as conv_err:
+            logger.warning(
+                f"Skipping node with unknown type/status during load "
+                f"for {graph.session_id}: {conv_err} — {nd.get('id')}"
+            )
+            continue
+        try:
+            n = MemoryNode(**{k: v for k, v in nd.items() if k != "_evicted"})
+        except TypeError as field_err:
+            # A row written by a newer version with extra fields must not
+            # take out the whole load.
+            logger.warning(
+                f"Skipping unreadable node row for {graph.session_id}: {field_err}"
+            )
+            continue
+        graph._nodes[n.id] = n
+
+
+def _hydrate_edges(graph: "GraphMemory", edges_data: list) -> None:
+    for ed in edges_data:
+        try:
+            ed["type"] = EdgeType(ed["type"])
+        except (ValueError, KeyError) as conv_err:
+            logger.warning(
+                f"Skipping edge with unknown type during load "
+                f"for {graph.session_id}: {conv_err}"
+            )
+            continue
+        try:
+            graph._edges.append(MemoryEdge(**ed))
+        except TypeError as field_err:
+            logger.warning(
+                f"Skipping unreadable edge row for {graph.session_id}: {field_err}"
+            )
+
+
+def _migrate_blob_session(graph: "GraphMemory", conn) -> bool:
+    """One-time migration of one session from the v1 blob to per-row.
+
+    Returns True if a v1 row existed and was loaded into memory. The
+    rows are written to the new tables by the caller's normal persist
+    path, so a failure here costs nothing — the blob is left untouched
+    and the migration is simply retried next load.
+
+    The v1 row is deliberately NOT deleted. Keeping it means downgrading
+    to a pre-migration build still finds the data it expects (as of the
+    moment of migration), which is what makes this rollback-safe. It
+    does go stale from then on, so a downgrade loses changes made after
+    the upgrade — that is the normal meaning of a rollback, and it is
+    stated in the CHANGELOG rather than left for someone to discover.
+    """
+    row = conn.execute(
+        "SELECT nodes_json, edges_json, processed_hashes FROM graphs "
+        "WHERE session_id=?",
+        (graph.session_id,),
+    ).fetchone()
+    if not row:
+        return False
+
+    nodes_data = json.loads(row[0])
+    edges_data = json.loads(row[1])
+    try:
+        graph._processed_hashes = set(json.loads(row[2]))
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning(
+            f"processed_hashes corrupted for {graph.session_id}, resetting "
+            f"(nodes/edges are unaffected): {e}"
+        )
+        graph._processed_hashes = set()
+
+    _hydrate_nodes(graph, nodes_data)
+    _hydrate_edges(graph, edges_data)
+    logger.info(
+        "Migrated session %s from v1 blob storage to per-row "
+        "(%d nodes, %d edges); the v1 row is kept for rollback",
+        graph.session_id, len(graph._nodes), len(graph._edges),
+    )
+    # Force the next persist to write every row into the new tables.
+    graph._dirty = True
+    graph._migrated_from_blob = True
+    return True
 
 
 def load(graph: "GraphMemory") -> None:
     try:
         conn = graph._db_connect()
         try:
-            row = conn.execute(
-                "SELECT nodes_json, edges_json, processed_hashes FROM graphs WHERE session_id=?",
+            node_rows = conn.execute(
+                "SELECT node_id, data_json FROM graph_nodes WHERE session_id=?",
+                (graph.session_id,),
+            ).fetchall()
+            edge_rows = conn.execute(
+                "SELECT edge_key, data_json FROM graph_edges WHERE session_id=?",
+                (graph.session_id,),
+            ).fetchall()
+            meta_row = conn.execute(
+                "SELECT processed_hashes FROM graph_meta WHERE session_id=?",
                 (graph.session_id,),
             ).fetchone()
+
+            if not node_rows and not edge_rows and meta_row is None:
+                # Nothing in v2 for this session — it may predate the
+                # migration. Falling back on "no v2 rows" rather than on a
+                # global flag keeps this per-session, so a DB holding a
+                # mix of migrated and unmigrated sessions converges one
+                # session at a time as each is touched.
+                if _migrate_blob_session(graph, conn):
+                    return
+                return
         finally:
             conn.close()
-        if not row:
-            return
-        nodes_data = json.loads(row[0])
-        edges_data = json.loads(row[1])
 
-        # FIXED — real bug, found while writing a proper (non-vacuous) test
-        # for tests/chaos/test_recovery.py::test_partial_write_recovery.
-        # processed_hashes used to be parsed inline with nodes/edges, all
-        # inside the same try block. If processed_hashes was corrupted
-        # (e.g. a partial/interrupted write), json.loads() on it raised
-        # BEFORE the node-population loop below ever ran — so a session
-        # with perfectly valid nodes_json still lost every node on reload,
-        # just because the unrelated hashes field was bad. That directly
-        # contradicts this method's whole purpose (recover what's good).
-        # Isolating this parse means a corrupt hash set only costs you
-        # incremental-extraction dedup (some messages get re-processed —
-        # harmless, add_node() already dedupes), not your entire graph.
-        try:
-            graph._processed_hashes = set(json.loads(row[2]))
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning(
-                f"processed_hashes corrupted for {graph.session_id}, "
-                f"resetting (nodes/edges are unaffected): {e}"
-            )
-            graph._processed_hashes = set()
+        # processed_hashes is parsed separately from nodes/edges: a
+        # corrupt hash set costs only incremental-extraction dedup (some
+        # messages get re-scanned, which add_node() dedupes anyway),
+        # while nodes and edges are the irreplaceable part. Parsing them
+        # together once meant a bad hash field discarded a perfectly good
+        # graph.
+        if meta_row is not None:
+            try:
+                graph._processed_hashes = set(json.loads(meta_row[0]))
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(
+                    f"processed_hashes corrupted for {graph.session_id}, "
+                    f"resetting (nodes/edges are unaffected): {e}"
+                )
+                graph._processed_hashes = set()
 
-        # CRITICAL: restore enum types on load. asdict() serializes
-        # NodeType/NodeStatus (str-Enums) to plain strings; without
-        # converting back, every reloaded node has type/status as `str`.
-        # Because they're str-Enums, equality checks still pass — which
-        # HID this bug — but any `.value` access crashes ('str' object
-        # has no attribute 'value'). Concretely: after a server restart,
-        # every checkpoint of a reloaded session returned HTTP 500.
-        # Found by the MCP e2e check, not by unit tests, because unit
-        # tests reloaded graphs but never then called `.type.value`.
-        for nd in nodes_data:
-            nd.pop("_evicted", None)
+        # Per-row decoding: one unreadable row costs that row only,
+        # instead of the whole session as a single bad blob did.
+        good_nodes, good_edges = [], []
+        for node_id, data_json in node_rows:
             try:
-                nd["type"] = NodeType(nd["type"])
-                nd["status"] = NodeStatus(nd["status"])
-            except (ValueError, KeyError) as conv_err:
+                good_nodes.append(json.loads(data_json))
+            except (json.JSONDecodeError, TypeError) as e:
                 logger.warning(
-                    f"Skipping node with unknown type/status during load "
-                    f"for {graph.session_id}: {conv_err} — {nd.get('id')}"
+                    f"Skipping corrupt node row {node_id} for "
+                    f"{graph.session_id} (other nodes unaffected): {e}"
                 )
-                continue
-            n = MemoryNode(**{k: v for k, v in nd.items() if k != "_evicted"})
-            graph._nodes[n.id] = n
-        for ed in edges_data:
+        for ekey, data_json in edge_rows:
             try:
-                ed["type"] = EdgeType(ed["type"])
-            except (ValueError, KeyError) as conv_err:
+                good_edges.append(json.loads(data_json))
+            except (json.JSONDecodeError, TypeError) as e:
                 logger.warning(
-                    f"Skipping edge with unknown type during load "
-                    f"for {graph.session_id}: {conv_err}"
+                    f"Skipping corrupt edge row {ekey} for "
+                    f"{graph.session_id} (other edges unaffected): {e}"
                 )
-                continue
-            graph._edges.append(MemoryEdge(**ed))
+
+        _hydrate_nodes(graph, good_nodes)
+        _hydrate_edges(graph, good_edges)
+
+        # Record what is on disk so persist() can diff against it. Built
+        # by re-serializing what we just hydrated, so it reflects exactly
+        # what a persist() of the unchanged graph would produce; using
+        # the raw stored strings would flag every row as changed whenever
+        # a field default shifted.
+        nodes, edges = _serialize_state(graph)
+        graph._persisted_nodes = nodes
+        graph._persisted_edges = edges
+        graph._persisted_hashes_json = json.dumps(sorted(graph._processed_hashes))
+        graph._dirty = False
     except sqlite3.OperationalError as e:
         # OperationalError is a SUBCLASS of DatabaseError and covers
         # entirely routine, transient conditions — above all "database is
@@ -450,13 +670,10 @@ def load(graph: "GraphMemory") -> None:
                 f"Graph DB reinit failed for {graph.session_id}: {reinit_err} "
                 "— running with in-memory graph only (data won't persist)"
             )
-            # FIXED: this is the worst-case path — persistence is
-            # completely broken for this session going forward, but
-            # previously the only trace of that fact was a log line.
-            # Surfacing it via stats() means a health-check script (or
-            # a human looking at /api/graph/{session_id}) can detect
-            # "this session has no durable memory" instead of finding
-            # out only after a restart wipes everything.
+            # Worst case: persistence is completely broken for this
+            # session going forward. Surfaced via stats() so a health
+            # check (or /api/graph/{session_id}) can detect "this session
+            # has no durable memory" before a restart wipes everything.
             graph._persistence_broken = True
     except Exception as e:
         logger.warning(f"Graph load failed for {graph.session_id}: {e}")

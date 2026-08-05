@@ -185,3 +185,180 @@ class TestCorruptionRecoveryIsScoped:
         assert dave.stats()["data_loss_detected"] is True, (
             "data loss must be queryable, not just logged"
         )
+
+
+class TestPerRowPersistence:
+    """
+    Schema v2. The v1 layout stored one JSON blob per session, so every
+    persist rewrote the entire graph (once per chat turn), and two
+    writers holding the same session each wrote the complete blob —
+    whoever saved last silently discarded everything the other added.
+    """
+
+    def _big_graph(self, storage, n=120):
+        g = GraphMemory("s-rows", storage_dir=storage)
+        for i in range(n):
+            g.add_node(NodeType.TASK, f"Implement feature number {i} in the API layer",
+                       NodeStatus.COMPLETED)
+        g._persist(force=True)
+        return g
+
+    def _stamps(self, storage, session="s-rows"):
+        conn = sqlite3.connect(str(storage) + "/graph_memory.db")
+        try:
+            return [r[0] for r in conn.execute(
+                "SELECT updated_at FROM graph_nodes WHERE session_id=?", (session,))]
+        finally:
+            conn.close()
+
+    def test_one_change_writes_one_row(self, storage):
+        import time
+        g = self._big_graph(storage)
+        before = max(self._stamps(storage))
+        time.sleep(0.01)
+
+        g.add_node(NodeType.DECISION, "Use PostgreSQL for the user database",
+                   NodeStatus.COMPLETED)
+        g._persist()
+
+        rewritten = sum(1 for s in self._stamps(storage) if s > before)
+        assert rewritten == 1, (
+            f"adding one node rewrote {rewritten} rows; the v1 blob rewrote "
+            f"all {len(g._nodes)} on every single persist"
+        )
+
+    def test_noop_persist_writes_nothing(self, storage):
+        import time
+        g = self._big_graph(storage)
+        time.sleep(0.01)
+        mark = max(self._stamps(storage))
+        g._persist()
+        assert sum(1 for s in self._stamps(storage) if s > mark) == 0
+
+    def test_deletions_propagate(self, storage):
+        """prune() deletes nodes outright — the rows must go too, or the
+        graph would resurrect pruned nodes on the next load."""
+        g = self._big_graph(storage)
+        g.prune(max_nodes=50)
+        g._persist()
+
+        conn = sqlite3.connect(str(storage) + "/graph_memory.db")
+        try:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM graph_nodes WHERE session_id='s-rows'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert rows == len(g._nodes)
+        assert len(GraphMemory("s-rows", storage_dir=storage)._nodes) == len(g._nodes)
+
+    def test_changes_are_detected_without_dirty_bookkeeping(self, storage):
+        """A direct field mutation that bypasses add_node() must still be
+        written. /api/decision/invalidate mutates node.status in place;
+        a dirty-set that mutation sites had to register with would miss
+        exactly this, which is why the diff is derived from state."""
+        g = GraphMemory("s-rows", storage_dir=storage)
+        nid = g.add_node(NodeType.DECISION, "Use MongoDB for the user database",
+                         NodeStatus.COMPLETED)
+        g._persist(force=True)
+
+        g._nodes[nid].status = NodeStatus.INVALIDATED   # no dirty flag set
+        g._persist(force=True)
+
+        assert GraphMemory("s-rows", storage_dir=storage)._nodes[nid].status \
+            == NodeStatus.INVALIDATED
+
+    def test_concurrent_writers_merge_instead_of_clobbering(self, storage):
+        a = GraphMemory("shared", storage_dir=storage)
+        b = GraphMemory("shared", storage_dir=storage)
+
+        a.add_node(NodeType.TASK, "Worker A implemented the billing endpoint",
+                   NodeStatus.COMPLETED)
+        b.add_node(NodeType.TASK, "Worker B implemented the auth endpoint",
+                   NodeStatus.COMPLETED)
+        a._persist()
+        b._persist()          # under v1 this replaced A's entire blob
+
+        labels = {n.label for n in GraphMemory("shared", storage_dir=storage)._nodes.values()}
+        assert any("Worker A" in x for x in labels), "second writer erased the first"
+        assert any("Worker B" in x for x in labels)
+
+    def test_v1_blob_is_migrated_and_kept_for_rollback(self, storage):
+        """Existing deployments hold v1 data; opening a session must
+        migrate it losslessly, and must not destroy the v1 row (that is
+        what makes downgrading possible)."""
+        import json
+        import time
+        from dataclasses import asdict
+
+        seed = GraphMemory("legacy", storage_dir=storage)
+        for i in range(10):
+            seed.add_node(NodeType.TASK, f"Legacy task number {i} in the pipeline",
+                          NodeStatus.COMPLETED)
+        seed.add_node(NodeType.DECISION, "Use PostgreSQL for the user database",
+                      NodeStatus.COMPLETED)
+        expected = sorted(n.label for n in seed._nodes.values())
+
+        # Rewrite this session as a pure v1 database.
+        conn = sqlite3.connect(str(storage) + "/graph_memory.db")
+        try:
+            conn.execute("DELETE FROM graph_nodes WHERE session_id='legacy'")
+            conn.execute("DELETE FROM graph_edges WHERE session_id='legacy'")
+            conn.execute("DELETE FROM graph_meta  WHERE session_id='legacy'")
+            conn.execute(
+                "INSERT OR REPLACE INTO graphs VALUES (?,?,?,?,?)",
+                ("legacy",
+                 json.dumps([asdict(n) for n in seed._nodes.values()]),
+                 json.dumps([asdict(e) for e in seed._edges]),
+                 json.dumps(list(seed._processed_hashes)), time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrated = GraphMemory("legacy", storage_dir=storage)
+        assert migrated._migrated_from_blob is True
+        assert sorted(n.label for n in migrated._nodes.values()) == expected
+        migrated._persist()
+
+        conn = sqlite3.connect(str(storage) + "/graph_memory.db")
+        try:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM graph_nodes WHERE session_id='legacy'"
+            ).fetchone()[0]
+            blob_kept = conn.execute(
+                "SELECT COUNT(*) FROM graphs WHERE session_id='legacy'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert rows == len(expected)
+        assert blob_kept == 1, "the v1 row is the rollback path — do not delete it"
+
+        # And the round-trip through v2 is lossless.
+        assert sorted(n.label for n in
+                      GraphMemory("legacy", storage_dir=storage)._nodes.values()) == expected
+
+    def test_one_corrupt_row_does_not_lose_the_session(self, storage):
+        """The v1 blob was all-or-nothing: one bad byte cost every node.
+        Per-row, damage is contained to the damaged row."""
+        g = GraphMemory("s-rows", storage_dir=storage)
+        for i in range(5):
+            g.add_node(NodeType.TASK, f"Implement feature number {i} in the API layer",
+                       NodeStatus.COMPLETED)
+        g._persist(force=True)
+
+        conn = sqlite3.connect(str(storage) + "/graph_memory.db")
+        try:
+            victim = conn.execute(
+                "SELECT node_id FROM graph_nodes WHERE session_id='s-rows' LIMIT 1"
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE graph_nodes SET data_json='{not valid json' "
+                "WHERE session_id='s-rows' AND node_id=?", (victim,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        reloaded = GraphMemory("s-rows", storage_dir=storage)
+        assert len(reloaded._nodes) == 4, "one corrupt row should cost one node"
+        assert victim not in reloaded._nodes

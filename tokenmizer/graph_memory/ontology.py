@@ -114,7 +114,7 @@ STATUS_TRANSITIONS: dict[NodeStatus, set[NodeStatus]] = {
     # A contested decision is resolved by an explicit human/LLM
     # verdict — reasserting one side (back to COMPLETED), invalidating
     # one side, or a later decision genuinely superseding it. There is no
-    # automatic resolution path; see TM-09.
+    # automatic resolution path.
     NodeStatus.CONTESTED:   {NodeStatus.COMPLETED, NodeStatus.SUPERSEDED,
                              NodeStatus.INVALIDATED},
 }

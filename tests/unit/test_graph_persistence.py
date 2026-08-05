@@ -264,17 +264,20 @@ class TestEnumRestorationOnLoad:
         graph.add_node(NodeType.TASK, "Implement login")
         graph._persist(force=True)
 
-        # Corrupt one node's type directly in SQLite
+        # Inject a node with a type this version doesn't know, as a
+        # newer build would have written it (schema v2: one row per node).
         conn = _sqlite3.connect(str(graph._db_path))
         row = conn.execute(
-            "SELECT nodes_json FROM graphs WHERE session_id=?",
+            "SELECT data_json FROM graph_nodes WHERE session_id=?",
             ("dirty-flag-test-session",),
         ).fetchone()
-        nodes = _json.loads(row[0])
-        nodes.append({**nodes[0], "id": "corrupt01", "type": "from_the_future"})
+        good = _json.loads(row[0])
         conn.execute(
-            "UPDATE graphs SET nodes_json=? WHERE session_id=?",
-            (_json.dumps(nodes), "dirty-flag-test-session"),
+            "INSERT OR REPLACE INTO graph_nodes "
+            "(session_id, node_id, data_json, updated_at) VALUES (?,?,?,?)",
+            ("dirty-flag-test-session", "corrupt01",
+             _json.dumps({**good, "id": "corrupt01", "type": "from_the_future"}),
+             0.0),
         )
         conn.commit()
         conn.close()

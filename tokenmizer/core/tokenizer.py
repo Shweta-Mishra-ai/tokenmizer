@@ -2,11 +2,11 @@
 Accurate token counting.
 
 - OpenAI/compatible models: tiktoken (model-specific encoding or cl100k_base fallback)
-- Anthropic/Claude models: tiktoken is the WRONG tokenizer — Claude uses a different
-  vocabulary and previously every Claude request was counted with an OpenAI encoder,
-  which is inaccurate (typically 5-20% off, worse on code-heavy content). This module
-  now routes Claude models through the Anthropic SDK's local tokenizer when available,
-  and only falls back to the tiktoken approximation if the SDK doesn't expose one.
+- Anthropic/Claude models: tiktoken is the WRONG tokenizer — Claude uses a
+  different vocabulary, and counting a Claude request with an OpenAI encoder
+  is typically 5-20% off, worse on code-heavy content. Claude models route
+  through the Anthropic SDK's local tokenizer when available, falling back
+  to the tiktoken approximation only if the SDK doesn't expose one.
 """
 from __future__ import annotations
 
@@ -24,17 +24,13 @@ def _get_encoding(model: str):
     Resolve a tiktoken encoding, or None if one cannot be obtained for
     ANY reason. Never raises.
 
-    This used to catch only ImportError. tiktoken does not ship its BPE
-    vocabulary — `encoding_for_model()` downloads it from
-    openaipublic.blob.core.windows.net on first use — so on an
-    air-gapped host, behind an egress proxy, or during a blob outage it
-    raises a network error (requests.ProxyError / ConnectionError),
-    which sailed straight past that ImportError handler and out through
-    count_tokens(). count_messages_tokens() is on the hot path of every
-    proxied request, so a transient failure to reach a third-party CDN
-    turned into a 500 on EVERY request, and the documented char/4
-    fallback below was unreachable — it only ever ran when tiktoken was
-    not installed at all.
+    Catching ImportError alone is NOT enough: tiktoken does not ship its
+    BPE vocabulary — `encoding_for_model()` downloads it from
+    openaipublic.blob.core.windows.net on first use — so on an air-gapped
+    host, behind an egress proxy, or during a blob outage it raises a
+    network error. count_messages_tokens() is on the hot path of every
+    proxied request, so letting that escape turns a third-party CDN
+    problem into a 500 on every request.
 
     Catching broadly here is deliberate: an approximate token count is
     always better than a dead proxy. The result (including None) is
@@ -100,15 +96,10 @@ def _count_with_anthropic_sdk(text: str) -> int | None:
         if hasattr(_anthropic, "tokenizer") and hasattr(_anthropic.tokenizer, "count_tokens"):
             return int(_anthropic.tokenizer.count_tokens(text))
     except Exception as e:
-        # FIXED: previously a bare `except Exception: pass` — the
-        # DOCUMENTED case (SDK installed but no local count_tokens
-        # exposed, so we fall back to the tiktoken approximation) is
-        # fine to stay quiet about, but an UNEXPECTED failure (the SDK
-        # has count_tokens and it raises for some other reason) was
-        # silently degrading every Claude-model token count with zero
-        # visibility. Logged at debug — this runs on every request, so
-        # anything louder would be noisy — but no longer invisible to a
-        # maintainer investigating token-count drift.
+        # Debug, not silent: the documented case (SDK installed without a
+        # local count_tokens) is fine to stay quiet about, but an
+        # unexpected failure degrades every Claude token count, and this
+        # runs per request so anything louder would be noise.
         logger.debug(
             f"Anthropic SDK count_tokens call failed, falling back to "
             f"tiktoken approximation: {type(e).__name__}: {e}"

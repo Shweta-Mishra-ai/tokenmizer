@@ -28,7 +28,7 @@ console = Console()
 
 # ── Shared HTTP helpers for the stats/checkpoint/resume commands ────────────
 #
-# FIXED: `checkpoint` and `resume` used to call httpx.post/httpx.get with NO
+# `checkpoint` and `resume` must never call httpx.post/httpx.get with NO
 # error handling at all — unlike `stats`, which already wrapped its call and
 # printed a clean "Cannot reach server" message. An unreachable server (the
 # single most common real-world CLI failure mode) crashed both commands with
@@ -56,7 +56,7 @@ def _cli_post(url: str, headers: dict, timeout: float):
 
 def _require_fields(data: dict, *fields: str) -> bool:
     """
-    FIXED: `checkpoint` and `resume` used to access response fields with
+    `checkpoint` and `resume` must not access response fields with
     direct dict keys (data['checkpoint_id'], data["resume_context"]). A
     non-200-non-404 response (auth failure, validation error, upstream 500)
     has a different body shape than a successful one, and direct key access
@@ -94,7 +94,7 @@ def serve(
     if config:
         os.environ["TOKENMIZER_CONFIG"] = config
 
-    # FIXED: host/port used to be hardcoded typer defaults ("0.0.0.0",
+    # host/port come from settings, NOT hardcoded typer defaults ("0.0.0.0",
     # 8000) completely independent of Settings.proxy_host/proxy_port —
     # tokenmizer.yaml shipped those as documented config, but editing
     # them did nothing at all. Now an explicit --host/--port flag always
@@ -150,7 +150,7 @@ def stats(
 
     url = f"{server}/api/stats"
     if session_id:
-        # FIXED: session_id used to be interpolated raw into the query
+        # session_id must never be interpolated raw into the query
         # string — a session_id containing '&', space, or other reserved
         # URL characters produced a malformed or misdirected request
         # (same class of bug already fixed in the MCP server).
@@ -158,7 +158,7 @@ def stats(
 
     r = _cli_get(url, headers, timeout=5)
     if r.status_code != 200:
-        # FIXED: previously there was no status check at all — a non-200
+        # Status must be checked explicitly: without it a non-200
         # response (e.g. an auth failure) still had `.json()` called on
         # it, which often succeeds and returns something like
         # {"detail": "..."}; `.get("daily", {})` on that silently
@@ -237,7 +237,7 @@ def resume(
         console.print(f"[yellow]No checkpoint found for session: {session_id}[/yellow]")
         raise typer.Exit(1)
     if r.status_code != 200:
-        # FIXED: previously ONLY 404 was special-cased — any OTHER
+        # Every status needs handling, not just 404: any OTHER
         # failure status (401, 500, ...) fell through to `data =
         # r.json()` and then `data["resume_context"]`, which raised a
         # raw KeyError on that response's different body shape instead

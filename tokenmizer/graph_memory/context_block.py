@@ -116,7 +116,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
         sections.append("Decided: " + " | ".join(parts))
 
     # ── 5b. Contested decisions — same topic, ambiguous whether one replaces
-    # the other (see NodeStatus.CONTESTED / TM-09). Surfaced explicitly
+    # the other (see NodeStatus.CONTESTED). Surfaced explicitly
     # rather than silently guessing which one is "current" — unlike
     # SUPERSEDED, both sides stay visible here since destroying either
     # one would risk losing correct information on weak evidence.

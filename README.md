@@ -472,11 +472,26 @@ when things go wrong mid-session, not just when they go right.
 | **Cache eviction during a request** | Sessions with an in-flight request are never selected for eviction, so a request cannot have its graph persisted and detached out from under it. |
 | **Transient DB lock** (`database is locked`) | Treated as contention, not corruption: nothing is deleted, and a graph that failed to *read* refuses to *write* over the stored row rather than replacing it with an empty one. |
 | **Corrupt database file** | The file is **quarantined by rename** (`graph_memory.db.corrupt-<timestamp>`), never deleted, and recovery is scoped to the affected session's row where possible. Recover with `sqlite3 <quarantined> '.recover' \| sqlite3 graph_memory.db`. |
+| **One corrupt row** | Costs that node or edge only — the rest of the session loads normally. |
 | **Anything was actually lost** | Surfaced as `data_loss_detected` in `GET /api/graph/{id}` and as `persist_failures` in `GET /api/stats` — queryable, not just a log line. |
 
 Both SQLite databases are shared by every session in a `storage_dir`,
 which is why "delete the file and start fresh" is never the recovery
 path: it would discard every other session too.
+
+### Storage layout
+
+Graph state is stored **one row per node and per edge** (`graph_nodes`,
+`graph_edges`, `graph_meta`). A persist writes only what changed —
+adding one node to a 151-node graph writes 1 row, and a turn that changes
+nothing writes none.
+
+Databases written before v0.4.2 used a single JSON blob per session.
+They are migrated automatically the first time each session is opened,
+one session at a time. The old row is kept, not deleted, so a downgrade
+still finds the data it expects as of the moment of migration — changes
+made after upgrading are lost if you roll back, which is what a rollback
+means. Nothing needs to be run by hand.
 
 ## Session isolation
 

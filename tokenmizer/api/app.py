@@ -63,11 +63,19 @@ def _warn_if_multi_worker_risk() -> None:
     in-process lock: running multiple OS worker processes (e.g. `uvicorn
     --workers 4`) against the same storage_dir. Each worker gets its own
     in-process `_graph_cache` and its own GraphMemory instances for the
-    same session_id — genuinely separate memory across processes — and
-    the current full-blob SQLite persist (see issue #27) means whichever
-    process saves a session last silently overwrites whatever an earlier
-    worker wrote. No amount of asyncio.Lock helps here; locks don't cross
-    process boundaries.
+    same session_id — genuinely separate memory across processes. No
+    amount of asyncio.Lock helps here; locks don't cross process
+    boundaries.
+
+    Per-row persistence (schema v2, issue #27) removed the worst of
+    this: writers no longer exchange whole-session blobs, so two workers
+    adding different nodes to one session now merge instead of the later
+    save discarding everything the earlier one wrote. What remains is
+    narrower but real — a worker persists the node set IT knows about, so
+    if one worker prunes nodes another still holds in memory, the second
+    worker's next write reinstates them, and simultaneous edits to the
+    SAME node are last-writer-wins. Analytics, the rate limiter and the
+    semantic cache are still per-process regardless.
 
     This can't be detected with certainty from inside a single process
     (there's no universal "how many workers am I one of" signal), so this
@@ -82,14 +90,15 @@ def _warn_if_multi_worker_risk() -> None:
         if val.isdigit() and int(val) > 1:
             logger.warning(
                 f"{var}={val} suggests multiple worker processes. "
-                "TokenMizer's SQLite-backed graph/checkpoint storage is "
-                "NOT safe for concurrent multi-process writers to the "
-                "same session — the last process to persist a session "
-                "silently overwrites what an earlier one wrote (tracked "
-                "as issue #27, which will move to per-row persistence). "
-                "Until that lands: run a single worker per storage_dir, or "
-                "route each session_id to a fixed worker (e.g. consistent "
-                "hashing at your load balancer)."
+                "Per-row graph storage means concurrent writers to one "
+                "session now merge rather than overwrite each other, but "
+                "multi-process is still not fully supported: pruning in "
+                "one worker can be undone by another, edits to the same "
+                "node are last-writer-wins, and analytics, rate limiting "
+                "and the semantic cache remain per-process. Prefer a "
+                "single worker per storage_dir, or route each session_id "
+                "to a fixed worker (e.g. consistent hashing at your load "
+                "balancer)."
             )
             return
 
@@ -162,13 +171,7 @@ def _get_session_lock(session_id: str) -> asyncio.Lock:
     _session_locks[session_id] = lock
 
     if len(_session_locks) > _SESSION_LOCK_MAX:
-        # Find oldest unheld lock to evict (iterate from front). Note: the
-        # trailing "already back under cap" check that used to sit here
-        # was unreachable dead code — the only way `len()` changes inside
-        # this loop is the `del` immediately above, which is followed by
-        # an unconditional `break` in the same branch, so that second
-        # check could never be reached with a smaller length than when
-        # the loop started.
+        # Evict the oldest unheld lock (OrderedDict order is LRU order).
         for old_id in list(_session_locks.keys()):
             if old_id == session_id:
                 continue
@@ -324,24 +327,10 @@ def _graph_cache_touch(session_id: str) -> None:
             )
             break
         evicted_graph = _graph_cache.pop(evicted_id)
-        # Ensure pending writes are flushed before dropping from memory.
-        #
-        # FIXED: previously a failed flush here was caught, logged at
-        # `error`, and then the graph was dropped from memory anyway —
-        # meaning any nodes added since the last successful `_persist()`
-        # call were gone permanently, with zero visibility beyond a log
-        # line. This is silent, permanent data loss in a tool whose whole
-        # pitch is "never lose context." We now retry once (covers
-        # transient SQLite WAL lock contention) and record the failure to
-        # analytics so it's queryable via /api/stats instead of invisible.
-        #
-        # FIXED (TM-12): _persist() used to catch its own exceptions and
-        # return None unconditionally, so this try/except never actually
-        # caught anything — `persisted = True` was set on the very first
-        # call every time, the retry never ran, and the
-        # record_silent_failure metric below was dead code despite the
-        # comment above describing it as implemented. _persist() now
-        # returns bool, so the retry is driven off the actual outcome.
+        # Flush pending writes before dropping from memory. One retry
+        # covers transient SQLite WAL lock contention; the outcome is
+        # driven off _persist()'s bool return, and a failure is recorded
+        # to analytics so it is queryable via /api/stats.
         persisted = False
         for attempt in range(2):
             persisted = evicted_graph._persist()
@@ -514,7 +503,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.4.1",
+    version="0.4.2",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -613,18 +602,14 @@ async def _check_rate_limit(request: Request) -> None:
     """
     Raise 429 if client is rate-limited.
 
-    FIXED (TM-05): previously keyed the bucket on
-    `request.headers.get("Authorization", client_ip)` — a raw,
-    client-supplied string. A client could vary that header per request
-    (free in dev mode, where it isn't even validated) and land in a fresh
-    bucket every time, never being limited at all. `request.client.host`
-    reflects the actual TCP-level source of the connection; it isn't
-    something the caller can vary per request the way a header string can.
+    Buckets key on the connection source, never on a client-supplied
+    header: a caller who can vary the key can mint a fresh bucket per
+    request and is never limited. See _rate_limit_key() for the
+    trusted-proxy exception.
 
-    This doesn't yet differentiate between individual API keys (the
-    current auth model has one shared key for the whole deployment — see
-    TM-15), so per-key rate limiting isn't meaningfully possible until
-    that lands. IP-based limiting is the correct available control today.
+    Limits are per-address, not per-API-key. Splitting by key would only
+    be meaningful for deployments that configure several (see
+    settings.api_keys); addresses are the control that always applies.
     """
     allowed, retry_after = await _rate_limiter.check(_rate_limit_key(request))
     if not allowed:
@@ -725,19 +710,12 @@ async def _update_graph(
                                                      extracted_data=extracted)
                             logger.debug(f"HybridExtractor complete for {_sid}")
                         except Exception as e:
-                            # FIXED: previously logged at `debug` (off by
-                            # default in production) — meaning the entire
-                            # LLM-powered extraction feature could fail on
-                            # every single call (e.g. invalid/expired cheap-
-                            # provider API key, provider outage, quota
-                            # exhausted) and run silently for the whole
-                            # session with zero visibility anywhere. The
-                            # graph would just quietly stop gaining new
-                            # nodes from this path and nobody would know
-                            # why. Bumped to `warning` (visible by default)
-                            # and tracked via analytics so persistent
-                            # failures are queryable via /api/stats instead
-                            # of only discoverable by reading debug logs.
+                            # Warning, not debug: this path can fail on
+                            # every call for the whole session (expired
+                            # cheap-provider key, outage, exhausted quota)
+                            # while the graph just quietly stops gaining
+                            # nodes. Also counted in analytics so repeated
+                            # failures show up in /api/stats.
                             logger.warning(
                                 f"Background LLM extraction failed for session "
                                 f"{_sid} (falling back to heuristic-only on next "
@@ -784,67 +762,36 @@ async def _update_graph(
                     f"{messages[sys_idx]['content']}"
                 )
             else:
-                # FIXED (TM-10): previously had no else branch here — a
-                # request with no system message did the graph query,
-                # built the context block, and threw it away. A system
-                # message was only guaranteed to exist because layer 2
-                # (terse-output injection) happens to add one, and only
-                # when settings.terse_output.enabled is True — a
-                # completely unrelated setting. Turning THAT off silently
-                # disabled graph context injection too, with no error and
-                # no indication anything was skipped.
+                # A system message is not guaranteed to exist: layer 2
+                # only adds one when terse_output is enabled. Without
+                # this branch, graph context injection would silently
+                # depend on that unrelated setting.
                 messages.insert(0, {
                     "role": "system",
                     "content": f"[Relevant session context]\n{ctx_block}",
                 })
 
-    # Context occupancy — measured directly from what will actually be
-    # sent to the provider THIS turn (post file-intelligence/compression/
-    # windowing/context-injection), not from a stateful accumulator.
-    #
-    # FIXED (TM-04): this used to be `(context_used + input_tokens) /
-    # window`, where context_used was a running total read from a state
-    # backend and re-written every call. Two problems, independent of any
-    # concurrency race: each `messages` list already contains the FULL
-    # running conversation (the OpenAI-style contract), so the
-    # accumulator double-counted every earlier turn's content on top of
-    # itself each subsequent turn — diverging further from real occupancy
-    # the longer a session ran. And it never reflected windowing: once
-    # the tracked value crossed trigger_at_percent it never came back
-    # down, so every later turn re-triggered a full checkpoint write
-    # (mitigated separately by the auto-retention cap below, but the root
-    # cause was the accumulator itself). Measuring the actual outgoing
-    # payload here is a pure function of `messages` — no shared mutable
-    # state, so nothing to race on, and it naturally reflects windowing
-    # having just shrunk `messages` above.
+    # Context occupancy is measured from what will actually be sent this
+    # turn (post file-intelligence/compression/windowing/injection), NOT
+    # accumulated across turns. Each `messages` list already carries the
+    # full running conversation, so a running total would double-count
+    # every earlier turn, and it could never fall again after windowing
+    # shrank the payload. This is a pure function of `messages`: no
+    # shared mutable state, and it reflects the windowing just applied.
     context_pct = count_messages_tokens(messages, model) / context_window
 
-    # Auto-checkpoint
+    # Auto-checkpoint.
     #
-    # FIXED: previously a failed auto-checkpoint was caught, logged at
-    # `warning`, and otherwise invisible — the chat response returned
-    # normally with no indication that the safety net didn't fire. For a
-    # tool whose entire pitch is "never lose context across sessions,"
-    # silently failing the auto-checkpoint and telling the user nothing is
-    # the single worst failure mode this codebase had. The chat request
-    # still should NOT fail just because the checkpoint failed (the user
-    # came here for an answer, not a checkpoint), but the failure must be
-    # visible somewhere the caller can actually see it.
+    # A failed checkpoint must NOT fail the chat request — the caller came
+    # for an answer — but it must be visible, so the outcome is returned
+    # in the `tokenmizer.checkpoint` response field rather than only
+    # logged. One retry covers transient SQLite lock contention under
+    # concurrent requests.
     #
-    # Fix: retry once (covers transient SQLite lock contention under
-    # concurrent requests — see WAL mode notes in checkpoints/manager.py),
-    # log at `error` if it still fails, and record the failure in `savings`
-    # so it flows into the `tokenmizer.checkpoint` response field below —
-    # a client that cares can check `checkpoint_failed` instead of having
-    # to grep server logs to discover their context wasn't saved.
-    #
-    # Retention/frequency: CheckpointManager caps how many auto-triggered
-    # checkpoints are kept per session (oldest pruned first, manual ones
-    # never touched — see checkpoints/manager.py::_prune_auto_checkpoints).
-    # That bounds storage growth for a session that stays near the
-    # threshold for many turns; it intentionally does not suppress this
-    # turn's checkpoint attempt, since each attempt reflects this turn's
-    # real (non-accumulated) occupancy rather than noise.
+    # Frequency is not throttled here: each attempt reflects this turn's
+    # real occupancy. Storage growth is bounded instead by
+    # CheckpointManager._prune_auto_checkpoints, which caps retained
+    # auto-checkpoints per session and never touches manual ones.
     checkpoint_status = {"attempted": False, "succeeded": False, "checkpoint_id": None}
     if (context_pct >= settings.graph_checkpoint.trigger_at_percent
             and settings.graph_checkpoint.enabled):
@@ -895,11 +842,9 @@ async def _call_provider(
     Layer 3 + 5: Cache lookup → LLM call → output trim → cache write.
     Returns (response_text, input_tokens, output_tokens, latency_ms, cache_hit).
 
-    FIXED (TM-34): cache_hit is now returned explicitly instead of being
-    inferred downstream from `input_tokens_actual == 0` — that inference
-    would misclassify any real provider response that happens to report
-    zero input tokens as a cache hit. This function already knows exactly
-    which path it took; it should just say so.
+    cache_hit is returned explicitly rather than inferred downstream from
+    `input_tokens == 0`, which would misclassify any real provider
+    response that happens to report zero input tokens.
     """
     # Cache lookup
     if settings.cache.enabled and user_content:
@@ -909,13 +854,10 @@ async def _call_provider(
             output_tokens = count_tokens(cached.response, model)
             return cached.response, 0, output_tokens, 0.0, True
 
-    # LLM call
-    # NOTE: `messages` is already redacted — redaction now happens once at
-    # ingestion in chat_completions() so every downstream consumer (this call,
-    # background graph extraction, checkpoint storage) sees the same safe
-    # copy. We do NOT re-redact here to avoid masking a regression upstream:
-    # if redaction is ever accidentally removed at ingestion, this call site
-    # should not silently paper over it.
+    # LLM call. `messages` is already redacted — redaction happens once
+    # at ingestion in chat_completions(), so every downstream consumer
+    # shares one safe copy. Deliberately NOT re-redacted here: doing so
+    # would mask a regression if ingestion ever stopped redacting.
     provider = _get_provider()
     try:
         resp  = await provider.chat(
@@ -924,12 +866,10 @@ async def _call_provider(
             **_sampling_kwargs(req),
         )
     except Exception as e:
-        # FIXED (TM-33): previously echoed str(e) verbatim into the 502
-        # response body. Provider SDK exceptions routinely embed request
-        # URLs, query params, or other internal detail that shouldn't
-        # reach an API client. Full detail is logged server-side (with a
-        # correlation id so it can be found), the client gets a generic
-        # message plus that same id.
+        # Provider SDK exceptions routinely embed request URLs, query
+        # params and other internal detail, so str(e) must not reach the
+        # client. Full detail goes to the log under a correlation id the
+        # client is given to quote.
         correlation_id = uuid.uuid4().hex[:12]
         logger.error(f"Provider error [{correlation_id}]: {e}")
         raise HTTPException(
@@ -1029,10 +969,9 @@ def _stream_response(req, messages, model, user_content, session_id,
             ) + "\n\n"
         except Exception as e:
             # Anything the provider layer didn't wrap in ProviderError
-            # (transport errors, decode errors, bugs) used to escape the
-            # generator entirely: the SSE stream died with no terminator
-            # and the bookkeeping below never ran. Same treatment — tell
-            # the client, then finish cleanly.
+            # (transport errors, decode errors, bugs) would otherwise
+            # escape the generator: the SSE stream dies with no
+            # terminator and the bookkeeping below never runs.
             stream_failed = True
             correlation_id = uuid.uuid4().hex[:12]
             logger.error(f"Stream error [{correlation_id}]: {e}")
@@ -1113,8 +1052,7 @@ async def chat_completions(req: ChatRequest, request: Request):
     #   - the main chat provider call (_call_provider)
     #   - the background graph-extraction LLM call (_update_graph → HybridExtractor),
     #     which talks to a *separate*, often cheaper third-party model
-    #     (haiku/gpt-4o-mini/deepseek) — previously this saw RAW unredacted
-    #     content because only _call_provider redacted its own copy.
+    #     (haiku/gpt-4o-mini/deepseek), a separate third party.
     #   - checkpoint storage (SQLite) and the graph DB itself
     # Redacting once here means every downstream path is safe by construction
     # instead of relying on each call site to remember to redact.
@@ -1145,13 +1083,9 @@ async def chat_completions(req: ChatRequest, request: Request):
                 session_id, graph, raw_messages, messages, model, savings, user_query
             )
 
-    # FIXED (TM-11): input_tokens_sent used to be measured HERE, before
-    # _update_graph() ran — so it never reflected either the reduction
-    # from windowing or the addition from graph-context injection, both
-    # of which happen inside _update_graph(). Measuring it after means
-    # this number (reported in analytics/dashboard as "tokens actually
-    # sent") is the actual size of what's about to be sent to the
-    # provider, not a stale pre-windowing estimate.
+    # Measured AFTER _update_graph(), so it reflects both the reduction
+    # from windowing and the addition from graph-context injection —
+    # i.e. the real size of what is about to be sent.
     sent_input_tokens = count_messages_tokens(messages, model)
 
     # Streaming: true SSE passthrough (v0.3). Output-trimming is skipped in
@@ -1204,10 +1138,8 @@ async def chat_completions(req: ChatRequest, request: Request):
             "savings":     savings,
             "total_saved": total_saved,
             "latency_ms":  round(latency_ms, 1),
-            # FIXED: previously a failed auto-checkpoint was invisible to
-            # the caller — only a log line nobody watches. Now surfaced
-            # here so a client can detect "my context wasn't saved" instead
-            # of finding out only when resume returns nothing.
+            # Surfaced so a client can detect "my context wasn't saved"
+            # here, rather than when a later resume returns nothing.
             "checkpoint": checkpoint_status,
         },
     }

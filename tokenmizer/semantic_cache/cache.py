@@ -43,10 +43,9 @@ class CacheEntry:
     # that same session). Recorded on the entry itself — not just implied
     # by which key it was filed under — so the semantic-similarity lookup
     # (which iterates ALL entries, not just one key) can enforce the same
-    # scoping rule the exact-match lookup does. See TM-03: without this,
-    # a near-miss query could return another session's private entry
-    # purely because cosine similarity cleared the threshold, entirely
-    # bypassing scope.
+    # scoping rule the exact-match lookup does. Without it, a near-miss
+    # query can return another session's private entry purely because
+    # cosine similarity cleared the threshold, bypassing scope entirely.
     scope: str = "__shared__"
 
     def is_expired(self, ttl_seconds: int) -> bool:
@@ -129,11 +128,10 @@ class SemanticCache:
             (or "__private__" if none given), regardless of whether it
             looks sensitive. Nothing is ever shared across sessions unless
             explicitly opted in.
-          "shared" — restores the pre-TM-03-fix behavior: non-sensitive
-            prompts (per _is_session_sensitive) are shared globally across
-            sessions; sensitive-looking ones are still session-scoped
-            regardless of this setting — the sensitivity gate is a floor,
-            not something share_scope can override.
+          "shared" — non-sensitive prompts (per _is_session_sensitive)
+            are shared globally across sessions; sensitive-looking ones
+            stay session-scoped regardless. The sensitivity gate is a
+            floor share_scope cannot override.
         """
         self.threshold = threshold
         self.ttl_seconds = ttl_seconds
@@ -146,10 +144,6 @@ class SemanticCache:
         self._hit_exact = 0
         self._hit_semantic = 0
         self._miss = 0
-        # FIXED: this was missing entirely. api/app.py's /api/cache/stats endpoint
-        # calls `_cache._preference_store.to_system_context()` — without this
-        # attribute that call raised AttributeError on every single request to
-        # that endpoint, unconditionally.
         self._preference_store = PreferenceStore()
 
     def _key(self, prompt: str, scope: str = "__shared__") -> str:
@@ -202,12 +196,10 @@ class SemanticCache:
 
         # 2. Semantic match
         #
-        # FIXED (TM-03): this used to scan every entry in self._exact
-        # regardless of scope, so a private/session-scoped entry from a
-        # DIFFERENT session could be returned to a near-miss query purely
-        # on cosine similarity — bypassing whatever scope set() assigned
-        # entirely. Only entries visible to THIS caller are eligible:
-        # shared entries, or entries scoped to this exact session_id.
+        # Only entries visible to THIS caller are eligible: shared ones,
+        # or ones scoped to this exact session_id. Scanning every entry
+        # regardless of scope would let cosine similarity hand a caller
+        # another session's private entry.
         if self._embedder.available:
             query_emb = self._embedder.embed(prompt)
             best_score = 0.0
@@ -266,7 +258,7 @@ class SemanticCache:
         """
         Store a cache entry.
 
-        Scoping rules (safe-by-default — see TM-03):
+        Scoping rules (safe by default):
         - Default (`share_scope="session"`): EVERY prompt is scoped to
           session_id (or "__private__" if none given), sensitive or not.
           Nothing is shared across sessions unless explicitly opted in.
@@ -323,13 +315,9 @@ class SemanticCache:
     def invalidate(self, prompt: str, session_id: str = "") -> int:
         """Remove cached entries for `prompt`. Returns how many were removed.
 
-        This used to build a single key with the DEFAULT scope
-        ("__shared__") and pop that. Under the default configuration
-        (share_scope="session") set() files every entry under the
-        session's scope instead, so the key computed here matched
-        nothing and invalidate() was a silent no-op — it reported no
-        error and removed nothing, which is the worst way for a cache
-        invalidation API to fail.
+        Note the scope trap: set() files entries under the session's
+        scope by default, so building a single "__shared__" key here
+        would match nothing and silently remove nothing.
 
         With a session_id, the session-scoped entry and the shared one
         are both removed. Without one, every scope holding this prompt is

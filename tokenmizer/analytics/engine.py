@@ -23,13 +23,11 @@ class PeriodStats:
 
 # Per-1K-token rates as (input, output).
 #
-# These used to be a SINGLE blended rate per provider, applied to input
-# and output tokens alike. Output tokens cost several times more than
-# input on every provider here (5x on Anthropic, 4x on OpenAI), so both
-# `cost_saved_usd` and `cost_actual` were materially wrong — and wrong in
-# a flattering direction for the savings figure the dashboard leads with.
-# Splitting them is the difference between a number you can put in front
-# of a finance team and a number you can't.
+# These MUST stay split by direction. Output tokens cost several times
+# more than input on every provider here (5x on Anthropic, 4x on
+# OpenAI), so a single blended rate makes both `cost_saved_usd` and
+# `cost_actual` materially wrong — and wrong in a flattering direction
+# for the savings figure the dashboard leads with.
 #
 # Still approximate: real pricing is per-MODEL, not per-provider, and
 # changes over time. Treat these as an estimate, which is why the field
@@ -95,7 +93,7 @@ class AnalyticsEngine:
         # total at all.
         self._provider_totals: Dict[str, int] = defaultdict(int)
         self._total_requests = 0
-        # FIXED: previously, silent failures (checkpoint save, graph
+        # Silent failures (checkpoint save, graph
         # eviction persist, Redis write, AND background LLM extraction
         # errors) were caught, logged at low severity, and otherwise
         # invisible — no way to know in production whether data loss or
@@ -111,8 +109,8 @@ class AnalyticsEngine:
         """Track a failure that would otherwise be invisible outside debug
         logs — persistence (checkpoint save, graph eviction, Redis write)
         AND non-persistence failures like background LLM extraction
-        errors. The common thread: all of these used to fail silently
-        with zero visibility outside of logs nobody watches by default.
+        errors. The common thread: all of them can otherwise fail with
+        zero visibility outside logs nobody watches by default.
         Call this from every place that catches such an exception — it
         costs one dict increment and turns 'silent forever' into 'visible
         in /api/stats'."""
@@ -256,7 +254,7 @@ class AnalyticsEngine:
             "layer_breakdown": self.layer_breakdown(),
             "by_provider": dict(self._provider_totals),
             "suggestions": self.generate_suggestions(),
-            # FIXED: persistence failures (checkpoint/graph/redis writes that
+            # persistence failures (checkpoint/graph/redis writes that
             # silently failed) are now visible here instead of only in logs.
             # Non-zero values mean data was lost — investigate immediately.
             "persist_failures": self.persist_failures,

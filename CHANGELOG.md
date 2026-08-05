@@ -1,5 +1,86 @@
 # Changelog
 
+## [0.4.2] — 2026-08-05 — per-row storage (#27), provider fixes, comment cleanup
+
+Closes the three items left open by 0.4.1.
+
+### Changed — graph storage is now per-row (schema v2), closes #27
+`graphs.nodes_json` / `edges_json` (one JSON blob per session) is replaced
+by `graph_nodes`, `graph_edges` and `graph_meta`, one row per node and
+per edge.
+
+Two problems the blob layout caused:
+
+- **Write amplification.** Every persist rewrote the whole graph, once
+  per chat turn, even for a single new node. Measured on a 151-node
+  graph: adding one node wrote **1 row instead of 151**, and a turn that
+  changes nothing now writes **0 rows** instead of the entire session.
+  The 200-node auto-prune cap existed largely to bound this cost.
+- **Concurrent writers destroyed sessions.** Two processes holding one
+  session each wrote the complete blob, so the later save discarded
+  everything the earlier one had added. Disjoint changes from two writers
+  now merge; only a genuine same-node conflict is last-writer-wins.
+
+Corruption is also contained: one unreadable row costs that row, where
+one bad byte in a blob cost the entire session.
+
+**Change detection is derived, not tracked.** Rather than a dirty-set
+that every mutation site must register with — node state is mutated from
+at least six places, and a site that forgot would silently never reach
+disk — persist() serializes the graph and compares each row against the
+exact string last written. Serialization is O(nodes) CPU with no I/O;
+the part that costs (SQLite writes, WAL, fsync) is O(changed). Nothing
+can be missed because nothing has to be remembered.
+
+**Migration.** Automatic and per-session: the first time a session with
+no v2 rows is opened, its v1 blob is read, hydrated, and written out as
+rows. A database holding a mix converges one session at a time. The v1
+row is **deliberately not deleted**, so downgrading to a pre-migration
+build still finds the data it expects as of the moment of migration —
+changes made after the upgrade are lost on downgrade, which is the normal
+meaning of a rollback.
+
+### Fixed — provider adapters (the modules skipped by both audit passes)
+- **Retryable-error detection matched substrings.** `"rate" in err`
+  fires on `"gene**rate**"` and `"mode**rate**"`, so `Failed to generate
+  completion` — a permanent failure — was retried three times, costing
+  the caller 1+2+4s before returning the same error. Now uses the OpenAI
+  SDK's typed exceptions, with word-boundary matching only as a fallback.
+- **Anthropic prompt caching never engaged.** `cache_control` was
+  attached when the system prompt exceeded 800 *characters* (~200
+  tokens), but Anthropic's minimum cacheable prefix is 1024 tokens (2048
+  for Haiku) and it silently ignores `cache_control` below that — so the
+  advertised "L5 Prompt Cache — 90% on repeated system prompts" almost
+  never applied. Thresholds are now in tokens, per model family. The
+  streaming path never applied caching at all; it now uses the same rule.
+- **Provider/model mismatch was silent.** `default_model` defaults to a
+  Claude model, so switching only `provider` to `openai` sent
+  `claude-sonnet-4-6` to the OpenAI API and produced an opaque
+  model-not-found error. Now warns at startup naming the actual cause.
+
+### Fixed — file intelligence overshot its token budget
+`token_budget` is the module's entire contract (the `analyze_file` MCP
+tool documents it as "Max tokens for the summary"), but the log and code
+strategies assembled a fixed set of sections and only then measured,
+overshooting by ~5%. A single budget clamp now applies to every strategy
+at the exit point, reserving room for its own trim marker.
+
+### Changed — comments no longer narrate past bugs
+Roughly 90 comment blocks across 20 files described bugs that had already
+been fixed (`FIXED (TM-xx): previously this…`), in one case running 25
+lines inside a docstring and 17 lines inside `pyproject.toml`. Two
+concrete harms, both observed during the 0.4.1 audit: the archaeology
+buried the logic (finding the decision-merge conflict meant reading past
+three unrelated fix narratives), and some of it asserted protections that
+no longer held — a comment explained at length why cache eviction was
+safe because of a lock the request path never actually took.
+
+Comments now state why the current code is the way it is, in the present
+tense, keeping the constraint and dropping the history. Load-bearing
+rationale is preserved (e.g. why `use`/`using` must stay out of the stop
+words, why set iteration must not decide which extracted items survive).
+No logic changed; the full suite passes unchanged either side.
+
 ## [0.4.1] — 2026-08-05 — second audit pass: correctness, durability, isolation
 
 Findings from a full-codebase audit. Every item below was reproduced

@@ -125,15 +125,15 @@ _DECISION_PASSIVE = re.compile(
     re.IGNORECASE,
 )
 
-# FIXED (TM-01) — the single most severe finding in the audit: none of
-# the decision passes above checked for negation. "We are NOT using
-# Redis" matched Pass 1's verb list ("using") and Pass 3's tech-name list
-# ("redis") independently — both blind to the preceding "NOT" — and both
-# produced "Use Redis" as an extracted decision: the literal opposite of
-# what was said. This became critical in combination with
-# SmartMessageWindow, which replaces older conversation turns with the
-# graph's context block, deleting the original sentence and leaving only
-# the fabricated "Decided: Use Redis" in what the model actually sees.
+# NEGATION CHECK — required by every decision pass above.
+#
+# Without it, "We are NOT using Redis" matches Pass 1's verb list
+# ("using") and Pass 3's tech-name list ("redis") independently, both
+# blind to the preceding "NOT", and both extract "Use Redis" — the
+# literal opposite of what was said. That compounds with
+# SmartMessageWindow, which replaces older turns with the graph's context
+# block: the original sentence is dropped and only the fabricated
+# "Decided: Use Redis" remains in what the model sees.
 #
 # Scoped to the current CLAUSE (back to the nearest sentence boundary),
 # not the whole message — an unrelated negation in an earlier, different
@@ -281,7 +281,7 @@ _GOAL_OPENERS = re.compile(
 
 # ── Endpoint / schema patterns ────────────────────────────────────────────────
 #
-# FIXED: ENDPOINT and SCHEMA are full node types (graph.py creates nodes
+# ENDPOINT and SCHEMA are full node types (graph.py creates nodes
 # for them, to_context_block() has dedicated sections, the LLM extraction
 # prompt asks for them) but the heuristic extractor had NO patterns to
 # ever populate ExtractedData.endpoints/.schemas. Since
@@ -305,7 +305,7 @@ _SCHEMA_HEADER = re.compile(
 # Inline "X table" mention — "a new sessions table to track logins".
 # Deliberately excludes common non-identifier words immediately before
 # "table" (generic phrasing like "the table below") via _SCHEMA_STOP_WORDS
-# below, and is negation-checked the same way decisions are (TM-01) — a
+# below, and is negation-checked the same way decisions are  — a
 # statement like "No refresh_tokens table needed" must not produce a
 # schema node claiming that table exists.
 _SCHEMA_TABLE = re.compile(
@@ -462,7 +462,7 @@ class HybridExtractor:
 
         # Passive completion: full history
         for m in _TASK_DONE_PASSIVE.finditer(content):
-            # FIXED (TM-21): was r'...\\s+' — a raw string, so \\s is a
+            # was r'...\\s+' — a raw string, so \\s is a
             # literal backslash-s, not the whitespace escape \s. Since no
             # real text contains a literal backslash there, this prefix
             # strip could never match anything and has never once fired.
@@ -696,28 +696,20 @@ class HybridExtractor:
 
         merged = ExtractedData()
 
-        # Simple list categories — merge with corroboration tracking
+        # Simple list categories — merge with corroboration tracking.
         #
-        # FIXED — REAL BUG (found via testing, not in the original audit's
-        # list): this used to build `combined` directly from the
-        # normalized (lowercased) sets, which meant the FINAL OUTPUT
-        # stored lowercased strings permanently. For file paths this is
-        # not cosmetic: "src/App.tsx" and "src/app.tsx" are different
-        # files on any case-sensitive filesystem (Linux, most CI/prod
-        # environments). A user reading their session graph would see
-        # "src/app.tsx" even though the actual file on disk is
-        # "src/App.tsx" — wrong information about which file was
-        # touched. `_deduplicate()` elsewhere in this same file gets this
-        # right (normalizes only for the dedup KEY, keeps original-case
-        # value) — `merge()` was inconsistent with its own codebase's
-        # established correct pattern. Fixed to match: normalize only for
-        # set membership / corroboration detection, always emit the
-        # ORIGINAL (first-seen, original-case) string into the output.
-        # FIXED (TM-14): use the dataclass-derived field list, same as
-        # _deduplicate() below, instead of a second hand-maintained copy
-        # of it — two independent lists that both need to stay in sync
-        # with ExtractedData's fields is exactly how "endpoints"/"schemas"
-        # drifted out of _deduplicate() in the first place.
+        # Normalize (lowercase) ONLY for set membership and corroboration
+        # detection; always emit the ORIGINAL first-seen casing into the
+        # output. Emitting the normalized form is not cosmetic for file
+        # paths: "src/App.tsx" and "src/app.tsx" are different files on
+        # any case-sensitive filesystem, so a session graph would report
+        # a file that does not exist. `_deduplicate()` below follows the
+        # same rule.
+        #
+        # The field list is derived from the dataclass rather than
+        # hand-maintained: two lists needing to stay in sync with
+        # ExtractedData is how "endpoints"/"schemas" went missing from
+        # _deduplicate() once already.
         for attr in self._simple_list_field_names():
             llm_raw = list(getattr(llm, attr))
             heu_raw = list(getattr(heuristic, attr))
@@ -735,18 +727,16 @@ class HybridExtractor:
             corroborated = bool(llm_keys & heu_keys)
             llm_only     = bool(llm_keys - heu_keys)
 
-            # FIXED (TM-18): this used to build `combined` from set
-            # difference/intersection operations (llm_keys & heu_keys,
-            # etc.) — Python's string-hash randomization (on by default)
-            # means set iteration order isn't stable across process runs,
-            # so when more than 15 items were found, WHICH 15 survived
-            # combined[:15] changed between runs of the IDENTICAL input.
-            # The same conversation processed on two different workers
-            # could produce different graphs. Fixed by iterating the
-            # already-insertion-ordered llm_by_norm/heu_by_norm dicts
-            # directly: every LLM item (corroborated or not) in the LLM's
-            # own order, then heuristic-only items in the heuristic's own
-            # order — a pure, deterministic function of input order.
+            # `combined` MUST be built by iterating the
+            # insertion-ordered llm_by_norm/heu_by_norm dicts, never from
+            # set operations (llm_keys & heu_keys, ...). Python's
+            # string-hash randomization makes set iteration order unstable
+            # across processes, so with more than 15 items, WHICH 15
+            # survive combined[:15] would vary between runs on identical
+            # input — the same conversation could yield different graphs
+            # on two workers. Every LLM item in the LLM's order, then
+            # heuristic-only items in the heuristic's order: a pure,
+            # deterministic function of input order.
             combined: list[str] = []
             for k, v in llm_by_norm.items():
                 combined.append(v)  # prefer LLM casing when corroborated
@@ -781,7 +771,7 @@ class HybridExtractor:
                     existing["reason"] = d["reason"]
                 if d.get("evidence") and not existing.get("evidence"):
                     existing["evidence"] = d["evidence"]
-                # source_role (TM-29): only the heuristic pass attributes a
+                # source_role : only the heuristic pass attributes a
                 # decision to a specific message's role — the LLM pass
                 # synthesizes across the whole conversation with no
                 # single-turn attribution, so `existing` (built from the LLM
@@ -825,7 +815,7 @@ class HybridExtractor:
         """Every ExtractedData field that's a plain list[str] — derived
         from the dataclass itself rather than hand-maintained here.
 
-        FIXED (TM-14): _deduplicate() used to hardcode this list
+        _deduplicate() must not hardcode this list
         ("goals", "tasks_done", ... "environments") and silently dropped
         "endpoints", "schemas", and "evidence" — added to ExtractedData
         at some point after this hardcoded list was written, and never
