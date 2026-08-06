@@ -157,19 +157,28 @@ jobs:
 
       # Body comes from the CHANGELOG section for this version, so the
       # release notes and the changelog cannot drift apart.
+      #
+      # The file is written directly with an explicit encoding rather than
+      # printed and shell-redirected. The changelog contains arrow and
+      # em-dash characters, and `print` encodes with whatever stdout
+      # happens to be: on a runner that is not UTF-8 the script dies with
+      # UnicodeEncodeError — after PyPI already has the upload, which is
+      # the worst possible moment. Writing the file removes the dependence
+      # on ambient locale entirely.
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          python - "$VERSION" > notes.md <<'PY'
-          import re, sys
+          python - "$VERSION" <<'PY'
+          import pathlib, re, sys
           version = sys.argv[1]
-          text = open("CHANGELOG.md", encoding="utf-8").read()
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
           m = re.search(
               rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
               text, re.MULTILINE | re.DOTALL)
-          print(m.group(1).strip() if m else f"See CHANGELOG.md for {version}.")
+          body = m.group(1).strip() if m else f"See CHANGELOG.md for {version}."
+          pathlib.Path("notes.md").write_text(body, encoding="utf-8")
           PY
           gh release create "v$VERSION" \
             --title "v$VERSION" \

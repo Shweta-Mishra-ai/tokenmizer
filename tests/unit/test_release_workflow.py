@@ -12,6 +12,7 @@ edit that removes one fails here rather than on release day.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -133,26 +134,51 @@ class TestReleaseNotes:
                     if s.get("name") == "Create the GitHub Release")
         return step["run"].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
 
-    def _run(self, wf, version, tmp_path):
+    def _run(self, wf, version, tmp_path, env=None):
+        """Run the extractor exactly as the workflow does, in a copy of the
+        repo root so the notes.md it writes does not litter the checkout."""
         script = tmp_path / "notes.py"
         script.write_text(self._extractor(wf), encoding="utf-8")
-        return subprocess.run(
+        (tmp_path / "CHANGELOG.md").write_text(
+            (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), encoding="utf-8")
+        res = subprocess.run(
             [sys.executable, str(script), version],
-            capture_output=True, text=True, cwd=ROOT,
+            capture_output=True, text=True, cwd=tmp_path,
+            env={**os.environ, **(env or {})},
         )
+        notes = tmp_path / "notes.md"
+        return res, (notes.read_text(encoding="utf-8") if notes.exists() else "")
 
     def test_extracts_exactly_the_current_versions_section(self, wf, tmp_path):
         import tokenmizer
 
-        res = self._run(wf, tokenmizer.__version__, tmp_path)
+        res, body = self._run(wf, tokenmizer.__version__, tmp_path)
         assert res.returncode == 0, res.stderr
-        assert len(res.stdout.strip()) > 500, "release notes came out empty"
-        assert "## [" not in res.stdout, "bled into an adjacent version's section"
+        assert len(body.strip()) > 500, "release notes came out empty"
+        assert "## [" not in body, "bled into an adjacent version's section"
 
     def test_an_unknown_version_degrades_instead_of_crashing(self, wf, tmp_path):
         """A release whose CHANGELOG section is missing should still
         publish with a pointer, not fail after PyPI already has the
         upload."""
-        res = self._run(wf, "9.9.9", tmp_path)
+        res, body = self._run(wf, "9.9.9", tmp_path)
         assert res.returncode == 0, res.stderr
-        assert "CHANGELOG" in res.stdout
+        assert "CHANGELOG" in body
+
+    def test_it_does_not_depend_on_the_runner_locale(self, wf, tmp_path):
+        """The changelog contains arrows and em-dashes. `print` encodes
+        with whatever stdout happens to be, so on a non-UTF-8 runner the
+        script died with UnicodeEncodeError — which the Windows leg caught,
+        and which in production would have fired AFTER PyPI already had the
+        upload. Forcing a legacy codec here reproduces that exactly."""
+        import tokenmizer
+
+        res, body = self._run(
+            wf, tokenmizer.__version__, tmp_path,
+            env={"PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"},
+        )
+        assert res.returncode == 0, (
+            "release notes must not depend on the runner's stdout encoding:\n"
+            + res.stderr
+        )
+        assert "\u2192" in body or len(body) > 500
