@@ -132,3 +132,36 @@ isolation comes from the credential, not from the id being hard to guess.
 ---
 
 [← Back to the README](../README.md)
+
+## Releasing
+
+Two ways, both running the same checks and publishing the same artifacts.
+
+**From the Actions tab** — Actions → *Release to PyPI* → Run workflow, and
+type the version. The typed version is compared against
+`tokenmizer.__version__`, so a stray click cannot publish: getting it
+wrong fails the run before anything is built. This path creates the tag
+and the GitHub Release for you.
+
+**From a GitHub Release** — create one whose tag is `v<version>`. The tag
+is the source of truth and is checked the same way.
+
+Either way the run: refuses a version already on PyPI (a version can
+never be replaced), runs the full suite and ruff, builds an sdist and a
+wheel, runs `twine check`, and uploads through PyPI Trusted Publishing —
+no API token is stored anywhere.
+
+The ordering is deliberate. Publishing is the irreversible step, so the
+tag and the GitHub Release are created **after** PyPI accepts the upload,
+never before. A tag is deletable; a published version is not. If tagging
+fails, PyPI is still correct and the tag can be added by hand — the
+reverse would leave the history asserting a release that never happened.
+
+`tests/unit/test_release_workflow.py` holds these properties: publish
+depends on the tests, the tag depends on the publish, caller input
+reaches scripts through `env:` rather than string interpolation, and only
+the publishing job carries the OIDC token.
+
+---
+
+[← Back to the README](../README.md)

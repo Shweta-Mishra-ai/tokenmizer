@@ -8,16 +8,35 @@ name: Release to PyPI
 #     Repository:        tokenmizer
 #     Workflow name:     release.yml
 #     Environment:       pypi
-# Then create a GitHub Release whose tag is v<version> — v0.5.0 for the
-# current package — and this workflow publishes it.
+#
+# TWO WAYS TO RELEASE. Both run the same checks and publish the same
+# artifacts; they differ only in what you click.
+#
+#   1. Create a GitHub Release whose tag is v<version>. The tag is the
+#      source of truth and is checked against the package version.
+#
+#   2. Actions → "Release to PyPI" → Run workflow, and type the version.
+#      The typed version is checked against the package version, so a
+#      stray button press cannot publish: getting it wrong fails the run
+#      before anything is built. This path also creates the tag and the
+#      GitHub Release for you, AFTER PyPI has accepted the upload — see
+#      the ordering note on the `finalise` job.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish — must match tokenmizer.__version__ exactly (e.g. 0.5.0)"
+        required: true
+        type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,17 +44,54 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The release tag must match the package version exactly — otherwise
-      # a stale tag publishes the wrong code under the wrong number. Version
-      # pins across server.json / plugin.json / app.py are enforced by
+      # Whichever way this was triggered, the version the human named must
+      # match the version the package will actually build as — otherwise a
+      # stale tag, or a typo in the dispatch box, publishes the wrong code
+      # under the wrong number. Version pins across server.json /
+      # plugin.json / marketplace.json and the FastAPI app are enforced by
       # tests/unit/test_version_consistency.py in the test run below.
-      - name: Verify tag matches package version
+      # `inputs.version` reaches the shell through `env:`, never through a
+      # `${{ }}` interpolation inside the script. Interpolating it directly
+      # would splice caller-controlled text into the command line — the
+      # standard script-injection hole in GitHub Actions, and a serious one
+      # in the job that holds the PyPI publishing identity.
+      - name: Verify the named version matches the package
+        id: resolve
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           pip install -e .
           PKG_VERSION=$(python -c "import tokenmizer; print(tokenmizer.__version__)")
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package version $PKG_VERSION"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            NAMED="${DISPATCH_VERSION#v}"
+            SOURCE="the version you typed"
+          else
+            NAMED="${GITHUB_REF_NAME#v}"
+            SOURCE="tag $GITHUB_REF_NAME"
+          fi
+          if [ "$PKG_VERSION" != "$NAMED" ]; then
+            echo "::error::$SOURCE says $NAMED, the package is $PKG_VERSION"
+            exit 1
+          fi
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing $PKG_VERSION (from $SOURCE)"
+
+      # A version already on PyPI can never be replaced. Finding that out
+      # from a 400 at the very last step, after a full test run, is a poor
+      # way to learn it.
+      - name: Refuse to republish an existing version
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          # Fails open on a network problem: a 000 or a 5xx means "could
+          # not tell", and the upload step will still reject a genuine
+          # duplicate. This step exists to say so in one second rather
+          # than after a full test run.
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://pypi.org/pypi/tokenmizer/$VERSION/json" || echo 000)
+          if [ "$CODE" = "200" ]; then
+            echo "::error::tokenmizer $VERSION is already on PyPI. A version cannot be replaced — bump the version and try again."
             exit 1
           fi
 
@@ -70,3 +126,52 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Only for the manual path — the GitHub Release path already has both.
+  #
+  # Runs AFTER the upload, not before. Publishing is the irreversible step:
+  # a version on PyPI cannot be taken back, while a tag can be deleted. So
+  # the repository only records a release once PyPI has actually accepted
+  # one. If this job fails, PyPI is correct and the tag can be added by
+  # hand; the reverse — a tag claiming a release that never uploaded —
+  # would be a lie in the history.
+  finalise:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag the published commit
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "v$VERSION"
+
+      # Body comes from the CHANGELOG section for this version, so the
+      # release notes and the changelog cannot drift apart.
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          python - "$VERSION" > notes.md <<'PY'
+          import re, sys
+          version = sys.argv[1]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(
+              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+              text, re.MULTILINE | re.DOTALL)
+          print(m.group(1).strip() if m else f"See CHANGELOG.md for {version}.")
+          PY
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes-file notes.md \
+            --repo "$GITHUB_REPOSITORY"
