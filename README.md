@@ -29,6 +29,7 @@
 
   <p>
     <a href="#quick-start"><b>Quick start</b></a> ·
+    <a href="#use-it-from-your-tools"><b>Claude Code &amp; MCP</b></a> ·
     <a href="docs/architecture.md"><b>Architecture</b></a> ·
     <a href="docs/benchmarks.md"><b>Benchmarks</b></a> ·
     <a href="docs/configuration.md"><b>Configuration</b></a> ·
@@ -152,6 +153,71 @@ configuration reference are in
 [**docs/deployment.md**](docs/deployment.md).
 </details>
 
+## Use it from your tools
+
+Three ways in, depending on where you work. All three talk to the same
+graph, so a session checkpointed from Claude Code resumes in the CLI.
+
+### Claude Code — plugin
+
+```
+/plugin marketplace add Shweta-Mishra-ai/tokenmizer
+/plugin install tokenmizer@Shweta-Mishra-ai/tokenmizer
+```
+
+Then, in any session:
+
+```
+/tokenmizer:checkpoint my-project      save the session to graph memory
+/tokenmizer:resume my-project          load it back (~300 tokens)
+/tokenmizer:analyze data/sales.csv     digest a large file
+/tokenmizer:stats                      token savings report
+```
+
+### Claude Desktop, Cursor, VS Code, Zed — MCP server
+
+<!-- mcp-name: io.github.Shweta-Mishra-ai/tokenmizer -->
+
+```json
+{
+  "mcpServers": {
+    "tokenmizer": {
+      "command": "tokenmizer-mcp",
+      "env": { "TOKENMIZER_URL": "http://localhost:8000" }
+    }
+  }
+}
+```
+
+| Client | Where that goes |
+|---|---|
+| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Claude Code | `.mcp.json` in the project, or `~/.claude/settings.json` |
+| Cursor | Settings → MCP → Add server, same JSON |
+| VS Code / Zed | their MCP settings, same `command` and `env` |
+| Codex CLI | `~/.codex/config.toml` — TOML, see [docs/api.md](docs/api.md) |
+
+Restart the client afterwards. Keep `tokenmizer serve` running for the
+checkpoint, resume, stats and reasoning tools; file analysis works
+without it. If `tokenmizer-mcp` is not on your PATH, use
+`"command": "python", "args": ["-m", "tokenmizer.mcp.server"]`.
+
+**Six tools:** `checkpoint_session`, `resume_session`, `get_graph_stats`,
+`get_savings_stats`, `analyze_file`, and `why_decision` — ask your agent
+*"why did we pick X?"* and it walks the supersession chain with the
+reason and evidence for each hop.
+
+### Anything else — the proxy
+
+Any OpenAI-compatible client works by pointing `base_url` at
+`http://localhost:8000/v1`, as in the quick start above. That covers
+Continue.dev, Aider, LangChain, LlamaIndex, the OpenAI SDKs in every
+language, and `curl`.
+
+→ [**API & CLI reference**](docs/api.md) — every endpoint, every command,
+every MCP tool.
+
 ## What a resume looks like
 
 ```
@@ -241,16 +307,21 @@ what matters, not its content.
 [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, the layer rules, and how
 to run the eval harness.
 
+### Contributors
+
+Thanks to everyone who has sent a fix upstream:
+
+- [**@0xfroOty**](https://github.com/0xfroOty) — negated-decision handling in the decision tracker ([#22](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/22)), `OutputTrimmer` level alignment ([#25](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/25)), streaming cache-hit analytics ([#31](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/31))
+- [**@pollychen-lab**](https://github.com/pollychen-lab) — graph node IDs derived from stored (truncated) labels ([#21](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/21)), semantic-opposite decision detection ([#26](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/26))
+- [**@floze-the-genius**](https://github.com/floze-the-genius) — dashboard stats authentication fix ([#35](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/35))
+
 ## Support
 
-TokenMizer is MIT licensed and always will be. Everything works without
-paying anything — there is no paid tier, no sponsors-only feature, and no
-gated support.
-
-If it saved you real time, a [⭐ star](https://github.com/Shweta-Mishra-ai/tokenmizer)
-is how other people find it, and
-[sponsorship](https://github.com/sponsors/Shweta-Mishra-ai) is there if
-you would like to put something behind it. Both entirely optional.
+A [⭐ star](https://github.com/Shweta-Mishra-ai/tokenmizer) is how other
+people find it. If it saved you real time and you would like to put
+something behind it,
+[sponsorship](https://github.com/sponsors/Shweta-Mishra-ai) is open —
+entirely optional.
 
 ## License
 

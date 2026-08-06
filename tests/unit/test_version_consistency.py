@@ -268,3 +268,48 @@ def test_readme_test_count_matches_reality():
         assert abs(n - actual) <= max(5, actual * 0.05), (
             f"README says {n} tests, the suite collects {actual}"
         )
+
+
+def test_every_merged_contributor_is_credited():
+    """Nobody who sent a fix upstream may quietly fall out of the README.
+
+    The v0.5.0 documentation split dropped the Contributors section
+    entirely — three people and six merged pull requests, removed by a
+    restructure that nothing was watching. Credit is not decoration; it
+    is the only thing an outside contributor gets, and losing it in a
+    refactor is worse than never having written it.
+
+    Reads the credited handles from the README and checks the set has not
+    shrunk. Adding a contributor is expected; removing one has to be
+    deliberate enough to edit this list.
+    """
+    credited_at_0_5_0 = {"0xfroOty", "pollychen-lab", "floze-the-genius"}
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### Contributors", 1)
+    assert len(section) == 2, "the README no longer credits contributors"
+
+    handles = set(re.findall(r"github\.com/([\w.-]+)\)", section[1].split("\n## ")[0]))
+    missing = credited_at_0_5_0 - handles
+    assert not missing, (
+        f"contributors dropped from the README: {sorted(missing)}. "
+        f"If someone must genuinely be removed, edit this test too."
+    )
+
+
+def test_setup_paths_stay_in_the_readme():
+    """Installing and wiring it up is the first thing anyone needs.
+
+    The documentation split moved the Claude Code plugin, the MCP server
+    config and the proxy setup into docs/, leaving a README that
+    explained the design well and never showed how to actually use the
+    thing. These belong above the fold, not one click away.
+    """
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for needle, what in [
+        ("pip install", "installation"),
+        ("plugin marketplace add", "the Claude Code plugin"),
+        ("mcpServers", "the MCP server config"),
+        ("base_url", "pointing a client at the proxy"),
+    ]:
+        assert needle in readme, f"the README no longer shows {what}"
