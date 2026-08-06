@@ -196,19 +196,53 @@ def sweep_stale_locks(storage_dir, max_age: float = STALE_LOCK_AGE_SECONDS) -> i
                 continue
         except OSError:
             continue
+        # POSIX and Windows differ on whether an open file can be deleted,
+        # and the difference is not cosmetic here.
+        #
+        # POSIX: unlink while still holding the lock. The directory entry
+        # goes immediately and the inode dies when we close, so no other
+        # process can acquire the file between our test and our delete.
+        #
+        # Windows: DeleteFile on an open handle fails with a sharing
+        # violation, so the lock must be released and the handle closed
+        # BEFORE unlinking. That opens a window where another process can
+        # take the lock on a file we are about to remove — the same
+        # residual race documented above, which the 30-day threshold is
+        # what makes acceptable. Deleting while open is not an option:
+        # it raised PermissionError, the sweep removed nothing, and lock
+        # files grew without bound on every Windows deployment.
         try:
-            with open(path, "a+b") as fh:
-                try:
-                    if _HAVE_FCNTL:
-                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    elif _HAVE_MSVCRT:  # pragma: no cover — Windows
-                        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                    else:  # pragma: no cover
-                        return removed
-                except OSError:
-                    continue  # held right now — leave it alone
+            fh = open(path, "a+b")
+        except OSError as e:
+            logger.debug("Could not open lock file %s: %s", path, e)
+            continue
+        try:
+            try:
+                if _HAVE_FCNTL:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif _HAVE_MSVCRT:  # pragma: no cover — Windows
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:  # pragma: no cover
+                    return removed
+            except OSError:
+                continue  # held right now — leave it alone
+
+            if _HAVE_FCNTL:
                 path.unlink(missing_ok=True)
                 removed += 1
+                continue
+
+            # Windows: release, then delete after the handle is closed.
+            try:  # pragma: no cover — Windows
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        finally:
+            fh.close()
+
+        try:  # pragma: no cover — Windows
+            path.unlink(missing_ok=True)
+            removed += 1
         except OSError as e:
             logger.debug("Could not sweep lock file %s: %s", path, e)
 

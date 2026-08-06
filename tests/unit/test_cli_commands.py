@@ -204,16 +204,22 @@ class TestAnalyzeCommand:
         assert res.exit_code == 0
         assert "tokens ->" not in res.output, "raw mode must omit the stats header"
 
-    @pytest.mark.parametrize("args,expect", [
-        (["analyze", "/nonexistent/nope.csv"], "not found"),
-        (["analyze", "/tmp"], "not a file"),
+    # `kind` picks the path at run time from `tmp_path`, rather than
+    # hardcoding one. The directory case used to pass `/tmp`, which does
+    # not exist on Windows — so the CLI correctly answered "file not
+    # found" and the test, which expected "not a file", failed for a
+    # reason that had nothing to do with the behaviour being checked.
+    @pytest.mark.parametrize("kind,expect", [
+        ("missing", "not found"),
+        ("directory", "not a file"),
     ])
-    def test_bad_input_exits_nonzero_with_a_reason(self, args, expect):
+    def test_bad_input_exits_nonzero_with_a_reason(self, kind, expect, tmp_path):
         from typer.testing import CliRunner
 
         from tokenmizer.cli import app as cli_app
 
-        res = CliRunner().invoke(cli_app, args)
+        target = tmp_path / "nope.csv" if kind == "missing" else tmp_path
+        res = CliRunner().invoke(cli_app, ["analyze", str(target)])
         assert res.exit_code == 1
         assert expect in res.output.lower()
 

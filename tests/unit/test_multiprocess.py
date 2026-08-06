@@ -102,13 +102,12 @@ class TestFileLock:
         holder_ready = mp.Event()
         release = mp.Event()
 
-        def hold(d, ready, rel):
-            from tokenmizer.graph_memory.filelock import session_lock
-            with session_lock(d, "sess", timeout=5):
-                ready.set()
-                rel.wait(timeout=10)
-
-        p = mp.Process(target=hold, args=(str(tmp_path), holder_ready, release))
+        # `_hold_lock` is module level, not a closure. Windows has no fork:
+        # multiprocessing spawns a fresh interpreter and pickles the target,
+        # and a function defined inside a test method cannot be pickled —
+        # the child died with "Can't get local object".
+        p = mp.Process(target=_hold_lock,
+                       args=(str(tmp_path), holder_ready, release))
         p.start()
         try:
             assert holder_ready.wait(timeout=10), "helper never acquired the lock"
@@ -138,6 +137,19 @@ class TestFileLock:
         assert len(created) == 5, "distinct session ids collided onto one lock file"
         for f in created:
             assert f.parent == tmp_path / ".locks"
+
+
+def _hold_lock(storage_dir, ready, release):
+    """Hold a session lock until told to let go.
+
+    Module level so it can be pickled: Windows spawns a new interpreter
+    for each process rather than forking, and pickles the target function
+    into it.
+    """
+    from tokenmizer.graph_memory.filelock import session_lock
+    with session_lock(storage_dir, "sess", timeout=5):
+        ready.set()
+        release.wait(timeout=10)
 
 
 def _writer(storage_dir, worker_id, count, barrier):

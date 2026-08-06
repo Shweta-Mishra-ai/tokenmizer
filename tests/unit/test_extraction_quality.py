@@ -356,17 +356,23 @@ class TestScanCost:
     caller sends. A pattern that backtracks superlinearly is a denial of
     service, not a slow test."""
 
-    @pytest.mark.parametrize("content,label", [
-        ("word." * 3000, "repeated single-token sentences"),
-        ("a.b.c.d.e.f.g.h " * 2000, "dotted tokens"),
-        ("a" * 40000, "one enormous token"),
-        (("Fixed the " + "path/to/file.py " * 40 + ". ") * 30, "path spam"),
+    # The content is BUILT from (unit, repeat), never passed in whole.
+    # Passing it directly put a 40,000-character string into the pytest
+    # test id, which Windows then refused to place in an environment
+    # variable — "longer than 32767 characters" — erroring the test out
+    # before it ran anything.
+    @pytest.mark.parametrize("unit,repeat,label", [
+        ("word.", 3000, "repeated single-token sentences"),
+        ("a.b.c.d.e.f.g.h ", 2000, "dotted tokens"),
+        ("a", 40000, "one enormous token"),
+        ("Fixed the " + "path/to/file.py " * 40 + ". ", 30, "path spam"),
     ])
-    def test_pathological_input_stays_bounded(self, content, label):
+    def test_pathological_input_stays_bounded(self, unit, repeat, label):
         """`(?:[\\w./-]+\\s+){0,3}` — a token repeat nested in a window
         repeat — took 6.3 seconds on the first case here. Flattening the
         windows brought it under 0.2s. The bound is loose on purpose; it
         is there to catch a return to superlinear, not to police ms."""
+        content = unit * repeat
         started = time.perf_counter()
         get_hybrid_extractor().heuristic_extract(
             [{"role": "assistant", "content": content}])

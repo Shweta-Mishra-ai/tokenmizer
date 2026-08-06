@@ -25,9 +25,9 @@ Corpus grown from 11 sessions to 14 (6 real transcripts, up from 3).
 | Pending tasks | 64% | **95%** |
 | Decisions | 66% | **92%** |
 | Completed tasks | 71% | **91%** |
-| Errors | 75% | **90%** |
+| Errors | 75% | **94%** |
 | **macro** | **74%** | **94%** |
-| real transcripts only | 65% | **88%** |
+| real transcripts only | 65% | **90%** |
 
 Part of that jump is better extraction and part is a corpus that was
 wrong. Both are itemised below rather than blended into one number.
@@ -141,13 +141,30 @@ now collapse to the one that says what actually broke.
   inert code ("the fallback is unreachable") and vulnerability classes.
 * 34 tests, including a floor on real transcripts scored separately so the
   synthetic half cannot carry the headline, and a scan-cost bound that
-  fails if the patterns return to superlinear. 533 → 567 tests.
+  fails if the patterns return to superlinear. 533 → 573 tests.
+
+#### Fixed — the lock sweep never removed anything on Windows
+`sweep_stale_locks` unlinked the lock file while its own handle was still
+open. POSIX allows that and it is the safer order — the directory entry
+goes before anything else can acquire it. Windows refuses with a sharing
+violation, so the sweep silently removed nothing and lock files grew
+without bound on every Windows deployment. The handle is now released and
+closed before the unlink on Windows, which reopens the residual race the
+30-day threshold already covers; POSIX keeps the tighter order.
+
+Two Windows-only test defects surfaced with it, both of which had been
+hiding real coverage: a lock-contention test passed a closure to
+`multiprocessing`, which cannot be pickled where processes are spawned
+rather than forked, and a CLI test hardcoded `/tmp` as "a path that is not
+a file" — a path that does not exist on Windows, so the CLI correctly
+answered "not found" and the assertion failed for a reason unrelated to
+the behaviour under test.
 
 #### Known limits
-Errors remain the weakest category at 90%. The three misses are defects
-stated as plain prose — "stats reported healthy over an empty database" —
-with no token for a regex to key on; that is what `use_llm_extraction` is
-for. n=14 is a small sample and one author wrote every label.
+Errors remain the weakest category at 94%. Across 172 labelled items it now
+misses four and invents three; the residue is a defect stated as a
+measurement ("error recall is 8 percent") and one failure named twice in
+words that share no tokens. That is what `use_llm_extraction` is for. n=14 is a small sample and one author wrote every label.
 
 ### Real transcripts in the corpus, and the gaps a sweep found
 

@@ -14,6 +14,7 @@ needed to get a change from idea to merged PR.
 - [Commit Convention](#commit-convention)
 - [Pull Request Process](#pull-request-process)
 - [Running Tests](#running-tests)
+- [Improving extraction](#improving-extraction)
 - [Good First Issues](#good-first-issues)
 
 ---
@@ -140,7 +141,8 @@ tokenmizer/
 
 ### Prerequisites
 
-- Python 3.10+ (CI matrix covers 3.10, 3.11, 3.12 on Linux, 3.12 on Windows)
+- Python 3.10+ (CI matrix: 3.10, 3.11, 3.12 and 3.13 on Linux, plus 3.12
+  on Windows — every version claimed in the pyproject classifiers)
 - A provider API key (Anthropic, OpenAI, etc.) for anything that exercises
   the LLM extraction pass — heuristic-only extraction and most of the
   graph/checkpoint/MCP tests need no key at all
@@ -343,6 +345,75 @@ Tests run against real SQLite in temp directories and mocked provider
 responses — no network access or live API keys required for the unit and
 integration suites. See [TESTING.md](TESTING.md) for exactly what each
 suite verifies.
+
+---
+
+## Improving extraction
+
+**This is the contribution the project needs most, and it does not require
+writing any code.**
+
+Extraction is measured against a labelled corpus in
+`benchmarks/eval/corpus/`. There are 14 sessions in it and the same person
+wrote every label. That is an honest ceiling on what the reported numbers
+can tell anyone about *their* workload, and the only way past it is
+transcripts nobody here wrote.
+
+### Run the harness
+
+```bash
+python -m benchmarks.eval                 # score the committed corpus
+python -m benchmarks.eval --errors        # every miss and every false positive
+python -m benchmarks.eval --corpus DIR    # score YOUR labelled sessions
+python -m benchmarks.eval --sweep         # what a threshold change costs
+```
+
+`--errors` is the one to start with. It prints, per session and per
+category, exactly what was missed and what was invented — which is a
+to-do list, not a score.
+
+### Add a session
+
+One JSON file per session. The format and the labelling rule are
+documented at the top of [`benchmarks/eval/corpus.py`](benchmarks/eval/corpus.py);
+read that before labelling, because the rule is what makes the numbers
+mean anything.
+
+Two constraints the harness enforces, so you will hit them anyway:
+
+1. **Every label must be quoted from a single message.** A label written
+   from hindsight is unreachable for *any* extractor, so it caps recall at
+   a number no code change can move. `validate_grounding()` refuses to
+   score a corpus containing one — it found two in ours.
+2. **Labelling is exhaustive, not selective.** If the rule matches, it gets
+   labelled, including decisions that were later superseded. Picking which
+   of several stated decisions "counts" turns precision into a measure of
+   your taste, and penalises the extractor for being right.
+
+Redact freely — rename files, change company names, replace secrets. What
+matters is the *shape* of the prose, not its content.
+
+### Change a pattern
+
+Every extraction change needs a number attached. The workflow:
+
+```bash
+python -m benchmarks.eval > before.txt
+# ... make the change ...
+python -m benchmarks.eval > after.txt
+diff before.txt after.txt
+```
+
+Put the before/after in the PR description. A change that improves recall
+while quietly costing precision is not an improvement, and the report
+shows both so the trade is visible rather than argued about.
+
+`tests/unit/test_extraction_quality.py` holds per-category F1 floors, a
+separate floor for the real-transcript half so the synthetic sessions
+cannot carry the headline, and a scan-cost bound. **Do not edit an
+assertion to make it pass.** They are set below the measured values on
+purpose, so a real regression reds the build and ordinary variation does
+not; if one fails, something got worse.
 
 ---
 
