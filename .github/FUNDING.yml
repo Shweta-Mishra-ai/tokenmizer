@@ -1,0 +1,13 @@
+# Renders the "Sponsor" button on the repository page.
+#
+# `github` requires the account to be enrolled in GitHub Sponsors; until
+# it is, the button simply does not appear — nothing breaks.
+#
+# The other platforms are commented out rather than guessed. Uncomment a
+# line and put your own handle in it; a placeholder handle would render a
+# button that leads somewhere wrong, which is worse than no button.
+github: [Shweta-Mishra-ai]
+# buy_me_a_coffee: your-handle
+# ko_fi: your-handle
+# polar: your-handle
+# thanks_dev: your-handle

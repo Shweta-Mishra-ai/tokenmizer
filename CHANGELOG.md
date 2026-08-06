@@ -141,7 +141,7 @@ now collapse to the one that says what actually broke.
   inert code ("the fallback is unreachable") and vulnerability classes.
 * 34 tests, including a floor on real transcripts scored separately so the
   synthetic half cannot carry the headline, and a scan-cost bound that
-  fails if the patterns return to superlinear. 533 → 578 tests.
+  fails if the patterns return to superlinear. 533 → 584 tests.
 
 #### Fixed — the lock sweep never removed anything on Windows
 `sweep_stale_locks` unlinked the lock file while its own handle was still
@@ -183,6 +183,44 @@ asserts the image serves cache hits with `--network none` and no model.
 
 The tiktoken bake stays hard-required, and the difference is the point:
 token counting runs on every request, the embedding model does not.
+
+#### Fixed — the first two commands a new reader runs
+Found by installing the built wheel into a clean virtualenv rather than
+trusting the repo checkout.
+
+`tokenmizer analyze` on a small CSV printed **"-536% smaller"**. A digest
+can legitimately be bigger than its source — three rows become a schema,
+column types and summary statistics — but reporting that as a negative
+percentage reads as a broken program on someone's very first command.
+
+`tokenmizer stats` with nothing running printed **"Cannot reach server:
+[Errno 111] Connection refused"**. That is what the stack knows, not what
+the reader needs, which is `tokenmizer serve`. Connect and timeout errors
+now say what to do; anything else still shows the real error.
+
+#### Changed — the README is 257 lines instead of 1062
+It had grown to document everything in one file: architecture, every
+configuration key, deployment, the full API surface, three benchmark
+suites, comparisons and the roadmap. That is a reference manual wearing a
+README's clothes, and the effect is that nobody reads either.
+
+The README now answers the three questions someone has in their first
+minute — what is this, does it work, how do I try it — and links out. The
+detail moved to `docs/`, unabridged:
+
+| | |
+|---|---|
+| `docs/architecture.md` | Request pipeline, graph data model, decision lifecycle |
+| `docs/configuration.md` | Every setting, environment variables, precedence, providers |
+| `docs/api.md` | Endpoints, CLI, MCP tools, Claude Code integration |
+| `docs/deployment.md` | Docker, multiple workers, durability, isolation, security |
+| `docs/benchmarks.md` | Extraction, memory and storage numbers, and running your own |
+| `docs/comparisons.md` | Mem0, Zep, longer context windows, roadmap |
+
+The two guards that read the README — the endpoint table check and the
+test-count check — now scan `docs/` as well, so moving content out cannot
+quietly disable them. Every internal link and heading anchor across all
+eight files is verified.
 
 #### Known limits
 Errors remain the weakest category at 94%. Across 172 labelled items it now

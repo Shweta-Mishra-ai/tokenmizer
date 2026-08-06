@@ -28,6 +28,8 @@ Three real bugs found:
 """
 from __future__ import annotations
 
+import re
+
 import httpx
 import pytest
 from typer.testing import CliRunner
@@ -68,7 +70,11 @@ class TestStatsCommand:
         monkeypatch.setattr(httpx, "get", fake_get)
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 1
-        assert "Cannot reach server" in result.output
+        # Asserts the reader is told what to DO, not the exact prose. The
+        # previous wording was "Cannot reach server: [Errno 111]
+        # Connection refused", which is what the stack knows rather than
+        # what the reader needs.
+        assert "tokenmizer serve" in _plain(result.output), result.output
 
 
 class TestCheckpointCommand:
@@ -281,3 +287,63 @@ class TestAnalyzeEndpoint:
         with TestClient(app_module.app) as c:
             r = c.post("/api/analyze", json={"file_path": "/etc/passwd"})
         assert r.status_code == 422
+
+
+def _plain(text: str) -> str:
+    """Strip ANSI styling before asserting on CLI output.
+
+    Rich styles each run separately, so a colourized `--server` arrives as
+    `ESC[1;36m-ESC[0mESC[1;36m-serverESC[0m` and the literal substring is
+    not present. Whether it colourizes depends on terminal detection, so a
+    test that asserts on raw output passes locally and fails in CI.
+    """
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+class TestFirstRunOutput:
+    """The first two commands a new reader runs are `analyze` and
+    `stats`. Both printed something that reads as a broken program."""
+
+    def test_a_digest_larger_than_its_source_is_not_reported_as_negative(self, tmp_path):
+        """A three-row CSV becomes a schema, types and statistics — bigger
+        than the source, and correct. The header said "-536% smaller"."""
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        f = tmp_path / "tiny.csv"
+        f.write_text("id,name,amount\n1,alpha,10\n2,beta,20\n3,gamma,30\n")
+        res = CliRunner().invoke(cli_app, ["analyze", str(f)])
+        out = _plain(res.output)
+        assert res.exit_code == 0
+        assert "-536" not in out and "% smaller" not in out, out
+        assert "larger" in out, out
+
+    @pytest.mark.parametrize("command", [
+        ["stats"],
+        ["checkpoint", "sess"],
+        ["resume", "sess"],
+    ])
+    def test_an_unreachable_server_says_what_to_do(self, command):
+        """"[Errno 111] Connection refused" is what the stack knows, not
+        what the reader needs — which is `tokenmizer serve`."""
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        res = CliRunner().invoke(
+            cli_app, command + ["--server", "http://127.0.0.1:9"])
+        out = _plain(res.output)
+        assert res.exit_code == 1
+        assert "tokenmizer serve" in out, out
+        assert "Errno" not in out, out
+
+    def test_the_suggested_flag_actually_exists(self):
+        """The message tells the reader to pass `--server`. It nearly told
+        them to set an environment variable that does not exist."""
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        out = _plain(CliRunner().invoke(cli_app, ["stats", "--help"]).output)
+        assert "--server" in out, out

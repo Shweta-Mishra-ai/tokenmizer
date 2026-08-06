@@ -36,12 +36,37 @@ console = Console()
 # commands now go through the same two helpers `stats` already used the
 # pattern for, so all three fail the same way.
 
+def _report_unreachable(exc: Exception) -> None:
+    """Explain an unreachable server in terms of what to do about it.
+
+    "Cannot reach server: [Errno 111] Connection refused" is what the
+    stack knows, not what the reader needs. By far the most common cause
+    is that nothing is running yet — often on the reader's first command
+    — and an errno does not say `tokenmizer serve`.
+    """
+    import httpx
+
+    if isinstance(exc, httpx.ConnectError):
+        console.print(
+            "[red]TokenMizer is not running.[/red]\n"
+            "Start it with [bold]tokenmizer serve[/bold], then run this again.\n"
+            "[dim]If it is running elsewhere, pass --server http://host:port.[/dim]"
+        )
+    elif isinstance(exc, httpx.TimeoutException):
+        console.print(
+            "[red]TokenMizer did not respond in time.[/red]\n"
+            "[dim]It may still be starting up, or busy with a long request.[/dim]"
+        )
+    else:
+        console.print(f"[red]Cannot reach TokenMizer:[/red] {type(exc).__name__}: {exc}")
+
+
 def _cli_get(url: str, headers: dict, timeout: float):
     import httpx
     try:
         return httpx.get(url, headers=headers, timeout=timeout)
     except httpx.HTTPError as e:
-        console.print(f"[red]Cannot reach server: {e}[/red]")
+        _report_unreachable(e)
         raise typer.Exit(1)
 
 
@@ -50,7 +75,7 @@ def _cli_post(url: str, headers: dict, timeout: float):
     try:
         return httpx.post(url, headers=headers, timeout=timeout)
     except httpx.HTTPError as e:
-        console.print(f"[red]Cannot reach server: {e}[/red]")
+        _report_unreachable(e)
         raise typer.Exit(1)
 
 
@@ -125,10 +150,21 @@ def analyze(
         print(result.content)
         return
 
+    # A digest can be BIGGER than its source when the source is tiny — a
+    # three-row CSV becomes a schema, column types and summary statistics.
+    # That is correct behaviour and the header used to report it as
+    # "-536% smaller", which reads as a broken program on the first
+    # command a new user runs. Say what actually happened instead.
     console.print(f"\n[bold]{path.name}[/bold]  [dim]({result.file_type})[/dim]")
+    if result.savings_pct > 0:
+        change = f"{result.savings_pct:.0f}% smaller"
+    elif result.extracted_tokens > result.original_tokens:
+        change = "larger — this file is already small enough to send as-is"
+    else:
+        change = "no change"
     console.print(
         f"[dim]{result.original_tokens:,} tokens -> {result.extracted_tokens:,} "
-        f"({result.savings_pct:.0f}% smaller, via {result.strategy_used})[/dim]\n"
+        f"({change}, via {result.strategy_used})[/dim]\n"
     )
     console.print(result.content)
     if result.was_truncated:
