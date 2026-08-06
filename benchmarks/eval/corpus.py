@@ -40,7 +40,9 @@ to every session, labelling everything the rule matches:
   choices are still decisions and are still labelled.
 * **files** — a path named in a turn.
 * **errors** — a failure, exception, status code, vulnerability class or
-  stated malfunction named in a turn.
+  stated malfunction named in a turn. Each *distinct* failure once: a
+  session that says "Login keeps returning 422" and later "Fixed: 422
+  error — missing email validation" has named one bug twice.
 
 Two constraints make the rule checkable rather than a matter of taste:
 

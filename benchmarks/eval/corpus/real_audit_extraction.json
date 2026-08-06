@@ -2,7 +2,7 @@
   "id": "real_audit_extraction",
   "origin": "real",
   "domain": "audit/nlp",
-  "notes": "Condensed from the 0.6.0 eval-harness session. Measurement-driven: each fix is justified by a number, and one change is reported as a regression.",
+  "notes": "Condensed from the eval-harness session. Measurement-driven: each fix is justified by a number, and one change is reported as a regression.",
   "messages": [
     {
       "role": "user",

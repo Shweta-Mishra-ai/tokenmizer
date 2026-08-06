@@ -1,25 +1,38 @@
 # Changelog
 
-## [0.7.0] — 2026-08-06 — extraction quality: macro F1 74% → 92%
+## [0.5.0] — 2026-08-06 — audit, durability, and measured extraction quality
 
-The eval harness added in 0.6.0 was pointed at itself. Everything below
-is a defect it found, with the before/after it produced. Corpus grown
-from 11 sessions to 14 (6 real transcripts, up from 3).
+Everything between 0.4.0 — the last version published to PyPI — and here,
+shipped as one release.
 
-| Category | 0.6.1 F1 | 0.7.0 F1 |
+The six sections below were development milestones, not releases. They
+previously carried version headers of their own (0.4.1 through 0.7.0), which
+implied six installable versions that never existed. The work is unchanged;
+only the numbering is, so that every heading in this file corresponds to
+something you can actually `pip install`.
+
+---
+
+### Extraction quality: macro F1 74% → 94%
+
+The eval harness built in the previous milestone was pointed at itself.
+Everything below is a defect it found, with the before/after it produced.
+Corpus grown from 11 sessions to 14 (6 real transcripts, up from 3).
+
+| Category | before | after |
 |---|---|---|
 | Files | 93% | **99%** |
 | Pending tasks | 64% | **95%** |
 | Decisions | 66% | **92%** |
 | Completed tasks | 71% | **91%** |
-| Errors | 75% | **84%** |
-| **macro** | **74%** | **92%** |
-| real transcripts only | 65% | **87%** |
+| Errors | 75% | **90%** |
+| **macro** | **74%** | **94%** |
+| real transcripts only | 65% | **88%** |
 
 Part of that jump is better extraction and part is a corpus that was
 wrong. Both are itemised below rather than blended into one number.
 
-### Fixed — a turn stating two decisions lost the second one
+#### Fixed — a turn stating two decisions lost the second one
 `(.{5,80})` ran straight past the full stop, so "Decided: X. Decided: Y."
 produced ONE match spanning both. `_clip()` kept the first clause and Y
 was gone for good: `finditer` does not re-scan a span it already
@@ -28,13 +41,13 @@ stops at the end of the sentence it started in, with a lookahead so
 `moment.js`, `React.lazy` and `go.mod` are not split on their own dots.
 Decisions 66% → 88% F1 from this change alone; completed tasks +3.
 
-### Fixed — present-tense intent recorded as finished work
+#### Fixed — present-tense intent recorded as finished work
 `migrated?`, `fixed?` and `removed?` also matched the present tense, so
 "We need to migrate 40M rows to Postgres" in an opening turn became a
 completed task. Present tense is the one reliable signal that something
 has *not* happened yet. Completion verbs are now past tense only.
 
-### Fixed — completed work resurfacing as outstanding work
+#### Fixed — completed work resurfacing as outstanding work
 "Fixed by adding a 5 second context timeout" was recorded as in-progress;
 "Completed: four OS processes writing one session" as WIP; "was missing
 email validation" as a to-do. A resume built from those tells the next
@@ -42,7 +55,7 @@ session to redo work that is already merged. A completion verb earlier in
 the same clause now disqualifies the rest of it, and the opening turn's
 goal no longer doubles as a WIP item. Pending tasks 50% → 100% precision.
 
-### Fixed — the validator silently dropped the most precise error labels
+#### Fixed — the validator silently dropped the most precise error labels
 A named exception is the most specific form an error label can take, and
 the generic length/word-count penalties punished exactly that: `ProxyError`
 scored 0.55 against a 0.65 threshold and never reached the graph, while
@@ -52,7 +65,7 @@ Identifier-shaped errors and filenames now clear the bar on their own
 evidence. Same defect on files: `go.mod` scored 0.50 and `Dockerfile`
 0.40, so neither could ever be extracted.
 
-### Added — three classes of failure the patterns could not see
+#### Added — three classes of failure the patterns could not see
 * **Data-loss prose.** "The later save discards everything the earlier
   one added" has no exception name, status code or symptom noun. These
   are the failures most worth carrying into a resume.
@@ -61,7 +74,7 @@ evidence. Same defect on files: `go.mod` scored 0.50 and `Dockerfile`
 * **Extensionless files.** Every file pattern keyed on a dot, so
   `Dockerfile` and `Makefile` were unextractable.
 
-### Fixed — errors that were not errors
+#### Fixed — errors that were not errors
 * A status code named in a *decision* ("Decided: 404 rather than 403")
   was recorded as two failures. A code now needs evidence it was
   received.
@@ -73,7 +86,7 @@ evidence. Same defect on files: `go.mod` scored 0.50 and `Dockerfile`
   "OperationalError subclasses DatabaseError, and OperationalError covers
   database is locked", `database is locked` was unreachable.
 
-### Fixed — the corpus itself, and a guard so it stays fixed
+#### Fixed — the corpus itself, and a guard so it stays fixed
 Two ground-truth labels were not in their transcripts at all
 (`CUDA out of memory` in a session that never mentions CUDA; `Chart.js`
 in a session that never mentions Chart.js). Such a label is unreachable
@@ -94,20 +107,51 @@ Roughly half the macro gain is extraction and half is the corpus. The
 split is stated here rather than hidden, because a benchmark you also
 own the labels for is worth exactly as much as its labelling rule.
 
-### Added
+#### Fixed — a 6.3-second scan on a 15 KB message
+The subject windows in the error patterns were written as a token repeat
+nested in a window repeat, `(?:[\w./-]+\s+){0,3}`. The inner `+` can give
+back inside every token and the outer `{0,3}` multiplies the alternatives,
+so a message built from `"word."` took 6.3 seconds to scan — on the hot
+path of a proxy that scans whatever a caller sends it. Python 3.10 has no
+atomic groups to fence it with, so the windows are now flat bounded runs
+and the sentence-boundary problem they were solving is handled after the
+match instead. Same message: 130 ms.
+
+Flattening them introduced a second defect, caught by its own test: a
+window that can end mid-word let the symptom vocabulary match *inside* a
+word — `race` in "All of them trace", `hang` in "single-user use is
+unchanged". The windows now end on whitespace by construction.
+
+#### Fixed — the negation guard suppressed real failures
+Added to stop "no longer resurrects a prune" being reported as a current
+bug, it fired on any "no"/"not" in a 60-character window — and error prose
+is full of them. "WebSocket message **not** triggering re-render — was
+missing dependency in useEffect" lost its second failure entirely. Only
+the phrases that actually mean *fixed* are excluded now.
+
+#### Fixed — one failure named twice became two nodes
+"Login keeps returning 422" and "Fixed: 422 error — missing email
+validation" is one bug. Word-overlap dedup could not see it: the two share
+only the digits. Errors carrying the same status code or exception class
+now collapse to the one that says what actually broke.
+
+#### Added
 * `benchmarks.eval.corpus.validate_grounding()` and `ungrounded()`.
-* 23 tests, including a floor on real transcripts scored separately, so
-  the synthetic half cannot carry the headline. 533 → 556 tests.
+* Error patterns for absence defects ("missing dependency in useEffect"),
+  inert code ("the fallback is unreachable") and vulnerability classes.
+* 34 tests, including a floor on real transcripts scored separately so the
+  synthetic half cannot carry the headline, and a scan-cost bound that
+  fails if the patterns return to superlinear. 533 → 567 tests.
 
-### Known limits
-Errors remain the weakest category at 84%. The misses are defects stated
-as plain prose — "stats reported healthy over an empty database" — with
-no token for a regex to key on. n=14 is a small sample and one author
-wrote every label.
+#### Known limits
+Errors remain the weakest category at 90%. The three misses are defects
+stated as plain prose — "stats reported healthy over an empty database" —
+with no token for a regex to key on; that is what `use_llm_extraction` is
+for. n=14 is a small sample and one author wrote every label.
 
-## [0.6.1] — 2026-08-05 — real transcripts in the corpus, and the gaps a sweep found
+### Real transcripts in the corpus, and the gaps a sweep found
 
-### Fixed — the logo advertised v0.2.3 while the package was on 0.6.0
+#### Fixed — the logo advertised v0.2.3 while the package was five releases ahead
 On the README, above the fold, the first thing anyone sees. A version
 baked into an image goes stale on every single release and nothing
 catches it, so the badge now reads "GRAPH MEMORY" instead of a number.
@@ -120,7 +164,7 @@ committed SVG contains a version-shaped string, so this cannot recur.
 hardcoded `"0.2.3"` sentinel — meaningless the moment 0.2.4 shipped; it
 now compares against `tokenmizer.__version__`.
 
-### New — the eval corpus is no longer 100% synthetic
+#### New — the eval corpus is no longer 100% synthetic
 Three sessions condensed from real TokenMizer audit work (the 0.4.2
 storage migration, the 0.5.0 concurrency work, the 0.6.0 eval harness)
 join the eight hand-written fixtures: **11 sessions, 116 turns, 122
@@ -143,7 +187,7 @@ last thing a project wanting to look good would publish.
 Overall on the full corpus: files F1 93%, errors 75%, completed tasks
 71%, decisions 66%, pending tasks 64%, **macro 74%**.
 
-### New — `tokenmizer analyze` and `POST /api/analyze`
+#### New — `tokenmizer analyze` and `POST /api/analyze`
 File analysis was reachable only from inside Claude Code, via the plugin
 skill. The README documented the CLI command and HTTP endpoint as a known
 missing piece; both now exist and wrap the same `FileIntelligence` the
@@ -160,7 +204,7 @@ to it — and accepting one would be an arbitrary-file-read primitive
 against the server. There is a test asserting a `file_path` payload is
 rejected.
 
-### Fixed — six endpoints existed but were undocumented
+#### Fixed — six endpoints existed but were undocumented
 `/api/cache/stats`, `/api/checkpoints/{id}`, `/api/graph/{id}/viz`,
 `/api/graph/{id}/history`, `/api/graph/{id}/transitions` and
 `/api/graph/{id}/obsidian` were all live and absent from the API table.
@@ -168,7 +212,7 @@ Found by a scripted sweep that compares every route decorator against
 every endpoint the README mentions, in both directions. Both directions
 are now clean.
 
-### Added — tests
+#### Added — tests
 `tokenmizer analyze` (happy path, `--raw`, missing file, directory
 instead of file, non-positive budget) and `POST /api/analyze` (budget is
 honoured, three invalid-input cases, path-payload rejection), plus the
@@ -176,13 +220,13 @@ asset version-drift guard, plus a test that compares every route
 decorator against the README's API table in both directions.
 **533 tests, 77% coverage, ruff clean, MCP e2e green.**
 
-## [0.6.0] — 2026-08-05 — an eval harness, a real corpus, and measured extraction
+### An eval harness, a real corpus, and measured extraction
 
 Addresses the three things flagged as launch risks in 0.5.0: a
 three-session benchmark, unmeasured task recall, and hand-tuned constants
 with nothing to justify them.
 
-### New — `python -m benchmarks.eval`
+#### New — `python -m benchmarks.eval`
 A precision/recall/F1 harness over a labelled corpus, with per-item error
 listing so a failure is diagnosable rather than just visible.
 
@@ -200,7 +244,7 @@ and still emit labels nobody wants in a token-budgeted resume block.
 `--sweep` moves a constant across a range and prints the effect, so a
 threshold can be defended with a table.
 
-### New — a labelled corpus, and a way to use your own
+#### New — a labelled corpus, and a way to use your own
 **8 sessions, 82 turns, 97 labelled items, 8 domains** (Go, Rust, Python,
 TypeScript, React, SQL, CI, ML) — up from 3 sessions in one style.
 
@@ -215,7 +259,7 @@ fixtures than on captured transcripts. **The committed corpus is entirely
 synthetic.** `--corpus DIR` runs against your own labelled sessions,
 which is the only way to get a number about your workload.
 
-### Fixed — extraction defects the harness exposed
+#### Fixed — extraction defects the harness exposed
 
 | | before | after |
 |---|---|---|
@@ -258,7 +302,7 @@ labels a human can read.
   thought ended, producing labels cut mid-word and labels spanning three
   sentences. Now clipped to one clause.
 
-### Changed — a constant chosen from a table instead of by feel
+#### Changed — a constant chosen from a table instead of by feel
 `_MIN_CLAUSE_CHARS` governs how short a clipped label may be. Swept
 against the corpus:
 
@@ -275,7 +319,7 @@ readability win and takes most of the accuracy gain. The sweep is in the
 code comment so the next person can disagree with the trade rather than
 with a magic number.
 
-### Added — tests
+#### Added — tests
 `tests/unit/test_extraction_quality.py` (23 tests): clause clipping
 including the dots-inside-tokens case, both dedup rules, errors surviving
 outside the recent window, bare symptom words not being emitted alone,
@@ -285,9 +329,9 @@ exact number trains people to edit the assertion.
 
 **521 tests, ruff clean, MCP e2e green.**
 
-## [0.5.0] — 2026-08-05 — cross-process safety, verified benchmarks, launch prep
+### Cross-process safety, verified benchmarks, launch prep
 
-### New — graph writes are safe across processes
+#### New — graph writes are safe across processes
 Per-row storage (0.4.2) stopped concurrent writers from destroying whole
 sessions, but not from undoing each other. A worker holding a pre-prune
 view of a session would faithfully write its stale node set back,
@@ -311,7 +355,7 @@ analytics counters, and the semantic cache.
 > `flock` is unreliable on NFS. Keep `storage_dir` on a local filesystem
 > for multi-process use.
 
-### New — benchmarks that produce the numbers in the README
+#### New — benchmarks that produce the numbers in the README
 - `benchmarks/persistence/runner.py` measures write amplification,
   no-op persist cost, persist latency, 4-process concurrency, and the
   stale-writer case.
@@ -319,7 +363,7 @@ analytics counters, and the semantic cache.
   `GraphMemory(storage_dir=...)` without the required `session_id` and
   crashed on every run, while being referenced as a benchmark. Fixed.
 
-### Changed — README benchmark figures now match the runners
+#### Changed — README benchmark figures now match the runners
 The quoted table was measured on **v0.2.4** and no longer matched what
 the committed runner produced. Re-measured on 0.5.0:
 
@@ -332,7 +376,7 @@ Per-session spread and the n=3 sample size are now stated inline rather
 than in a footnote, because a three-session synthetic benchmark is
 directional and should read that way.
 
-### Fixed — documentation that described features which do not exist
+#### Fixed — documentation that described features which do not exist
 - **SECURITY.md advertised encryption at rest**, complete with an
   `encrypt_storage` / `encryption_key` config block. No such setting has
   ever existed. Replaced with what to actually do (filesystem/volume
@@ -347,7 +391,7 @@ directional and should read that way.
 - `tokenmizer/storage/__init__.py` described a unified storage protocol
   that nothing imports or conforms to.
 
-### Changed — packaging and release readiness
+#### Changed — packaging and release readiness
 - `py.typed` added and shipped in the wheel (PEP 561), so the type
   annotations are actually visible to consumers instead of being
   discarded as `Any`.
@@ -357,7 +401,7 @@ directional and should read that way.
 - Wheel and sdist build clean and install into a fresh venv with a
   working `tokenmizer` entry point.
 
-### Changed — CI actually verifies the deployment story
+#### Changed — CI actually verifies the deployment story
 - The Docker job now runs on **pull requests**, not only `main`.
 - New steps assert the image works **with the network removed**
   (`--network none`): token counting must use the baked tiktoken
@@ -369,7 +413,7 @@ directional and should read that way.
   and asserts this version reads it without loss. Nothing else in the
   suite exercises a real cross-version upgrade.
 
-### Added — tests
+#### Added — tests
 `tests/unit/test_multiprocess.py` (9 tests) covers the stale-writer
 case, reconciliation not eating unpersisted work, another process's
 additions surviving, lock exclusivity across real subprocesses, distinct
@@ -377,7 +421,7 @@ sessions not contending, hostile `session_id` values not escaping the
 lock directory, 4-process lossless concurrency, and stale-lock
 sweeping never touching a held lock.
 
-### Fixed — repository hygiene
+#### Fixed — repository hygiene
 `.gitignore` had `checkpoints/` commented out ("conflicts with
 `tokenmizer/checkpoints/`"), which is what an *unanchored* pattern does.
 Anchoring it to `/checkpoints/` ignores the runtime storage directory
@@ -389,11 +433,11 @@ days on an hourly cycle so the directory cannot grow without bound.
 **498 tests, 77% coverage, ruff clean across `tokenmizer/`, `tests/`,
 `benchmarks/` and `scripts/`.**
 
-## [0.4.2] — 2026-08-05 — per-row storage (#27), provider fixes, comment cleanup
+### Per-row storage (#27), provider fixes, comment cleanup
 
 Closes the three items left open by 0.4.1.
 
-### Changed — graph storage is now per-row (schema v2), closes #27
+#### Changed — graph storage is now per-row (schema v2), closes #27
 `graphs.nodes_json` / `edges_json` (one JSON blob per session) is replaced
 by `graph_nodes`, `graph_edges` and `graph_meta`, one row per node and
 per edge.
@@ -429,7 +473,7 @@ build still finds the data it expects as of the moment of migration —
 changes made after the upgrade are lost on downgrade, which is the normal
 meaning of a rollback.
 
-### Fixed — provider adapters (the modules skipped by both audit passes)
+#### Fixed — provider adapters (the modules skipped by both audit passes)
 - **Retryable-error detection matched substrings.** `"rate" in err`
   fires on `"gene**rate**"` and `"mode**rate**"`, so `Failed to generate
   completion` — a permanent failure — was retried three times, costing
@@ -447,14 +491,14 @@ meaning of a rollback.
   `claude-sonnet-4-6` to the OpenAI API and produced an opaque
   model-not-found error. Now warns at startup naming the actual cause.
 
-### Fixed — file intelligence overshot its token budget
+#### Fixed — file intelligence overshot its token budget
 `token_budget` is the module's entire contract (the `analyze_file` MCP
 tool documents it as "Max tokens for the summary"), but the log and code
 strategies assembled a fixed set of sections and only then measured,
 overshooting by ~5%. A single budget clamp now applies to every strategy
 at the exit point, reserving room for its own trim marker.
 
-### Changed — comments no longer narrate past bugs
+#### Changed — comments no longer narrate past bugs
 Roughly 90 comment blocks across 20 files described bugs that had already
 been fixed (`FIXED (TM-xx): previously this…`), in one case running 25
 lines inside a docstring and 17 lines inside `pyproject.toml`. Two
@@ -470,13 +514,13 @@ rationale is preserved (e.g. why `use`/`using` must stay out of the stop
 words, why set iteration must not decide which extracted items survive).
 No logic changed; the full suite passes unchanged either side.
 
-## [0.4.1] — 2026-08-05 — second audit pass: correctness, durability, isolation
+### Second audit pass: correctness, durability, isolation
 
 Findings from a full-codebase audit. Every item below was reproduced
 before being fixed and has a regression test in
 `tests/unit/test_audit_fixes.py` or `tests/unit/test_durability.py`.
 
-### Fixed — decision supersession silently discarded changes (critical)
+#### Fixed — decision supersession silently discarded changes (critical)
 `_is_same_decision` merged any two decision labels sharing ≥82% of their
 words. Two decisions in the same slot differ by exactly one word — the
 technology name, which is the entire meaning — so the check got *more*
@@ -501,7 +545,7 @@ now never treated as duplicates. Restatements and refinements (`Use
 PostgreSQL` → `Use PostgreSQL 16 with pgvector`) still merge, and
 re-adding a stale decision still cannot resurrect it.
 
-### Fixed — resume surfaced superseded and invalidated decisions as current
+#### Fixed — resume surfaced superseded and invalidated decisions as current
 `_build_critical` sorted *all* decision nodes by importance with no
 status filter, so the ~100-token "must-know facts" block presented
 choices the team had already moved off — and ones explicitly rejected via
@@ -512,7 +556,7 @@ output, did not. All resume builders now go through one `_live_nodes()`
 filter. Invalidated decisions are surfaced separately as `DO NOT REVISIT`
 so the model doesn't re-propose them.
 
-### Fixed — token counting took the whole proxy down (critical)
+#### Fixed — token counting took the whole proxy down (critical)
 `_get_encoding` caught only `ImportError`, but tiktoken downloads its BPE
 vocabulary from a CDN on first use. Any egress restriction, proxy, or CDN
 outage raised a network error that propagated out of
@@ -522,7 +566,7 @@ request 500'd**, and the documented char/4 fallback was unreachable
 the failure so it isn't retried per request, and the Dockerfile
 pre-downloads the vocabulary at build time (`TIKTOKEN_CACHE_DIR`).
 
-### Fixed — corrupt-DB recovery destroyed every session (critical)
+#### Fixed — corrupt-DB recovery destroyed every session (critical)
 `graph_memory.db` and `checkpoints.db` are each shared by *every* session
 in a `storage_dir`. Recovery called `unlink()`, so a single bad read by
 one session permanently deleted everyone's memory — and
@@ -538,7 +582,7 @@ it. A graph that failed to *read* refuses to *write* over the stored row,
 so a transient failure can't become permanent loss. Actual loss is
 reported as `data_loss_detected` in `GET /api/graph/{id}`.
 
-### New — mid-session durability guarantees
+#### New — mid-session durability guarantees
 See README "Durability". Shutdown (SIGTERM) now drains in-flight
 background extraction and force-persists every cached graph instead of
 logging one line and exiting; a periodic flush bounds hard-kill exposure
@@ -547,7 +591,7 @@ evicted; and sessions with an in-flight request are never evicted (the
 previous guard checked a lock only the background task ever took, so it
 was inert for request traffic).
 
-### Fixed — any caller could read or modify any session (security)
+#### Fixed — any caller could read or modify any session (security)
 Session-scoped routes took `session_id` straight from the URL, with a
 single shared deployment key as the only auth and no ownership model at
 all. Since clients choose their own `session_id`, reading someone else's
@@ -558,7 +602,7 @@ Denied requests return 404, not 403, so the endpoints can't be used to
 probe which sessions exist. Dev mode and single-key deployments are
 behaviour-compatible.
 
-### Fixed — environment variables did not override `tokenmizer.yaml`
+#### Fixed — environment variables did not override `tokenmizer.yaml`
 `from_yaml` passed the file's contents as `__init__` kwargs — the
 highest-priority source in pydantic-settings, above env vars — so every
 key present in the shipped (and Docker-`COPY`'d) config silently beat its
@@ -566,14 +610,14 @@ key present in the shipped (and Docker-`COPY`'d) config silently beat its
 `TOKENMIZER_PROVIDER=openai` resolved to `anthropic`. API keys appeared to
 work only because those lines happen to be commented out.
 
-### Fixed — streaming cached truncated responses
+#### Fixed — streaming cached truncated responses
 On a mid-stream provider error the generator fell through to post-stream
 bookkeeping and cached whatever partial text had arrived, serving that
 truncated answer to every future matching prompt. Failed and cache-hit
 streams no longer write to the cache, and non-`ProviderError` exceptions
 are handled instead of killing the generator mid-stream.
 
-### Fixed — smaller correctness and resource bugs
+#### Fixed — smaller correctness and resource bugs
 - `SemanticCache.invalidate()` was a **silent no-op** under the default
   `share_scope="session"`: it built its key with the `"__shared__"` scope
   that `set()` never uses. Now removes the entry and reports how many.
@@ -600,7 +644,7 @@ are handled instead of killing the generator mid-stream.
   forwarded address, indexed from the right by `trusted_proxy_hops` (the
   leftmost `X-Forwarded-For` entry is caller-controlled).
 
-### Changed — settings that did nothing now do something, or say so
+#### Changed — settings that did nothing now do something, or say so
 `compression.min_tokens_to_compress`, `graph_checkpoint.max_resume_tokens`,
 `graph_checkpoint.extraction_model` and `memory.enabled` were all
 documented but read by nothing; they are now honoured. `routing.*` has no
@@ -608,7 +652,7 @@ implementation at all — it is kept so existing configs load, but logs a
 warning at startup and is labelled NOT IMPLEMENTED in the README and
 config file.
 
-### Removed — Redis from `docker-compose.yml`
+#### Removed — Redis from `docker-compose.yml`
 The stack ran a Redis container, gated startup on its health check, and
 persisted a volume for it. `tokenmizer/state/backend.py` has no callers —
 not a byte was ever written to Redis. Removed rather than left as

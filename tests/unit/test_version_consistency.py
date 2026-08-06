@@ -79,7 +79,7 @@ def test_no_asset_hardcodes_a_version():
     """No committed asset may bake in a version string.
 
     The logo SVG carried `v0.2.3` in a badge while the package was on
-    0.6.0 — on the README, above the fold, the first thing anyone sees.
+    On the README, above the fold, the first thing anyone sees.
     Nothing caught it because nothing looked. Version belongs in exactly
     one place (pyproject) plus badges that render it live from a
     registry; anywhere else it is a stale claim waiting to happen.
@@ -142,3 +142,72 @@ def test_readme_documents_every_endpoint_and_no_others():
         if norm(d) not in documented_n and d not in ("/", "/health")
     )
     assert not undocumented, f"live endpoints missing from the README: {undocumented}"
+
+
+def test_changelog_has_no_versions_that_were_never_released():
+    """Every `## [x.y.z]` heading must be a version that exists as a release.
+
+    Six headings once sat above the last published one — 0.4.1 through
+    0.7.0 — none of which was ever on PyPI. A changelog that lists
+    versions nobody can install is worse than no changelog: it makes the
+    published version look stale and the release history look forged.
+
+    The rule this enforces: a version heading is created when the release
+    is cut, not while the work is in progress. Work in progress belongs
+    under the current version's heading.
+    """
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    headings = re.findall(r'^## \[(\d+\.\d+\.\d+)\]', text, re.MULTILINE)
+    assert headings, "CHANGELOG.md has no version headings"
+
+    def as_tuple(v: str) -> tuple[int, ...]:
+        return tuple(int(x) for x in v.split("."))
+
+    current = as_tuple(tokenmizer.__version__)
+    ahead = [v for v in headings if as_tuple(v) > current]
+    assert not ahead, (
+        f"CHANGELOG.md documents {ahead} above the package version "
+        f"{tokenmizer.__version__}. Those versions do not exist."
+    )
+    assert headings[0] == tokenmizer.__version__, (
+        f"the newest CHANGELOG heading is {headings[0]}, package is "
+        f"{tokenmizer.__version__}"
+    )
+
+
+def test_no_source_file_hardcodes_a_stale_version():
+    """A version baked into prose or a comment goes stale silently.
+
+    The logo carried `v0.2.3` for four releases before anyone noticed,
+    on the README above the fold. This sweeps every tracked text file
+    for a `vX.Y.Z` that is neither the current version nor one that was
+    genuinely released earlier.
+    """
+    released_or_current = {tokenmizer.__version__}
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    released_or_current |= set(
+        re.findall(r'^## \[(\d+\.\d+\.\d+)\]', changelog, re.MULTILINE))
+
+    offenders = []
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or path.suffix not in {
+                ".py", ".md", ".json", ".yaml", ".yml", ".toml", ".svg"}:
+            continue
+        rel = path.relative_to(ROOT)
+        if any(part in {".git", "node_modules", "dist", "build", ".venv"}
+               for part in rel.parts):
+            continue
+        if rel.name == "CHANGELOG.md":
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for found in set(re.findall(r'\bv(\d+\.\d+\.\d+)\b', text)):
+            if found not in released_or_current:
+                offenders.append(f"{rel}: v{found}")
+
+    assert not offenders, (
+        "version strings referring to releases that do not exist:\n  "
+        + "\n  ".join(sorted(offenders))
+    )

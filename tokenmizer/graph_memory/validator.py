@@ -60,7 +60,7 @@ _EXCEPTION_NAME = re.compile(r'\b[A-Z][A-Za-z0-9]*(?:Error|Exception|Fault)\b')
 # validator recognises as a filename.
 _EXTENSIONLESS_FILE = re.compile(
     r'Dockerfile|Makefile|Procfile|Jenkinsfile|Gemfile|Rakefile|Vagrantfile|'
-    r'Brewfile|Justfile|Caddyfile|CODEOWNERS|LICENSE|MANIFEST\.in'
+    r'Brewfile|Justfile|Caddyfile|CODEOWNERS|MANIFEST\.in'
 )
 
 # Vulnerability classes are named by acronym far more often than described.

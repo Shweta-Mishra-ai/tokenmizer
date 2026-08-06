@@ -2,7 +2,7 @@
   "id": "real_audit_concurrency",
   "origin": "real",
   "domain": "audit/systems",
-  "notes": "Condensed from the 0.5.0 cross-process session. Includes a decision reversal after a test failure.",
+  "notes": "Condensed from the cross-process-safety session. Includes a decision reversal after a test failure.",
   "messages": [
     {
       "role": "user",
@@ -62,7 +62,8 @@
       "persistence.py"
     ],
     "errors": [
-      "reinstating rows another worker deleted"
+      "reinstating rows another worker deleted",
+      "flock is unreliable on NFS"
     ]
   }
 }

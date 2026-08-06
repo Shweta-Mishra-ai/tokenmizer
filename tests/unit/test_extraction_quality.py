@@ -13,6 +13,7 @@ which trains people to edit the assertion instead of reading it.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -172,7 +173,7 @@ class TestQualityFloors:
         ("pending_tasks",   0.82),   # measured 0.95
         ("decisions",       0.84),   # measured 0.92
         ("files",           0.92),   # measured 0.99
-        ("errors",          0.74),   # measured 0.82
+        ("errors",          0.82),   # measured 0.90
     ])
     def test_category_f1_floor(self, result, category, min_f1):
         assert result["micro"][category]["f1"] >= min_f1
@@ -348,3 +349,63 @@ class TestExtensionlessFiles:
         out = get_hybrid_extractor().heuristic_extract(
             [{"role": "assistant", "content": f"Updated the {name}."}])
         assert name in out.files
+
+
+class TestScanCost:
+    """The extractor runs on the hot path of a proxy, over whatever a
+    caller sends. A pattern that backtracks superlinearly is a denial of
+    service, not a slow test."""
+
+    @pytest.mark.parametrize("content,label", [
+        ("word." * 3000, "repeated single-token sentences"),
+        ("a.b.c.d.e.f.g.h " * 2000, "dotted tokens"),
+        ("a" * 40000, "one enormous token"),
+        (("Fixed the " + "path/to/file.py " * 40 + ". ") * 30, "path spam"),
+    ])
+    def test_pathological_input_stays_bounded(self, content, label):
+        """`(?:[\\w./-]+\\s+){0,3}` — a token repeat nested in a window
+        repeat — took 6.3 seconds on the first case here. Flattening the
+        windows brought it under 0.2s. The bound is loose on purpose; it
+        is there to catch a return to superlinear, not to police ms."""
+        started = time.perf_counter()
+        get_hybrid_extractor().heuristic_extract(
+            [{"role": "assistant", "content": content}])
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2.0, f"{label}: {elapsed:.1f}s to scan {len(content)} chars"
+
+
+class TestVocabularyBoundaries:
+    """Symptom vocabulary must match whole words. The flat subject window
+    that fixed the backtracking briefly let it match inside one."""
+
+    @pytest.mark.parametrize("content,forbidden", [
+        ("All of them trace to one cause: no egress.", "race"),
+        ("With no key configured, single-user use is unchanged.", "hang"),
+        ("The panic button is in the corner of the settings page.", "panic button"),
+    ])
+    def test_a_symptom_inside_a_word_is_not_an_error(self, content, forbidden):
+        errors = get_hybrid_extractor().heuristic_extract(
+            [{"role": "user", "content": content}]).errors
+        assert not any(forbidden in e.lower() for e in errors), errors
+
+    def test_a_label_does_not_start_in_the_previous_sentence(self):
+        """The subject window can step over a full stop; the label must
+        not come out as two half-thoughts."""
+        errors = get_hybrid_extractor().heuristic_extract(
+            [{"role": "assistant",
+              "content": "Limits apply per worker. Also flock is unreliable on NFS."}]
+        ).errors
+        assert any("flock is unreliable" in e for e in errors), errors
+        assert not any("per worker" in e for e in errors), errors
+
+
+class TestRestatedErrors:
+    def test_one_failure_named_twice_yields_one_label(self):
+        errors = get_hybrid_extractor().heuristic_extract([
+            {"role": "user", "content": "Login keeps returning 422"},
+            {"role": "assistant", "content": "Fixed: 422 error — missing email "
+                                             "validation in the LoginRequest model."},
+        ]).errors
+        with_422 = [e for e in errors if "422" in e]
+        assert len(with_422) == 1, with_422
+        assert "email validation" in with_422[0], with_422

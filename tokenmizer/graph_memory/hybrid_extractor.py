@@ -97,7 +97,7 @@ _FILE_COMMON = re.compile(
 # lowercase "makefile" in prose is usually the noun, not the file.
 _FILE_EXTENSIONLESS = re.compile(
     r'\b(Dockerfile|Makefile|Procfile|Jenkinsfile|Gemfile|Rakefile|Vagrantfile|'
-    r'Brewfile|Justfile|Caddyfile|CODEOWNERS|LICENSE|MANIFEST\.in)\b'
+    r'Brewfile|Justfile|Caddyfile|CODEOWNERS|MANIFEST\.in)\b'
 )
 
 # ── Decision patterns — 5 passes ─────────────────────────────────────────────
@@ -313,7 +313,7 @@ _DANGLING_TAIL = re.compile(
 # and "Python 3".
 # Minimum length a clipped label must reach before a clause boundary is
 # allowed to end it. Chosen by sweeping it against the eval corpus
-# (`python -m benchmarks.eval --sweep`, and the table in CHANGELOG 0.6.0)
+# (`python -m benchmarks.eval --sweep`, and the table in the CHANGELOG)
 # rather than by feel:
 #
 #   min_chars   macro F1   truncated   multi-sentence
@@ -369,6 +369,30 @@ def _is_only_paths(text: str) -> bool:
     what was done.
     """
     return bool(_ONLY_PATHS.match((text or "").strip()))
+
+
+_SENTENCE_BOUNDARY = re.compile(r'[.!?](?=\s)')
+
+
+def _drop_leading_sentence(text: str) -> str:
+    """Drop everything up to the last sentence boundary inside `text`.
+
+    The subject windows in the error patterns walk backwards a few words to
+    find what failed, and a word may legitimately end in a dot (`moment.js`,
+    `go.mod`), so they cannot simply refuse to cross one. When the dot really
+    was a full stop the window steps into the previous sentence and the label
+    comes out as "per worker. Also flock is unreliable" — two half-thoughts,
+    the first of them irrelevant.
+
+    Solving this inside the regex needs an atomic group, which Python 3.10
+    does not have, and the non-atomic equivalent backtracks catastrophically
+    (see `_TOKEN`). Trimming after the match is O(n) and does the same job.
+    """
+    s = (text or "").strip()
+    last = None
+    for m in _SENTENCE_BOUNDARY.finditer(s):
+        last = m
+    return s[last.end():].strip() if last else s
 
 
 def _clip(text: str, max_chars: int = 90) -> str:
@@ -448,7 +472,8 @@ _LEADING_CONNECTIVE = re.compile(
 
 # Passive completion — "rate limiting is implemented", "tests are passing"
 _TASK_DONE_PASSIVE = re.compile(
-    r'(.{5,50}?)\s+(?:is|are)\s+(?:working|ready|done|complete|live|passing|'
+    r'((?:(?![.!?](?=\s|$))[^\n]){5,50}?)\s+(?:is|are)\s+'
+    r'(?:working|ready|done|complete|live|passing|'
     r'implemented|deployed|fixed|resolved|working now|up and running)',
     re.IGNORECASE,
 )
@@ -498,7 +523,11 @@ _ERROR_STOPWORDS = frozenset({
 # and it reached the graph purely because the determiner made the label
 # longer than the bare stopword.
 _ERROR_DETERMINER = re.compile(
-    r'^(?:any|some|no|the|a|an|these|those|this|that|more|other)\s+',
+    r'^(?:any|some|no|the|a|an|these|those|this|that|more|other|'
+    # Leading discourse adverbs are not part of the failure's name: a
+    # subject window that starts one word too early yields "Also flock is
+    # unreliable" where the label is "flock is unreliable".
+    r'also|additionally|furthermore|moreover|however|besides)\s+',
     re.IGNORECASE,
 )
 
@@ -510,6 +539,46 @@ _ERROR_HANDLED = re.compile(
     r'raises?|raising|swallow(?:s|ed|ing)?)\s+(?:only\s+|just\s+)?$',
     re.IGNORECASE,
 )
+
+# One word of a subject or object window.
+#
+# This is deliberately the permissive `[\w./-]+` and NOT the "may contain a
+# dot but must not end on one" form (`[\w/-]+(?:\.[\w/-]+)*`) that it looks
+# like it should be. That form is ambiguous — a run like `word.word.word` can
+# be split many ways — and nesting it inside the `{0,3}` window repeats made
+# the error patterns backtrack catastrophically: 6.3 seconds on a 15 KB
+# message built from `"word."`, on the hot path of a proxy that scans
+# whatever a caller sends. Python 3.10 has no atomic groups to fence it with,
+# so the boundary problem is solved after the match instead, by
+# `_drop_leading_sentence`.
+_TOKEN = r'[\w./-]+'
+
+# The few words in front of the thing that broke — "a port collision", "the
+# later save discards…". Written as a FLAT bounded run of characters, not as
+# a repeat of whole tokens.
+#
+# `(?:[\w./-]+\s+){0,3}` reads better and is a latent denial of service: the
+# inner `+` can give back inside every token, and nesting that in a `{0,3}`
+# repeat makes the alternatives multiply. Scanning a 15 KB message built from
+# `"word."` took 6.3 seconds — on the hot path of a proxy that scans whatever
+# a caller sends it. The flat form backtracks at most `n` times instead of
+# `n**3`, and the same message now takes ~60 ms.
+#
+# Cost of the flat form: the window can end mid-phrase or step over a full
+# stop, which `_drop_leading_sentence` cleans up after the match.
+# The trailing `\s` is load-bearing, not tidiness. Without it the window can
+# end mid-word and the vocabulary that follows matches INSIDE a word: `race`
+# inside "All of them trace", `hang` inside "single-user use is unchanged".
+# Ending the window on whitespace puts the vocabulary at a word boundary by
+# construction, which is what the nested-token form gave for free.
+def _subject_window(max_chars: int, extra: str = "") -> str:
+    return r"(?:[\w./\-" + extra + r" ]{0," + str(max_chars - 1) + r"}\s)?"
+
+
+def _object_run(max_chars: int) -> str:
+    """A trailing object window. No boundary requirement — an object cut
+    mid-word costs label quality, not correctness, and `_clip` trims it."""
+    return r"[\w./\- ]{0," + str(max_chars) + r"}"
 
 # Trailing context stops at a clause boundary (`,` `;`) as well as at sentence
 # end. Running to the next full stop meant one match swallowed the errors named
@@ -526,7 +595,7 @@ _ERROR_HANDLED = re.compile(
 # already the failure.
 _ERROR_TYPED = re.compile(
     r'\b((?:[A-Z]\w*(?:Error|Exception)\b|Traceback|'
-    r'(?:[A-Za-z][\w./-]*\s+){0,2}'
+    + _subject_window(30) +
     r'(?:returns?|returning|returned|throws?|throwing|threw|gives?|got|getting|'
     r'receives?|received|responds? with|responded with|fails? with|'
     r'failing with)\s+(?:HTTP\s*)?[45]\d{2}\b|'
@@ -539,7 +608,7 @@ _ERROR_TYPED = re.compile(
 # reach — it only looks backwards for a subject.
 _ERROR_INTEGRITY = re.compile(
     r'\b((?:corrupt(?:ed)?|malformed|truncated|unreadable|mismatched|'
-    r'unparseable)\s+[\w./-]+(?:\s+[\w./-]+)?)',
+    r'unparseable)\s+' + _TOKEN + r'(?:\s+' + _TOKEN + r')?)',
     re.IGNORECASE,
 )
 
@@ -554,7 +623,7 @@ _ERROR_INTEGRITY = re.compile(
 # the imperative `delete`, so "Actually drop that library" stays an
 # instruction. A trailing object is required, so "zero lost" is not a failure.
 _ERROR_DAMAGE = re.compile(
-    r'\b((?:[\w./\'-]+\s+){0,3}'
+    r'\b(' + _subject_window(40, extra="'") +
     r'(?:deletes|deleted|discards|discarded|dropped|loses|lost|'
     r'overwrites|overwrote|clobbers|clobbered|wipes|wiped|'
     r'resurrects|resurrected|reinstates|reinstating|reinstated|'
@@ -575,22 +644,58 @@ _ALREADY_FIXED = re.compile(
 # Vulnerability classes are named, not described, and were invisible to every
 # other pattern. No trailing context: the class name IS the label, and the
 # clause after it is prose about the fix.
+#
+# Acronyms stay case-sensitive — lowercase `rce` and `xss` occur inside
+# ordinary words far more often than they occur as vulnerabilities. The
+# spelled-out phrases are case-insensitive, because prose does not
+# capitalise "sql injection".
 _ERROR_VULN = re.compile(
     r'\b(IDOR|XSS|CSRF|SSRF|RCE|SQLi|TOCTOU|CVE-\d{4}-\d+|'
-    r'SQL injection|path traversal|privilege escalation|'
-    r'session fixation|open redirect)\b',
+    r'(?i:SQL injection|path traversal|privilege escalation|'
+    r'session fixation|open redirect|prototype pollution))\b',
+)
+
+# Absence defects. "missing X", "no dial timeout", "lacks a retry" is one of
+# the most common shapes a defect takes in engineering prose, and none of the
+# patterns above could see it: there is no exception, no status code and no
+# symptom noun, only the thing that should have been there and was not.
+#
+# `no` is excluded on purpose — "with no downtime" and "no extra library" are
+# requirements and design notes, not failures. So is `absent`, which in this
+# prose is nearly always predicative ("only runs when tiktoken is absent"),
+# a condition rather than a defect.
+#
+# The thing missing must be a noun: `(?!\w*ly\b)` rejects "absent entirely".
+_ERROR_ABSENCE = re.compile(
+    r'\b((?:missing|lacks|lacking|never set|unset)'
+    r'\s+(?:a|an|the)?\s*(?!\w*ly\b)' + _TOKEN +
+    r'(?:\s+(?:in|on|from|for)\s+' + _TOKEN + r')?)',
+    re.IGNORECASE,
+)
+
+# Inert code. "There is a char/4 fallback but it is unreachable" states that a
+# code path exists and never runs — a defect with no failure event to name, so
+# nothing else here can reach it. The subject window is wider than the other
+# patterns because the thing that is dead is usually named a clause earlier
+# ("a char/4 fallback but it is unreachable").
+_ERROR_INERT = re.compile(
+    r'\b(' + _subject_window(50) + r'(?:is|are|was|were)\s+'
+    r'(?:unreachable|unreliable|dead code|silently ignored|'
+    r'never (?:called|reached|run|hit|used|fired)|'
+    r'not (?:reached|called|persisted|applied|enforced)))',
+    re.IGNORECASE,
 )
 
 # Symptom vocabulary, with the noun phrase that precedes it — the subject
 # is what identifies the failure ("teardown race", not "race").
 _ERROR_SYMPTOM = re.compile(
-    r'\b((?:[\w./-]+\s+){0,3}'
+    r'\b(' + _subject_window(40) +
     r'(?:out of memory|oom|segfaults?|segmentation fault|stack overflow|'
     r'deadlocks?|race condition|race|collisions?|memory leaks?|'
     r'timing out|timed out|times out|timeouts?|hangs?|hanging|flaky|'
     r'panics?|crash(?:es|ed|ing)?|regressions?|null pointer|infinite loop|'
     r'not triggering|borrow checker error|fails? intermittently)'
-    r'(?:\s+(?:in|on|from)\s+(?:[\w./-]+\s*){1,3})?)',
+    r'(?:\s+(?:in|on|from)\s+' + _object_run(30) + r')?)',
     re.IGNORECASE,
 )
 
@@ -610,7 +715,9 @@ _ENV = re.compile(
 _GOAL_OPENERS = re.compile(
     r'(?:goal|objective|trying to|want to|need to|building|creating|'
     r'let.s build|we.re building|the plan is|we need to build|task is)'
-    r'\s*[:\-]?\s*(.{10,120})',
+    # Same run-past-the-full-stop bug the decision and task captures had:
+    # a goal in the opening turn ran into the sentence after it.
+    r'\s*[:\-]?\s*((?:(?![.!?](?=\s|$))[^\n]){10,120})',
     re.IGNORECASE,
 )
 
@@ -977,24 +1084,29 @@ class HybridExtractor:
         # a session that diagnosed three failures early and spent the rest
         # of its turns fixing them carried none of them forward.
         for pattern in (_ERROR_TYPED, _ERROR_VULN, _ERROR_INTEGRITY,
-                        _ERROR_DAMAGE, _ERROR_SYMPTOM):
+                        _ERROR_DAMAGE, _ERROR_ABSENCE, _ERROR_INERT,
+                        _ERROR_SYMPTOM):
             for m in pattern.finditer(content):
                 before = content[max(0, m.start(1) - 60):m.start(1)]
                 if _SOLUTION_VERB.search(before):
                     continue   # the symptom names the fix, not the failure
-                if _is_negated_context(content, m.start(1)):
-                    continue
+                # NOT _is_negated_context here. It fires on any "no"/"not"
+                # in the window, and error prose is full of them: "WebSocket
+                # message NOT triggering re-render — was missing dependency
+                # in useEffect" lost the second failure entirely. Only the
+                # phrases that actually mean *fixed* are excluded.
                 if _ALREADY_FIXED.search(m.group(1)) or _ALREADY_FIXED.search(before):
                     continue   # "no longer resurrects a prune" is the fix
                 if _ERROR_HANDLED.search(before):
                     continue   # the exception is being caught, not raised
-                err = _clip(_FIX_PREFIX.sub("", m.group(1).strip()), 70)
+                err = _drop_leading_sentence(m.group(1))
+                err = _clip(_FIX_PREFIX.sub("", err.strip()), 70)
+                err = _ERROR_DETERMINER.sub("", err).strip()
                 # `IDOR`, `XSS`, `RCE` are four and three characters. A flat
                 # minimum length rejected the entire vulnerability vocabulary,
                 # which is the highest-signal thing an error label can carry.
                 floor = 3 if pattern is _ERROR_VULN else 5
-                bare = _ERROR_DETERMINER.sub("", err).lower()
-                if len(err) < floor or bare in _ERROR_STOPWORDS:
+                if len(err) < floor or err.lower() in _ERROR_STOPWORDS:
                     continue
                 if any(self._subsumes(err, e) for e in result.errors):
                     continue
@@ -1084,6 +1196,7 @@ class HybridExtractor:
         # de-duplication can happen for heuristic-only extraction.
         result.files = self._drop_shadowed_paths(result.files)
         result.decisions = self._drop_vaguer_decisions(result.decisions)
+        result.errors = self._drop_restated_errors(result.errors)
         return result
 
 
@@ -1286,6 +1399,7 @@ class HybridExtractor:
             setattr(result, attr, deduped[:15])
         result.files = self._drop_shadowed_paths(result.files)
         result.decisions = self._drop_vaguer_decisions(data.decisions)
+        result.errors = self._drop_restated_errors(result.errors)
         result.superseded = data.superseded
         result.evidence = data.evidence
         return result
@@ -1303,6 +1417,44 @@ class HybridExtractor:
         basenames = {f.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower() for f in full}
         return [f for f in files
                 if ("/" in f or "\\" in f) or f.lower() not in basenames]
+
+    @staticmethod
+    def _drop_restated_errors(errors: list[str]) -> list[str]:
+        """Keep one label per named failure.
+
+        A status code or exception class names the failure, so two labels
+        carrying the same one are two descriptions of a single event, not
+        two events: a session that says "Login keeps returning 422" and
+        later "Fixed: 422 error — missing email validation in the
+        LoginRequest model" has one bug. Word-overlap dedup cannot see
+        that — the two share only the digits — so both survived into the
+        graph and the resume block reported the same failure twice.
+
+        Keeps the label with the most content words, which is the one that
+        says what actually broke rather than merely that something did.
+        """
+        def key(label: str) -> str | None:
+            m = re.search(r'\b[A-Z]\w*(?:Error|Exception)\b', label)
+            if m:
+                return m.group(0).lower()
+            m = re.search(r'\b[45]\d{2}\b', label)
+            return m.group(0) if m else None
+
+        def weight(label: str) -> int:
+            return len({w for w in re.findall(r"[a-z0-9]+", label.lower()) if len(w) > 2})
+
+        # The LLM path can hand back non-strings; this runs on both paths.
+        errors = [e for e in errors if isinstance(e, str) and e.strip()]
+
+        best: dict[str, str] = {}
+        for e in errors:
+            k = key(e)
+            if k is None:
+                continue
+            if k not in best or weight(e) > weight(best[k]):
+                best[k] = e
+        kept = set(best.values())
+        return [e for e in errors if key(e) is None or e in kept]
 
     def _drop_vaguer_decisions(self, decisions: list) -> list:
         """Collapse "Use X" into a longer decision that also names X.

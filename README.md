@@ -491,7 +491,7 @@ state_backend: memory           # memory | redis — see note below
 
 All settings via env vars: `TOKENMIZER_PROVIDER`, `TOKENMIZER_API_KEY`, etc.
 **Environment variables override `tokenmizer.yaml`.** (They genuinely do
-as of v0.4.1 — before that the YAML file silently won every conflict, so
+as of v0.5.0 — before that the YAML file silently won every conflict, so
 any `TOKENMIZER_*` variable whose key also appeared in the file was
 ignored.)
 
@@ -580,7 +580,7 @@ Graph state is stored **one row per node and per edge** (`graph_nodes`,
 adding one node to a 151-node graph writes 1 row, and a turn that changes
 nothing writes none.
 
-Databases written before v0.4.2 used a single JSON blob per session.
+Databases written before v0.5.0 used a single JSON blob per session.
 They are migrated automatically the first time each session is opened,
 one session at a time. The old row is kept, not deleted, so a downgrade
 still finds the data it expects as of the moment of migration — changes
@@ -672,15 +672,15 @@ python -m benchmarks.eval --errors                   # every miss, every false p
 python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 556 tests
+pytest tests/ -q                                     # 567 tests
 ```
 
 ### Extraction quality — precision, recall and F1
 
 `python -m benchmarks.eval` scores extraction against a labelled corpus:
-**14 sessions, 144 turns, 171 labelled items, 14 domains** (Go, Rust,
+**14 sessions, 144 turns, 172 labelled items, 14 domains** (Go, Rust,
 Python, TypeScript, React, SQL, CI, ML, plus six real audit sessions).
-Measured on v0.7.0:
+Measured on v0.5.0:
 
 | Category | Precision | Recall | F1 |
 |---|---|---|---|
@@ -688,8 +688,8 @@ Measured on v0.7.0:
 | Pending tasks | 100% | 90% | **95%** |
 | Decisions | 90% | 95% | **92%** |
 | Completed tasks | 92% | 90% | **91%** |
-| Errors | 87% | 81% | **84%** |
-| | | **macro F1** | **92%** |
+| Errors | 92% | 89% | **90%** |
+| | | **macro F1** | **94%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
 whole transcript as one node scores 100% recall; that is why recall-only
@@ -703,10 +703,10 @@ run rather than kept in a drawer:
 
 | Corpus origin | Sessions | Macro F1 |
 |---|---|---|
-| Synthetic (hand-written) | 8 | **93%** |
-| Real (captured transcripts) | 6 | **87%** |
+| Synthetic (hand-written) | 8 | **95%** |
+| Real (captured transcripts) | 6 | **88%** |
 
-**Treat 87% as the number that describes real sessions.** The six-point
+**Treat 88% as the number that describes real sessions.** The seven-point
 gap is the honest measure of how much the heuristics are fitted to text
 we wrote ourselves. Closing it needs more real transcripts, which is the
 single most useful contribution anyone could make here.
@@ -728,8 +728,9 @@ author. Label quality, scored separately because a correct-but-sprawling
 label still wastes resume budget: 15% truncated mid-word, 1% spanning more
 than one sentence, mean length 35 characters.
 
-Errors are the weakest category. The misses are defects stated as plain
-prose with no exception name, status code or symptom noun to key on —
+Errors are the weakest category at 90%. The three misses are defects
+stated as plain prose with no exception name, status code or symptom
+noun to key on —
 "stats reported healthy over an empty database". Regex heuristics have no
 purchase there; that is what `use_llm_extraction` is for.
 
@@ -857,8 +858,8 @@ tokenmizer stats
 |---|---|
 | **v0.3** | SSE streaming passthrough (checkpoint on stream close) |
 | **v0.4** | Graph ontology · deterministic reasoning API (`why`, `impact`, consistency checks) |
-| **v0.5** | Per-row storage schema · cross-process write safety · session ownership · durability guarantees |
-| v0.6 | Cross-session memory · embedding-based edge linking · a real precision/recall eval harness for extraction |
+| **v0.5** | Per-row storage schema · cross-process write safety · session ownership · durability guarantees · measured extraction quality *(this release)* |
+| v0.6 | Cross-session memory · embedding-based edge linking · LLM-assisted extraction for the defects regexes cannot reach |
 | Research | Real-transcript benchmark suite → paper ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research)) |
 
 Have a use case that doesn't fit? [Open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/new/choose) — extraction misses have their own issue template.
