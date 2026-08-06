@@ -43,10 +43,9 @@ class CacheEntry:
     # that same session). Recorded on the entry itself — not just implied
     # by which key it was filed under — so the semantic-similarity lookup
     # (which iterates ALL entries, not just one key) can enforce the same
-    # scoping rule the exact-match lookup does. See TM-03: without this,
-    # a near-miss query could return another session's private entry
-    # purely because cosine similarity cleared the threshold, entirely
-    # bypassing scope.
+    # scoping rule the exact-match lookup does. Without it, a near-miss
+    # query can return another session's private entry purely because
+    # cosine similarity cleared the threshold, bypassing scope entirely.
     scope: str = "__shared__"
 
     def is_expired(self, ttl_seconds: int) -> bool:
@@ -68,16 +67,48 @@ class EmbeddingEngine:
         self._initialized = False
 
     def _load(self) -> None:
+        """Load the embedding model, or leave it None. Never raises.
+
+        Catching ImportError alone was NOT enough, and the gap is the same
+        one `core.tokenizer._get_encoding` documents for tiktoken:
+        sentence-transformers ships no weights. `SentenceTransformer(...)`
+        downloads them from huggingface.co on first use, so with the
+        package installed but the model not cached — an air-gapped host,
+        an egress proxy, a Hub outage, a rate limit — it raises OSError.
+
+        That escaped `_load()`, and `embed()` is reached from the cache
+        lookup on the request path, so a Hugging Face problem became an
+        exception on every request that consulted the cache. The semantic
+        cache is an optimisation; it must degrade to exact-match, never
+        fail the request that was only trying to use it.
+
+        The failure is recorded (`_initialized` is set before the attempt),
+        so this costs one try per process rather than a fresh network
+        timeout on every lookup.
+
+        To avoid the network entirely, pre-fetch the model at image build
+        time and point HF_HOME at it — see the Dockerfile.
+        """
         if self._initialized:
             return
         self._initialized = True
         try:
             from sentence_transformers import SentenceTransformer  # type: ignore
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
-            logger.info("Sentence transformer loaded for semantic cache")
         except ImportError:
             logger.info("sentence-transformers not installed "
                         "— semantic cache uses exact match only")
+            return
+
+        try:
+            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            logger.info("Sentence transformer loaded for semantic cache")
+        except Exception as e:
+            logger.warning(
+                "Could not load the embedding model (%s: %s) — semantic "
+                "cache falls back to exact match. Pre-fetch the model at "
+                "image build time and set HF_HOME to avoid the network.",
+                type(e).__name__, e,
+            )
 
     @property
     def available(self) -> bool:
@@ -129,11 +160,10 @@ class SemanticCache:
             (or "__private__" if none given), regardless of whether it
             looks sensitive. Nothing is ever shared across sessions unless
             explicitly opted in.
-          "shared" — restores the pre-TM-03-fix behavior: non-sensitive
-            prompts (per _is_session_sensitive) are shared globally across
-            sessions; sensitive-looking ones are still session-scoped
-            regardless of this setting — the sensitivity gate is a floor,
-            not something share_scope can override.
+          "shared" — non-sensitive prompts (per _is_session_sensitive)
+            are shared globally across sessions; sensitive-looking ones
+            stay session-scoped regardless. The sensitivity gate is a
+            floor share_scope cannot override.
         """
         self.threshold = threshold
         self.ttl_seconds = ttl_seconds
@@ -146,10 +176,6 @@ class SemanticCache:
         self._hit_exact = 0
         self._hit_semantic = 0
         self._miss = 0
-        # FIXED: this was missing entirely. api/app.py's /api/cache/stats endpoint
-        # calls `_cache._preference_store.to_system_context()` — without this
-        # attribute that call raised AttributeError on every single request to
-        # that endpoint, unconditionally.
         self._preference_store = PreferenceStore()
 
     def _key(self, prompt: str, scope: str = "__shared__") -> str:
@@ -202,12 +228,10 @@ class SemanticCache:
 
         # 2. Semantic match
         #
-        # FIXED (TM-03): this used to scan every entry in self._exact
-        # regardless of scope, so a private/session-scoped entry from a
-        # DIFFERENT session could be returned to a near-miss query purely
-        # on cosine similarity — bypassing whatever scope set() assigned
-        # entirely. Only entries visible to THIS caller are eligible:
-        # shared entries, or entries scoped to this exact session_id.
+        # Only entries visible to THIS caller are eligible: shared ones,
+        # or ones scoped to this exact session_id. Scanning every entry
+        # regardless of scope would let cosine similarity hand a caller
+        # another session's private entry.
         if self._embedder.available:
             query_emb = self._embedder.embed(prompt)
             best_score = 0.0
@@ -266,7 +290,7 @@ class SemanticCache:
         """
         Store a cache entry.
 
-        Scoping rules (safe-by-default — see TM-03):
+        Scoping rules (safe by default):
         - Default (`share_scope="session"`): EVERY prompt is scoped to
           session_id (or "__private__" if none given), sensitive or not.
           Nothing is shared across sessions unless explicitly opted in.
@@ -320,10 +344,32 @@ class SemanticCache:
             if emb is not None:
                 self._embeddings[key] = emb
 
-    def invalidate(self, prompt: str) -> None:
-        key = self._key(prompt)
-        self._exact.pop(key, None)
-        self._embeddings.pop(key, None)
+    def invalidate(self, prompt: str, session_id: str = "") -> int:
+        """Remove cached entries for `prompt`. Returns how many were removed.
+
+        Note the scope trap: set() files entries under the session's
+        scope by default, so building a single "__shared__" key here
+        would match nothing and silently remove nothing.
+
+        With a session_id, the session-scoped entry and the shared one
+        are both removed. Without one, every scope holding this prompt is
+        removed — "invalidate this prompt" should mean it, and a caller
+        who cannot name the scope still needs the stale answer gone.
+        """
+        removed = 0
+        if session_id:
+            candidates = [self._key(prompt, session_id), self._key(prompt, "__shared__")]
+        else:
+            # Scope is part of the key hash and can't be reversed, so
+            # match on the stored prompt instead. Entries store a 500-char
+            # prefix, so compare against the same prefix.
+            needle = prompt[:500]
+            candidates = [k for k, e in self._exact.items() if e.prompt == needle]
+        for key in candidates:
+            if self._exact.pop(key, None) is not None:
+                removed += 1
+            self._embeddings.pop(key, None)
+        return removed
 
     def clear(self) -> None:
         self._exact.clear()

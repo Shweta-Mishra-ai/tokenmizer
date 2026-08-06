@@ -21,19 +21,33 @@ class PeriodStats:
         return (self.tokens_saved / total * 100) if total > 0 else 0.0
 
 
+# Per-1K-token rates as (input, output).
+#
+# These MUST stay split by direction. Output tokens cost several times
+# more than input on every provider here (5x on Anthropic, 4x on
+# OpenAI), so a single blended rate makes both `cost_saved_usd` and
+# `cost_actual` materially wrong — and wrong in a flattering direction
+# for the savings figure the dashboard leads with.
+#
+# Still approximate: real pricing is per-MODEL, not per-provider, and
+# changes over time. Treat these as an estimate, which is why the field
+# is named cost_saved_usd and not billed_amount.
 _COST_PER_1K = {
-    "claude": 0.003, "anthropic": 0.003,
-    "openai": 0.005, "gpt": 0.005,
-    "gemini": 0.001,
-    "deepseek": 0.0014,
-    "mistral": 0.002,
-    "default": 0.003,
+    "claude":    (0.003,  0.015),
+    "anthropic": (0.003,  0.015),
+    "openai":    (0.005,  0.020),
+    "gpt":       (0.005,  0.020),
+    "gemini":    (0.001,  0.004),
+    "deepseek":  (0.0014, 0.0028),
+    "mistral":   (0.002,  0.006),
+    "default":   (0.003,  0.015),
 }
 
 
-def _cost(tokens: int, provider: str) -> float:
-    rate = _COST_PER_1K.get(provider.lower(), _COST_PER_1K["default"])
-    return (tokens / 1000) * rate
+def _cost(input_tokens: int, output_tokens: int, provider: str) -> float:
+    """Estimated USD cost, charging input and output at their own rates."""
+    in_rate, out_rate = _COST_PER_1K.get(provider.lower(), _COST_PER_1K["default"])
+    return (input_tokens / 1000) * in_rate + (output_tokens / 1000) * out_rate
 
 
 @dataclass
@@ -53,10 +67,33 @@ class AnalyticsRecord:
 
 class AnalyticsEngine:
 
-    def __init__(self):
+    # Hard cap on retained per-request records.
+    #
+    # This list was unbounded and appended to on EVERY request, with a
+    # second copy of each reference in _by_provider — the one structure
+    # in the codebase without a cap, while graph cache, session locks,
+    # semantic cache and rate-limiter buckets are all LRU-bounded. A
+    # long-running proxy grew it until the process died. summary() also
+    # scans the whole list five times (daily/weekly/monthly +
+    # layer_breakdown + generate_suggestions re-deriving daily), so
+    # /api/stats got linearly slower for the life of the process too.
+    #
+    # The monthly rollup is the longest window anything reads, so records
+    # older than that are dead weight regardless of count. Both bounds
+    # are enforced: age first, then a hard ceiling.
+    MAX_RECORDS = 50_000
+    MAX_RECORD_AGE_SECONDS = 31 * 86_400
+
+    def __init__(self, max_records: int = MAX_RECORDS):
+        self._max_records = max_records
         self._records: List[AnalyticsRecord] = []
         self._by_provider: Dict[str, List[AnalyticsRecord]] = defaultdict(list)
-        # FIXED: previously, silent failures (checkpoint save, graph
+        # Provider counts must survive record trimming — a total that
+        # silently decreases as old records age out is worse than no
+        # total at all.
+        self._provider_totals: Dict[str, int] = defaultdict(int)
+        self._total_requests = 0
+        # Silent failures (checkpoint save, graph
         # eviction persist, Redis write, AND background LLM extraction
         # errors) were caught, logged at low severity, and otherwise
         # invisible — no way to know in production whether data loss or
@@ -72,8 +109,8 @@ class AnalyticsEngine:
         """Track a failure that would otherwise be invisible outside debug
         logs — persistence (checkpoint save, graph eviction, Redis write)
         AND non-persistence failures like background LLM extraction
-        errors. The common thread: all of these used to fail silently
-        with zero visibility outside of logs nobody watches by default.
+        errors. The common thread: all of them can otherwise fail with
+        zero visibility outside logs nobody watches by default.
         Call this from every place that catches such an exception — it
         costs one dict increment and turns 'silent forever' into 'visible
         in /api/stats'."""
@@ -111,6 +148,35 @@ class AnalyticsEngine:
         )
         self._records.append(r)
         self._by_provider[provider].append(r)
+        self._provider_totals[provider] += 1
+        self._total_requests += 1
+        self._trim()
+
+    def _trim(self) -> None:
+        """Drop records older than the longest reporting window, then
+        enforce the hard ceiling. Records are appended in timestamp
+        order, so the oldest are always at the front."""
+        cutoff = time.time() - self.MAX_RECORD_AGE_SECONDS
+        drop = 0
+        for r in self._records:
+            if r.timestamp >= cutoff:
+                break
+            drop += 1
+        if len(self._records) - drop > self._max_records:
+            drop = len(self._records) - self._max_records
+        if drop <= 0:
+            return
+        dropped = self._records[:drop]
+        del self._records[:drop]
+        # Keep the per-provider index consistent with the trimmed list,
+        # or it becomes the unbounded leak this cap was meant to remove.
+        stale = {id(r) for r in dropped}
+        for prov, recs in list(self._by_provider.items()):
+            kept = [r for r in recs if id(r) not in stale]
+            if kept:
+                self._by_provider[prov] = kept
+            else:
+                del self._by_provider[prov]
 
     def _period_stats(self, cutoff: float) -> PeriodStats:
         stats = PeriodStats()
@@ -120,8 +186,12 @@ class AnalyticsEngine:
             stats.requests += 1
             stats.tokens_saved += r.tokens_saved
             stats.tokens_used += r.input_tokens_sent + r.output_tokens
-            stats.cost_saved += _cost(r.tokens_saved, r.provider)
-            stats.cost_actual += _cost(r.input_tokens_sent + r.output_tokens, r.provider)
+            # Savings are input-side (compression, windowing, file
+            # intelligence and cache all reduce the prompt), so they are
+            # priced at the input rate rather than a blend that silently
+            # inflated them with output pricing.
+            stats.cost_saved += _cost(r.tokens_saved, 0, r.provider)
+            stats.cost_actual += _cost(r.input_tokens_sent, r.output_tokens, r.provider)
         return stats
 
     @property
@@ -159,7 +229,10 @@ class AnalyticsEngine:
     def summary(self) -> dict:
         d, w, m = self.daily, self.weekly, self.monthly
         return {
-            "total_requests": len(self._records),
+            # Lifetime count, not len(self._records) — that would silently
+            # shrink as old records are trimmed.
+            "total_requests": self._total_requests,
+            "retained_records": len(self._records),
             "daily": {
                 "requests": d.requests,
                 "tokens_saved": d.tokens_saved,
@@ -179,9 +252,9 @@ class AnalyticsEngine:
                 "cost_saved_usd": round(m.cost_saved, 4),
             },
             "layer_breakdown": self.layer_breakdown(),
-            "by_provider": {p: len(recs) for p, recs in self._by_provider.items()},
+            "by_provider": dict(self._provider_totals),
             "suggestions": self.generate_suggestions(),
-            # FIXED: persistence failures (checkpoint/graph/redis writes that
+            # persistence failures (checkpoint/graph/redis writes that
             # silently failed) are now visible here instead of only in logs.
             # Non-zero values mean data was lost — investigate immediately.
             "persist_failures": self.persist_failures,

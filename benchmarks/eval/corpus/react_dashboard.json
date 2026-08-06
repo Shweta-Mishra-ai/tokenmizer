@@ -1,0 +1,78 @@
+{
+  "id": "react_dashboard",
+  "origin": "synthetic",
+  "domain": "frontend/typescript",
+  "notes": "Mixed explicit markers and prose; includes a decision reversal (Chart.js -> Recharts). Ground truth relabelled to transcript spans, not hindsight summaries.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Building a real-time analytics dashboard with React and WebSockets"
+    },
+    {
+      "role": "assistant",
+      "content": "Starting dashboard project. Creating: src/App.tsx, src/components/Dashboard.tsx, src/hooks/useWebSocket.ts"
+    },
+    {
+      "role": "user",
+      "content": "Use TypeScript and Recharts for charts"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: TypeScript for type safety. Decided: Recharts for data visualization (good React integration). Completed: project scaffold with Vite."
+    },
+    {
+      "role": "user",
+      "content": "The chart is not updating in real time"
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed: WebSocket message not triggering re-render — was missing dependency in useEffect. Updated src/hooks/useWebSocket.ts. Chart now updates live."
+    },
+    {
+      "role": "user",
+      "content": "Add dark mode"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: CSS variables for theming (no extra library). Completed: dark mode toggle in src/components/Header.tsx. Updated src/styles/theme.css."
+    },
+    {
+      "role": "user",
+      "content": "Add authentication"
+    },
+    {
+      "role": "assistant",
+      "content": "Going with JWT stored in httpOnly cookie (not localStorage — XSS safe). Working on: src/hooks/useAuth.ts, src/components/Login.tsx"
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "project scaffold with Vite",
+      "dark mode toggle",
+      "missing dependency in useEffect",
+      "WebSocket message not triggering re-render"
+    ],
+    "pending_tasks": [],
+    "decisions": [
+      "React",
+      "WebSockets",
+      "TypeScript for type safety",
+      "Recharts for data visualization",
+      "CSS variables for theming",
+      "JWT stored in httpOnly cookie"
+    ],
+    "files": [
+      "src/App.tsx",
+      "src/components/Dashboard.tsx",
+      "src/hooks/useWebSocket.ts",
+      "src/components/Header.tsx",
+      "src/styles/theme.css",
+      "src/hooks/useAuth.ts",
+      "src/components/Login.tsx"
+    ],
+    "errors": [
+      "WebSocket message not triggering re-render",
+      "missing dependency in useEffect"
+    ]
+  }
+}

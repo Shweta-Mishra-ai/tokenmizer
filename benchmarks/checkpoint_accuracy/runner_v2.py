@@ -155,9 +155,11 @@ def _summary_extract(messages: list[dict]) -> dict:
         idx = 0
         while True:
             idx = all_text.lower().find(kw, idx)
-            if idx == -1: break
+            if idx == -1:
+                break
             snippet = all_text[idx+len(kw):idx+len(kw)+50].split(".")[0].strip()
-            if snippet: tasks.add(snippet)
+            if snippet:
+                tasks.add(snippet)
             idx += 1
 
     return {"decisions": decisions, "tasks": tasks, "files": files}

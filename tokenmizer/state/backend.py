@@ -7,19 +7,15 @@ RedisBackend     — production, survives restarts, works across workers
 Set TOKENMIZER_STATE_BACKEND=redis and TOKENMIZER_REDIS_URL=redis://...
 to enable Redis in production.
 
-STATUS (as of the TM-04 audit fix): this module currently has no caller in
-api/app.py. Its one previous caller — a `context_used` accumulator tracking
-how much context a session had used across turns — was removed outright:
-the accumulator design was wrong independent of persistence (it double-
-counted every earlier turn's content each time, since each `messages` list
-already contains the full running conversation, and it never reflected
-windowing/compaction — see api/app.py::_update_graph). Deleting the wrong
-counter was the fix; there is no replacement caller yet. This module is
-kept because a Redis-backed shared store is the right building block for
-future cross-worker coordination (e.g. a distributed session lock once
-issue #27's per-row persistence migration lands), not because anything
-here is broken. Do not treat its presence as evidence that cross-worker
-state sharing is currently wired up anywhere — it isn't.
+STATUS: THIS MODULE HAS NO CALLERS. get_state_backend() is never invoked,
+so nothing is read from or written to Redis, and setting
+TOKENMIZER_STATE_BACKEND=redis changes no behaviour. All durable state
+(graph memory, checkpoints, session ownership) is SQLite.
+
+It is kept because a Redis-backed shared store is the right building
+block for cross-worker coordination — e.g. a distributed session lock —
+not because anything here is broken. Do not treat its presence as
+evidence that cross-worker state sharing is wired up anywhere.
 """
 from __future__ import annotations
 

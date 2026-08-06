@@ -1,0 +1,79 @@
+{
+  "id": "real_audit_extraction",
+  "origin": "real",
+  "domain": "audit/nlp",
+  "notes": "Condensed from the eval-harness session. Measurement-driven: each fix is justified by a number, and one change is reported as a regression.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Task recall is 76% and nothing justifies the tuning constants. Build an eval harness and fix what it finds."
+    },
+    {
+      "role": "assistant",
+      "content": "Created benchmarks/eval/metrics.py and benchmarks/eval/__main__.py. Decided: report precision alongside recall, because a recall-only metric is gamed by emitting more text."
+    },
+    {
+      "role": "user",
+      "content": "run it"
+    },
+    {
+      "role": "assistant",
+      "content": "Error recall is 8 percent — 1 of 12 labelled errors found. Two causes: errors are scanned only in the recent window, and the pattern requires a keyword followed by a description."
+    },
+    {
+      "role": "user",
+      "content": "fix that"
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed the error window — errors are now scanned over full history. Replaced the pattern with typed-exception and symptom-phrase matching in hybrid_extractor.py. Error F1 went from 14 percent to 87 percent."
+    },
+    {
+      "role": "user",
+      "content": "what else is wrong"
+    },
+    {
+      "role": "assistant",
+      "content": "Found that any task whose label ends in a file path was retyped as a FILE node by validator.py, so it vanished from completed tasks and appeared as a spurious file. Fixed by bounding the path check to short labels."
+    },
+    {
+      "role": "user",
+      "content": "and the constants?"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: sweep _MIN_CLAUSE_CHARS against the corpus instead of picking by feel. F1 keeps climbing past 22 but only by letting labels sprawl again, so 22 is the knee. Table is in the code comment."
+    },
+    {
+      "role": "user",
+      "content": "any regressions"
+    },
+    {
+      "role": "assistant",
+      "content": "Yes — completed tasks F1 dropped from 77 to 75 and decisions from 63 to 60. Clipping labels to one clause costs coverage on long ground-truth items. Reporting it rather than quoting only the macro, which went 59 to 75."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "the error window",
+      "the pattern with typed-exception",
+      "bounding the path check to short labels"
+    ],
+    "pending_tasks": [],
+    "decisions": [
+      "report precision alongside recall",
+      "sweep _MIN_CLAUSE_CHARS against the corpus"
+    ],
+    "files": [
+      "benchmarks/eval/metrics.py",
+      "benchmarks/eval/__main__.py",
+      "hybrid_extractor.py",
+      "validator.py"
+    ],
+    "errors": [
+      "Error recall is 8 percent",
+      "retyped as a FILE node",
+      "completed tasks F1 dropped from 77 to 75"
+    ]
+  }
+}

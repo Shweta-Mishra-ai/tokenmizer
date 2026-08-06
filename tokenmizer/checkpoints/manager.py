@@ -14,6 +14,7 @@ import json
 import logging
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -63,35 +64,76 @@ class CheckpointManager:
     # cap — only ones the auto-threshold trigger itself created.
     DEFAULT_AUTO_RETENTION = 20
 
-    def __init__(self, storage_dir: str = "./checkpoints", auto_retention: int = DEFAULT_AUTO_RETENTION):
+    def __init__(self, storage_dir: str = "./checkpoints",
+                 auto_retention: int = DEFAULT_AUTO_RETENTION,
+                 max_resume_tokens: int = 300):
+        # `graph_checkpoint.max_resume_tokens` is documented in
+        # tokenmizer.yaml as "cap on standard resume block size" but was
+        # never read by anything — _build_standard() hardcoded 300, so
+        # raising it in config had no effect at all. Now plumbed through.
+        self._max_resume_tokens = max_resume_tokens
         self._dir = Path(storage_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._db_path = self._dir / "checkpoints.db"
         self._auto_retention = auto_retention
+        # Durability flags, mirroring GraphMemory's — surfaced via
+        # /api/stats so "no checkpoints" can be distinguished from
+        # "checkpoints were destroyed" and from "saves are failing".
+        self.data_loss_detected = False
+        self.persistence_broken = False
         self._safe_init_db()
-        self._prev_snapshots: dict[str, dict] = {}  # session_id → last snapshot
+        # session_id -> last snapshot, used only to compute graph_diff.
+        # LRU-bounded: this was an unbounded dict holding a FULL graph
+        # snapshot per session forever, so a busy proxy leaked one
+        # snapshot per distinct session for the life of the process.
+        # Losing an entry only costs diff fidelity for one checkpoint
+        # (it reports every node as "added"), never any stored data.
+        self._prev_snapshots: "OrderedDict[str, dict]" = OrderedDict()
+
+    _MAX_PREV_SNAPSHOTS = 500
+
+    def _remember_snapshot(self, session_id: str, snapshot: dict) -> None:
+        self._prev_snapshots[session_id] = snapshot
+        self._prev_snapshots.move_to_end(session_id)
+        while len(self._prev_snapshots) > self._MAX_PREV_SNAPSHOTS:
+            self._prev_snapshots.popitem(last=False)
 
     def _safe_init_db(self) -> None:
-        """Initialize DB, deleting corrupt file if necessary."""
+        """Initialize DB, quarantining a corrupt file if necessary.
+
+        checkpoints.db holds EVERY session's checkpoints, so the old
+        `unlink()` here destroyed all of them whenever one init failed —
+        the same shared-file blast radius fixed in graph_memory/
+        persistence.py. Quarantine by rename instead: SQLite corruption
+        is usually partial and `.recover` can salvage most of it, which
+        is impossible once the file is gone.
+        """
         try:
             self._init_db()
-        except Exception:
-            logger.warning(f"Checkpoint DB corrupt or unreadable — recreating: {self._db_path}")
-            try:
-                self._db_path.unlink(missing_ok=True)
-            except Exception as del_err:
-                logger.error(f"Could not delete corrupt checkpoint DB: {del_err}")
+        except Exception as init_err:
+            from tokenmizer.graph_memory.persistence import quarantine_db
+            if quarantine_db(self._db_path, f"checkpoint init failed: {init_err}"):
+                self.data_loss_detected = True
             try:
                 self._init_db()
             except Exception as e:
                 logger.error(f"Cannot initialize checkpoint DB after cleanup: {e}")
+                self.persistence_broken = True
 
     def _db_connect(self) -> sqlite3.Connection:
         """SQLite connection with WAL mode and timeout for concurrent safety."""
         import sqlite3 as _sqlite3
         conn = _sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            # Close before re-raising: a failed PRAGMA (corrupt file) would
+            # otherwise leak the handle, and an open handle blocks the
+            # quarantine/recreate path on Windows. The graph's own
+            # db_connect() was fixed for this; its twin here was not.
+            conn.close()
+            raise
         return conn
 
     def _init_db(self) -> None:
@@ -147,7 +189,7 @@ class CheckpointManager:
         # Compute diff from previous checkpoint
         prev = self._prev_snapshots.get(session_id, {"nodes": []})
         graph_diff = self._compute_diff(prev, graph_snapshot)
-        self._prev_snapshots[session_id] = graph_snapshot
+        self._remember_snapshot(session_id, graph_snapshot)
 
         # Get last user message as next_action hint
         next_action = ""
@@ -225,29 +267,72 @@ class CheckpointManager:
             logger.warning(f"Auto-checkpoint retention prune failed for "
                            f"session {session_id} (non-fatal): {e}")
 
+    @staticmethod
+    def _live_nodes(graph: GraphMemory, node_type, *, statuses=None) -> list:
+        """
+        Nodes of `node_type` that represent the CURRENT state of the
+        world: not evicted, and not in a terminal/historical status.
+
+        Every resume builder must go through this. Previously they read
+        `graph._nodes.values()` raw, so a resume block could present a
+        SUPERSEDED choice the team had already moved off, or a decision
+        someone had explicitly INVALIDATED via /api/decision/invalidate,
+        as a current "KEY DECISION" — while the decision that actually
+        replaced it might be crowded out of the top-N. query() and
+        to_context_block() have always filtered these; the checkpoint
+        resume path (the thing the whole product exists to produce) did
+        not. Resuming with confidently-wrong context is worse than
+        resuming with none.
+        """
+        from tokenmizer.graph_memory.graph import INACTIVE_STATUSES
+        out = []
+        for n in graph._nodes.values():
+            if n._evicted or n.type != node_type:
+                continue
+            if statuses is not None:
+                if n.status not in statuses:
+                    continue
+            elif n.status in INACTIVE_STATUSES:
+                continue
+            out.append(n)
+        return out
+
     def _build_critical(self, graph: GraphMemory, next_action: str) -> str:
         """~100 tokens. Only open blockers + critical decisions."""
         from tokenmizer.graph_memory.graph import NodeStatus, NodeType
         lines = []
 
-        open_errors = [n for n in graph._nodes.values()
-                       if n.type == NodeType.ERROR and n.status == NodeStatus.FAILED]
+        open_errors = self._live_nodes(graph, NodeType.ERROR,
+                                       statuses={NodeStatus.FAILED})
         if open_errors:
             lines.append("OPEN BUGS: " + " | ".join(e.label for e in open_errors[:3]))
 
-        high_priority_tasks = [n for n in graph._nodes.values()
-                               if n.type == NodeType.TASK
-                               and n.status == NodeStatus.IN_PROGRESS
-                               and n.importance >= 0.8]
+        high_priority_tasks = [
+            n for n in self._live_nodes(graph, NodeType.TASK,
+                                        statuses={NodeStatus.IN_PROGRESS})
+            if n.importance >= 0.8
+        ]
         if high_priority_tasks:
             lines.append("CRITICAL WIP: " + " | ".join(t.label for t in high_priority_tasks[:3]))
 
         decisions = sorted(
-            [n for n in graph._nodes.values() if n.type == NodeType.DECISION],
+            self._live_nodes(graph, NodeType.DECISION),
             key=lambda x: x.importance, reverse=True
         )
         if decisions:
             lines.append("KEY DECISIONS: " + " | ".join(d.label for d in decisions[:3]))
+
+        # Invalidated decisions are surfaced as an explicit warning rather
+        # than dropped, matching the documented 4-state model (README:
+        # INVALIDATED = "⚠️ Always (warning)"). Resuming without them
+        # invites the model to cheerfully re-propose the exact thing the
+        # user already rejected — but they must never be presented as
+        # current decisions, which is what the unfiltered version did.
+        invalidated = self._live_nodes(graph, NodeType.DECISION,
+                                       statuses={NodeStatus.INVALIDATED})
+        if invalidated:
+            lines.append("DO NOT REVISIT (explicitly rejected): "
+                         + " | ".join(d.label for d in invalidated[:3]))
 
         if next_action:
             lines.append(f"LAST REQUEST: {next_action[:100]}")
@@ -256,7 +341,7 @@ class CheckpointManager:
 
     def _build_standard(self, graph: GraphMemory, next_action: str) -> str:
         """~300 tokens. Normal resume — goals, tasks, decisions, files."""
-        block = graph.to_context_block(token_budget=300)
+        block = graph.to_context_block(token_budget=self._max_resume_tokens)
         if next_action:
             block += f"\nContinue from: {next_action[:150]}"
         return block
@@ -266,24 +351,28 @@ class CheckpointManager:
         from tokenmizer.graph_memory.graph import NodeStatus, NodeType
         parts = [self._build_standard(graph, "")]
 
-        env_nodes = [n for n in graph._nodes.values() if n.type == NodeType.ENVIRONMENT]
+        # All of these go through _live_nodes for the same reason
+        # _build_critical does: an ARCHIVED dependency or an evicted
+        # endpoint is not part of the current state of the project, and
+        # presenting it in a resume block states it as fact.
+        env_nodes = self._live_nodes(graph, NodeType.ENVIRONMENT)
         if env_nodes:
             parts.append("Environment: " + ", ".join(e.label for e in env_nodes[:8]))
 
-        dep_nodes = [n for n in graph._nodes.values() if n.type == NodeType.DEPENDENCY]
+        dep_nodes = self._live_nodes(graph, NodeType.DEPENDENCY)
         if dep_nodes:
             parts.append("Dependencies: " + ", ".join(d.label for d in dep_nodes[:10]))
 
-        schema_nodes = [n for n in graph._nodes.values() if n.type == NodeType.SCHEMA]
+        schema_nodes = self._live_nodes(graph, NodeType.SCHEMA)
         if schema_nodes:
             parts.append("Schemas: " + " | ".join(s.label for s in schema_nodes[:4]))
 
-        endpoint_nodes = [n for n in graph._nodes.values() if n.type == NodeType.ENDPOINT]
+        endpoint_nodes = self._live_nodes(graph, NodeType.ENDPOINT)
         if endpoint_nodes:
             parts.append("Endpoints: " + ", ".join(e.label for e in endpoint_nodes[:8]))
 
-        done_tasks = [n for n in graph._nodes.values()
-                      if n.type == NodeType.TASK and n.status == NodeStatus.COMPLETED]
+        done_tasks = self._live_nodes(graph, NodeType.TASK,
+                                      statuses={NodeStatus.COMPLETED})
         done_tasks.sort(key=lambda x: x.updated_at, reverse=True)
         if done_tasks:
             parts.append("Recently completed: " + " | ".join(t.label for t in done_tasks[:6]))
@@ -311,7 +400,7 @@ class CheckpointManager:
         """
         Persist a checkpoint to SQLite.
 
-        FIXED: previously this caught Exception, logged it, and returned
+        This must not catch Exception, log it, and return
         None — silently. The caller (create()) had no way to know the
         save failed, so callers (including the auto-checkpoint trigger and
         the manual /api/checkpoint endpoint) would report a checkpoint as
@@ -385,7 +474,7 @@ class CheckpointManager:
         """
         Returns checkpoint metadata for a session, newest first.
 
-        FIXED: previously a DB read failure here was indistinguishable from
+        A DB read failure here must not be indistinguishable from
         "this session genuinely has zero checkpoints" — both returned `[]`
         with zero logging. A caller (e.g. the /api/checkpoints/{session_id}
         endpoint) would show an empty list to the user with no way to tell

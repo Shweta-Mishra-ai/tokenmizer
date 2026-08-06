@@ -192,7 +192,7 @@ class WhitespaceNormalizer:
 class CommentStripper:
     """Strip comments from code blocks. ~10-30% on comment-heavy code.
 
-    CORRECTNESS FIX: the JS line-comment pattern previously matched `//`
+    the JS line-comment pattern must not match `//`
     anywhere on a line, including inside string literals — most commonly
     URLs like "https://example.com", which would get truncated to
     "https:" with everything after silently deleted. This is real code
@@ -218,7 +218,7 @@ class CommentStripper:
         String-aware line-comment stripper, shared by both Python (#) and
         JS-style (//) comments.
 
-        FIXED BUGS (found via actually running tests against this code,
+        Constraints this code must preserve (
         not just reading it):
           1. The original Python regex `^\\s*#.*$` only matched comments
              where `#` was the first non-whitespace character on the
@@ -434,7 +434,7 @@ class LLMLinguaEngine:
         """
         Compress text via LLMLingua-2, EXCLUDING code segments.
 
-        FIXED: previously the entire text — including any fenced/inline
+        The entire text — including any fenced/inline
         code — went straight into the ML compressor with only a soft
         `force_tokens` hint asking it to try to preserve a few literal
         tokens like "```" and "def ". That hint does not guarantee
@@ -523,9 +523,17 @@ class CompressionPipeline:
         strip_comments: bool = False,
         enable_ml: bool = True,
         device: str = "cpu",
+        min_tokens_to_compress: int = 300,
     ):
         self.ratio = ratio
         self.strip_comments = strip_comments
+        # Messages below this many tokens are passed through untouched.
+        # `compression.min_tokens_to_compress` has always been a documented
+        # setting (it is spelled out in the shipped tokenmizer.yaml) but
+        # nothing ever read it — compress_messages() hardcoded 200. An
+        # operator raising it to avoid mangling short prompts got no
+        # effect and no warning. It is now honoured.
+        self.min_tokens_to_compress = min_tokens_to_compress
         # compression_ratio = output_tokens / input_tokens (lower = more compressed)
         # If ratio > threshold, ML compression had no effect — keep heuristic result
         self._quality_threshold = 0.95
@@ -581,7 +589,7 @@ class CompressionPipeline:
         # Save the heuristic-only result BEFORE running ML compression so we can
         # actually revert to it if the quality gate below rejects the ML output.
         #
-        # FIXED — this was a real bug, not cosmetic: the previous code assigned
+        # the previous code assigned
         # `text = result.compressed_text` immediately, THEN computed
         # compression_ratio from that same already-overwritten `text`. That
         # meant the "keep heuristic result" comment was describing something
@@ -652,7 +660,7 @@ class CompressionPipeline:
                 continue
 
             content = msg.get("content", "")
-            cr = self.compress_text(content, min_tokens=200)
+            cr = self.compress_text(content, min_tokens=self.min_tokens_to_compress)
             total_saved += cr.original_tokens - cr.compressed_tokens
             result.append({**msg, "content": cr.compressed_text})
 

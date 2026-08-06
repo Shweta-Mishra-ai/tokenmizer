@@ -29,16 +29,68 @@ import logging
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
+from pydantic import BaseModel
 
 from tokenmizer.api import app as app_module
 from tokenmizer.core.tokenizer import count_tokens
 from tokenmizer.security.auth import verify_api_key
+from tokenmizer.security.ownership import OwnershipUnavailable, SessionAccessDenied
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def verify_session_access(request: Request) -> None:
+    """FastAPI dependency enforcing session ownership on session-scoped
+    routes. Must be listed AFTER verify_api_key, which establishes
+    `request.state.principal`.
+
+    Reads session_id from the path (e.g. /api/graph/{session_id}) or the
+    query string (e.g. /api/checkpoint?session_id=...), whichever the
+    route uses. A route with no session_id at all is unaffected.
+
+    Read-only routes do not claim ownership (claim=False): a GET for a
+    session that was never created should fall through to its normal
+    404/empty response rather than staking a claim as a side effect.
+    """
+    session_id = (request.path_params.get("session_id")
+                  or request.query_params.get("session_id"))
+    if not session_id:
+        return
+
+    principal = getattr(request.state, "principal", None)
+    if principal is None:
+        # verify_api_key didn't run or didn't set one — fail closed.
+        raise HTTPException(
+            status_code=503,
+            detail="Session access could not be evaluated — request rejected.",
+        )
+
+    claim = request.method not in ("GET", "HEAD", "OPTIONS")
+    try:
+        app_module._ownership.check_access(session_id, principal, claim=claim)
+    except SessionAccessDenied:
+        logger.warning(
+            f"Denied {request.method} {request.url.path} — session "
+            f"{session_id!r} belongs to a different principal"
+        )
+        # 404, not 403: confirming that a session exists but belongs to
+        # someone else is itself a disclosure (it turns the endpoint into
+        # a session-name oracle). Indistinguishable from "no such session".
+        raise HTTPException(
+            status_code=404,
+            detail=f"No session '{session_id}' found.",
+        )
+    except OwnershipUnavailable as e:
+        logger.error(f"Ownership store unavailable, denying request: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Session ownership state unavailable — request rejected "
+                   "for safety. This is a server-side problem.",
+        )
 
 
 def _internal_error(context: str, e: Exception) -> HTTPException:
@@ -46,12 +98,12 @@ def _internal_error(context: str, e: Exception) -> HTTPException:
     Build a 500 HTTPException for an unexpected failure without leaking
     the raw exception text to the client.
 
-    FIXED: these three handlers (checkpoint creation, decision
-    invalidation, resume) previously did `detail=str(e)` directly —
+    these three handlers (checkpoint creation, decision
+    invalidation, resume) must not put `detail=str(e)` in a response —
     `str(e)` on things like `sqlite3.OperationalError` or a filesystem
     error routinely embeds real disk paths, and other exception types
     can include similarly internal detail. `chat_completions()`'s own
-    provider-failure handler already avoids this (see TM-33) via a
+    provider-failure handler already avoids this via a
     correlation id: full detail goes to the server log, the client gets
     a generic message plus the id to reference when asking for help.
     Factored out here since the same pattern was needed at all three
@@ -65,20 +117,77 @@ def _internal_error(context: str, e: Exception) -> HTTPException:
     )
 
 
-@router.get("/api/stats", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/stats", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def stats(session_id: Optional[str] = None):
     return app_module._analytics.summary()
 
 
-@router.get("/api/cache/stats", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+class AnalyzeRequest(BaseModel):
+    """File analysis request. Content is sent inline rather than as a
+    path: the server may be a container or a remote host, so a path the
+    CLIENT can see usually means nothing to it, and accepting one would
+    be an arbitrary-file-read primitive besides."""
+    filename: str
+    content: str
+    token_budget: int = 500
+    query: str = ""
+
+
+@router.post("/api/analyze", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+async def analyze_file(req: AnalyzeRequest):
+    """Summarise a large file into a token-budgeted digest.
+
+    The same FileIntelligence used by layer 0 of the proxy pipeline and
+    by the `analyze` plugin skill, exposed for callers that are not
+    inside Claude Code — a shell, a script, curl, another editor. The
+    README previously documented this as a known missing piece.
+    """
+    if req.token_budget <= 0 or req.token_budget > 100_000:
+        raise HTTPException(
+            status_code=422,
+            detail="token_budget must be between 1 and 100000.",
+        )
+    if not req.filename.strip():
+        raise HTTPException(status_code=422, detail="filename is required.")
+
+    try:
+        result = app_module._file_intelligence.process(
+            req.content, req.filename,
+            token_budget=req.token_budget, query=req.query,
+        )
+    except Exception as e:
+        raise _internal_error("File analysis failed", e)
+
+    return {
+        "filename": req.filename,
+        "file_type": result.file_type,
+        "original_tokens": result.original_tokens,
+        "extracted_tokens": result.extracted_tokens,
+        "tokens_saved": result.tokens_saved,
+        "savings_pct": result.savings_pct,
+        "strategy_used": result.strategy_used,
+        "was_truncated": result.was_truncated,
+        "content": result.content,
+        "summary": result.summary,
+    }
+
+
+@router.get("/api/cache/stats", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def cache_stats():
-    stats = app_module._cache.stats()
-    # Include preference context for completeness (was previously unused)
-    stats["preference_context"] = app_module._cache._preference_store.to_system_context()
-    return stats
+    # NOTE: no "preference_context" field is returned here.
+    # SemanticCache._preference_store. PreferenceStore.save() has no
+    # callers anywhere in the codebase, so that field was always the
+    # empty string while implying a working cross-session preference-
+    # memory feature. Reporting an always-empty field for an unwired
+    # subsystem is worse than reporting nothing, so it is gone until the
+    # store is actually populated — which additionally needs a decision
+    # about scoping, since the store is process-global and would
+    # otherwise share one caller's preferences with every other
+    # principal (see security/ownership.py).
+    return app_module._cache.stats()
 
 
-@router.get("/api/graph/{session_id}/history", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/graph/{session_id}/history", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_graph_history(session_id: str, at_time: float = 0.0, top_k: int = 12):
     """
     Query graph state at a specific Unix timestamp.
@@ -108,13 +217,13 @@ async def get_graph_history(session_id: str, at_time: float = 0.0, top_k: int = 
     }
 
 
-@router.get("/api/graph/{session_id}", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/graph/{session_id}", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_graph(session_id: str):
     graph = await app_module._get_graph_async(session_id)
     return graph.stats()
 
 
-@router.get("/api/graph/{session_id}/viz", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/graph/{session_id}/viz", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_graph_viz(session_id: str):
     """
     Return full graph as D3-compatible JSON for visualization.
@@ -125,7 +234,7 @@ async def get_graph_viz(session_id: str):
     return graph.to_vis_json()
 
 
-@router.get("/api/graph/{session_id}/html", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/graph/{session_id}/html", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_graph_html(session_id: str):
     """Shareable standalone interactive graph — open in a browser, drag/zoom,
     screenshot, share. Self-contained dark-theme D3 force layout."""
@@ -134,7 +243,7 @@ async def get_graph_html(session_id: str):
     return HTMLResponse(to_share_html(graph))
 
 
-@router.get("/api/ontology", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/ontology", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_ontology():
     """The TokenMizer graph ontology: node/edge types with semantics and
     the status state machine. Machine-readable — what the graph CAN contain
@@ -143,7 +252,7 @@ async def get_ontology():
     return ontology_dict()
 
 
-@router.get("/api/graph/{session_id}/why", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/graph/{session_id}/why", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_graph_why(session_id: str, q: str):
     """Reasoning: trace the causal chain behind a decision. Matches decision
     nodes containing `q`, walks the supersession chain in both directions,
@@ -154,7 +263,7 @@ async def get_graph_why(session_id: str, q: str):
     return why(graph, q)
 
 
-@router.get("/api/graph/{session_id}/reasoning", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/graph/{session_id}/reasoning", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_graph_reasoning(session_id: str):
     """Full reasoning view over session memory: active decisions, recent
     changes, decision history grouped by topic, and an ontology-based
@@ -164,7 +273,7 @@ async def get_graph_reasoning(session_id: str):
     return summarize_reasoning(graph)
 
 
-@router.get("/api/graph/{session_id}/obsidian", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/graph/{session_id}/obsidian", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_graph_obsidian(session_id: str):
     """
     Download graph as Obsidian Canvas (.canvas) file.
@@ -182,7 +291,7 @@ async def get_graph_obsidian(session_id: str):
     )
 
 
-@router.get("/api/graph/{session_id}/transitions", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/graph/{session_id}/transitions", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_transitions(session_id: str):
     """Full decision transition history — trigger, reason, evidence, confidence_delta."""
     graph = await app_module._get_graph_async(session_id)
@@ -206,7 +315,7 @@ async def get_transitions(session_id: str):
     }
 
 
-@router.post("/api/checkpoint", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.post("/api/checkpoint", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def create_manual_checkpoint(session_id: str):
     """
     Create a manual checkpoint for a session, snapshotting current graph
@@ -253,7 +362,7 @@ async def create_manual_checkpoint(session_id: str):
         raise _internal_error(f"Manual checkpoint failed for session {session_id}", e)
 
 
-@router.get("/api/checkpoints/{session_id}", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/checkpoints/{session_id}", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def list_checkpoints(session_id: str):
     return app_module._checkpoint_mgr.list_checkpoints(session_id)
 
@@ -261,7 +370,7 @@ async def list_checkpoints(session_id: str):
 _INVALIDATE_MIN_LABEL_LEN = 3  # matches validator.py's own noise-pattern floor (<=3 chars = noise)
 
 
-@router.post("/api/decision/invalidate", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.post("/api/decision/invalidate", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def invalidate_decision(
     session_id: str,
     decision_label: Optional[str] = None,
@@ -279,7 +388,7 @@ async def invalidate_decision(
     decision labels; may match more than one node, all of which are
     returned in affected_nodes).
 
-    FIXED (TM-13): decision_label used to be matched with a raw substring
+    decision_label must not be matched with a raw substring
     check (`label_lower in node.label.lower()`) and had no minimum
     length — `decision_label=""` is a substring of every label, so an
     empty (or accidentally-empty, e.g. a client bug that sends "") value
@@ -346,7 +455,7 @@ async def invalidate_decision(
         # force=True is required here or this write is silently skipped
         # (caught in a final accuracy pass; same class of bug the
         # eviction path and prune() were already protected against).
-        # _persist() now returns bool (TM-12) — check it, since claiming
+        # _persist() now returns bool  — check it, since claiming
         # "status": "invalidated" while the write actually failed is the
         # same silent-data-loss pattern this whole audit is about.
         if not graph._persist(force=True):
@@ -370,7 +479,7 @@ async def invalidate_decision(
         raise _internal_error("Invalidate decision failed", e)
 
 
-@router.get("/api/resume/{session_id}", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+@router.get("/api/resume/{session_id}", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_resume(session_id: str, level: str = "standard"):
     """Get resume context for a session. level: critical | standard | full"""
     try:

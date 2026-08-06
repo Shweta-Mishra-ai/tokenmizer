@@ -28,7 +28,7 @@ console = Console()
 
 # ── Shared HTTP helpers for the stats/checkpoint/resume commands ────────────
 #
-# FIXED: `checkpoint` and `resume` used to call httpx.post/httpx.get with NO
+# `checkpoint` and `resume` must never call httpx.post/httpx.get with NO
 # error handling at all — unlike `stats`, which already wrapped its call and
 # printed a clean "Cannot reach server" message. An unreachable server (the
 # single most common real-world CLI failure mode) crashed both commands with
@@ -56,7 +56,7 @@ def _cli_post(url: str, headers: dict, timeout: float):
 
 def _require_fields(data: dict, *fields: str) -> bool:
     """
-    FIXED: `checkpoint` and `resume` used to access response fields with
+    `checkpoint` and `resume` must not access response fields with
     direct dict keys (data['checkpoint_id'], data["resume_context"]). A
     non-200-non-404 response (auth failure, validation error, upstream 500)
     has a different body shape than a successful one, and direct key access
@@ -72,6 +72,67 @@ def _require_fields(data: dict, *fields: str) -> bool:
         )
         return False
     return True
+
+
+@app.command()
+def analyze(
+    file: str = typer.Argument(..., help="Path to the file to analyze"),
+    token_budget: int = typer.Option(500, help="Max tokens for the summary"),
+    query: str = typer.Option("", help="What you want to know (improves relevance)"),
+    raw: bool = typer.Option(False, "--raw", help="Print only the summary text"),
+):
+    """Summarise a large file (CSV, JSON, PDF, Excel, code, logs) into a
+    token-budgeted digest.
+
+    Runs FileIntelligence locally — no server and no API key needed, so
+    this works in a plain shell, a script, or CI. The same capability is
+    available over HTTP at POST /api/analyze and inside Claude Code as
+    the `analyze` plugin skill.
+    """
+    from pathlib import Path
+
+    from rich.console import Console
+
+    from tokenmizer.filters.file_intelligence import FileIntelligence
+
+    console = Console()
+    path = Path(file)
+    if not path.exists():
+        console.print(f"[red]File not found:[/red] {file}")
+        raise typer.Exit(1)
+    if not path.is_file():
+        console.print(f"[red]Not a file:[/red] {file}")
+        raise typer.Exit(1)
+    if token_budget <= 0:
+        console.print("[red]--token-budget must be positive[/red]")
+        raise typer.Exit(1)
+
+    try:
+        content = path.read_bytes()
+    except OSError as e:
+        console.print(f"[red]Could not read {file}:[/red] {e}")
+        raise typer.Exit(1)
+
+    try:
+        result = FileIntelligence().process(
+            content, path.name, token_budget=token_budget, query=query
+        )
+    except Exception as e:
+        console.print(f"[red]Analysis failed:[/red] {type(e).__name__}: {e}")
+        raise typer.Exit(1)
+
+    if raw:
+        print(result.content)
+        return
+
+    console.print(f"\n[bold]{path.name}[/bold]  [dim]({result.file_type})[/dim]")
+    console.print(
+        f"[dim]{result.original_tokens:,} tokens -> {result.extracted_tokens:,} "
+        f"({result.savings_pct:.0f}% smaller, via {result.strategy_used})[/dim]\n"
+    )
+    console.print(result.content)
+    if result.was_truncated:
+        console.print("\n[yellow]Trimmed to fit the token budget.[/yellow]")
 
 
 @app.command()
@@ -94,7 +155,7 @@ def serve(
     if config:
         os.environ["TOKENMIZER_CONFIG"] = config
 
-    # FIXED: host/port used to be hardcoded typer defaults ("0.0.0.0",
+    # host/port come from settings, NOT hardcoded typer defaults ("0.0.0.0",
     # 8000) completely independent of Settings.proxy_host/proxy_port —
     # tokenmizer.yaml shipped those as documented config, but editing
     # them did nothing at all. Now an explicit --host/--port flag always
@@ -150,7 +211,7 @@ def stats(
 
     url = f"{server}/api/stats"
     if session_id:
-        # FIXED: session_id used to be interpolated raw into the query
+        # session_id must never be interpolated raw into the query
         # string — a session_id containing '&', space, or other reserved
         # URL characters produced a malformed or misdirected request
         # (same class of bug already fixed in the MCP server).
@@ -158,7 +219,7 @@ def stats(
 
     r = _cli_get(url, headers, timeout=5)
     if r.status_code != 200:
-        # FIXED: previously there was no status check at all — a non-200
+        # Status must be checked explicitly: without it a non-200
         # response (e.g. an auth failure) still had `.json()` called on
         # it, which often succeeds and returns something like
         # {"detail": "..."}; `.get("daily", {})` on that silently
@@ -237,7 +298,7 @@ def resume(
         console.print(f"[yellow]No checkpoint found for session: {session_id}[/yellow]")
         raise typer.Exit(1)
     if r.status_code != 200:
-        # FIXED: previously ONLY 404 was special-cased — any OTHER
+        # Every status needs handling, not just 404: any OTHER
         # failure status (401, 500, ...) fell through to `data =
         # r.json()` and then `data["resume_context"]`, which raised a
         # raw KeyError on that response's different body shape instead

@@ -5,7 +5,7 @@ any error message is logged, or any message is sent to ANY LLM provider
 (including the cheap background-extraction provider, not just the main
 chat provider).
 
-SECURITY NOTE (fixed): previously, only `_call_provider()` in api/app.py
+SECURITY NOTE: it is NOT enough for only `_call_provider()` in api/app.py
 called redact_messages() on its own local copy of `messages`. The
 background graph-extraction path (HybridExtractor → cheap LLM provider
 such as haiku/gpt-4o-mini/deepseek) received `raw_messages` directly,
@@ -90,7 +90,7 @@ def _redact_content(content):
     """
     Redact secrets from message content of any shape.
 
-    Previously this assumed `content` was always a `str` and called
+    `content` must not be assumed to always be a `str` calling
     `redact()` directly on it. Two real failure modes existed:
       1. content=None (common for tool-call-only messages) → re.sub on
          None raises TypeError, which would have bubbled up as a 500 on

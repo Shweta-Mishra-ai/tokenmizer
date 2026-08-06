@@ -1,0 +1,59 @@
+{
+  "id": "real_audit_tokenizer",
+  "origin": "real",
+  "domain": "audit/infra",
+  "notes": "Condensed from the 0.4.1 tokenizer work. A production outage class traced to a dependency's lazy network fetch.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "21 percent of the test suite fails here. Why?"
+    },
+    {
+      "role": "assistant",
+      "content": "All of them trace to one cause: tiktoken downloads its BPE vocabulary from a CDN on first use, and this sandbox has no egress. The failure is a ProxyError."
+    },
+    {
+      "role": "user",
+      "content": "is that only a test problem"
+    },
+    {
+      "role": "assistant",
+      "content": "No. _get_encoding in core/tokenizer.py catches only ImportError, so the network error propagates out of count_messages_tokens, which is on the hot path of every request. Every request returns 500 on an air-gapped host."
+    },
+    {
+      "role": "user",
+      "content": "there's a fallback isn't there"
+    },
+    {
+      "role": "assistant",
+      "content": "There is a char/4 fallback but it is unreachable — it only runs when tiktoken is absent entirely. Decided: catch broadly and cache the failure so it is not retried per request."
+    },
+    {
+      "role": "user",
+      "content": "and in production?"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: pre-download the vocabulary at image build time with TIKTOKEN_CACHE_DIR. Updated the Dockerfile. Working on a CI step that runs the image with the network removed to prove the bake worked."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [],
+    "pending_tasks": [
+      "a CI step that runs the image with the network removed"
+    ],
+    "decisions": [
+      "catch broadly and cache the failure",
+      "pre-download the vocabulary at image build time"
+    ],
+    "files": [
+      "core/tokenizer.py",
+      "Dockerfile"
+    ],
+    "errors": [
+      "ProxyError",
+      "Every request returns 500",
+      "char/4 fallback but it is unreachable"
+    ]
+  }
+}

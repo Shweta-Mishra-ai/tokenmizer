@@ -1,17 +1,17 @@
 """
 Provider adapters for all supported LLMs.
 
-Fixed in this version:
-- Gemini: full conversation history passed (not just last message)
-- Gemini: proper async (not run_in_executor)
-- asyncio.get_event_loop() → asyncio.get_running_loop()
-- Lazy imports — no SDK required at import time
-- Normalized ProviderError across all providers
+Invariants every adapter upholds:
+- Gemini receives the full conversation history, not just the last message
+- Native async throughout — no run_in_executor wrappers
+- SDK imports are lazy, so no provider SDK is required at import time
+- Failures are normalized to ProviderError, with `retryable` set honestly
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -34,6 +34,38 @@ def _sampling(kwargs: dict) -> dict:
 
 def _as_stop_list(stop) -> list[str]:
     return [stop] if isinstance(stop, str) else list(stop)
+
+
+# Retryable-error detection for OpenAI-compatible providers.
+#
+# Do NOT reduce this to substring matching on the error text: "rate"
+# appears inside "generate" and "moderate", so "Failed to generate
+# completion" reads as retryable and costs the caller 1+2+4s of retries
+# before the same permanent error comes back. The SDK's typed exceptions
+# are authoritative; word-boundary matching is only the fallback for
+# when the type is unavailable.
+_RETRYABLE_TEXT = re.compile(
+    r"\b(rate[ _-]?limit|too many requests|timed?[ _-]?out|timeout|"
+    r"overloaded|unavailable|internal server error|bad gateway|"
+    r"service unavailable)\b",
+    re.IGNORECASE,
+)
+
+
+def _openai_error_is_retryable(exc: Exception) -> bool:
+    """True if an OpenAI-compatible SDK error is worth retrying."""
+    try:
+        import openai
+        if isinstance(exc, (openai.RateLimitError, openai.APITimeoutError,
+                            openai.APIConnectionError, openai.InternalServerError)):
+            return True
+        if isinstance(exc, openai.APIStatusError):
+            return exc.status_code in (408, 429, 500, 502, 503, 504)
+        if isinstance(exc, openai.APIError):
+            return False   # typed, and not one of the retryable kinds
+    except Exception:
+        pass  # SDK missing or shaped differently — fall through to text
+    return bool(_RETRYABLE_TEXT.search(str(exc)))
 
 
 # ── Response dataclass ────────────────────────────────────────────────────────
@@ -123,6 +155,34 @@ class BaseProvider(ABC):
         )
 
 
+# Anthropic will not cache a prefix shorter than a per-model minimum and
+# silently ignores cache_control below it, so these thresholds must stay
+# in TOKENS and at or above the real minimums. Setting them lower (an
+# earlier version used 800 CHARACTERS) attaches cache_control to prompts
+# that can never be cached, and prompt caching silently never engages.
+_CACHE_MIN_TOKENS_DEFAULT = 1024
+_CACHE_MIN_TOKENS_HAIKU = 2048
+
+
+def _anthropic_system_param(system_text: str, model: str):
+    """Build the `system` parameter, marking it cacheable only when it is
+    actually long enough for Anthropic to cache.
+
+    Returns a plain string when the prefix is too short (no point paying
+    the structured-block overhead) and a single cache-controlled text
+    block when it is long enough to earn the discount.
+    """
+    minimum = (_CACHE_MIN_TOKENS_HAIKU if "haiku" in (model or "").lower()
+               else _CACHE_MIN_TOKENS_DEFAULT)
+    if count_tokens(system_text, model) < minimum:
+        return system_text
+    return [{
+        "type": "text",
+        "text": system_text,
+        "cache_control": {"type": "ephemeral"},
+    }]
+
+
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 
 class AnthropicProvider(BaseProvider):
@@ -151,18 +211,7 @@ class AnthropicProvider(BaseProvider):
             if "stop" in kwargs_clean:
                 kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
             if system_text:
-                # Anthropic prompt caching — system prompts >200 tokens cached at 90% discount
-                # on repeated calls. Cache persists for 5 minutes.
-                if len(system_text) > 800:  # ~200 tokens
-                    kwargs_clean["system"] = [
-                        {
-                            "type": "text",
-                            "text": system_text,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ]
-                else:
-                    kwargs_clean["system"] = system_text
+                kwargs_clean["system"] = _anthropic_system_param(system_text, model)
 
             if stream:
                 full_text = ""
@@ -212,7 +261,12 @@ class AnthropicProvider(BaseProvider):
         if "stop" in kwargs_clean:
             kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
         if sys_parts:
-            kwargs_clean["system"] = "\n\n".join(sys_parts)
+            # Same cacheability rule as the non-streaming path — this used
+            # to pass a bare string, so streaming requests never got prompt
+            # caching even when the prefix was long enough to qualify.
+            kwargs_clean["system"] = _anthropic_system_param(
+                "\n\n".join(sys_parts), model
+            )
 
         try:
             async with client.messages.stream(
@@ -279,9 +333,8 @@ class OpenAIProvider(BaseProvider):
                 finish_reason=choice.finish_reason or "stop",
             )
         except Exception as e:
-            err = str(e).lower()
-            retryable = "rate" in err or "server" in err or "timeout" in err
-            raise ProviderError("openai", "api_error", str(e), retryable=retryable)
+            raise ProviderError("openai", "api_error", str(e),
+                                retryable=_openai_error_is_retryable(e))
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -309,10 +362,9 @@ class OpenAIProvider(BaseProvider):
                 if delta:
                     yield delta
         except Exception as e:
-            err = str(e).lower()
-            retryable = "rate" in err or "server" in err or "timeout" in err
             raise ProviderError(self.__class__.__name__.lower().replace("provider", ""),
-                                "api_error", str(e), retryable=retryable)
+                                "api_error", str(e),
+                                retryable=_openai_error_is_retryable(e))
 
 
 # ── DeepSeek ──────────────────────────────────────────────────────────────────
@@ -387,7 +439,7 @@ class CohereProvider(BaseProvider):
             raise ProviderError("cohere", "api_error", str(e), retryable="rate" in str(e).lower())
 
 
-# ── Gemini — FIXED ─────────────────────────────────────────────────────────────
+# ── Gemini ───────────────────────────────────────────────────────────────────
 
 class GeminiProvider(BaseProvider):
     """
@@ -538,11 +590,49 @@ class OllamaProvider(BaseProvider):
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
+# Model-name prefixes that identify which provider a model belongs to.
+# Used only to warn about an obvious provider/model mismatch.
+_MODEL_FAMILY_HINTS = {
+    "claude": ("anthropic", "claude"),
+    "gpt-": ("openai", "gpt"),
+    "o1-": ("openai", "gpt"),
+    "gemini": ("gemini",),
+    "deepseek": ("deepseek",),
+    "mistral": ("mistral",),
+    "grok": ("grok",),
+    "command-r": ("cohere",),
+}
+
+
+def _warn_on_model_provider_mismatch(provider: str, model: str) -> None:
+    """Warn when default_model clearly belongs to a different provider.
+
+    `default_model` defaults to a Claude model, so switching only
+    `provider` to openai (a one-line change, and the obvious one to make)
+    sent "claude-sonnet-4-6" to the OpenAI API and produced an opaque
+    model-not-found error from the SDK with nothing pointing at the
+    actual cause. The `model or "<default>"` fallbacks in the registry
+    below never help, because default_model is never empty.
+    """
+    m = (model or "").lower()
+    for prefix, owners in _MODEL_FAMILY_HINTS.items():
+        if m.startswith(prefix) and provider not in owners:
+            logger.warning(
+                "default_model=%r looks like a %s model, but provider=%r. "
+                "The request will be sent to %s and will most likely fail "
+                "with an unknown-model error — set default_model to one of "
+                "%s's models.",
+                model, owners[0], provider, provider, provider,
+            )
+            return
+
+
 def build_provider(settings) -> BaseProvider:
     """Build the correct provider from settings."""
     provider = settings.provider.lower()
     key = settings.get_api_key_for_provider(provider)
     model = settings.default_model
+    _warn_on_model_provider_mismatch(provider, model)
 
     mapping = {
         "anthropic": lambda: AnthropicProvider(key, model),

@@ -1,0 +1,254 @@
+"""
+Cross-process advisory file lock.
+
+WHY THIS EXISTS
+---------------
+Session state is guarded in-process by an asyncio.Lock, which does
+nothing across process boundaries. Two uvicorn workers (or a worker and
+the CLI, or a worker and a cron job) holding the same session each keep
+their own GraphMemory instance, and each writes what IT believes the
+graph contains.
+
+Per-row storage already stopped that from being catastrophic — disjoint
+node additions merge instead of one writer's blob replacing the other's.
+What it does not fix is staleness:
+
+    worker A loads a session (100 nodes)
+    worker B loads the same session (100 nodes)
+    worker A prunes it to 50 and persists      -> 50 rows on disk
+    worker B adds one node and persists        -> its 100 nodes come back
+
+B is not misbehaving; it is faithfully writing the state it holds. The
+only fix is to make read-modify-write atomic across processes, which
+needs a lock the OS enforces, not one the interpreter does.
+
+SCOPE AND LIMITS
+----------------
+- Advisory, and POSIX-record-lock based (`fcntl.flock`) on Unix,
+  `msvcrt.locking` on Windows. Both are per-file and released
+  automatically if the holding process dies, which matters: a crashed
+  worker must not wedge a session forever.
+- The lock file lives next to the database, one per session, so two
+  sessions never contend with each other.
+- flock semantics on NFS are unreliable. A storage_dir on NFS is not
+  supported for multi-process use; this is documented rather than
+  silently depended upon.
+- This orders writers. It does not make analytics, the rate limiter or
+  the semantic cache cross-process — those remain per-process.
+"""
+from __future__ import annotations
+
+import errno
+import logging
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+try:  # POSIX
+    import fcntl
+    _HAVE_FCNTL = True
+except ImportError:  # pragma: no cover — Windows
+    fcntl = None  # type: ignore[assignment]
+    _HAVE_FCNTL = False
+
+try:  # Windows
+    import msvcrt
+    _HAVE_MSVCRT = True
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
+    _HAVE_MSVCRT = False
+
+
+class LockUnavailable(Exception):
+    """The lock could not be acquired within the timeout."""
+
+
+def _safe_name(session_id: str) -> str:
+    """Filesystem-safe lock filename for a session.
+
+    session_id is client-supplied, so it can contain path separators,
+    NULs, or be long enough to blow the filename limit. Anything outside
+    a conservative allowlist is replaced, and a hash suffix keeps two
+    different ids from colliding onto one lock file after sanitising
+    (which would make two unrelated sessions block each other).
+    """
+    import hashlib
+    cleaned = "".join(c if (c.isalnum() or c in "-_") else "_" for c in session_id)[:64]
+    digest = hashlib.sha256(session_id.encode()).hexdigest()[:12]
+    return f"{cleaned}.{digest}.lock"
+
+
+@contextmanager
+def session_lock(storage_dir, session_id: str, timeout: float = 10.0):
+    """Hold an exclusive cross-process lock for `session_id`.
+
+    Raises LockUnavailable if it cannot be acquired within `timeout`.
+    Callers treat that as "do not write" rather than "write anyway" —
+    proceeding without the lock is precisely the corruption this exists
+    to prevent.
+
+    If neither locking primitive is available (an unusual platform), the
+    lock degrades to a no-op and logs once, because failing every write
+    on such a platform would be worse than the single-process behaviour
+    that shipped before this existed.
+    """
+    lock_dir = Path(storage_dir) / ".locks"
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / _safe_name(session_id)
+        fh = open(lock_path, "a+b")
+    except OSError as e:
+        logger.warning(
+            "Could not open lock file for session %s (%s) — proceeding "
+            "without cross-process locking for this write.", session_id, e
+        )
+        yield False
+        return
+
+    acquired = False
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if _HAVE_FCNTL:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif _HAVE_MSVCRT:  # pragma: no cover — Windows
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:  # pragma: no cover — neither primitive
+                    logger.warning(
+                        "No file-locking primitive on this platform; "
+                        "multi-process writes are NOT serialised."
+                    )
+                    yield False
+                    return
+                acquired = True
+                break
+            except OSError as e:
+                if e.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise LockUnavailable(
+                        f"Could not acquire the write lock for session "
+                        f"{session_id!r} within {timeout}s — another process "
+                        f"is holding it."
+                    ) from e
+                time.sleep(0.05)
+
+        yield True
+    finally:
+        if acquired:
+            try:
+                if _HAVE_FCNTL:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                elif _HAVE_MSVCRT:  # pragma: no cover — Windows
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError as e:
+                logger.error("Failed to release lock for %s: %s", session_id, e)
+        try:
+            fh.close()
+        except OSError:
+            pass
+
+
+def lock_files_in(storage_dir) -> list:
+    """Lock files present in a storage dir. Diagnostic helper only —
+    the presence of a file says nothing about whether it is held, since
+    the OS releases the lock when a process exits without deleting it."""
+    d = Path(storage_dir) / ".locks"
+    return sorted(d.glob("*.lock")) if d.exists() else []
+
+
+# Lock files are never deleted on release, so `.locks/` gains one empty
+# file per session touched, forever. Each is 0 bytes, but a long-lived
+# deployment with many sessions still accumulates inodes without bound.
+STALE_LOCK_AGE_SECONDS = 30 * 86_400
+
+
+def sweep_stale_locks(storage_dir, max_age: float = STALE_LOCK_AGE_SECONDS) -> int:
+    """Delete lock files untouched for `max_age`. Returns the count removed.
+
+    Only files we can acquire exclusively are removed, so a lock being
+    actively held is never deleted.
+
+    Residual race, stated rather than hidden: another process could have
+    the file OPEN and be blocked waiting for the lock at the moment we
+    unlink it. It would then acquire a lock on an unlinked inode while a
+    later process creates a fresh file and locks that — two writers each
+    believing they hold the session. The 30-day threshold is what makes
+    this acceptable: a session untouched for a month having a concurrent
+    writer at that exact instant is vanishingly unlikely, and the
+    consequence is one interleaved write, not corruption. Do not lower
+    the threshold without replacing this with byte-range locking on a
+    single file, which avoids the problem entirely.
+    """
+    lock_dir = Path(storage_dir) / ".locks"
+    if not lock_dir.exists():
+        return 0
+
+    cutoff = time.time() - max_age
+    removed = 0
+    for path in lock_dir.glob("*.lock"):
+        try:
+            if path.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        # POSIX and Windows differ on whether an open file can be deleted,
+        # and the difference is not cosmetic here.
+        #
+        # POSIX: unlink while still holding the lock. The directory entry
+        # goes immediately and the inode dies when we close, so no other
+        # process can acquire the file between our test and our delete.
+        #
+        # Windows: DeleteFile on an open handle fails with a sharing
+        # violation, so the lock must be released and the handle closed
+        # BEFORE unlinking. That opens a window where another process can
+        # take the lock on a file we are about to remove — the same
+        # residual race documented above, which the 30-day threshold is
+        # what makes acceptable. Deleting while open is not an option:
+        # it raised PermissionError, the sweep removed nothing, and lock
+        # files grew without bound on every Windows deployment.
+        try:
+            fh = open(path, "a+b")
+        except OSError as e:
+            logger.debug("Could not open lock file %s: %s", path, e)
+            continue
+        try:
+            try:
+                if _HAVE_FCNTL:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif _HAVE_MSVCRT:  # pragma: no cover — Windows
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:  # pragma: no cover
+                    return removed
+            except OSError:
+                continue  # held right now — leave it alone
+
+            if _HAVE_FCNTL:
+                path.unlink(missing_ok=True)
+                removed += 1
+                continue
+
+            # Windows: release, then delete after the handle is closed.
+            try:  # pragma: no cover — Windows
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        finally:
+            fh.close()
+
+        try:  # pragma: no cover — Windows
+            path.unlink(missing_ok=True)
+            removed += 1
+        except OSError as e:
+            logger.debug("Could not sweep lock file %s: %s", path, e)
+
+    if removed:
+        logger.info("Swept %d stale lock file(s) from %s", removed, lock_dir)
+    return removed
+
+
+__all__ = ["session_lock", "LockUnavailable", "lock_files_in", "sweep_stale_locks"]

@@ -57,7 +57,7 @@ def run():
     print()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        g = GraphMemory(storage_dir=tmpdir)
+        g = GraphMemory("graph-retrieval-benchmark", storage_dir=tmpdir)
         g.extract_from_messages(SYNTHETIC_SESSION)
 
         nodes = list(g._nodes.values())

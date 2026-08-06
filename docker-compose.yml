@@ -1,4 +1,18 @@
-version: "3.9"
+# NOTE ON REDIS (removed):
+# This file used to run a Redis container, gate startup on its health
+# check, persist a redis_data volume, and set TOKENMIZER_STATE_BACKEND=redis
+# — presenting Redis as the production state backend. It was not one.
+# tokenmizer/state/backend.py has no callers anywhere in the codebase:
+# get_state_backend() is never invoked, so not a single byte was ever
+# written to or read from Redis. The container was pure overhead, and the
+# compose file advertised horizontal-scaling readiness the code does not
+# have.
+#
+# All durable state (graph memory, checkpoints, session ownership) is
+# SQLite in the `checkpoints` volume, which is why this stack runs ONE
+# worker (see the Dockerfile CMD). Redis will come back when the state
+# backend actually has callers and graph persistence is multi-process
+# safe — tracked as issue #27.
 
 services:
   tokenmizer:
@@ -10,34 +24,20 @@ services:
       - TOKENMIZER_OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - TOKENMIZER_GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - TOKENMIZER_API_KEY=${TOKENMIZER_API_KEY:-}
-      - TOKENMIZER_STATE_BACKEND=redis
-      - TOKENMIZER_REDIS_URL=redis://redis:6379/0
       - TOKENMIZER_PROVIDER=${TOKENMIZER_PROVIDER:-anthropic}
       - TOKENMIZER_DEFAULT_MODEL=${TOKENMIZER_DEFAULT_MODEL:-claude-sonnet-4-6}
     volumes:
       - checkpoints:/app/checkpoints
-    depends_on:
-      redis:
-        condition: service_healthy
     restart: unless-stopped
+    # SIGTERM triggers the lifespan shutdown hook, which drains in-flight
+    # background extraction and flushes every cached graph to SQLite.
+    # Give it room to finish rather than losing the tail of each session.
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
 
-  redis:
-    image: redis:7-alpine
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    restart: unless-stopped
-
 volumes:
   checkpoints:
-  redis_data:

@@ -421,7 +421,7 @@ class JSONExtractor:
             try:
                 data = [json.loads(line) for line in lines[:1000]]
             except Exception as jsonl_err:
-                # FIXED: previously a bare `except Exception:` with no log
+                # Not a bare `except Exception:` with no log
                 # line at all — inconsistent with this file's other
                 # fallback paths (CSV parse failure, file-type sniff
                 # failure), which do log a warning. An operator watching
@@ -555,7 +555,7 @@ class PDFExtractor:
                 # Non-fatal: one corrupted page shouldn't block extracting
                 # the rest of the document. Logged (not silent) so a
                 # document with many failing pages is at least visible —
-                # previously this was a bare `except: pass`.
+                # Deliberately not a bare `except: pass`.
                 logger.debug(f"Failed to extract text from page {i} of {filename}: {e}")
                 page_texts.append("")
 
@@ -672,7 +672,7 @@ class ExcelExtractor:
                 strategy_used="install_hint", was_truncated=False,
             )
         except Exception as e:
-            # FIXED: previously this returned a degraded result with no
+            # Must not return a degraded result with no
             # server-side log line at all — the failure was visible only
             # to whoever read the API response's content/summary field,
             # not to an operator watching production logs.
@@ -877,19 +877,69 @@ class FileIntelligence:
                    f"{len(content_bytes):,} bytes, budget={token_budget})")
 
         if file_type == "csv":
-            return self._csv.extract(content_str, filename, token_budget)
+            result = self._csv.extract(content_str, filename, token_budget)
         elif file_type == "tsv":
-            return self._csv.extract(content_str, filename, token_budget, delimiter="\t")
+            result = self._csv.extract(content_str, filename, token_budget, delimiter="\t")
         elif file_type in ("json", "jsonl"):
-            return self._json.extract(content_str, filename, token_budget)
+            result = self._json.extract(content_str, filename, token_budget)
         elif file_type == "pdf":
-            return self._pdf.extract(content_bytes, filename, token_budget, query)
+            result = self._pdf.extract(content_bytes, filename, token_budget, query)
         elif file_type == "excel":
-            return self._excel.extract(content_bytes, filename, token_budget)
+            result = self._excel.extract(content_bytes, filename, token_budget)
         elif file_type == "code":
-            return self._text.extract(content_str, filename, token_budget, "code")
+            result = self._text.extract(content_str, filename, token_budget, "code")
         else:
-            return self._text.extract(content_str, filename, token_budget, "text")
+            result = self._text.extract(content_str, filename, token_budget, "text")
+
+        return self._enforce_budget(result, token_budget)
+
+    @staticmethod
+    def _enforce_budget(result: FileExtractionResult, token_budget: int) -> FileExtractionResult:
+        """Final guarantee that the returned content fits token_budget.
+
+        Each per-type extractor decides its own layout and sizes itself
+        against the budget independently, and the log and code paths
+        overshoot: they assemble a fixed set of sections (head lines, tail
+        lines, signatures) and only then measure. Measured overshoot was
+        ~5% at budget=200 and up to 5% at 500 — small per file, but
+        `token_budget` is the entire contract of this module (the
+        analyze_file MCP tool documents it as "Max tokens for the
+        summary"), and several files in one request compound it.
+
+        Enforcing it once here covers every strategy, including any added
+        later, instead of relying on each extractor to re-derive the
+        clamp correctly.
+        """
+        if token_budget <= 0 or result.extracted_tokens <= token_budget:
+            return result
+
+        # The trim marker is part of the returned content, so its own cost
+        # comes out of the budget — appending it after trimming to exactly
+        # the budget is what left the result marginally over.
+        marker = "\n… [trimmed to fit token budget]"
+        target = max(1, token_budget - count_tokens(marker))
+
+        # Trim by characters proportionally, then re-measure; the
+        # chars-per-token ratio varies by content, so re-check and shave
+        # again rather than trusting a single estimate.
+        content = result.content
+        for _ in range(6):
+            if count_tokens(content) <= target:
+                break
+            ratio = target / max(1, count_tokens(content))
+            keep = max(1, int(len(content) * ratio * 0.95))
+            content = content[:keep]
+        content = content.rstrip() + marker
+
+        actual = count_tokens(content)
+        result.content = content
+        result.extracted_tokens = actual
+        result.tokens_saved = max(0, result.original_tokens - actual)
+        result.savings_pct = round(
+            result.tokens_saved / max(1, result.original_tokens) * 100, 1
+        )
+        result.was_truncated = True
+        return result
 
     def process_message_files(
         self,
@@ -955,7 +1005,7 @@ class FileIntelligence:
         # Pattern: very long line-separated content (likely CSV/TSV)
         lines = content.split("\n")
         if len(lines) > 50:
-            # FIXED — real bug found via testing, not just theorized: the old
+            # the old
             # code sampled lines[:5] unconditionally and averaged comma counts
             # across them. Any prose preamble before the actual data (e.g. a
             # user typing "Analyze this data:" before pasting a CSV — an

@@ -13,10 +13,11 @@ run here — see TESTING.md for what to run on a machine with
 """
 import sys
 import traceback
+
 sys.path.insert(0, ".")
 
 from tokenmizer.compression.engine import CodeBlockGuard, CommentStripper
-from tokenmizer.security.redaction import redact, redact_messages, redact_node
+from tokenmizer.security.redaction import redact, redact_messages
 
 passed = 0
 failed = 0
@@ -345,8 +346,10 @@ print("invalidate_decision force=True regression (direct-mutation persist bug)")
 print("=" * 70)
 
 import tempfile as _tempfile
+
 from tokenmizer.graph_memory.graph import GraphMemory
-from tokenmizer.graph_memory.types import NodeType as _NodeTypeMod, NodeStatus as _NodeStatusMod
+from tokenmizer.graph_memory.types import NodeStatus as _NodeStatusMod
+from tokenmizer.graph_memory.types import NodeType as _NodeTypeMod
 
 _NodeType_DECISION = _NodeTypeMod.DECISION
 _NodeStatus_INVALIDATED = _NodeStatusMod.INVALIDATED

@@ -99,9 +99,13 @@ def main() -> int:
                                "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}})
         check("initialize returns serverInfo",
               r and r.get("result", {}).get("serverInfo", {}).get("name") == "tokenmizer")
-        check("initialize reports current version",
-              r.get("result", {}).get("serverInfo", {}).get("version") not in ("", "0.2.3"),
-              str(r.get("result", {}).get("serverInfo")))
+        # Compare against the package version, not a hardcoded sentinel:
+        # the old check asserted "not 0.2.3", which silently stopped
+        # meaning anything the moment 0.2.4 shipped.
+        from tokenmizer import __version__ as _pkg_version
+        check("initialize reports the package version",
+              r.get("result", {}).get("serverInfo", {}).get("version") == _pkg_version,
+              f"expected {_pkg_version}, got {r.get('result', {}).get('serverInfo')}")
         rpc("notifications/initialized", req_id=None)
 
         # 2. tools/list

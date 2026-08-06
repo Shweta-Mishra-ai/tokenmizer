@@ -2,16 +2,15 @@
 Unified storage interface.
 tokenmizer/storage/__init__.py
 
-Your friend correctly identified that graph, checkpoint, and state all have
-different persistence approaches with no shared interface.
-
-This module defines a single StorageBackend protocol that all of them satisfy,
-making the storage layer consistent and testable.
+STATUS: this defines a protocol, nothing imports it, and the classes
+below do not declare conformance to it. It documents an intended shape
+for the storage layer rather than enforcing one — do not read its
+presence as evidence that the storage layer is unified.
 
 Current implementations:
   GraphMemory       → SQLite  (tokenmizer/graph_memory/graph.py)
   CheckpointManager → SQLite  (tokenmizer/checkpoints/manager.py)
-  StateBackend      → Redis or InMemory (tokenmizer/state/backend.py)
+  StateBackend      → defined but UNUSED (tokenmizer/state/backend.py)
 
 All three now implement the same conceptual interface:
   get(key) → value | None

@@ -1,0 +1,69 @@
+{
+  "id": "real_audit_concurrency",
+  "origin": "real",
+  "domain": "audit/systems",
+  "notes": "Condensed from the cross-process-safety session. Includes a decision reversal after a test failure.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Multi-process writes still aren't safe. Fix it."
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: an OS-level advisory lock, fcntl on POSIX and msvcrt on Windows. Created graph_memory/filelock.py with one lock file per session."
+    },
+    {
+      "role": "user",
+      "content": "does a lock alone fix it?"
+    },
+    {
+      "role": "assistant",
+      "content": "No. A worker holding a pre-prune view still writes its stale node set back, reinstating rows another worker deleted. The lock has to wrap a read-modify-write, not just the write."
+    },
+    {
+      "role": "user",
+      "content": "so what does the reconcile do"
+    },
+    {
+      "role": "assistant",
+      "content": "Implemented _reconcile_with_disk in persistence.py. Under the lock it re-reads the stored row keys and adopts another process's deletions. Rows this instance created but never persisted are untouched."
+    },
+    {
+      "role": "user",
+      "content": "prove it"
+    },
+    {
+      "role": "assistant",
+      "content": "Completed: four OS processes writing one session, 100 of 100 nodes persisted, zero lost. The stale writer no longer resurrects a prune."
+    },
+    {
+      "role": "user",
+      "content": "anything left unsafe"
+    },
+    {
+      "role": "assistant",
+      "content": "Rate limiting, analytics and the semantic cache are still per-process, so limits apply per worker. Also flock is unreliable on NFS. Working on documenting both in the startup warning."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "graph_memory/filelock.py with one lock file per session",
+      "_reconcile_with_disk in persistence.py",
+      "four OS processes writing one session, 100 of 100 nodes persisted, zero lost"
+    ],
+    "pending_tasks": [
+      "documenting both in the startup warning"
+    ],
+    "decisions": [
+      "an OS-level advisory lock"
+    ],
+    "files": [
+      "graph_memory/filelock.py",
+      "persistence.py"
+    ],
+    "errors": [
+      "reinstating rows another worker deleted",
+      "flock is unreliable on NFS"
+    ]
+  }
+}

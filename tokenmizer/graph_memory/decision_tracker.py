@@ -175,7 +175,7 @@ def classify_topic(label: str, summary: str = "") -> Optional[str]:
     return ordered[0] if ordered else None
 
 
-# ── Slot extraction (TM-09) ───────────────────────────────────────────────────
+# ── Slot extraction  ───────────────────────────────────────────────────
 #
 # Topic-bucket overlap alone is too coarse to decide "this new decision
 # replaces that old one": "Use PostgreSQL for primary user data" and "Use
@@ -312,7 +312,7 @@ def find_contradicting_decisions(
     Only returns decisions that:
     1. Are currently COMPLETED (active)
     2. Cover the same topic bucket AND the same descriptive "slot" (see
-       _same_slot) — topic overlap alone is no longer sufficient (TM-09)
+       _same_slot) — topic overlap alone is not sufficient
     3. Are NOT the same decision (not a duplicate)
 
     Same-topic decisions that DON'T pass the slot check are not silently
@@ -444,8 +444,60 @@ def _find_by_word_overlap(
     return to_supersede
 
 
+def _names_competing_alternatives(label_a: str, label_b: str) -> bool:
+    """
+    True if both labels name a technology from the SAME topic bucket but
+    name DIFFERENT ones — i.e. they are competing alternatives for one
+    slot ("MySQL" vs "MongoDB" for the database), not two phrasings of
+    one decision.
+
+    This is the discriminating signal that flat word overlap destroys.
+    Two decisions in the same slot differ by exactly one word — the
+    technology name — which is the entire semantic content of the
+    decision. Every other word (use / for / the / user / database) is
+    shared scaffold. The longer and more natural the label, the higher
+    the overlap ratio, so `_is_same_decision`'s threshold alone gets
+    MORE wrong as labels get more descriptive:
+
+        "Use MySQL"                       vs "Use MongoDB"                        -> 0.50  (correctly distinct)
+        "Use MySQL for the user database" vs "Use MongoDB for the user database"  -> 0.83  (wrongly merged)
+
+    When this returns True the callers must NOT treat the pair as a
+    duplicate — the supersession path is what should handle it.
+    """
+    kw_a = _matched_topic_keywords(label_a, "")
+    kw_b = _matched_topic_keywords(label_b, "")
+    if not kw_a or not kw_b:
+        return False          # no tech vocabulary on one side — no signal
+
+    # Compare only the keywords each side has that the other does NOT.
+    # Shared keywords are usually the category word rather than the
+    # choice ("Use MySQL for the user *database*" and "Use MongoDB for
+    # the user *database*" both match the generic `database` keyword as
+    # well as their product name), so a plain intersection test reads
+    # every same-slot swap as a match and defeats the whole check.
+    exclusive_a = kw_a - kw_b
+    exclusive_b = kw_b - kw_a
+    if not exclusive_a or not exclusive_b:
+        # One side only refines the other ("Use PostgreSQL" ->
+        # "Use PostgreSQL 16 with pgvector"): same choice, more detail.
+        return False
+
+    topics_a = {_KEYWORD_TO_TOPIC[k] for k in exclusive_a if k in _KEYWORD_TO_TOPIC}
+    topics_b = {_KEYWORD_TO_TOPIC[k] for k in exclusive_b if k in _KEYWORD_TO_TOPIC}
+    return bool(topics_a & topics_b)
+
+
 def _is_same_decision(label_a: str, label_b: str) -> bool:
     """True if two labels are essentially the same decision (dedup check)."""
+
+    # Competing alternatives in one slot are never the same decision, no
+    # matter how much of the surrounding sentence they share. Checked
+    # before the overlap heuristics below precisely because those
+    # heuristics get this case backwards — see
+    # _names_competing_alternatives.
+    if _names_competing_alternatives(label_a, label_b):
+        return False
 
     def _norm(s: str) -> str:
         s = s.lower().rstrip(".,!?;:")

@@ -1,0 +1,77 @@
+{
+  "id": "go_microservice",
+  "origin": "synthetic",
+  "domain": "backend/go",
+  "notes": "Prose-heavy, few explicit markers. Stresses extraction from natural narration rather than 'Completed:' headers.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "I'm starting a Go microservice for order processing. Should talk gRPC to the inventory service."
+    },
+    {
+      "role": "assistant",
+      "content": "Set up the module and the gRPC scaffolding. I created cmd/server/main.go, internal/order/service.go and proto/order.proto."
+    },
+    {
+      "role": "user",
+      "content": "Let's use Postgres for orders. Keep it simple."
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: PostgreSQL for order storage. I've written internal/store/postgres.go with the connection pool."
+    },
+    {
+      "role": "user",
+      "content": "The integration test hangs forever"
+    },
+    {
+      "role": "assistant",
+      "content": "Found it — the gRPC client had no dial timeout, so it blocked indefinitely. Fixed by adding a 5 second context timeout in internal/order/client.go. Tests pass now."
+    },
+    {
+      "role": "user",
+      "content": "Add retries with backoff"
+    },
+    {
+      "role": "assistant",
+      "content": "Working on exponential backoff in internal/order/client.go. Using cenkalti/backoff for it."
+    },
+    {
+      "role": "user",
+      "content": "Actually drop that library, write it by hand, one less dependency"
+    },
+    {
+      "role": "assistant",
+      "content": "Switching from cenkalti/backoff to a hand-rolled retry loop. Removed the dependency from go.mod."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "gRPC scaffolding",
+      "connection pool",
+      "5 second context timeout",
+      "the dependency from go.mod"
+    ],
+    "pending_tasks": [
+      "exponential backoff"
+    ],
+    "decisions": [
+      "gRPC",
+      "PostgreSQL for order storage",
+      "cenkalti/backoff",
+      "hand-rolled retry loop"
+    ],
+    "files": [
+      "cmd/server/main.go",
+      "internal/order/service.go",
+      "proto/order.proto",
+      "internal/store/postgres.go",
+      "internal/order/client.go",
+      "go.mod"
+    ],
+    "errors": [
+      "integration test hangs",
+      "no dial timeout"
+    ]
+  }
+}

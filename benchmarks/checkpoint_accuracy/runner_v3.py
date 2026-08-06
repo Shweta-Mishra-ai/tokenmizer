@@ -47,7 +47,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tokenmizer.graph_memory.hybrid_extractor import HybridExtractor, ExtractedData
+from benchmarks.checkpoint_accuracy.runner_v2 import SESSIONS, _recall
+from tokenmizer.graph_memory.hybrid_extractor import ExtractedData, HybridExtractor
 
 
 def _out(msg: str) -> None:
@@ -56,8 +57,6 @@ def _out(msg: str) -> None:
         print(msg)
     except UnicodeEncodeError:
         print(msg.encode("ascii", "replace").decode("ascii"))
-from benchmarks.checkpoint_accuracy.runner_v2 import SESSIONS, _recall
-
 
 # ── Merge-logic fixtures ─────────────────────────────────────────────────────
 #

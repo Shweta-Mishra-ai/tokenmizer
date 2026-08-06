@@ -47,9 +47,30 @@ class NodeStatus(str, Enum):
     # silently guessing and marking one SUPERSEDED — destroying it from
     # resume context on possibly-wrong evidence — both sides are flagged
     # CONTESTED and surfaced together so a human or the LLM can resolve
-    # the ambiguity explicitly (see TM-09). Remains visible in query() and
+    # the ambiguity explicitly. Remains visible in query() and
     # to_context_block(), unlike SUPERSEDED/ARCHIVED/INVALIDATED.
     CONTESTED = "contested"
+
+
+# Statuses meaning "no longer the current state of the world".
+#
+# Single source of truth, because the three places that need this rule
+# had drifted apart: query() filtered them inline, add_node()'s dedup
+# path did not filter at all (so a SUPERSEDED node absorbed the very
+# decision that replaced it, and the replacement was silently lost), and
+# the resume builders in checkpoints/manager.py did not filter either
+# (so resume advertised superseded and invalidated decisions as current).
+# A node in one of these statuses must never be surfaced as a live fact
+# and must never absorb a new decision via dedup/merge.
+#
+# CONTESTED is deliberately absent: it means "two live decisions conflict
+# and a human should resolve it", which is still current information.
+INACTIVE_STATUSES: frozenset = frozenset({
+    NodeStatus.SUPERSEDED,
+    NodeStatus.MODIFIED,        # alias for SUPERSEDED
+    NodeStatus.INVALIDATED,
+    NodeStatus.ARCHIVED,
+})
 
 
 class EdgeType(str, Enum):
@@ -76,7 +97,7 @@ class MemoryNode:
     updated_at: float = field(default_factory=time.time)
     valid_from: float = field(default_factory=time.time)   # when this fact became true
     valid_until: float = field(default=0.0)                # 0.0 = currently valid
-    # FIXED (TM-07): apply_importance_decay() used to compute decay
+    # apply_importance_decay() must not compute decay
     # magnitude from age_days() (absolute age since updated_at) and
     # multiply it into the CURRENT importance every time it ran — but it
     # runs once per chat turn, and nothing recorded when decay was last

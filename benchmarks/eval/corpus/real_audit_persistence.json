@@ -1,0 +1,76 @@
+{
+  "id": "real_audit_persistence",
+  "origin": "real",
+  "domain": "audit/python",
+  "notes": "Condensed from the TokenMizer 0.4.2 storage-migration session. Long turns, mixed diagnosis and implementation, decisions justified by measurement.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Do a deep audit of the persistence layer and fix what you find."
+    },
+    {
+      "role": "assistant",
+      "content": "Found that graph_memory/persistence.py rewrites every node and edge as one JSON blob on every persist, once per chat turn. Cost is O(total graph) rather than O(changed)."
+    },
+    {
+      "role": "user",
+      "content": "that sounds bad for concurrency too"
+    },
+    {
+      "role": "assistant",
+      "content": "It is. Two processes holding one session each write the complete blob, so the later save discards everything the earlier one added. Decided: per-row storage, one row per node and per edge."
+    },
+    {
+      "role": "user",
+      "content": "how will you know which rows changed?"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: derive the diff from state rather than tracking a dirty set. Node state is mutated from at least six places and a site that forgot to register would silently never reach disk. Implemented _serialize_state in persistence.py comparing each row against the exact string last written."
+    },
+    {
+      "role": "user",
+      "content": "what about existing databases"
+    },
+    {
+      "role": "assistant",
+      "content": "Completed: per-session migration in persistence.py that reads the v1 blob and writes it out as rows. The v1 row is kept, not deleted, so a downgrade still finds its data."
+    },
+    {
+      "role": "user",
+      "content": "measure it"
+    },
+    {
+      "role": "assistant",
+      "content": "Created benchmarks/persistence/runner.py. Adding one node to a 151-node graph now writes 1 row instead of 151, and a turn that changes nothing writes 0 rows."
+    },
+    {
+      "role": "user",
+      "content": "any test broken?"
+    },
+    {
+      "role": "assistant",
+      "content": "One: tests/unit/test_graph_persistence.py reached into the v1 graphs table directly. Fixed by porting it to the v2 schema. All 496 tests pass."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "per-session migration in persistence.py",
+      "_serialize_state in persistence.py",
+      "porting it to the v2 schema"
+    ],
+    "pending_tasks": [],
+    "decisions": [
+      "per-row storage",
+      "derive the diff from state"
+    ],
+    "files": [
+      "graph_memory/persistence.py",
+      "benchmarks/persistence/runner.py",
+      "tests/unit/test_graph_persistence.py"
+    ],
+    "errors": [
+      "the later save discards everything the earlier one added"
+    ]
+  }
+}

@@ -46,6 +46,37 @@ _NOISE_PATTERNS = [
     re.compile(r"^https?://", re.IGNORECASE),       # URLs (not useful as labels)
 ]
 
+# ── Error vocabulary ──────────────────────────────────────────────────────────
+#
+# Kept in step with the symptom vocabulary in hybrid_extractor: a failure the
+# extractor is willing to emit should be a failure the validator recognises.
+# Where the two disagreed, the extractor found the error and the validator
+# silently dropped it ("corrupt header" scored 0.60 against a 0.65 threshold).
+
+_EXCEPTION_NAME = re.compile(r'\b[A-Z][A-Za-z0-9]*(?:Error|Exception|Fault)\b')
+
+# Build files with no extension — kept in step with hybrid_extractor's
+# _FILE_EXTENSIONLESS, so a file the extractor is willing to emit is one the
+# validator recognises as a filename.
+_EXTENSIONLESS_FILE = re.compile(
+    r'Dockerfile|Makefile|Procfile|Jenkinsfile|Gemfile|Rakefile|Vagrantfile|'
+    r'Brewfile|Justfile|Caddyfile|CODEOWNERS|MANIFEST\.in'
+)
+
+# Vulnerability classes are named by acronym far more often than described.
+_VULN_CLASS = re.compile(
+    r'\b(?:IDOR|XSS|CSRF|SSRF|RCE|SQLi|TOCTOU|OOM|CVE-\d{4}-\d+)\b'
+)
+
+_ERROR_TERMS = (
+    "error", "exception", "fail", "crash", "bug", "issue", "traceback",
+    "422", "500", "404", "timeout", "timed out", "timing out", "null",
+    "undefined", "corrupt", "malformed", "truncated", "deadlock", "race",
+    "leak", "segfault", "segmentation fault", "panic", "hang", "flaky",
+    "regression", "overflow", "locked", "denied", "refused", "unreachable",
+    "mismatch", "invalid", "collision", "out of memory", "not triggering",
+)
+
 # Generic single-word labels that carry no information about THIS project
 _GENERIC_SINGLE_WORDS = frozenset({
     "implement", "create", "update", "fix", "add", "remove", "delete",
@@ -95,32 +126,22 @@ class GraphValidator:
         source_role: "assistant" (default), "user", or None. Only "assistant"
         gets the small trust bonus below.
 
-        TM-29 background: add_node() used to never pass this through at all,
-        so every node got the assistant-trust bonus unconditionally,
-        regardless of whether a user or the assistant actually stated it —
-        including candidates extracted from a user's own message. The
-        default stays "assistant" here (rather than None/no-bonus) because
-        every node type's confidence scoring, and the 0.65 min_confidence
-        threshold itself, were empirically tuned assuming this bonus applies
-        — flipping the default to "no bonus by default" measurably regressed
-        acceptance for dependency/task/decision nodes with no source_role
-        wired at all yet, confirmed against this repo's own unit tests and
-        the memory-accuracy fixture (tests/memory_accuracy/test_retention.py)
-        before this was caught and reverted. See [[feedback_heuristic_tuning_needs_eval]]
-        for the standing rule this follows: don't flip a shared default whose
-        blast radius wasn't independently re-validated.
+        The default stays "assistant" rather than None/no-bonus on
+        purpose: every node type's confidence scoring and the 0.65
+        min_confidence threshold were tuned assuming the bonus applies.
+        Flipping the default to "no bonus" measurably regressed acceptance
+        for dependency/task/decision nodes that have no source_role wired
+        through yet — confirmed against the unit tests and the
+        memory-accuracy fixture (tests/memory_accuracy/test_retention.py).
+        Do not change it without re-validating that blast radius.
 
-        What's actually fixed: HybridExtractor._extract_one_message knows
-        the true role of the message each heuristic-extracted DECISION came
-        from (see hybrid_extractor.py and GraphMemory._apply_extracted) and
-        now threads it through explicitly — so a decision a USER stated no
-        longer silently gets the assistant bonus it shouldn't. Every other
-        node type, and LLM-synthesized decisions (no single-turn
-        attribution), still fall through to the "assistant" default
-        unchanged — extending real role-tracking to them is a separate,
-        larger effort (would require a broader ExtractedData schema change)
-        left for future work, not silently attempted here at the cost of a
-        confirmed recall regression.
+        Real attribution exists only for heuristic-extracted DECISIONS:
+        HybridExtractor._extract_one_message knows which message (and role)
+        each came from and threads it through, so a decision a USER stated
+        does not get the assistant bonus. Every other node type, and
+        LLM-synthesized decisions (no single-turn attribution), fall
+        through to the default. Extending real role-tracking to them needs
+        a broader ExtractedData schema change.
 
         extractor_confidence: the corroboration-based confidence computed by
         HybridExtractor.merge() (0.95 = both LLM and heuristic found it,
@@ -165,24 +186,12 @@ class GraphValidator:
 
         # Length signals: longer = more specific = higher confidence
         #
-        # NOTE (TM-29): this used to have a further `elif char_len > 40:
-        # confidence += 0.05` branch documented as "diminishing returns
-        # on very long labels" — but it was checked AFTER `elif char_len
-        # > 20`, and every label over 40 chars is also over 20, so that
-        # branch could never be reached; every long label has always
-        # gotten the flat +0.10 in practice. Making the diminishing-
-        # returns behavior actually fire (checking the longer threshold
-        # first) measurably REDUCED task-extraction recall against this
-        # repo's own memory-accuracy fixture — several legitimately
-        # long, specific task labels lost enough confidence to fall
-        # below the acceptance threshold. Since that recall regression
-        # is concrete and immediate while "diminishing returns" was never
-        # validated behavior to begin with (it never ran), the dead
-        # branch is removed rather than activated: every label over 20
-        # chars gets a flat +0.10, which is what has actually been
-        # shipping. Revisit with a real precision/recall evaluation
-        # harness (see audit roadmap) before reintroducing length-based
-        # diminishing returns.
+        # Every label over 20 chars gets a flat +0.10. Do NOT add a
+        # length-based diminishing-returns tier here without a real
+        # precision/recall harness: introducing one measurably reduced
+        # task-extraction recall against the memory-accuracy fixture,
+        # because several legitimately long, specific task labels lost
+        # enough confidence to fall under the acceptance threshold.
         char_len = len(label)
         if char_len < 8:
             confidence -= 0.20
@@ -221,7 +230,8 @@ class GraphValidator:
             confidence += 0.08
 
         # Source role: assistant claims are generally more reliable than user
-        # ones — but only applied when actually known (see TM-29 note above).
+        # ones — but only applied when actually known (see the
+        # source_role note in validate()'s docstring).
         if source_role == "assistant":
             confidence += 0.05
 
@@ -253,6 +263,11 @@ class GraphValidator:
 
     def _score_file(self, label: str, base: float) -> float:
         # File paths are high confidence if they have an extension or /
+        looks_like_a_path = bool(
+            re.search(r'\.[a-z]{1,5}$', label, re.IGNORECASE)
+            or "/" in label or "\\" in label
+            or _EXTENSIONLESS_FILE.fullmatch(label)
+        )
         if re.search(r'\.[a-z]{1,5}$', label, re.IGNORECASE):
             base += 0.25
         if "/" in label or "\\" in label:
@@ -260,6 +275,14 @@ class GraphValidator:
         # Common filename words
         if any(w in label.lower() for w in ["main", "app", "config", "test", "model", "route", "api"]):
             base += 0.05
+        # Short filenames are the UNAMBIGUOUS ones, and the generic
+        # length/word-count penalties in validate() were rejecting exactly
+        # those: `go.mod` scored 0.50 and `Dockerfile` 0.40 against a 0.65
+        # threshold, while the longer `internal/store/postgres.go` sailed
+        # through. Anything that is recognisably a filename clears the bar on
+        # that evidence rather than on how many characters it happens to have.
+        if looks_like_a_path:
+            return max(base, 0.65)
         return base
 
     def _score_decision(self, label: str, summary: str, base: float) -> float:
@@ -292,9 +315,16 @@ class GraphValidator:
         return base
 
     def _score_error(self, label: str, base: float) -> float:
-        error_terms = ["error", "exception", "fail", "crash", "bug", "issue",
-                       "traceback", "422", "500", "404", "timeout", "null", "undefined"]
-        if any(t in label.lower() for t in error_terms):
+        # A named exception class or vulnerability class IS the error, and is
+        # the most precise form an error label can take. The generic
+        # length/word-count penalties in validate() assume prose labels and
+        # punish exactly that form: "ProxyError" scored 0.55 and was rejected,
+        # while the vaguer "500 on an air-gapped host" scored 0.90. Give
+        # identifier-shaped errors a floor that clears the threshold on their
+        # own evidence rather than on sentence length.
+        if _EXCEPTION_NAME.search(label) or _VULN_CLASS.search(label):
+            return max(base + 0.15, 0.65)
+        if any(t in label.lower() for t in _ERROR_TERMS):
             base += 0.15
         return base
 
@@ -332,9 +362,21 @@ class GraphValidator:
     _DEP_PATTERN = re.compile(r'^[a-z][a-z0-9\-_]+(==|>=|<=|~=|>|<)\d', re.IGNORECASE)
     _URL_PATTERN = re.compile(r'^(GET|POST|PUT|DELETE|PATCH)\s+/')
 
+    # A label is "essentially a path" when the path IS the label, not
+    # merely its tail. Without this bound, `_FILE_PATTERN` (which anchors
+    # on the end of the string) retyped any task or decision that happened
+    # to finish with a filename — "User model in api/models.py" became a
+    # FILE node, so it vanished from completed tasks and showed up as a
+    # spurious file. Measured on the eval corpus, this alone cost several
+    # points of task recall and of file precision.
+    _MAX_PATH_LABEL_WORDS = 2
+
     def _check_type_mismatch(self, label: str, node_type: str) -> Optional[str]:
         """Return corrected type if we detect a mismatch, else None."""
-        if node_type != "file" and self._FILE_PATTERN.search(label) and "/" in label:
+        if (node_type != "file"
+                and self._FILE_PATTERN.search(label)
+                and "/" in label
+                and len(label.split()) <= self._MAX_PATH_LABEL_WORDS):
             return "file"
         if node_type != "dependency" and self._DEP_PATTERN.match(label):
             return "dependency"
@@ -350,12 +392,10 @@ _validator: Optional[GraphValidator] = None
 
 def get_validator(min_confidence: float | None = None) -> GraphValidator:
     """
-    FIXED (TM-29): an explicit min_confidence used to overwrite the
-    module-level singleton permanently — one caller passing an override
-    changed behavior for every OTHER caller that just calls
-    get_validator() with no arguments, for the rest of the process
-    lifetime. An explicit override is scoped to the caller now: it
-    returns a fresh instance WITHOUT touching the shared singleton.
+    An explicit min_confidence returns a FRESH instance and must never
+    touch the module-level singleton: overwriting it would change
+    behaviour for every other caller that passes no argument, for the
+    rest of the process lifetime.
     """
     if min_confidence is not None:
         return GraphValidator(min_confidence=min_confidence)

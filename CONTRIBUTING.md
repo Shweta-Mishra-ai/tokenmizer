@@ -14,6 +14,7 @@ needed to get a change from idea to merged PR.
 - [Commit Convention](#commit-convention)
 - [Pull Request Process](#pull-request-process)
 - [Running Tests](#running-tests)
+- [Improving extraction](#improving-extraction)
 - [Good First Issues](#good-first-issues)
 
 ---
@@ -37,11 +38,15 @@ needed to get a change from idea to merged PR.
 
 This reflects the actual current layout — verify against `find tokenmizer -name "*.py"`
 before trusting a stale copy of this section. Two things worth knowing up
-front: `tokenmizer/agents/` is an empty package (a placeholder, not active
-code), and `tokenmizer/storage/__init__.py` documents a `StorageBackend`
-protocol that `GraphMemory`, `CheckpointManager`, and the state backend are
-each *conceptually* consistent with, but none of them formally implement —
-don't assume a shared interface exists at the type level.
+front. Three things are placeholders rather than working code, and are
+labelled as such in their own modules so nobody wires against them by
+mistake:
+
+| Path | Reality |
+|---|---|
+| `tokenmizer/agents/` | Empty package. No code. |
+| `tokenmizer/storage/__init__.py` | Documents a `StorageBackend` protocol nothing imports or formally implements. Do not assume a shared interface exists at the type level. |
+| `tokenmizer/state/backend.py` | Has **no callers**. `state_backend: redis` is accepted by config and changes nothing. |
 
 ```
 tokenmizer/
@@ -55,8 +60,9 @@ tokenmizer/
 │   ├── cli.py                    # `tokenmizer` command: serve, stats, checkpoint, resume
 │   │
 │   ├── api/
-│   │   ├── app.py                # FastAPI app — /v1/chat/completions + session/graph/reasoning endpoints
-│   │   └── rate_limiter.py       # Per-session token-bucket rate limiting
+│   │   ├── app.py                # FastAPI app — /v1/chat/completions, pipeline, durability
+│   │   ├── routes_graph.py       # Session/graph/checkpoint/reasoning endpoints
+│   │   └── rate_limiter.py       # Per-client token-bucket rate limiting
 │   │
 │   ├── config/
 │   │   └── settings.py           # pydantic-settings — TOKENMIZER_* env prefix, tokenmizer.yaml backing
@@ -82,13 +88,18 @@ tokenmizer/
 │   │   ├── validator.py           # Confidence scoring and hard-reject rules for candidate nodes
 │   │   ├── ontology.py            # Machine-readable node/edge semantics + status state machine
 │   │   ├── reasoning.py           # why() / impact() / decision_history() / consistency_check()
+│   │   ├── persistence.py         # Per-row SQLite storage (schema v2) + v1 migration
+│   │   ├── filelock.py            # Cross-process advisory lock for session writes
+│   │   ├── pruning.py             # Importance decay + node-count cap
+│   │   ├── context_block.py       # Tiered, token-budgeted resume context
+│   │   ├── helpers.py             # Content flattening, trigger/evidence inference
 │   │   └── visualization.py       # Self-contained interactive HTML graph export
 │   │
 │   ├── checkpoints/
 │   │   └── manager.py             # Checkpoint create/save/load, tiered resume blocks
 │   │
 │   ├── state/
-│   │   └── backend.py             # Redis or in-memory session state
+│   │   └── backend.py             # UNUSED — no callers; see the module docstring
 │   │
 │   ├── semantic_cache/
 │   │   └── cache.py               # Embedding-similarity response cache
@@ -98,6 +109,7 @@ tokenmizer/
 │   │
 │   ├── security/
 │   │   ├── auth.py                 # API key verification (fail-closed on config error)
+│   │   ├── ownership.py            # Session ownership — who may read/modify a session
 │   │   ├── middleware.py           # Prompt-injection keyword filter (best-effort — see SECURITY.md)
 │   │   └── redaction.py             # Secret/PII pattern redaction
 │   │
@@ -114,8 +126,13 @@ tokenmizer/
 │       └── __init__.py              # StorageBackend protocol (documentation-level, not enforced — see note above)
 │
 ├── scripts/                      # mcp_e2e_check.py, gen_demo_gif.py, setup/install helpers
-├── benchmarks/                   # checkpoint_accuracy/, graph_retrieval/, latency/
-└── tests/                        # 19 files — see TESTING.md for what's covered and how
+├── benchmarks/
+│   ├── eval/                     # extraction P/R/F1 harness + labelled corpus
+│   ├── checkpoint_accuracy/      # graph vs summary baseline
+│   ├── graph_retrieval/          # category recall
+│   ├── persistence/              # write amplification + concurrency
+│   └── latency/                  # end-to-end proxy latency (needs a running server)
+└── tests/                        # 42 files — see TESTING.md for what's covered and how
 ```
 
 ---
@@ -124,7 +141,8 @@ tokenmizer/
 
 ### Prerequisites
 
-- Python 3.10+ (CI matrix covers 3.10, 3.11, 3.12 on Linux, 3.12 on Windows)
+- Python 3.10+ (CI matrix: 3.10, 3.11, 3.12 and 3.13 on Linux, plus 3.12
+  on Windows — every version claimed in the pyproject classifiers)
 - A provider API key (Anthropic, OpenAI, etc.) for anything that exercises
   the LLM extraction pass — heuristic-only extraction and most of the
   graph/checkpoint/MCP tests need no key at all
@@ -294,12 +312,108 @@ pytest tests/unit/test_decision_tracker.py -v   # a single module
 pytest tests/memory_accuracy/ -v                # extraction-accuracy regression
 python scripts/mcp_e2e_check.py                 # MCP stdio transport, end to end
 pytest tests/ --cov=tokenmizer --cov-report=term-missing   # coverage report (no enforced floor)
+
+### Changing extraction
+
+Extraction changes must be measured, not eyeballed:
+
+```bash
+python -m benchmarks.eval              # precision / recall / F1 per category
+python -m benchmarks.eval --errors     # every miss and false positive, by session
+python -m benchmarks.eval --sweep      # how strict is "found"?
+```
+
+`tests/unit/test_extraction_quality.py` holds F1 floors that fail the
+build on a regression. If your change moves a number the wrong way, say
+so in the PR with the before/after table — a trade is fine, an unnoticed
+regression is not.
+
+Tuning a constant? Sweep it and put the table in the code comment, as
+`_MIN_CLAUSE_CHARS` does. The point is that the next person can disagree
+with the trade-off rather than with a magic number.
+
+**Adding corpus sessions is one of the most useful contributions
+available.** The committed corpus is 8 hand-written synthetic sessions;
+it is the weakest part of every extraction claim this project makes.
+Format and rules are documented in `benchmarks/eval/corpus.py`. Label
+spans that appear in the transcript, not hindsight summaries — scoring
+against "auth endpoints" when nobody said it measures paraphrasing, not
+extraction.
 ```
 
 Tests run against real SQLite in temp directories and mocked provider
 responses — no network access or live API keys required for the unit and
 integration suites. See [TESTING.md](TESTING.md) for exactly what each
 suite verifies.
+
+---
+
+## Improving extraction
+
+**This is the contribution the project needs most, and it does not require
+writing any code.**
+
+Extraction is measured against a labelled corpus in
+`benchmarks/eval/corpus/`. There are 14 sessions in it and the same person
+wrote every label. That is an honest ceiling on what the reported numbers
+can tell anyone about *their* workload, and the only way past it is
+transcripts nobody here wrote.
+
+### Run the harness
+
+```bash
+python -m benchmarks.eval                 # score the committed corpus
+python -m benchmarks.eval --errors        # every miss and every false positive
+python -m benchmarks.eval --corpus DIR    # score YOUR labelled sessions
+python -m benchmarks.eval --sweep         # what a threshold change costs
+```
+
+`--errors` is the one to start with. It prints, per session and per
+category, exactly what was missed and what was invented — which is a
+to-do list, not a score.
+
+### Add a session
+
+One JSON file per session. The format and the labelling rule are
+documented at the top of [`benchmarks/eval/corpus.py`](benchmarks/eval/corpus.py);
+read that before labelling, because the rule is what makes the numbers
+mean anything.
+
+Two constraints the harness enforces, so you will hit them anyway:
+
+1. **Every label must be quoted from a single message.** A label written
+   from hindsight is unreachable for *any* extractor, so it caps recall at
+   a number no code change can move. `validate_grounding()` refuses to
+   score a corpus containing one — it found two in ours.
+2. **Labelling is exhaustive, not selective.** If the rule matches, it gets
+   labelled, including decisions that were later superseded. Picking which
+   of several stated decisions "counts" turns precision into a measure of
+   your taste, and penalises the extractor for being right.
+
+Redact freely — rename files, change company names, replace secrets. What
+matters is the *shape* of the prose, not its content.
+
+### Change a pattern
+
+Every extraction change needs a number attached. The workflow:
+
+```bash
+python -m benchmarks.eval > before.txt
+# ... make the change ...
+python -m benchmarks.eval > after.txt
+diff before.txt after.txt
+```
+
+Put the before/after in the PR description. A change that improves recall
+while quietly costing precision is not an improvement, and the report
+shows both so the trade is visible rather than argued about.
+
+`tests/unit/test_extraction_quality.py` holds per-category F1 floors, a
+separate floor for the real-transcript half so the synthetic sessions
+cannot carry the headline, and a scan-cost bound. **Do not edit an
+assertion to make it pass.** They are set below the measured values on
+purpose, so a real regression reds the build and ordinary variation does
+not; if one fails, something got worse.
 
 ---
 

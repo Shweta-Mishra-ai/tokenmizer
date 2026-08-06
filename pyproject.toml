@@ -4,22 +4,29 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tokenmizer"
-version = "0.4.0"
-description = "Reduce AI context loss by 2x. Graph-backed checkpoint and resume for any LLM session."
+version = "0.5.0"
+description = "Graph-backed checkpoint and resume for LLM sessions. An OpenAI-compatible proxy that remembers decisions across context limits."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Shweta Mishra", url = "https://github.com/Shweta-Mishra-ai" }]
-keywords = ["llm", "context", "memory", "checkpoint", "ai", "anthropic", "openai"]
+keywords = [
+    "llm", "context", "memory", "checkpoint", "knowledge-graph",
+    "ai", "anthropic", "openai", "proxy", "mcp", "rag",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 
 dependencies = [
@@ -49,7 +56,9 @@ files = ["pypdf>=4.0.0", "openpyxl>=3.1.0"]
 # ML compression (much better than heuristic-only)
 compression = ["llmlingua>=0.2.0"]
 
-# Production persistence
+# Redis client. NOTE: tokenmizer/state/backend.py has no callers, so
+# installing this changes nothing today. Kept so the dependency does not
+# have to be re-added when that backend is wired up.
 redis = ["redis>=5.0.0"]
 
 # Observability
@@ -79,9 +88,32 @@ tokenmizer-mcp = "tokenmizer.mcp.server:run_stdio_server"
 Homepage = "https://github.com/Shweta-Mishra-ai/tokenmizer"
 Repository = "https://github.com/Shweta-Mishra-ai/tokenmizer"
 Issues = "https://github.com/Shweta-Mishra-ai/tokenmizer/issues"
+Changelog = "https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CHANGELOG.md"
+Security = "https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/SECURITY.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tokenmizer"]
+# py.typed marks the package as typed so mypy/pyright in a CONSUMER's
+# project actually reads our annotations instead of treating the whole
+# package as Any (PEP 561). Without it in the wheel, the annotations we
+# ship are invisible downstream.
+artifacts = ["tokenmizer/py.typed"]
+
+[tool.hatch.build.targets.sdist]
+# Ship what a consumer needs to verify the package, and nothing else:
+# the source tree, tests, benchmarks and the docs they reference.
+include = [
+    "/tokenmizer",
+    "/tests",
+    "/benchmarks",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/SECURITY.md",
+    "/CONTRIBUTING.md",
+    "/tokenmizer.yaml",
+    "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -96,6 +128,12 @@ target-version = "py310"
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# A self-contained diagnostic script that deliberately interleaves
+# imports with progress output so each section runs and reports even if
+# a later import is unavailable. Restructuring it would defeat the point.
+"scripts/run_stdlib_tests.py" = ["E402"]
+
 [tool.coverage.run]
 source = ["tokenmizer"]
 # Only NON-PRODUCT code is omitted. Do not add product modules here to
@@ -107,22 +145,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Honest floor over ALL product code (previously 70, but with api/app.py,
-# auth.py, providers and other core modules excluded — coverage theater).
-# Single source of truth: CI matrix reads this value, no override in the
-# workflow — see CHANGELOG "Honest quality gates" for why 50 (measured
-# 61% at the time this was set, before the omits above were removed;
-# threshold kept a margin below the honest number rather than pinned to
-# it, so incidental coverage dips don't immediately red the build).
-#
-# FOUND DURING FINAL VALIDATION: this file was truncated mid-comment,
-# with the actual `fail_under = 50` line missing entirely — the
-# CHANGELOG entry documenting this decision survived, but the config
-# value it describes did not. Since fail_under was never set, CI's
-# "Run tests with coverage" step could never fail on low coverage
-# regardless of how far it dropped — the exact kind of silently-lost
-# information (a gate that looks configured in the comments but isn't
-# actually enforced) this audit was tasked with finding. Restored to
-# the documented value; current measured coverage is ~76%, comfortably
-# above it.
+# Floor over ALL product code — nothing is omitted to flatter the number.
+# Set below the measured figure (~77%) on purpose, so an incidental dip
+# does not red the build while a real collapse still does. Single source
+# of truth: CI reads this, and must not override it on the command line.
 fail_under = 50

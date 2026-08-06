@@ -1,0 +1,70 @@
+{
+  "id": "real_audit_corruption",
+  "origin": "real",
+  "domain": "audit/storage",
+  "notes": "Condensed from the 0.4.1 corruption-recovery work. Blast-radius reasoning and a transient-vs-permanent distinction.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Look at the corrupt-database recovery path."
+    },
+    {
+      "role": "assistant",
+      "content": "It calls unlink on graph_memory.db. That file holds every session in the storage directory, so one bad read by one session permanently deletes everyone's memory."
+    },
+    {
+      "role": "user",
+      "content": "prove it"
+    },
+    {
+      "role": "assistant",
+      "content": "Three healthy sessions, one corrupt header, and the next unrelated session to connect wiped all three. The persistence_broken flag stayed False, so stats reported healthy over an empty database."
+    },
+    {
+      "role": "user",
+      "content": "what triggers it"
+    },
+    {
+      "role": "assistant",
+      "content": "sqlite3.OperationalError subclasses DatabaseError, and OperationalError covers database is locked. Ordinary write contention was enough to trigger the delete."
+    },
+    {
+      "role": "user",
+      "content": "fix it"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: quarantine by rename instead of unlink, so sqlite3 recover can salvage the file. Decided: treat lock errors as contention and destroy nothing. Completed: scoped recovery to the affected session row in persistence.py."
+    },
+    {
+      "role": "user",
+      "content": "anything else"
+    },
+    {
+      "role": "assistant",
+      "content": "Added a data_loss_detected flag surfaced through stats, so destroyed memory is queryable rather than only logged."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "scoped recovery to the affected session row",
+      "a data_loss_detected flag"
+    ],
+    "pending_tasks": [],
+    "decisions": [
+      "quarantine by rename instead of unlink",
+      "treat lock errors as contention"
+    ],
+    "files": [
+      "graph_memory.db",
+      "persistence.py"
+    ],
+    "errors": [
+      "database is locked",
+      "corrupt header",
+      "OperationalError",
+      "permanently deletes everyone's memory",
+      "stats reported healthy over an empty database"
+    ]
+  }
+}

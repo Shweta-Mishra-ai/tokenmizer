@@ -470,26 +470,34 @@ tokenmizer serve
 
 ## Part 10: Production Setup (When You're Ready)
 
-### With Redis (state survives restarts):
+### Docker:
 ```bash
-docker-compose up
+ANTHROPIC_API_KEY=sk-ant-... docker-compose up
 ```
+All durable state (graph, checkpoints, session ownership) is SQLite in
+the `checkpoints` volume and survives restarts. There is no Redis — the
+`state_backend` setting is accepted but nothing reads it.
 
-### With authentication (for API security):
+### With authentication:
 ```bash
+export TOKENMIZER_ENV=production          # refuse to start unauthenticated
 export TOKENMIZER_API_KEY=your-strong-random-key
 tokenmizer serve
 # All endpoints now require: Authorization: Bearer your-key
 ```
 
-### Multi-provider routing (use cheap model for simple queries):
+Add more credentials to isolate sessions between callers — each key is
+its own principal, and a session belongs to the key that created it:
 ```yaml
 # tokenmizer.yaml
-routing:
-  enabled: true
-  simple_model: claude-haiku-4-5
-  complex_model: claude-sonnet-4-6
+api_keys:
+  - second-team-key
 ```
+
+### Multi-provider routing
+**Not implemented.** The `routing:` block is accepted so old config files
+still load, but nothing reads it and `savings.routing` is always 0.
+Setting `enabled: true` logs a warning at startup and changes nothing.
 
 ---
 

@@ -1,0 +1,61 @@
+{
+  "id": "flaky_ci",
+  "origin": "synthetic",
+  "domain": "devops/ci",
+  "notes": "Debugging session — mostly errors and fixes, almost no decisions. Stresses the error category.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "CI has been flaky for a week. Roughly one in four runs fails."
+    },
+    {
+      "role": "assistant",
+      "content": "Looking at .github/workflows/ci.yml. Three failure modes so far: a port collision in the integration tests, a race in the fixture teardown, and an OOM on the Windows runner."
+    },
+    {
+      "role": "user",
+      "content": "start with the port collision"
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed the port collision by binding to port 0 and reading the assigned port. Updated tests/conftest.py."
+    },
+    {
+      "role": "user",
+      "content": "now the teardown race"
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed the fixture teardown race — the temp directory was removed while a background thread still held a handle. Added an explicit join in tests/conftest.py."
+    },
+    {
+      "role": "user",
+      "content": "and the OOM?"
+    },
+    {
+      "role": "assistant",
+      "content": "The Windows OOM is from the parallel test workers. Working on lowering the worker count for Windows in .github/workflows/ci.yml."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "port collision",
+      "fixture teardown race",
+      "an explicit join in tests/conftest.py"
+    ],
+    "pending_tasks": [
+      "lowering the worker count"
+    ],
+    "decisions": [],
+    "files": [
+      ".github/workflows/ci.yml",
+      "tests/conftest.py"
+    ],
+    "errors": [
+      "port collision",
+      "fixture teardown race",
+      "OOM on the Windows runner",
+      "CI has been flaky"
+    ]
+  }
+}
