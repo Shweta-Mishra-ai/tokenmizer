@@ -313,3 +313,46 @@ def test_setup_paths_stay_in_the_readme():
         ("base_url", "pointing a client at the proxy"),
     ]:
         assert needle in readme, f"the README no longer shows {what}"
+
+
+def test_docs_pages_have_sane_heading_structure():
+    """The v0.5.0 documentation split concatenated whole README sections
+    onto new pages by demoting every heading one level uniformly. That
+    silently produced three defects nothing was checking for: a second H1
+    duplicating the page's own title, a jump from H1 straight to H3 with
+    no H2 in between, and — because the append step ran twice — a doubled
+    "---" separator and a doubled back-link at the end of every page.
+
+    All three render fine as raw text, which is exactly why a person
+    proofreading rendered markdown on GitHub caught it before any test
+    did. This checks the structure directly: exactly one H1 (the page's
+    own title, on line 1), no level skips, and exactly one footer link.
+    """
+    import re
+
+    for path in sorted((ROOT / "docs").glob("*.md")):
+        lines = path.read_text(encoding="utf-8").split("\n")
+        levels = []
+        in_fence = False
+        for line in lines:
+            if line.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            m = re.match(r"^(#{1,6}) ", line)
+            if m:
+                levels.append(len(m.group(1)))
+
+        assert levels and levels[0] == 1, f"{path.name}: must open with an H1"
+        assert levels.count(1) == 1, (
+            f"{path.name}: {levels.count(1)} H1 headings — a page has one title"
+        )
+        skips = [(a, b) for a, b in zip(levels, levels[1:]) if b - a > 1]
+        assert not skips, f"{path.name}: heading level jumps {skips}"
+
+        footer_count = path.read_text(encoding="utf-8").count(
+            "[← Back to the README]")
+        assert footer_count == 1, (
+            f"{path.name}: {footer_count} back-to-README links, want exactly 1"
+        )

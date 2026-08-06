@@ -4,7 +4,7 @@ Where TokenMizer sits next to other tools, and where it does not compete with th
 
 ---
 
-# Why TokenMizer and not X?
+## Why TokenMizer and not X?
 
 Engineers ask this every time. Honest answers:
 
@@ -25,7 +25,7 @@ Longer context = higher cost + slower inference + model attention dilution on lo
 
 ---
 
-# Running alongside other token tools
+## Running alongside other token tools
 
 Token tooling divides along one axis: what you send, what you get back,
 and what you remember. TokenMizer is the third. It composes with the
@@ -43,7 +43,7 @@ other two rather than competing with them.
 
 ---
 
-# Roadmap
+## Roadmap
 
 | Version | Focus |
 |---|---|
@@ -54,8 +54,6 @@ other two rather than competing with them.
 | Research | Real-transcript benchmark suite → paper ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research)) |
 
 Have a use case that doesn't fit? [Open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/new/choose) — extraction misses have their own issue template.
-
----
 
 
 ---

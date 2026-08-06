@@ -4,7 +4,7 @@ Running TokenMizer beyond `tokenmizer serve` on a laptop: containers, more than 
 
 ---
 
-# Docker
+## Docker
 
 ```bash
 # Quick start
@@ -21,7 +21,7 @@ TOKENMIZER_API_KEY=strong-key docker-compose up
 flush (see [Durability](#durability--what-happens-when-something-breaks-mid-session));
 cutting it short is what loses data.
 
-## Running more than one worker
+### Running more than one worker
 
 Graph and checkpoint **writes are safe across processes**: storage is
 per-row and every persist is a read-modify-write under an OS-level file
@@ -47,7 +47,7 @@ real rate limiter in front and treat `/api/stats` as per-worker.
 
 ---
 
-# Durability — what happens when something breaks mid-session
+## Durability — what happens when something breaks mid-session
 
 The point of this tool is that you don't lose context. That has to hold
 when things go wrong mid-session, not just when they go right.
@@ -67,7 +67,7 @@ Both SQLite databases are shared by every session in a `storage_dir`,
 which is why "delete the file and start fresh" is never the recovery
 path: it would discard every other session too.
 
-## Storage layout
+### Storage layout
 
 Graph state is stored **one row per node and per edge** (`graph_nodes`,
 `graph_edges`, `graph_meta`). A persist writes only what changed —
@@ -81,7 +81,7 @@ still finds the data it expects as of the moment of migration — changes
 made after upgrading are lost if you roll back, which is what a rollback
 means. Nothing needs to be run by hand.
 
-# Session isolation
+## Session isolation
 
 A session is claimed by the first API key that uses it, and only that key
 can read or modify it afterwards (`GET /api/graph/{id}`, `/api/resume/{id}`,
@@ -108,7 +108,7 @@ isolation comes from the credential, not from the id being hard to guess.
 
 ---
 
-# Security
+## Security
 
 - API key auth — `TOKENMIZER_API_KEY` (constant-time comparison)
 - Secret/PII redaction applied once at ingestion, before graph storage,
@@ -127,11 +127,6 @@ isolation comes from the credential, not from the id being hard to guess.
 - CORS restricted to configured origins by default
 
 ---
-
-
----
-
-[← Back to the README](../README.md)
 
 ## Releasing
 
@@ -161,6 +156,7 @@ reverse would leave the history asserting a release that never happened.
 depends on the tests, the tag depends on the publish, caller input
 reaches scripts through `env:` rather than string interpolation, and only
 the publishing job carries the OIDC token.
+
 
 ---
 

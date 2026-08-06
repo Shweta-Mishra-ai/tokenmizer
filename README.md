@@ -44,8 +44,6 @@
 
 ---
 
----
-
 ## The problem
 
 Every AI session has a context limit. When you hit it, the model forgets
@@ -281,7 +279,7 @@ here rather than left to be discovered:
 | [**API & CLI**](docs/api.md) | Endpoints, commands, MCP tools, Claude Code integration |
 | [**Deployment**](docs/deployment.md) | Docker, multiple workers, durability, session isolation, security |
 | [**Benchmarks**](docs/benchmarks.md) | Extraction quality, memory quality, storage, running your own |
-| [**Comparisons**](docs/comparisons.md) | Mem0, Zep, longer context windows, and the roadmap |
+| [**Comparisons**](docs/comparisons.md) | Mem0, Zep, longer context windows, running alongside other token tools, and the roadmap |
 | [**Contributing**](CONTRIBUTING.md) | Setup, layer rules, and how to improve extraction |
 | [**Changelog**](CHANGELOG.md) · [**Security**](SECURITY.md) | Release history and how to report a vulnerability |
 
@@ -291,7 +289,7 @@ here rather than left to be discovered:
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 584 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 600 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

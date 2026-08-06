@@ -245,6 +245,26 @@ The support section also stopped explaining itself. A star first, a
 sponsorship link second, both optional, no paragraph defending the fact
 that the project is free.
 
+#### Fixed — the documentation split produced broken markdown structure
+The split concatenated whole README sections onto new pages by demoting
+every heading one level uniformly, and by appending a footer that was
+sometimes already there. That silently produced three defects, on every
+one of the six new pages, that render fine as raw text and only show up
+in the rendered view: a second H1 duplicating the page's own title
+(`# Architecture` immediately followed by another `# Architecture`), a
+jump from H1 straight to H3 with nothing in between, and — because the
+footer-append step ran twice on `docs/deployment.md` — a stray
+`## Releasing` section stranded after a premature "back to the README"
+link, followed by a second one.
+
+Fixed across all six pages: exactly one H1 per page, no level skips, one
+footer. `test_docs_pages_have_sane_heading_structure` checks the
+structure directly rather than the text, and was mutation-tested by
+reproducing the original bug.
+
+Two stale test counts (578, 584) were also found and corrected to 600
+while fixing this.
+
 #### Known limits
 Errors remain the weakest category at 94%. Across 172 labelled items it now
 misses four and invents three; the residue is a defect stated as a

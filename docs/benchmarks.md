@@ -4,19 +4,13 @@ Every number here comes from a committed runner you can execute yourself. Nothin
 
 ---
 
-# Benchmarks
-
-Every number below comes from a committed runner you can execute
-yourself. Nothing here is hand-written; if a figure and a runner
-disagree, the runner is right and the README is a bug.
-
 ```bash
 python -m benchmarks.eval                            # extraction P/R/F1
 python -m benchmarks.eval --errors                   # every miss, every false positive
 python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 578 tests
+pytest tests/ -q                                     # 600 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -141,8 +135,6 @@ reproducible measurements — `runner_v2.py` runs actual heuristic
 extraction against actual ground truth with no LLM and no mocking
 involved, which is why those numbers are presented with confidence
 and the LLM ones currently are not.
-
----
 
 
 ---
