@@ -47,8 +47,9 @@
   ],
   "ground_truth": {
     "completed_tasks": [
-      "graph_memory/filelock.py",
-      "_reconcile_with_disk in persistence.py"
+      "graph_memory/filelock.py with one lock file per session",
+      "_reconcile_with_disk in persistence.py",
+      "four OS processes writing one session, 100 of 100 nodes persisted, zero lost"
     ],
     "pending_tasks": [
       "documenting both in the startup warning"

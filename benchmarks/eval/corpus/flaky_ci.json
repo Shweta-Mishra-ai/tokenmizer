@@ -2,7 +2,7 @@
   "id": "flaky_ci",
   "origin": "synthetic",
   "domain": "devops/ci",
-  "notes": "Debugging session \u2014 mostly errors and fixes, almost no decisions. Stresses the error category.",
+  "notes": "Debugging session — mostly errors and fixes, almost no decisions. Stresses the error category.",
   "messages": [
     {
       "role": "user",
@@ -26,7 +26,7 @@
     },
     {
       "role": "assistant",
-      "content": "Fixed the fixture teardown race \u2014 the temp directory was removed while a background thread still held a handle. Added an explicit join in tests/conftest.py."
+      "content": "Fixed the fixture teardown race — the temp directory was removed while a background thread still held a handle. Added an explicit join in tests/conftest.py."
     },
     {
       "role": "user",
@@ -40,7 +40,8 @@
   "ground_truth": {
     "completed_tasks": [
       "port collision",
-      "fixture teardown race"
+      "fixture teardown race",
+      "an explicit join in tests/conftest.py"
     ],
     "pending_tasks": [
       "lowering the worker count"

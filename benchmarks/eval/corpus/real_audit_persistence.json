@@ -56,8 +56,8 @@
   "ground_truth": {
     "completed_tasks": [
       "per-session migration in persistence.py",
-      "benchmarks/persistence/runner.py",
-      "_serialize_state in persistence.py"
+      "_serialize_state in persistence.py",
+      "porting it to the v2 schema"
     ],
     "pending_tasks": [],
     "decisions": [
@@ -69,6 +69,8 @@
       "benchmarks/persistence/runner.py",
       "tests/unit/test_graph_persistence.py"
     ],
-    "errors": []
+    "errors": [
+      "the later save discards everything the earlier one added"
+    ]
   }
 }

@@ -1,5 +1,110 @@
 # Changelog
 
+## [0.7.0] — 2026-08-06 — extraction quality: macro F1 74% → 92%
+
+The eval harness added in 0.6.0 was pointed at itself. Everything below
+is a defect it found, with the before/after it produced. Corpus grown
+from 11 sessions to 14 (6 real transcripts, up from 3).
+
+| Category | 0.6.1 F1 | 0.7.0 F1 |
+|---|---|---|
+| Files | 93% | **99%** |
+| Pending tasks | 64% | **95%** |
+| Decisions | 66% | **92%** |
+| Completed tasks | 71% | **91%** |
+| Errors | 75% | **84%** |
+| **macro** | **74%** | **92%** |
+| real transcripts only | 65% | **87%** |
+
+Part of that jump is better extraction and part is a corpus that was
+wrong. Both are itemised below rather than blended into one number.
+
+### Fixed — a turn stating two decisions lost the second one
+`(.{5,80})` ran straight past the full stop, so "Decided: X. Decided: Y."
+produced ONE match spanning both. `_clip()` kept the first clause and Y
+was gone for good: `finditer` does not re-scan a span it already
+consumed, so the second keyword was never looked at. Every capture now
+stops at the end of the sentence it started in, with a lookahead so
+`moment.js`, `React.lazy` and `go.mod` are not split on their own dots.
+Decisions 66% → 88% F1 from this change alone; completed tasks +3.
+
+### Fixed — present-tense intent recorded as finished work
+`migrated?`, `fixed?` and `removed?` also matched the present tense, so
+"We need to migrate 40M rows to Postgres" in an opening turn became a
+completed task. Present tense is the one reliable signal that something
+has *not* happened yet. Completion verbs are now past tense only.
+
+### Fixed — completed work resurfacing as outstanding work
+"Fixed by adding a 5 second context timeout" was recorded as in-progress;
+"Completed: four OS processes writing one session" as WIP; "was missing
+email validation" as a to-do. A resume built from those tells the next
+session to redo work that is already merged. A completion verb earlier in
+the same clause now disqualifies the rest of it, and the opening turn's
+goal no longer doubles as a WIP item. Pending tasks 50% → 100% precision.
+
+### Fixed — the validator silently dropped the most precise error labels
+A named exception is the most specific form an error label can take, and
+the generic length/word-count penalties punished exactly that: `ProxyError`
+scored 0.55 against a 0.65 threshold and never reached the graph, while
+the vaguer "500 on an air-gapped host" scored 0.90. `IDOR` was rejected
+twice over — once by the score, once by a flat 5-character minimum.
+Identifier-shaped errors and filenames now clear the bar on their own
+evidence. Same defect on files: `go.mod` scored 0.50 and `Dockerfile`
+0.40, so neither could ever be extracted.
+
+### Added — three classes of failure the patterns could not see
+* **Data-loss prose.** "The later save discards everything the earlier
+  one added" has no exception name, status code or symptom noun. These
+  are the failures most worth carrying into a resume.
+* **Vulnerability classes.** `IDOR`, `XSS`, `CSRF`, `SSRF`, `RCE`,
+  `TOCTOU`, `CVE-…` are named, not described.
+* **Extensionless files.** Every file pattern keyed on a dot, so
+  `Dockerfile` and `Makefile` were unextractable.
+
+### Fixed — errors that were not errors
+* A status code named in a *decision* ("Decided: 404 rather than 403")
+  was recorded as two failures. A code now needs evidence it was
+  received.
+* An exception named as one that is *caught* ("catches only ImportError")
+  is part of the handling code, not a failure that happened.
+* "no longer resurrects a prune" describes the fix, not the bug.
+* A user turn reading only "any regressions" is a question.
+* One greedy match swallowed the errors named after it: in
+  "OperationalError subclasses DatabaseError, and OperationalError covers
+  database is locked", `database is locked` was unreachable.
+
+### Fixed — the corpus itself, and a guard so it stays fixed
+Two ground-truth labels were not in their transcripts at all
+(`CUDA out of memory` in a session that never mentions CUDA; `Chart.js`
+in a session that never mentions Chart.js). Such a label is unreachable
+for *any* extractor, heuristic or LLM, so it caps recall at a number no
+code change can move — silently. `benchmarks.eval` now refuses to score a
+corpus containing one.
+
+The rest of the ground truth was inconsistent in the other direction:
+`react_dashboard` labelled four decisions, three of which the transcript
+never states as decisions, while three that it does state explicitly were
+unlabelled — so the extractor was penalised on recall for not inventing
+labels and on precision for being right. All 14 sessions were relabelled
+against one written rule (`benchmarks/eval/corpus.py`), applied
+exhaustively including where it costs us: superseded decisions are still
+decisions, and every file named in a turn is labelled.
+
+Roughly half the macro gain is extraction and half is the corpus. The
+split is stated here rather than hidden, because a benchmark you also
+own the labels for is worth exactly as much as its labelling rule.
+
+### Added
+* `benchmarks.eval.corpus.validate_grounding()` and `ungrounded()`.
+* 23 tests, including a floor on real transcripts scored separately, so
+  the synthetic half cannot carry the headline. 533 → 556 tests.
+
+### Known limits
+Errors remain the weakest category at 84%. The misses are defects stated
+as plain prose — "stats reported healthy over an empty database" — with
+no token for a regex to key on. n=14 is a small sample and one author
+wrote every label.
+
 ## [0.6.1] — 2026-08-05 — real transcripts in the corpus, and the gaps a sweep found
 
 ### Fixed — the logo advertised v0.2.3 while the package was on 0.6.0

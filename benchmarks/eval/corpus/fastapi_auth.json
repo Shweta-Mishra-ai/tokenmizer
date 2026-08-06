@@ -2,7 +2,7 @@
   "id": "fastapi_auth",
   "origin": "synthetic",
   "domain": "backend/python",
-  "notes": "Explicit 'Completed:'/'Decided:' markers \u2014 the easy case the heuristics were written against. Ground truth relabelled to transcript spans, not hindsight summaries.",
+  "notes": "Explicit 'Completed:'/'Decided:' markers — the easy case the heuristics were written against. Ground truth relabelled to transcript spans, not hindsight summaries.",
   "messages": [
     {
       "role": "user",
@@ -26,7 +26,7 @@
     },
     {
       "role": "assistant",
-      "content": "Completed: User model in api/models.py \u2014 fields: id, email, hashed_password, created_at, is_active"
+      "content": "Completed: User model in api/models.py — fields: id, email, hashed_password, created_at, is_active"
     },
     {
       "role": "user",
@@ -42,7 +42,7 @@
     },
     {
       "role": "assistant",
-      "content": "Fixed: 422 error \u2014 missing email validation in LoginRequest Pydantic model. Updated api/models.py. Login endpoint working now."
+      "content": "Fixed: 422 error — missing email validation in LoginRequest Pydantic model. Updated api/models.py. Login endpoint working now."
     },
     {
       "role": "user",
@@ -50,7 +50,7 @@
     },
     {
       "role": "assistant",
-      "content": "Decided: Redis for refresh token storage (not DB \u2014 faster revocation). Adding: redis to requirements.txt. Working on: refresh token rotation in api/auth.py"
+      "content": "Decided: Redis for refresh token storage (not DB — faster revocation). Adding: redis to requirements.txt. Working on: refresh token rotation in api/auth.py"
     },
     {
       "role": "user",
@@ -58,7 +58,7 @@
     },
     {
       "role": "assistant",
-      "content": "Schema: users table \u2014 id (UUID PK), email (unique), hashed_password, created_at, is_active. No refresh_tokens table \u2014 using Redis."
+      "content": "Schema: users table — id (UUID PK), email (unique), hashed_password, created_at, is_active. No refresh_tokens table — using Redis."
     },
     {
       "role": "user",
@@ -82,19 +82,22 @@
       "virtual environment setup",
       "User model in api/models.py",
       "POST /api/auth/register",
+      "POST /api/auth/login",
+      "POST /api/auth/logout",
       "422 error",
-      "tests/test_auth.py"
+      "tests/test_auth.py with 12 tests"
     ],
     "pending_tasks": [
       "refresh token rotation",
+      "redis to requirements.txt",
       "rate limiting using slowapi"
     ],
     "decisions": [
+      "JWT",
+      "PostgreSQL",
       "Python 3.12",
       "bcrypt for password hashing",
-      "Redis for refresh token storage",
-      "PostgreSQL",
-      "JWT"
+      "Redis for refresh token storage"
     ],
     "files": [
       "api/main.py",

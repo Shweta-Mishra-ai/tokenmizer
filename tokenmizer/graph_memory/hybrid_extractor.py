@@ -68,28 +68,66 @@ Respond with JSON only."""
 
 # ── Heuristic patterns (enhanced) ────────────────────────────────────────────
 
+# Leading dot allowed: `.github/workflows/ci.yml` and `.env.example` are
+# ordinary paths, and requiring an alphanumeric first character silently
+# excluded every dotfile directory.
 _FILE_PATH = re.compile(
-    r'(?:^|[\s\'\"`(])([a-zA-Z0-9_\-]+(?:/[a-zA-Z0-9_\-\.]+){1,6}\.[a-zA-Z]{1,6})',
+    r'(?:^|[\s\'\"`(])((?:\.?[a-zA-Z0-9_\-]+)(?:/[a-zA-Z0-9_\-\.]+){1,6}\.[a-zA-Z]{1,6})',
     re.MULTILINE,
 )
+# Extension list covers the files people actually name in these sessions.
+# It previously omitted .txt, .mod, .lock and .cfg, so `requirements.txt`,
+# `go.mod` and `Cargo.lock` — three of the most-mentioned files in any
+# Python, Go or Rust session — were never extracted at all.
 _FILE_COMMON = re.compile(
-    r'\b((?:[\w\-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|cs|cpp|c|h|yaml|yml|json|toml|env|md|sh|sql|html|css))\b)',
+    r'\b((?:[\w\-]+\.(?:'
+    r'py|pyi|js|mjs|cjs|ts|tsx|jsx|vue|svelte|'
+    r'go|mod|sum|rs|java|kt|swift|scala|rb|php|cs|cpp|cc|c|h|hpp|ex|exs|'
+    r'yaml|yml|json|toml|ini|cfg|conf|env|lock|txt|md|rst|'
+    r'sh|bash|zsh|ps1|sql|proto|graphql|tf|tfvars|'
+    r'html|css|scss|less|xml|csv|tsv|'
+    r'db|sqlite|sqlite3'
+    r'))\b)',
     re.IGNORECASE,
 )
 
+# Build and tooling files that have no extension at all. Every pattern above
+# keys on a dot, so `Dockerfile` and `Makefile` — named in almost every infra
+# session — could not be extracted by any of them. Case-sensitive on purpose:
+# lowercase "makefile" in prose is usually the noun, not the file.
+_FILE_EXTENSIONLESS = re.compile(
+    r'\b(Dockerfile|Makefile|Procfile|Jenkinsfile|Gemfile|Rakefile|Vagrantfile|'
+    r'Brewfile|Justfile|Caddyfile|CODEOWNERS|LICENSE|MANIFEST\.in)\b'
+)
+
 # ── Decision patterns — 5 passes ─────────────────────────────────────────────
+
+# A capture that stops at the end of the sentence it started in.
+#
+# The plain `(.{5,80})` ran straight past the full stop, so a message
+# stating two decisions — "Decided: X. Decided: Y." — produced ONE match
+# spanning both. _clip() then kept the first clause and Y was gone for
+# good: finditer does not re-scan inside a span it already consumed, so
+# the second keyword was never even looked at. Measured on the corpus,
+# that silently dropped one decision in every multi-decision turn.
+#
+# The lookahead is what makes this safe for labels that legitimately
+# contain dots — `moment.js`, `React.lazy`, `Python 3.12`, `go.mod` —
+# where the dot is not followed by whitespace or end-of-string.
+_CLAUSE_SPAN = r'((?:(?![.!?](?=\s|$))[^\n]){5,80})'
 
 # Pass 1: explicit verb ("decided:", "going with", "will use")
 _DECISION = re.compile(
     r'(?:decided?|going with|will use|chose?|switching? to|opted for|settled on|'
     r'picked|sticking with|selected?|using|went with|we.ll use|let.s use)'
-    r'[\s:\-]+(.{5,80})',
+    r'[\s:\-]+' + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
 # Pass 2: header format ("Decision: X", "Tech choice: X")
 _DECISION_HEADER = re.compile(
-    r'(?:^|\n)\s*(?:decision|tech choice|architecture choice|approach|stack)\s*[:\-]\s*(.{5,80})',
+    r'(?:^|\n)\s*(?:decision|tech choice|architecture choice|approach|stack)\s*[:\-]\s*'
+    + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
@@ -111,6 +149,44 @@ _DECISION_FOR = re.compile(
     r')\b(?:(?!\s+(?:to|with|for)\s+\w)[^.!?\n,—\-]){0,40})',
     re.IGNORECASE,
 )
+
+# Pass 3 matches a bare technology name anywhere in a message, which is
+# not the same thing as a decision. "missing email validation in the
+# LoginRequest Pydantic model" mentions Pydantic; nobody decided anything.
+# Measured, this single pass produced most of the spurious decisions.
+#
+# A tech mention counts as a decision only with supporting context:
+#   - a choosing verb shortly before it ("decided: Redis", "we'll use X"), or
+#   - a purpose clause right after it ("Redis FOR refresh tokens"), which
+#     is the shape a decision takes when stated without a verb.
+_DECISION_CONTEXT_BEFORE = re.compile(
+    r"(?:decided?|decision|going with|will use|we'?ll use|let'?s use|chose|"
+    r"choosing|opted for|settled on|picked|sticking with|selected|switch(?:ing)? to|"
+    r"moved? to|migrat\w+ to|adopt(?:ed|ing)?|use|using|with)\s*[:\-]?\s*$",
+    re.IGNORECASE,
+)
+_DECISION_PURPOSE_AFTER = re.compile(
+    r"^\s*(?:for|as|to handle|to store|to manage|instead of|over)\b",
+    re.IGNORECASE,
+)
+# "migrate 40M rows FROM MySQL TO Postgres" — MySQL is what is being left
+# behind, not what was chosen. Only the destination is a decision.
+_MIGRATION_SOURCE = re.compile(
+    r"\b(?:from|away from|off of|out of|replacing|instead of|drop(?:ping)?|"
+    r"deprecat\w+|retir\w+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _tech_mention_is_a_decision(content: str, start: int, end: int) -> bool:
+    """True if a bare technology name at [start:end] is stated as a choice."""
+    before = content[max(0, start - 40):start]
+    after = content[end:end + 40]
+    if _MIGRATION_SOURCE.search(before):
+        return False        # the thing being migrated away from
+    return bool(_DECISION_CONTEXT_BEFORE.search(before)
+                or _DECISION_PURPOSE_AFTER.match(after))
+
 
 # Pass 4: passive/implicit — "bcrypt with cost factor 12", "JWT expires in 15m"
 _DECISION_PASSIVE = re.compile(
@@ -256,6 +332,45 @@ _MIN_CLAUSE_CHARS = 22
 _CLAUSE_END = re.compile(r"[.!?;](?=\s|$)|\s[—–]\s|\n")
 
 
+_ONLY_PATHS = re.compile(
+    r"^(?:the\s+)?[\w./\-]+\.[a-zA-Z]{1,6}"
+    r"(?:\s*(?:,|and)\s*[\w./\-]+\.[a-zA-Z]{1,6})*$",
+    re.IGNORECASE,
+)
+
+# "Fixed the backfill timeout" names a real failure, just in the past
+# tense. Strip the repair verb and keep the failure — an error that was
+# resolved is still part of the session's history, and dropping it loses
+# the reason the code looks the way it does.
+_FIX_PREFIX = re.compile(
+    r"^(?:fix(?:ed|es)?|resolv(?:ed|es)?|patch(?:ed)?|repair(?:ed)?|"
+    r"correct(?:ed)?|address(?:ed)?|clos(?:ed)?|eliminat(?:ed)?)\s+"
+    r"(?:the\s+|a\s+|an\s+)?",
+    re.IGNORECASE,
+)
+
+# A symptom word can also name part of the SOLUTION rather than the
+# problem: "Fixed by adding a 5 second context timeout" is a timeout
+# being introduced on purpose. An additive verb immediately before the
+# match is the tell.
+_SOLUTION_VERB = re.compile(
+    r"\b(?:add(?:ing|ed)?|introduc(?:ing|ed)?|set(?:ting)?|configur(?:ing|ed)?|"
+    r"enabl(?:ing|ed)?|impos(?:ing|ed)?|appl(?:ying|ied))\s+"
+    r"(?:an?\s+|the\s+)?(?:[\w.-]+\s+){0,3}$",
+    re.IGNORECASE,
+)
+
+
+def _is_only_paths(text: str) -> bool:
+    """True if `text` is nothing but filenames.
+
+    "Updated src/App.tsx and src/routes.tsx" is a file list; recording it
+    as a completed task duplicates the file nodes and says nothing about
+    what was done.
+    """
+    return bool(_ONLY_PATHS.match((text or "").strip()))
+
+
 def _clip(text: str, max_chars: int = 90) -> str:
     """Trim a captured span to one readable clause.
 
@@ -300,11 +415,34 @@ _TASK_DONE = re.compile(
     # Past participles are listed explicitly. `wrote?` only ever matched
     # "wrot"/"wrote" — never "written", which is how most completion is
     # actually narrated ("I've written the connection pool").
-    r'(?:completed?|finished?|done|implemented?|fixed?|added?|built?|shipped?|'
-    r'wired up|set up|created?|wrote|written|updated?|deployed?|resolved?|'
-    r'merged?|refactored?|cleaned?|migrated?|restructured?|removed?|'
-    r'switched?|replaced?)'
-    r'[\s:\-]+(.{5,80})',
+    #
+    # Every verb here is past tense, with no optional final `d`. Writing them
+    # as `migrated?`/`removed?`/`fixed?` also matched the PRESENT tense, so
+    # "We need to migrate 40M rows to Postgres" — a statement of intent in the
+    # opening turn — was recorded as finished work. Present tense is the one
+    # reliable signal that something has not happened yet, and spending it to
+    # save four characters cost precision on every session that opens by
+    # describing the goal.
+    r'(?:completed|finished|done|implemented|fixed|added|built|shipped|'
+    r'wired up|set up|created|wrote|written|updated|deployed|resolved|'
+    r'merged|refactored|cleaned|migrated|restructured|removed|'
+    r'switched|replaced)'
+    r'[\s:\-]+' + _CLAUSE_SPAN,
+    re.IGNORECASE,
+)
+
+# A completion verb earlier in the same clause. See the WIP/TODO guards.
+_COMPLETION_LEAD = re.compile(
+    r'\b(?:completed|finished|done|fixed|resolved|solved|implemented|shipped|'
+    r'landed|merged)\b\s*(?:[:\-—]|by|via|with)?\s*[^.!?\n]{0,30}$',
+    re.IGNORECASE,
+)
+
+# A capture that opens with a conjunction is the tail of someone else's
+# sentence, not a statement: "Rows this instance created but never persisted
+# are untouched" yields "but never persisted are untouched".
+_LEADING_CONNECTIVE = re.compile(
+    r'^(?:but|and|or|so|because|which|while|that|then|though|although|however)\b',
     re.IGNORECASE,
 )
 
@@ -318,14 +456,19 @@ _TASK_DONE_PASSIVE = re.compile(
 _TASK_WIP = re.compile(
     r'(?:working on|implementing|building|currently\s+\w+ing|adding|integrating|'
     r'setting up|configuring|writing|debugging|investigating)'
-    r'[\s:\-]+(.{5,80})',
+    r'[\s:\-]+' + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
+# `missing` needs a guard the other openers do not: "was missing dependency
+# in useEffect" is a past-tense diagnosis of something already fixed, and
+# recording it as outstanding work tells the next session to go redo it.
+# Only an unqualified "missing X" is a TODO.
 _TASK_TODO = re.compile(
     r'(?:will add|will implement|next:|todo:|will do|need to add|planning to|'
-    r'should add|still need|not yet|missing|pending|next step)'
-    r'[\s:\-]+(.{5,80})',
+    r'should add|still need|not yet|(?<!was )(?<!were )(?<!is )(?<!are )missing|'
+    r'pending|next step)'
+    r'[\s:\-]+' + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
@@ -346,12 +489,96 @@ _TASK_TODO = re.compile(
 _ERROR_STOPWORDS = frozenset({
     "error", "errors", "exception", "failed", "failure", "broken",
     "crash", "crashed", "race", "timeout", "hangs", "flaky", "panic",
+    "regression", "regressions", "leak", "leaks", "collision", "collisions",
+    "deadlock", "deadlocks", "segfault", "segfaults",
 })
 
+# The stopword check runs on the label with any leading determiner removed:
+# a user turn reading only "any regressions" is a question, not a failure,
+# and it reached the graph purely because the determiner made the label
+# longer than the bare stopword.
+_ERROR_DETERMINER = re.compile(
+    r'^(?:any|some|no|the|a|an|these|those|this|that|more|other)\s+',
+    re.IGNORECASE,
+)
+
+# An exception named as one that is CAUGHT is part of the handling code, not
+# a failure that happened: "catches only ImportError" is the diagnosis of a
+# bug, and recording ImportError as an error of the session is wrong.
+_ERROR_HANDLED = re.compile(
+    r'\b(?:catch(?:es|ing)?|caught|except|excluding|handles?|handled|handling|'
+    r'raises?|raising|swallow(?:s|ed|ing)?)\s+(?:only\s+|just\s+)?$',
+    re.IGNORECASE,
+)
+
+# Trailing context stops at a clause boundary (`,` `;`) as well as at sentence
+# end. Running to the next full stop meant one match swallowed the errors named
+# after it: in "OperationalError subclasses DatabaseError, and OperationalError
+# covers database is locked" a single greedy match consumed the whole sentence,
+# and `database is locked` was unreachable because finditer does not return
+# overlapping matches.
+#
+# A status code needs evidence that it was *received*, not merely named. A bare
+# `[45]\d{2}` treated "Decided: 404 rather than 403" — a design choice — as two
+# failures. So the code must either follow a production verb ("every request
+# returns 500", where the subject sits BEFORE the code) or be followed by
+# error/response/status. Named exceptions need neither: the class name is
+# already the failure.
 _ERROR_TYPED = re.compile(
-    r'\b((?:[A-Z]\w*(?:Error|Exception)|Traceback|'
-    r'HTTP\s*[45]\d{2}|\b[45]\d{2}\b)'
-    r'(?:[\s:-]+[^.!?\n]{0,60})?)',
+    r'\b((?:[A-Z]\w*(?:Error|Exception)\b|Traceback|'
+    r'(?:[A-Za-z][\w./-]*\s+){0,2}'
+    r'(?:returns?|returning|returned|throws?|throwing|threw|gives?|got|getting|'
+    r'receives?|received|responds? with|responded with|fails? with|'
+    r'failing with)\s+(?:HTTP\s*)?[45]\d{2}\b|'
+    r'(?:HTTP\s*)?[45]\d{2}\s+(?:error|errors|response|status)\b)'
+    r'(?:[\s:-]+[^.!?,;\n]{0,60})?)',
+)
+
+# Data-integrity failures are stated as an adjective in front of the thing that
+# is broken ("one corrupt header"), which the symptom vocabulary below cannot
+# reach — it only looks backwards for a subject.
+_ERROR_INTEGRITY = re.compile(
+    r'\b((?:corrupt(?:ed)?|malformed|truncated|unreadable|mismatched|'
+    r'unparseable)\s+[\w./-]+(?:\s+[\w./-]+)?)',
+    re.IGNORECASE,
+)
+
+# Data-loss verbs. A whole class of defect is stated as plain prose about what
+# the system does to your data — "the later save discards everything the
+# earlier one added", "one bad read permanently deletes everyone's memory" —
+# with no exception name, no status code and no symptom noun to key on. These
+# are the failures most worth carrying into a resume and none of the patterns
+# above could see them.
+#
+# Only forms that describe what the system DID: `deletes`/`deleted` but not
+# the imperative `delete`, so "Actually drop that library" stays an
+# instruction. A trailing object is required, so "zero lost" is not a failure.
+_ERROR_DAMAGE = re.compile(
+    r'\b((?:[\w./\'-]+\s+){0,3}'
+    r'(?:deletes|deleted|discards|discarded|dropped|loses|lost|'
+    r'overwrites|overwrote|clobbers|clobbered|wipes|wiped|'
+    r'resurrects|resurrected|reinstates|reinstating|reinstated|'
+    r'corrupts|corrupted|silently (?:ignores|drops|fails))'
+    r'\s+[^.!?,;\n]{3,50})',
+    re.IGNORECASE,
+)
+
+# "no longer resurrects a prune" describes the fix. A general negation check
+# cannot be used here: "WebSocket message NOT triggering re-render" and "NO
+# dial timeout" are real failures whose names contain a negator. Only the
+# phrases that mean *this used to happen and no longer does* are excluded.
+_ALREADY_FIXED = re.compile(
+    r'\b(?:no longer|not any ?more|already fixed|since fixed)\b',
+    re.IGNORECASE,
+)
+
+# Vulnerability classes are named, not described, and were invisible to every
+# other pattern. No trailing context: the class name IS the label, and the
+# clause after it is prose about the fix.
+_ERROR_VULN = re.compile(
+    r'\b(IDOR|XSS|CSRF|SSRF|RCE|SQLi|TOCTOU|CVE-\d{4}-\d+|'
+    r'SQL injection|path traversal|privilege escalation|'
+    r'session fixation|open redirect)\b',
 )
 
 # Symptom vocabulary, with the noun phrase that precedes it — the subject
@@ -563,7 +790,7 @@ class HybridExtractor:
         # Tasks done: full history (completed = permanent fact)
         for m in _TASK_DONE.finditer(content):
             task = _clip(m.group(1))
-            if len(task) < 5:
+            if len(task) < 5 or _is_only_paths(task) or _LEADING_CONNECTIVE.match(task):
                 continue
             norm = self._normalize(task)
             # Subsumption, not just exact match: several passes fire on
@@ -598,16 +825,36 @@ class HybridExtractor:
                     seen_tasks.add(norm)
 
         # WIP/TODO: recent window only (avoid stale in-progress)
+        #
+        # Two guards, both about work that is NOT outstanding:
+        #
+        #   _COMPLETION_LEAD — a completion verb earlier in the same clause
+        #   makes the rest of it finished work, whatever opener follows.
+        #   "Fixed by adding a 5 second context timeout" is not a to-do;
+        #   "Completed: four OS processes writing one session" is not WIP.
+        #   Carrying these into a resume tells the next session to redo work
+        #   that is already merged, which is worse than omitting them.
+        #
+        #   goal subsumption — the opening turn states the goal in exactly
+        #   the shape of a WIP line ("Building a real-time analytics
+        #   dashboard"), and the goal is already a node of its own.
         if is_recent:
+            def _outstanding(text: str, start: int, seen: list[str]) -> bool:
+                if len(text) < 5 or _is_only_paths(text):
+                    return False
+                if _COMPLETION_LEAD.search(content[max(0, start - 40):start]):
+                    return False
+                if any(self._subsumes(text, g) for g in result.goals):
+                    return False
+                return not any(self._subsumes(text, t) for t in seen)
+
             for m in _TASK_WIP.finditer(content):
                 wip = _clip(m.group(1))
-                if len(wip) >= 5 and not any(
-                        self._subsumes(wip, t) for t in result.tasks_wip):
+                if _outstanding(wip, m.start(1), result.tasks_wip):
                     result.tasks_wip.append(wip)
             for m in _TASK_TODO.finditer(content):
                 todo = _clip(m.group(1))
-                if len(todo) >= 5 and not any(
-                        self._subsumes(todo, t) for t in result.tasks_todo):
+                if _outstanding(todo, m.start(1), result.tasks_todo):
                     result.tasks_todo.append(todo)
 
         # Decision Pass 1: explicit verb
@@ -634,7 +881,11 @@ class HybridExtractor:
         for m in _DECISION_FOR.finditer(content):
             if _is_negated_context(content, m.start()):
                 continue
-            label = "Use " + m.group(1).strip()[:60]
+            # A bare tech name is only a decision with choosing context —
+            # see _tech_mention_is_a_decision.
+            if not _tech_mention_is_a_decision(content, m.start(1), m.end(1)):
+                continue
+            label = "Use " + _clip(m.group(1), 60)
             norm  = self._normalize(label)
             if norm not in seen_decisions:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
@@ -672,6 +923,11 @@ class HybridExtractor:
                 result.files.append(f)
                 seen_files.add(f)
         for m in _FILE_COMMON.finditer(content):
+            f = m.group(1).strip()
+            if f not in seen_files:
+                result.files.append(f)
+                seen_files.add(f)
+        for m in _FILE_EXTENSIONLESS.finditer(content):
             f = m.group(1).strip()
             if f not in seen_files:
                 result.files.append(f)
@@ -720,10 +976,25 @@ class HybridExtractor:
         # important thing to carry into a resume. Gating on recency meant
         # a session that diagnosed three failures early and spent the rest
         # of its turns fixing them carried none of them forward.
-        for pattern in (_ERROR_TYPED, _ERROR_SYMPTOM):
+        for pattern in (_ERROR_TYPED, _ERROR_VULN, _ERROR_INTEGRITY,
+                        _ERROR_DAMAGE, _ERROR_SYMPTOM):
             for m in pattern.finditer(content):
-                err = _clip(m.group(1), 70)
-                if len(err) < 5 or err.lower() in _ERROR_STOPWORDS:
+                before = content[max(0, m.start(1) - 60):m.start(1)]
+                if _SOLUTION_VERB.search(before):
+                    continue   # the symptom names the fix, not the failure
+                if _is_negated_context(content, m.start(1)):
+                    continue
+                if _ALREADY_FIXED.search(m.group(1)) or _ALREADY_FIXED.search(before):
+                    continue   # "no longer resurrects a prune" is the fix
+                if _ERROR_HANDLED.search(before):
+                    continue   # the exception is being caught, not raised
+                err = _clip(_FIX_PREFIX.sub("", m.group(1).strip()), 70)
+                # `IDOR`, `XSS`, `RCE` are four and three characters. A flat
+                # minimum length rejected the entire vulnerability vocabulary,
+                # which is the highest-signal thing an error label can carry.
+                floor = 3 if pattern is _ERROR_VULN else 5
+                bare = _ERROR_DETERMINER.sub("", err).lower()
+                if len(err) < floor or bare in _ERROR_STOPWORDS:
                     continue
                 if any(self._subsumes(err, e) for e in result.errors):
                     continue

@@ -26,7 +26,7 @@
     },
     {
       "role": "assistant",
-      "content": "Fixed the borrow checker error \u2014 the iterator held a reference across the loop body. Restructured to own the buffer in src/parser.rs."
+      "content": "Fixed the borrow checker error — the iterator held a reference across the loop body. Restructured to own the buffer in src/parser.rs."
     },
     {
       "role": "user",
@@ -40,6 +40,7 @@
   "ground_truth": {
     "completed_tasks": [
       "line iterator",
+      "own the buffer in src/parser.rs",
       "borrow checker error"
     ],
     "pending_tasks": [

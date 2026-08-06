@@ -26,7 +26,7 @@
     },
     {
       "role": "assistant",
-      "content": "Decided: date-fns instead of moment.js \u2014 tree-shakeable, saves about 230KB. Updated src/utils/format.ts and package.json."
+      "content": "Decided: date-fns instead of moment.js — tree-shakeable, saves about 230KB. Updated src/utils/format.ts and package.json."
     },
     {
       "role": "user",

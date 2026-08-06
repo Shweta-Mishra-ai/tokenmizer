@@ -672,54 +672,66 @@ python -m benchmarks.eval --errors                   # every miss, every false p
 python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 533 tests
+pytest tests/ -q                                     # 556 tests
 ```
 
 ### Extraction quality — precision, recall and F1
 
 `python -m benchmarks.eval` scores extraction against a labelled corpus:
-**11 sessions, 116 turns, 122 labelled items, 11 domains** (Go, Rust,
-Python, TypeScript, React, SQL, CI, ML, plus three real audit sessions).
-Measured on v0.6.1:
+**14 sessions, 144 turns, 171 labelled items, 14 domains** (Go, Rust,
+Python, TypeScript, React, SQL, CI, ML, plus six real audit sessions).
+Measured on v0.7.0:
 
 | Category | Precision | Recall | F1 |
 |---|---|---|---|
-| Files | 93% | 93% | **93%** |
-| Errors | 77% | 73% | **75%** |
-| Completed tasks | 62% | 83% | **71%** |
-| Decisions | 57% | 79% | **66%** |
-| Pending tasks | 50% | 88% | **64%** |
-| | | **macro F1** | **74%** |
+| Files | 98% | 100% | **99%** |
+| Pending tasks | 100% | 90% | **95%** |
+| Decisions | 90% | 95% | **92%** |
+| Completed tasks | 92% | 90% | **91%** |
+| Errors | 87% | 81% | **84%** |
+| | | **macro F1** | **92%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
 whole transcript as one node scores 100% recall; that is why recall-only
 extraction numbers should be distrusted, including earlier ones of ours.
 
-#### The number we would rather not publish
+#### Fixtures are easier than real sessions
 
-Eight of the sessions are hand-written fixtures; three are condensed from
-real TokenMizer audit sessions. Scored separately:
+Eight of the sessions are hand-written fixtures; six are condensed from
+real TokenMizer audit sessions. Scored separately, and printed on every
+run rather than kept in a drawer:
 
 | Corpus origin | Sessions | Macro F1 |
 |---|---|---|
-| Synthetic (hand-written) | 8 | **75%** |
-| Real (captured transcripts) | 3 | **65%** |
+| Synthetic (hand-written) | 8 | **93%** |
+| Real (captured transcripts) | 6 | **87%** |
 
-**A 10-point drop from fixtures to real data.** That gap is the honest
-measure of how much the heuristics are fitted to text we wrote
-ourselves, and it is printed on every run rather than kept in a drawer.
-Treat 65% as the number that describes real sessions and 75% as the
-optimistic one. Closing that gap needs more real transcripts, which is
-the single most useful contribution anyone could make here.
+**Treat 87% as the number that describes real sessions.** The six-point
+gap is the honest measure of how much the heuristics are fitted to text
+we wrote ourselves. Closing it needs more real transcripts, which is the
+single most useful contribution anyone could make here.
 
-Label quality, scored separately because a correct-but-sprawling label
-still wastes resume budget: 11% truncated mid-word, 4% spanning more than
-one sentence, mean length 35 characters.
+Two things keep these numbers from being self-congratulatory:
 
-Decisions and pending tasks are the weakest on precision — the decision
-passes over-fire, producing roughly one spurious item for every two real
-ones. That is the next thing to fix, and it is visible here rather than
-hidden behind an average.
+* **Ground truth must be quoted from the transcript.** `--corpus` refuses
+  to score a corpus containing a label no single message supports, because
+  such a label is unreachable for *any* extractor and caps recall at a
+  number no code change can move. Adding the check found two in our own
+  corpus.
+* **Labelling is exhaustive, not selective.** Every item matching the rule
+  in `benchmarks/eval/corpus.py` is labelled, including decisions that were
+  later superseded. Choosing which of several stated decisions "counts"
+  turns precision into a measure of the annotator's taste.
+
+n=14 is still a small sample and every session was labelled by the same
+author. Label quality, scored separately because a correct-but-sprawling
+label still wastes resume budget: 15% truncated mid-word, 1% spanning more
+than one sentence, mean length 35 characters.
+
+Errors are the weakest category. The misses are defects stated as plain
+prose with no exception name, status code or symptom noun to key on —
+"stats reported healthy over an empty database". Regex heuristics have no
+purchase there; that is what `use_llm_extraction` is for.
 
 To get a number for *your* workload, label a few of your own sessions in
 the format documented in `benchmarks/eval/corpus.py` and run

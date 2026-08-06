@@ -26,7 +26,7 @@
     },
     {
       "role": "assistant",
-      "content": "Found it \u2014 the gRPC client had no dial timeout, so it blocked indefinitely. Fixed by adding a 5 second context timeout in internal/order/client.go. Tests pass now."
+      "content": "Found it — the gRPC client had no dial timeout, so it blocked indefinitely. Fixed by adding a 5 second context timeout in internal/order/client.go. Tests pass now."
     },
     {
       "role": "user",
@@ -49,14 +49,16 @@
     "completed_tasks": [
       "gRPC scaffolding",
       "connection pool",
-      "5 second context timeout"
+      "5 second context timeout",
+      "the dependency from go.mod"
     ],
     "pending_tasks": [
       "exponential backoff"
     ],
     "decisions": [
-      "PostgreSQL for order storage",
       "gRPC",
+      "PostgreSQL for order storage",
+      "cenkalti/backoff",
       "hand-rolled retry loop"
     ],
     "files": [

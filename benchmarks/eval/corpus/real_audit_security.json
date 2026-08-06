@@ -1,0 +1,68 @@
+{
+  "id": "real_audit_security",
+  "origin": "real",
+  "domain": "audit/security",
+  "notes": "Condensed from the 0.4.1 session-ownership work. Security reasoning, a rejected alternative, and a deliberate 404-over-403 choice.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Any caller can read any session. Close it."
+    },
+    {
+      "role": "assistant",
+      "content": "Confirmed the IDOR: every session-scoped route takes session_id from the URL and there is one shared deployment key, so nothing ties a session to a caller."
+    },
+    {
+      "role": "user",
+      "content": "and session ids are guessable?"
+    },
+    {
+      "role": "assistant",
+      "content": "Worse — clients choose their own session_id in the request body, so no guessing is needed. Decided: bind each session to the credential that first used it."
+    },
+    {
+      "role": "user",
+      "content": "how do you tell callers apart with one key"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: an api_keys list where each credential is its own principal. Created security/ownership.py with an OwnershipStore backed by SQLite."
+    },
+    {
+      "role": "user",
+      "content": "what do denied requests return"
+    },
+    {
+      "role": "assistant",
+      "content": "Decided: 404 rather than 403. A distinguishable 403 turns the routes into an oracle for which session names exist. Completed: verify_session_access in routes_graph.py, wired into all 15 session routes."
+    },
+    {
+      "role": "user",
+      "content": "does it break existing users"
+    },
+    {
+      "role": "assistant",
+      "content": "No. With no key configured every caller is one principal, so local single-user use is unchanged. Completed: the ownership tests, and all 446 tests pass."
+    }
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "security/ownership.py with an OwnershipStore backed by SQLite",
+      "verify_session_access in routes_graph.py",
+      "the ownership tests"
+    ],
+    "pending_tasks": [],
+    "decisions": [
+      "bind each session to the credential",
+      "an api_keys list",
+      "404 rather than 403"
+    ],
+    "files": [
+      "security/ownership.py",
+      "routes_graph.py"
+    ],
+    "errors": [
+      "IDOR"
+    ]
+  }
+}

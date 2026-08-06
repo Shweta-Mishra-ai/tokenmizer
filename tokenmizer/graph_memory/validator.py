@@ -46,6 +46,37 @@ _NOISE_PATTERNS = [
     re.compile(r"^https?://", re.IGNORECASE),       # URLs (not useful as labels)
 ]
 
+# ── Error vocabulary ──────────────────────────────────────────────────────────
+#
+# Kept in step with the symptom vocabulary in hybrid_extractor: a failure the
+# extractor is willing to emit should be a failure the validator recognises.
+# Where the two disagreed, the extractor found the error and the validator
+# silently dropped it ("corrupt header" scored 0.60 against a 0.65 threshold).
+
+_EXCEPTION_NAME = re.compile(r'\b[A-Z][A-Za-z0-9]*(?:Error|Exception|Fault)\b')
+
+# Build files with no extension — kept in step with hybrid_extractor's
+# _FILE_EXTENSIONLESS, so a file the extractor is willing to emit is one the
+# validator recognises as a filename.
+_EXTENSIONLESS_FILE = re.compile(
+    r'Dockerfile|Makefile|Procfile|Jenkinsfile|Gemfile|Rakefile|Vagrantfile|'
+    r'Brewfile|Justfile|Caddyfile|CODEOWNERS|LICENSE|MANIFEST\.in'
+)
+
+# Vulnerability classes are named by acronym far more often than described.
+_VULN_CLASS = re.compile(
+    r'\b(?:IDOR|XSS|CSRF|SSRF|RCE|SQLi|TOCTOU|OOM|CVE-\d{4}-\d+)\b'
+)
+
+_ERROR_TERMS = (
+    "error", "exception", "fail", "crash", "bug", "issue", "traceback",
+    "422", "500", "404", "timeout", "timed out", "timing out", "null",
+    "undefined", "corrupt", "malformed", "truncated", "deadlock", "race",
+    "leak", "segfault", "segmentation fault", "panic", "hang", "flaky",
+    "regression", "overflow", "locked", "denied", "refused", "unreachable",
+    "mismatch", "invalid", "collision", "out of memory", "not triggering",
+)
+
 # Generic single-word labels that carry no information about THIS project
 _GENERIC_SINGLE_WORDS = frozenset({
     "implement", "create", "update", "fix", "add", "remove", "delete",
@@ -232,6 +263,11 @@ class GraphValidator:
 
     def _score_file(self, label: str, base: float) -> float:
         # File paths are high confidence if they have an extension or /
+        looks_like_a_path = bool(
+            re.search(r'\.[a-z]{1,5}$', label, re.IGNORECASE)
+            or "/" in label or "\\" in label
+            or _EXTENSIONLESS_FILE.fullmatch(label)
+        )
         if re.search(r'\.[a-z]{1,5}$', label, re.IGNORECASE):
             base += 0.25
         if "/" in label or "\\" in label:
@@ -239,6 +275,14 @@ class GraphValidator:
         # Common filename words
         if any(w in label.lower() for w in ["main", "app", "config", "test", "model", "route", "api"]):
             base += 0.05
+        # Short filenames are the UNAMBIGUOUS ones, and the generic
+        # length/word-count penalties in validate() were rejecting exactly
+        # those: `go.mod` scored 0.50 and `Dockerfile` 0.40 against a 0.65
+        # threshold, while the longer `internal/store/postgres.go` sailed
+        # through. Anything that is recognisably a filename clears the bar on
+        # that evidence rather than on how many characters it happens to have.
+        if looks_like_a_path:
+            return max(base, 0.65)
         return base
 
     def _score_decision(self, label: str, summary: str, base: float) -> float:
@@ -271,9 +315,16 @@ class GraphValidator:
         return base
 
     def _score_error(self, label: str, base: float) -> float:
-        error_terms = ["error", "exception", "fail", "crash", "bug", "issue",
-                       "traceback", "422", "500", "404", "timeout", "null", "undefined"]
-        if any(t in label.lower() for t in error_terms):
+        # A named exception class or vulnerability class IS the error, and is
+        # the most precise form an error label can take. The generic
+        # length/word-count penalties in validate() assume prose labels and
+        # punish exactly that form: "ProxyError" scored 0.55 and was rejected,
+        # while the vaguer "500 on an air-gapped host" scored 0.90. Give
+        # identifier-shaped errors a floor that clears the threshold on their
+        # own evidence rather than on sentence length.
+        if _EXCEPTION_NAME.search(label) or _VULN_CLASS.search(label):
+            return max(base + 0.15, 0.65)
+        if any(t in label.lower() for t in _ERROR_TERMS):
             base += 0.15
         return base
 

@@ -215,6 +215,10 @@ def main() -> int:
 
     try:
         sessions = corpus_mod.load(args.corpus)
+        # Refuse to score a corpus whose labels are not in its transcripts.
+        # An ungrounded label is unreachable for every extractor, so it caps
+        # recall at a number no code change can move, and it does so silently.
+        corpus_mod.validate_grounding(sessions, args.threshold)
     except corpus_mod.CorpusError as e:
         print(f"corpus error: {e}", file=sys.stderr)
         return 2

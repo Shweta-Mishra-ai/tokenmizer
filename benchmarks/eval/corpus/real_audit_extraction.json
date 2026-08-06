@@ -18,7 +18,7 @@
     },
     {
       "role": "assistant",
-      "content": "Error recall is 8 percent \u2014 1 of 12 labelled errors found. Two causes: errors are scanned only in the recent window, and the pattern requires a keyword followed by a description."
+      "content": "Error recall is 8 percent — 1 of 12 labelled errors found. Two causes: errors are scanned only in the recent window, and the pattern requires a keyword followed by a description."
     },
     {
       "role": "user",
@@ -26,7 +26,7 @@
     },
     {
       "role": "assistant",
-      "content": "Fixed the error window \u2014 errors are now scanned over full history. Replaced the pattern with typed-exception and symptom-phrase matching in hybrid_extractor.py. Error F1 went from 14 percent to 87 percent."
+      "content": "Fixed the error window — errors are now scanned over full history. Replaced the pattern with typed-exception and symptom-phrase matching in hybrid_extractor.py. Error F1 went from 14 percent to 87 percent."
     },
     {
       "role": "user",
@@ -50,14 +50,14 @@
     },
     {
       "role": "assistant",
-      "content": "Yes \u2014 completed tasks F1 dropped from 77 to 75 and decisions from 63 to 60. Clipping labels to one clause costs coverage on long ground-truth items. Reporting it rather than quoting only the macro, which went 59 to 75."
+      "content": "Yes — completed tasks F1 dropped from 77 to 75 and decisions from 63 to 60. Clipping labels to one clause costs coverage on long ground-truth items. Reporting it rather than quoting only the macro, which went 59 to 75."
     }
   ],
   "ground_truth": {
     "completed_tasks": [
-      "benchmarks/eval/metrics.py",
       "the error window",
-      "the pattern with typed-exception"
+      "the pattern with typed-exception",
+      "bounding the path check to short labels"
     ],
     "pending_tasks": [],
     "decisions": [
@@ -72,7 +72,8 @@
     ],
     "errors": [
       "Error recall is 8 percent",
-      "retyped as a FILE node"
+      "retyped as a FILE node",
+      "completed tasks F1 dropped from 77 to 75"
     ]
   }
 }

@@ -2,7 +2,7 @@
   "id": "data_migration",
   "origin": "synthetic",
   "domain": "data/sql",
-  "notes": "Two decision reversals in one session \u2014 stresses supersession without an explicit 'switched from' marker on the second.",
+  "notes": "Two decision reversals in one session — stresses supersession without an explicit 'switched from' marker on the second.",
   "messages": [
     {
       "role": "user",
@@ -54,14 +54,16 @@
       "row count reconciliation"
     ],
     "decisions": [
-      "AWS DMS",
+      "dual-write",
       "logical replication",
-      "dual-write"
+      "pglogical for the replication layer",
+      "AWS DMS"
     ],
     "files": [
       "migrations/001_dual_write.sql",
       "scripts/backfill.py",
-      "infra/dms_task.tf"
+      "infra/dms_task.tf",
+      "scripts/verify_counts.py"
     ],
     "errors": [
       "backfill is timing out"

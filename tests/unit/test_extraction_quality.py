@@ -12,6 +12,8 @@ which trains people to edit the assertion instead of reading it.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from benchmarks.eval import corpus as corpus_mod
@@ -166,20 +168,183 @@ class TestQualityFloors:
         return evaluate(corpus_mod.load())
 
     @pytest.mark.parametrize("category,min_f1", [
-        ("completed_tasks", 0.62),   # measured 0.75
-        ("decisions",       0.48),   # measured 0.60
-        ("files",           0.80),   # measured 0.91
-        ("errors",          0.70),   # measured 0.87
+        ("completed_tasks", 0.82),   # measured 0.91
+        ("pending_tasks",   0.82),   # measured 0.95
+        ("decisions",       0.84),   # measured 0.92
+        ("files",           0.92),   # measured 0.99
+        ("errors",          0.74),   # measured 0.82
     ])
     def test_category_f1_floor(self, result, category, min_f1):
         assert result["micro"][category]["f1"] >= min_f1
 
     def test_macro_f1_floor(self, result):
         f1s = [m["f1"] for m in result["micro"].values()]
-        assert sum(f1s) / len(f1s) >= 0.65   # measured 0.75
+        assert sum(f1s) / len(f1s) >= 0.85   # measured 0.92
+
+    def test_real_transcripts_floor(self, result):
+        """Scored separately, because the synthetic half is easier and a
+        headline macro hides that. Do not delete this to make a number
+        look better — the gap between the two IS the finding."""
+        real = [s for s in corpus_mod.load() if s.origin == "real"]
+        assert len(real) >= 6, "real-transcript sample shrank"
+        sub = evaluate(real)
+        f1s = [m["f1"] for m in sub["micro"].values()]
+        assert sum(f1s) / len(f1s) >= 0.80   # measured 0.87
 
     def test_label_quality_floor(self, result):
         """Before clipping: 23% truncated, 27% multi-sentence."""
         q = result["labels"]
         assert q.truncated_pct <= 15
-        assert q.multi_sentence_pct <= 12
+        assert q.multi_sentence_pct <= 5
+
+
+class TestCorpusGrounding:
+    """Ground truth has to come from the transcript.
+
+    A label written from hindsight rather than from a message is
+    unreachable for every extractor — heuristic, LLM or human — so it
+    caps recall at a number no code change can move, and it does so
+    silently. Two such labels were in the committed corpus before this
+    check existed."""
+
+    def test_committed_corpus_is_grounded(self):
+        corpus_mod.validate_grounding(corpus_mod.load())
+
+    def test_an_ungrounded_label_is_rejected(self, tmp_path):
+        (tmp_path / "s.json").write_text(json.dumps({
+            "id": "s", "origin": "real", "domain": "test",
+            "messages": [{"role": "assistant", "content": "Fixed the login bug."}],
+            "ground_truth": {"errors": ["CUDA out of memory"]},
+        }))
+        sessions = corpus_mod.load(tmp_path)
+        assert corpus_mod.ungrounded(sessions[0]) == [("errors", "CUDA out of memory")]
+        with pytest.raises(corpus_mod.CorpusError, match="not supported"):
+            corpus_mod.validate_grounding(sessions)
+
+    def test_grounding_is_per_message_not_per_transcript(self, tmp_path):
+        """Tokens scattered across separate turns are not evidence that any
+        turn stated the fact. Pooling the whole transcript would let almost
+        any label pass."""
+        (tmp_path / "s.json").write_text(json.dumps({
+            "id": "s", "origin": "real", "domain": "test",
+            "messages": [{"role": "user", "content": "the backfill is slow"},
+                         {"role": "assistant", "content": "raised the batch size"}],
+            "ground_truth": {"errors": ["backfill batch size limit"]},
+        }))
+        with pytest.raises(corpus_mod.CorpusError):
+            corpus_mod.validate_grounding(corpus_mod.load(tmp_path))
+
+
+class TestMultiStatementTurns:
+    """`(.{5,80})` ran past the full stop, so one match spanned two
+    statements and the second was unreachable — finditer does not re-scan
+    a span it already consumed."""
+
+    def _extract(self, text):
+        return get_hybrid_extractor().heuristic_extract(
+            [{"role": "assistant", "content": text}])
+
+    def test_both_decisions_in_one_turn_survive(self):
+        labels = [d["label"] for d in self._extract(
+            "Decided: TypeScript for type safety. "
+            "Decided: Recharts for data visualization (good React integration)."
+        ).decisions]
+        assert "TypeScript for type safety" in labels
+        assert any("Recharts" in x for x in labels)
+
+    def test_a_short_first_decision_does_not_swallow_the_second(self):
+        """The clause cut has a minimum length, so a decision shorter than
+        it used to run on into the next sentence."""
+        labels = [d["label"] for d in self._extract(
+            "Decided: Python 3.12 runtime. Decided: bcrypt for password hashing."
+        ).decisions]
+        assert "Python 3.12 runtime" in labels
+        assert any("bcrypt" in x for x in labels)
+
+    def test_dots_inside_tokens_still_do_not_split(self):
+        labels = [d["label"] for d in self._extract(
+            "Decided: date-fns instead of moment.js — tree-shakeable."
+        ).decisions]
+        assert any("moment.js" in x for x in labels)
+
+
+class TestNotYetDone:
+    def test_present_tense_intent_is_not_completed_work(self):
+        """`migrated?` also matched the present tense, so an opening turn
+        describing the goal was recorded as finished."""
+        out = get_hybrid_extractor().heuristic_extract(
+            [{"role": "user",
+              "content": "We need to migrate 40M rows from MySQL to Postgres."}])
+        assert not any("40M rows" in t for t in out.tasks_done)
+
+    def test_a_fix_is_not_outstanding_work(self):
+        out = get_hybrid_extractor().heuristic_extract(
+            [{"role": "assistant",
+              "content": "Fixed by adding a 5 second context timeout in "
+                         "internal/order/client.go. Tests pass now."}])
+        assert not any("timeout" in t for t in out.tasks_wip + out.tasks_todo)
+
+    def test_past_tense_missing_is_not_a_todo(self):
+        out = get_hybrid_extractor().heuristic_extract(
+            [{"role": "assistant",
+              "content": "Fixed: 422 error — was missing email validation "
+                         "in the LoginRequest model."}])
+        assert not any("email validation" in t for t in out.tasks_todo)
+
+
+class TestErrorVocabulary:
+    def _errors(self, text, role="assistant"):
+        return get_hybrid_extractor().heuristic_extract(
+            [{"role": role, "content": text}]).errors
+
+    def test_a_bare_exception_name_is_an_error(self):
+        """`ProxyError` is the most precise form an error label can take
+        and was rejected for being short."""
+        assert "ProxyError" in self._errors(
+            "tiktoken has no egress here. The failure is a ProxyError.")
+
+    def test_a_vulnerability_class_is_an_error(self):
+        assert any("IDOR" in e for e in self._errors(
+            "Confirmed the IDOR: every route takes session_id from the URL."))
+
+    def test_a_caught_exception_is_not_an_error(self):
+        assert not any("ImportError" in e for e in self._errors(
+            "_get_encoding catches only ImportError, so the network error "
+            "propagates out."))
+
+    def test_a_status_code_named_in_a_decision_is_not_an_error(self):
+        assert self._errors(
+            "Decided: 404 rather than 403 for denied requests.") == []
+
+    def test_a_received_status_code_is_an_error(self):
+        assert any("500" in e for e in self._errors(
+            "Every request returns 500 on an air-gapped host."))
+
+    def test_data_loss_prose_is_an_error(self):
+        assert any("discards" in e for e in self._errors(
+            "Two processes each write the complete blob, so the later save "
+            "discards everything the earlier one added."))
+
+    def test_a_fixed_data_loss_is_not_reported_as_current(self):
+        assert not any("resurrect" in e for e in self._errors(
+            "The stale writer no longer resurrects a prune."))
+
+    def test_a_second_error_in_one_sentence_is_reachable(self):
+        errs = self._errors(
+            "sqlite3.OperationalError subclasses DatabaseError, and "
+            "OperationalError covers database is locked.")
+        assert any("database is locked" in e for e in errs)
+
+    def test_a_bare_determiner_plus_stopword_is_not_an_error(self):
+        assert self._errors("any regressions", role="user") == []
+
+
+class TestExtensionlessFiles:
+    """Every file pattern keyed on a dot, so `Dockerfile` and `Makefile`
+    could not be extracted at all."""
+
+    @pytest.mark.parametrize("name", ["Dockerfile", "Makefile", "go.mod"])
+    def test_short_and_extensionless_filenames_survive(self, name):
+        out = get_hybrid_extractor().heuristic_extract(
+            [{"role": "assistant", "content": f"Updated the {name}."}])
+        assert name in out.files

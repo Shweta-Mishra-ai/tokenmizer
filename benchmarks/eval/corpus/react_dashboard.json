@@ -26,7 +26,7 @@
     },
     {
       "role": "assistant",
-      "content": "Fixed: WebSocket message not triggering re-render \u2014 was missing dependency in useEffect. Updated src/hooks/useWebSocket.ts. Chart now updates live."
+      "content": "Fixed: WebSocket message not triggering re-render — was missing dependency in useEffect. Updated src/hooks/useWebSocket.ts. Chart now updates live."
     },
     {
       "role": "user",
@@ -42,29 +42,37 @@
     },
     {
       "role": "assistant",
-      "content": "Going with JWT stored in httpOnly cookie (not localStorage \u2014 XSS safe). Working on: src/hooks/useAuth.ts, src/components/Login.tsx"
+      "content": "Going with JWT stored in httpOnly cookie (not localStorage — XSS safe). Working on: src/hooks/useAuth.ts, src/components/Login.tsx"
     }
   ],
   "ground_truth": {
     "completed_tasks": [
       "project scaffold with Vite",
       "dark mode toggle",
-      "missing dependency in useEffect"
+      "missing dependency in useEffect",
+      "WebSocket message not triggering re-render"
     ],
     "pending_tasks": [],
     "decisions": [
-      "Recharts",
-      "Chart.js",
+      "React",
       "WebSockets",
-      "Vite"
+      "TypeScript for type safety",
+      "Recharts for data visualization",
+      "CSS variables for theming",
+      "JWT stored in httpOnly cookie"
     ],
     "files": [
+      "src/App.tsx",
+      "src/components/Dashboard.tsx",
+      "src/hooks/useWebSocket.ts",
       "src/components/Header.tsx",
       "src/styles/theme.css",
-      "src/hooks/useWebSocket.ts"
+      "src/hooks/useAuth.ts",
+      "src/components/Login.tsx"
     ],
     "errors": [
-      "WebSocket message not triggering re-render"
+      "WebSocket message not triggering re-render",
+      "missing dependency in useEffect"
     ]
   }
 }
