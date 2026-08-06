@@ -28,6 +28,8 @@ Three real bugs found:
 """
 from __future__ import annotations
 
+import re
+
 import httpx
 import pytest
 from typer.testing import CliRunner
@@ -72,7 +74,7 @@ class TestStatsCommand:
         # previous wording was "Cannot reach server: [Errno 111]
         # Connection refused", which is what the stack knows rather than
         # what the reader needs.
-        assert "tokenmizer serve" in result.output, result.output
+        assert "tokenmizer serve" in _plain(result.output), result.output
 
 
 class TestCheckpointCommand:
@@ -287,6 +289,17 @@ class TestAnalyzeEndpoint:
         assert r.status_code == 422
 
 
+def _plain(text: str) -> str:
+    """Strip ANSI styling before asserting on CLI output.
+
+    Rich styles each run separately, so a colourized `--server` arrives as
+    `ESC[1;36m-ESC[0mESC[1;36m-serverESC[0m` and the literal substring is
+    not present. Whether it colourizes depends on terminal detection, so a
+    test that asserts on raw output passes locally and fails in CI.
+    """
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
 class TestFirstRunOutput:
     """The first two commands a new reader runs are `analyze` and
     `stats`. Both printed something that reads as a broken program."""
@@ -301,9 +314,10 @@ class TestFirstRunOutput:
         f = tmp_path / "tiny.csv"
         f.write_text("id,name,amount\n1,alpha,10\n2,beta,20\n3,gamma,30\n")
         res = CliRunner().invoke(cli_app, ["analyze", str(f)])
+        out = _plain(res.output)
         assert res.exit_code == 0
-        assert "-536" not in res.output and "% smaller" not in res.output, res.output
-        assert "larger" in res.output, res.output
+        assert "-536" not in out and "% smaller" not in out, out
+        assert "larger" in out, out
 
     @pytest.mark.parametrize("command", [
         ["stats"],
@@ -319,9 +333,10 @@ class TestFirstRunOutput:
 
         res = CliRunner().invoke(
             cli_app, command + ["--server", "http://127.0.0.1:9"])
+        out = _plain(res.output)
         assert res.exit_code == 1
-        assert "tokenmizer serve" in res.output, res.output
-        assert "Errno" not in res.output, res.output
+        assert "tokenmizer serve" in out, out
+        assert "Errno" not in out, out
 
     def test_the_suggested_flag_actually_exists(self):
         """The message tells the reader to pass `--server`. It nearly told
@@ -330,4 +345,5 @@ class TestFirstRunOutput:
 
         from tokenmizer.cli import app as cli_app
 
-        assert "--server" in CliRunner().invoke(cli_app, ["stats", "--help"]).output
+        out = _plain(CliRunner().invoke(cli_app, ["stats", "--help"]).output)
+        assert "--server" in out, out
