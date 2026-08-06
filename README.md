@@ -457,6 +457,37 @@ Continue: Implement token refresh endpoint
 
 **247 tokens** replaces **25,000+ tokens** of conversation history.
 
+### The loop, end to end
+
+Nothing here needs a command in the common case: the checkpoint fires on
+its own when the context window fills, and the resume block is injected
+into the next session's first request. The CLI is for driving it by hand.
+
+```mermaid
+flowchart TD
+    Start([New session]) --> Work["You work.<br/><sub>Every turn: extract nodes, persist changed rows</sub>"]
+    Work --> Check{"Context<br/>>= 85%?"}
+    Check -->|no| Work
+    Check -->|yes| Ckpt["Auto-checkpoint<br/><sub>retry once, report the outcome</sub>"]
+    Ckpt --> Full["Window fills"]
+    Full --> New([Next session, same session_id])
+    New --> Resume["Resume block injected<br/><sub>active decisions, open work, unresolved errors</sub>"]
+    Resume --> Work
+
+    Work -.->|"any time"| Ask["<b>Ask the graph</b><br/><sub>why_decision · /reasoning · /why</sub>"]
+
+    classDef auto fill:#7c6af722,stroke:#7c6af7,color:inherit
+    classDef ask  fill:#5ee7c822,stroke:#5ee7c8,color:inherit
+    class Ckpt,Resume auto
+    class Ask ask
+```
+
+What is *not* carried forward is as deliberate as what is. Superseded
+decisions are hidden from the resume but kept in history, so the model
+does not re-propose a choice you already moved off — while
+`why_decision` can still replay how you got here. Invalidated ones are
+surfaced explicitly, as "do not revisit".
+
 ---
 
 ## File Intelligence
