@@ -141,7 +141,7 @@ now collapse to the one that says what actually broke.
   inert code ("the fallback is unreachable") and vulnerability classes.
 * 34 tests, including a floor on real transcripts scored separately so the
   synthetic half cannot carry the headline, and a scan-cost bound that
-  fails if the patterns return to superlinear. 533 → 573 tests.
+  fails if the patterns return to superlinear. 533 → 578 tests.
 
 #### Fixed — the lock sweep never removed anything on Windows
 `sweep_stale_locks` unlinked the lock file while its own handle was still
@@ -159,6 +159,30 @@ rather than forked, and a CLI test hardcoded `/tmp` as "a path that is not
 a file" — a path that does not exist on Windows, so the CLI correctly
 answered "not found" and the assertion failed for a reason unrelated to
 the behaviour under test.
+
+#### Fixed — the embedding model could raise on the request path
+`EmbeddingEngine._load` caught only `ImportError`. sentence-transformers
+ships no weights: `SentenceTransformer(...)` downloads them from
+huggingface.co on first use, so with the package installed and the model
+not cached — air-gapped host, egress proxy, Hub outage, rate limit — it
+raised `OSError` out of `embed()`, which the cache lookup calls while
+serving a request. The semantic cache is an optimisation; it must degrade
+to exact match, never fail the request that was only trying to use it.
+
+This is the same defect as the tiktoken one fixed earlier in this
+release, in a second place: a lazily-downloaded asset behind a
+catch-too-narrow, on a hot path.
+
+Two things had kept it invisible. The test suite replaced `_load` with a
+no-op for every test, so nothing exercised it — the stub is now a fixture
+a test can opt out of. And the Dockerfile baked the model in a step that
+hard-failed the build, which meant every image build depended on
+huggingface.co being reachable *and* not rate-limiting; it duly broke CI
+on a Hub hiccup. That step retries once and then continues, and CI now
+asserts the image serves cache hits with `--network none` and no model.
+
+The tiktoken bake stays hard-required, and the difference is the point:
+token counting runs on every request, the embedding model does not.
 
 #### Known limits
 Errors remain the weakest category at 94%. Across 172 labelled items it now

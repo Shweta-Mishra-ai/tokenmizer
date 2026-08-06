@@ -67,16 +67,48 @@ class EmbeddingEngine:
         self._initialized = False
 
     def _load(self) -> None:
+        """Load the embedding model, or leave it None. Never raises.
+
+        Catching ImportError alone was NOT enough, and the gap is the same
+        one `core.tokenizer._get_encoding` documents for tiktoken:
+        sentence-transformers ships no weights. `SentenceTransformer(...)`
+        downloads them from huggingface.co on first use, so with the
+        package installed but the model not cached — an air-gapped host,
+        an egress proxy, a Hub outage, a rate limit — it raises OSError.
+
+        That escaped `_load()`, and `embed()` is reached from the cache
+        lookup on the request path, so a Hugging Face problem became an
+        exception on every request that consulted the cache. The semantic
+        cache is an optimisation; it must degrade to exact-match, never
+        fail the request that was only trying to use it.
+
+        The failure is recorded (`_initialized` is set before the attempt),
+        so this costs one try per process rather than a fresh network
+        timeout on every lookup.
+
+        To avoid the network entirely, pre-fetch the model at image build
+        time and point HF_HOME at it — see the Dockerfile.
+        """
         if self._initialized:
             return
         self._initialized = True
         try:
             from sentence_transformers import SentenceTransformer  # type: ignore
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
-            logger.info("Sentence transformer loaded for semantic cache")
         except ImportError:
             logger.info("sentence-transformers not installed "
                         "— semantic cache uses exact match only")
+            return
+
+        try:
+            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            logger.info("Sentence transformer loaded for semantic cache")
+        except Exception as e:
+            logger.warning(
+                "Could not load the embedding model (%s: %s) — semantic "
+                "cache falls back to exact match. Pre-fetch the model at "
+                "image build time and set HF_HOME to avoid the network.",
+                type(e).__name__, e,
+            )
 
     @property
     def available(self) -> bool:

@@ -790,7 +790,7 @@ python -m benchmarks.eval --errors                   # every miss, every false p
 python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 573 tests
+pytest tests/ -q                                     # 578 tests
 ```
 
 ### Extraction quality — precision, recall and F1

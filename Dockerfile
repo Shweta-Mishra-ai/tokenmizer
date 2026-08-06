@@ -26,9 +26,34 @@ RUN pip install --no-cache-dir ".[anthropic,openai,gemini,cache]"
 RUN mkdir -p /app/checkpoints
 
 # Pre-download the sentence-transformer model into a shared cache dir
-# (done as root so the path is fixed, then handed to appuser)
+# (done as root so the path is fixed, then handed to appuser).
+#
+# NON-FATAL on purpose, unlike the tiktoken bake below. The two look
+# alike and are not:
+#
+#   tiktoken   — required, on the hot path of every request. If its
+#                vocabulary is missing the proxy still answers, but every
+#                token count silently drops to a char/4 estimate. Worth
+#                failing the build over.
+#   this model — the semantic cache only. Without it the cache degrades
+#                to exact match, which is a slower cache, not a broken
+#                image (semantic_cache/cache.py handles the absence).
+#
+# Hard-failing here made every image build depend on huggingface.co being
+# reachable AND not rate-limiting, and it duly broke CI on a Hub hiccup.
+# Retry once, then continue and say so in the build log.
 ENV HF_HOME=/app/.hf-cache
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+RUN set -eu; \
+    baked=0; \
+    for attempt in 1 2; do \
+      if python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"; then \
+        baked=1; echo "embedding model baked in"; break; \
+      fi; \
+      echo "embedding model download failed (attempt $attempt of 2)"; \
+      [ "$attempt" = 1 ] && sleep 15 || true; \
+    done; \
+    [ "$baked" = 1 ] || \
+      echo "WARNING: no embedding model baked in — the semantic cache will run in exact-match mode"
 
 # Pre-download tiktoken's BPE vocabulary at BUILD time.
 #

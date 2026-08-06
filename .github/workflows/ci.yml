@@ -144,6 +144,25 @@ jobs:
           print('offline token count OK:', n)
           "
 
+      # The embedding model is baked in on a best-effort basis: it serves
+      # the semantic cache only, and hard-failing the build on a
+      # huggingface.co hiccup broke CI for a reason unrelated to this
+      # code. So the image must be correct WITHOUT it — a cache lookup
+      # with no egress and no model must degrade to exact match, not
+      # raise. That path caught an unhandled OSError once already.
+      - name: Semantic cache degrades instead of raising with no network
+        run: |
+          docker run --rm --network none tokenmizer:latest python -c "
+          from tokenmizer.semantic_cache.cache import EmbeddingEngine, SemanticCache
+          e = EmbeddingEngine()
+          assert e.embed('hello world') is None or e.available, 'embed must not raise'
+          c = SemanticCache(threshold=0.95, ttl_seconds=60, max_size=8)
+          c.set('what is the capital of France?', 'Paris.', 10, 5)
+          hit = c.get('what is the capital of France?')
+          assert hit is not None and hit.response == 'Paris.', 'exact match broken offline'
+          print('offline cache OK (semantic:', e.available, ')')
+          "
+
       - name: Graph storage works with no network
         run: |
           docker run --rm --network none tokenmizer:latest python -c "

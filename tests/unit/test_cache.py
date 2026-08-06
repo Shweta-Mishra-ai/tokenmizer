@@ -100,3 +100,89 @@ class TestStats:
         assert s["entries"] == 1
         assert s["hit_exact"] == 1
         assert s["miss"] == 1
+
+
+class TestEmbeddingModelIsOptional:
+    """The semantic cache is an optimisation. It must degrade to exact
+    match when the embedding model cannot be loaded — never fail the
+    request that was only trying to use it.
+
+    Same defect shape as the tiktoken one in `core.tokenizer`: the
+    package ships no weights, `SentenceTransformer(...)` downloads them
+    from huggingface.co on first use, and `_load` caught only
+    ImportError. An air-gapped host, an egress proxy, a Hub outage or a
+    rate limit therefore raised OSError out of `embed()` — which the
+    cache lookup calls on the request path.
+    """
+
+    def _engine_that_fails_with(self, monkeypatch, exc, real_embedding_load):
+        import sys
+        import types
+
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine
+
+        def boom(*_a, **_kw):
+            raise exc
+
+        fake = types.ModuleType("sentence_transformers")
+        fake.SentenceTransformer = boom
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+
+        engine = EmbeddingEngine()
+        return engine
+
+    @pytest.mark.parametrize("exc", [
+        OSError("We couldn't connect to 'https://huggingface.co'"),
+        RuntimeError("rate limited"),
+        ValueError("corrupt weights"),
+    ])
+    def test_a_model_that_cannot_load_does_not_raise(self, monkeypatch, exc,
+                                                     real_embedding_load):
+        engine = self._engine_that_fails_with(monkeypatch, exc, real_embedding_load)
+        assert engine.available is False
+        assert engine.embed("hello world") is None
+
+    def test_the_failure_is_attempted_once_not_per_call(self, monkeypatch,
+                                                        real_embedding_load):
+        """Otherwise every cache lookup pays a fresh network timeout."""
+        import sys
+        import types
+
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine
+
+        calls = []
+
+        def boom(*_a, **_kw):
+            calls.append(1)
+            raise OSError("no egress")
+
+        fake = types.ModuleType("sentence_transformers")
+        fake.SentenceTransformer = boom
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+
+        engine = EmbeddingEngine()
+        for _ in range(5):
+            engine.embed("hello")
+        assert len(calls) == 1, f"model load retried {len(calls)} times"
+
+    def test_the_cache_still_serves_exact_matches_without_a_model(
+            self, monkeypatch, real_embedding_load):
+        import sys
+        import types
+
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine, SemanticCache
+
+        fake = types.ModuleType("sentence_transformers")
+
+        def boom(*_a, **_kw):
+            raise OSError("no egress")
+
+        fake.SentenceTransformer = boom
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+        monkeypatch.setattr(EmbeddingEngine, "_instance", None)
+
+        cache = SemanticCache(threshold=0.95, ttl_seconds=3600, max_size=5)
+        cache.set("what is the capital of France?", "Paris.", 10, 5)
+        hit = cache.get("what is the capital of France?")
+        assert hit is not None, "exact match must still work with no model"
+        assert hit.response == "Paris."
