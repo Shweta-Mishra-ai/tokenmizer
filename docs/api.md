@@ -4,7 +4,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 
 ---
 
-# API Reference
+## API Reference
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -30,7 +30,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 
 ---
 
-# CLI
+## CLI
 
 ```bash
 tokenmizer serve [--port 8000]
@@ -61,9 +61,9 @@ tokenmizer stats
 
 ---
 
-# Claude Code Integration
+## Claude Code Integration
 
-## Option A — Plugin (recommended)
+### Option A — Plugin (recommended)
 
 ```bash
 # Add TokenMizer as a plugin marketplace
@@ -83,7 +83,7 @@ Then use skills directly:
 /tokenmizer:stats                      → token savings report
 ```
 
-## Option B — MCP server (Claude Desktop, Claude Code, Cursor, VS Code, Zed)
+### Option B — MCP server (Claude Desktop, Claude Code, Cursor, VS Code, Zed)
 
 mcp-name: io.github.Shweta-Mishra-ai/tokenmizer
 
@@ -133,14 +133,12 @@ decision's supersession chain with reasons and evidence.
 
 ---
 
-# Other Tools
+## Other Tools
 
 **Cursor / Continue.dev / any OpenAI-compatible tool:**
 ```
 API Base URL:  http://localhost:8000/v1
 ```
-
----
 
 
 ---

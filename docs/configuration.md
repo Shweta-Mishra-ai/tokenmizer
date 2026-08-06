@@ -4,7 +4,7 @@ Every setting, where it can be set, and which ones fail loudly. Precedence is **
 
 ---
 
-# Configuration
+## Example config
 
 ```yaml
 # tokenmizer.yaml
@@ -84,7 +84,7 @@ untrusted network lets any caller reset their own limit.
 
 ---
 
-# Supported Providers
+## Supported Providers
 
 Model strings pass through unchanged — the newest models work out of the box:
 `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5`,
@@ -101,8 +101,6 @@ GPT-4o/o-series, Gemini 1.5/2.0, and any Ollama/OpenRouter model.
 | Cohere | `TOKENMIZER_COHERE_API_KEY` |
 | OpenRouter | `TOKENMIZER_OPENROUTER_API_KEY` |
 | Ollama | No key — free, local |
-
----
 
 
 ---

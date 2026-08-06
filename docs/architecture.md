@@ -4,7 +4,7 @@ How a request moves through TokenMizer, what the graph stores, and how a decisio
 
 ---
 
-# How TokenMizer Solves It
+## How TokenMizer Solves It
 
 TokenMizer is a **local proxy** between your app and any LLM. Every
 request passes through a pipeline that builds a live knowledge graph,
@@ -40,13 +40,13 @@ flowchart LR
 
 ---
 
-# Architecture
+## Request pipeline and data model
 
 <div align="center">
   <img src="docs/assets/architecture.svg" width="880" alt="TokenMizer architecture: proxy pipeline, graph memory, and SQLite storage"/>
 </div>
 
-## What happens on one request
+### What happens on one request
 
 ```mermaid
 sequenceDiagram
@@ -72,7 +72,7 @@ sequenceDiagram
     P-->>C: completion + usage + tokenmizer.savings
 ```
 
-## Decision lifecycle
+### Decision lifecycle
 
 The graph tracks *why* the current answer is current. A new decision in
 an occupied slot supersedes the old one and records the transition, so
@@ -99,7 +99,7 @@ stateDiagram-v2
     end note
 ```
 
-## What the graph actually stores
+### What the graph actually stores
 
 Nodes are typed, and so are the edges between them. Extraction produces
 this shape; the resume block is a filtered projection of it.
@@ -147,7 +147,7 @@ completed work and superseded choices, never for goals or active
 decisions — so a long session prunes what stopped mattering and keeps
 what still does.
 
-## Decision Memory — 4-State Model
+### Decision Memory — 4-State Model
 
 | Status | Meaning | In Resume |
 |---|---|---|
@@ -160,7 +160,7 @@ History is **never deleted**. "Why did we switch from React to Next.js?" — alw
 ask `GET /api/graph/{session}/why?q=react` (or the `why_decision` MCP tool) and get the full
 old → new trail with trigger, reason, and evidence per hop.
 
-## From Storage to Reasoning
+### From Storage to Reasoning
 
 The graph doesn't just store facts — it answers questions over them:
 
@@ -175,7 +175,7 @@ All reasoning is deterministic and local — no LLM calls, no extra cost.
 
 ---
 
-# Session Resume
+## Session Resume
 
 ```bash
 tokenmizer checkpoint my-project
@@ -194,7 +194,7 @@ Continue: Implement token refresh endpoint
 
 **247 tokens** replaces **25,000+ tokens** of conversation history.
 
-## The loop, end to end
+### The loop, end to end
 
 Nothing here needs a command in the common case: the checkpoint fires on
 its own when the context window fills, and the resume block is injected
@@ -227,7 +227,7 @@ surfaced explicitly, as "do not revisit".
 
 ---
 
-# File Intelligence
+## File Intelligence
 
 ```python
 from tokenmizer.filters.file_intelligence import FileIntelligence
@@ -244,8 +244,6 @@ result = fi.process(open("sales.csv","rb").read(), "sales.csv",
 | PDF (200 pages) | 98.8% |
 | Excel (10 sheets) | 99.7% |
 | JSON (1k items) | 95% |
-
----
 
 
 ---
