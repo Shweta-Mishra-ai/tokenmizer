@@ -317,11 +317,12 @@ Thanks to everyone who has sent a fix upstream:
 
 ## Support
 
-A [⭐ star](https://github.com/Shweta-Mishra-ai/tokenmizer) is how other
-people find it. If it saved you real time and you would like to put
-something behind it,
-[sponsorship](https://github.com/sponsors/Shweta-Mishra-ai) is open —
-entirely optional.
+If TokenMizer is useful to you, please give it a
+[⭐ star](https://github.com/Shweta-Mishra-ai/tokenmizer). It takes a
+second and it genuinely helps.
+
+[Sponsorship](https://github.com/sponsors/Shweta-Mishra-ai) is open too,
+if you would like to support the work. Entirely optional.
 
 ## License
 
