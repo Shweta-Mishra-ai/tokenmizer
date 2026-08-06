@@ -1,5 +1,3 @@
-version: "3.9"
-
 # NOTE ON REDIS (removed):
 # This file used to run a Redis container, gate startup on its health
 # check, persist a redis_data volume, and set TOKENMIZER_STATE_BACKEND=redis

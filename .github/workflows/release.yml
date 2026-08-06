@@ -8,7 +8,8 @@ name: Release to PyPI
 #     Repository:        tokenmizer
 #     Workflow name:     release.yml
 #     Environment:       pypi
-# Then create a GitHub Release (tag v0.2.4 etc.) and this workflow publishes.
+# Then create a GitHub Release whose tag is v<version> — v0.5.0 for the
+# current package — and this workflow publishes it.
 
 on:
   release:
@@ -24,7 +25,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The release tag (v0.3.2) must match the package version — otherwise
+      # The release tag must match the package version exactly — otherwise
       # a stale tag publishes the wrong code under the wrong number. Version
       # pins across server.json / plugin.json / app.py are enforced by
       # tests/unit/test_version_consistency.py in the test run below.

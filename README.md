@@ -145,6 +145,54 @@ stateDiagram-v2
     end note
 ```
 
+### What the graph actually stores
+
+Nodes are typed, and so are the edges between them. Extraction produces
+this shape; the resume block is a filtered projection of it.
+
+```mermaid
+erDiagram
+    GOAL ||--o{ TASK : "DECOMPOSES_INTO"
+    DECISION ||--o{ TASK : "AFFECTS"
+    TASK ||--o{ FILE : "IMPLEMENTS"
+    ERROR }o--|| FILE : "OCCURS_IN"
+    DECISION ||--o| DECISION : "SUPERSEDES"
+    FILE ||--o{ ENDPOINT : "DEFINES"
+    SCHEMA ||--o{ ENDPOINT : "SHAPES"
+    DECISION ||--o{ EVIDENCE : "JUSTIFIED_BY"
+
+    GOAL {
+        string label
+        float importance "never decays"
+    }
+    DECISION {
+        string label
+        string status "ACTIVE SUPERSEDED CONTESTED INVALIDATED"
+        string topic_slot "one active decision per slot"
+        json transition "trigger reason evidence"
+    }
+    TASK {
+        string label
+        string status "COMPLETED IN_PROGRESS PENDING"
+    }
+    ERROR {
+        string label
+        bool resolved
+    }
+    FILE {
+        string path
+    }
+    EVIDENCE {
+        string text
+        string kind "metric quote standard"
+    }
+```
+
+Every node carries `importance` and `confidence`. Importance decays for
+completed work and superseded choices, never for goals or active
+decisions — so a long session prunes what stopped mattering and keeps
+what still does.
+
 ### Decision Memory — 4-State Model
 
 | Status | Meaning | In Resume |
@@ -431,17 +479,21 @@ result = fi.process(open("sales.csv","rb").read(), "sales.csv",
 
 ---
 
-## Works Alongside Caveman & CodeBurn
+## Running alongside other token tools
 
-TokenMizer **complements** — does not replace — these tools:
+Token tooling divides along one axis: what you send, what you get back,
+and what you remember. TokenMizer is the third. It composes with the
+other two rather than competing with them.
 
-| Tool | What it does |
-|---|---|
-| **Caveman** | Output tokens shorter (~65%) |
-| **CodeBurn** | Input context trimming |
-| **TokenMizer** | Graph memory + resume + file intelligence + cache |
+| Layer | Tool | Where it acts |
+|---|---|---|
+| Output length | [Caveman](https://github.com/Shweta-Mishra-ai/caveman) | Shortens what the model writes back |
+| Input trimming | [CodeBurn](https://github.com/Shweta-Mishra-ai/codeburn) | Trims the context you send |
+| **Memory** | **TokenMizer** | Keeps the decisions, files and errors across the context limit |
 
-> **Tip:** If using Caveman, set `terse_output: enabled: false` in `tokenmizer.yaml` to avoid conflicting system prompts.
+> **If you run Caveman too,** set `terse_output.enabled: false` in
+> `tokenmizer.yaml`. Both inject a system prompt asking for brevity, and
+> two of them fight each other.
 
 ---
 
@@ -489,11 +541,46 @@ cache:
 state_backend: memory           # memory | redis — see note below
 ```
 
-All settings via env vars: `TOKENMIZER_PROVIDER`, `TOKENMIZER_API_KEY`, etc.
-**Environment variables override `tokenmizer.yaml`.** (They genuinely do
-as of v0.5.0 — before that the YAML file silently won every conflict, so
-any `TOKENMIZER_*` variable whose key also appeared in the file was
-ignored.)
+### Environment
+
+Every setting has an environment variable. **Environment variables
+override `tokenmizer.yaml`** — they genuinely do as of v0.5.0; before
+that the YAML file silently won every conflict, so any `TOKENMIZER_*`
+variable whose key also appeared in the file was ignored.
+
+Precedence, highest first: **environment → `tokenmizer.yaml` → defaults.**
+
+Top-level settings take the prefix directly. Nested ones use a double
+underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
+`TOKENMIZER_GRAPH_CHECKPOINT__TRIGGER_AT_PERCENT`. Setting the parent
+(`TOKENMIZER_GRAPH_CHECKPOINT`, as JSON) replaces the whole object.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `TOKENMIZER_CONFIG` | `tokenmizer.yaml` | Path to the config file |
+| `TOKENMIZER_ENV` | *(unset)* | `production` refuses to start on an unsafe config — no API key, or a wide-open bind. Anything else is development mode |
+| `TOKENMIZER_API_KEY` | *(empty)* | Client auth for TokenMizer itself. Empty = no auth, single shared principal |
+| `TOKENMIZER_PROVIDER` | `anthropic` | Upstream provider |
+| `TOKENMIZER_DEFAULT_MODEL` | `claude-sonnet-4-6` | Used when the request names no model |
+| `TOKENMIZER_<PROVIDER>_API_KEY` | *(empty)* | Upstream key — `ANTHROPIC`, `OPENAI`, `GEMINI`, `GROK`, `DEEPSEEK`, `MISTRAL`, `COHERE`, `OPENROUTER` |
+| `TOKENMIZER_PROXY_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` accepts remote connections — set an API key first |
+| `TOKENMIZER_TRUST_PROXY_HEADERS` | `false` | Read `X-Forwarded-For` for rate-limit identity. Only enable behind a proxy you control; otherwise callers can forge it |
+| `TOKENMIZER_TRUSTED_PROXY_HOPS` | `1` | How many proxies sit in front of you |
+| `TOKENMIZER_GRAPH_CHECKPOINT__ENABLED` | `true` | Graph memory on/off |
+| `TOKENMIZER_GRAPH_CHECKPOINT__TRIGGER_AT_PERCENT` | `0.85` | Auto-checkpoint at this share of the context window |
+| `TOKENMIZER_GRAPH_CHECKPOINT__STORAGE_DIR` | `./checkpoints` | Where the SQLite database lives |
+| `TOKENMIZER_GRAPH_CHECKPOINT__MAX_RESUME_TOKENS` | `400` | Budget for the injected resume block |
+| `TOKENMIZER_GRAPH_CHECKPOINT__USE_LLM_EXTRACTION` | `false` | Hybrid LLM + heuristic extraction (needs a key, ~$0.001/turn) |
+| `TOKENMIZER_CACHE__ENABLED` | `true` | Semantic cache |
+| `TOKENMIZER_CACHE__SIMILARITY_THRESHOLD` | `0.92` | How close a hit must be |
+| `TOKENMIZER_COMPRESSION__ENABLED` | `true` | Prompt compression |
+| `TIKTOKEN_CACHE_DIR` | *(unset)* | Where tiktoken looks for its BPE vocabulary. Set it, and pre-download, to run without egress — the Docker image does this at build time |
+
+Two variables are worth calling out because they fail loudly rather than
+quietly: `TOKENMIZER_ENV=production` **refuses to start** on an unsafe
+config instead of warning, and `TOKENMIZER_TRUST_PROXY_HEADERS` changes
+who the rate limiter thinks you are — enabling it in front of an
+untrusted network lets any caller reset their own limit.
 
 > **`state_backend: redis` is not wired up.** `tokenmizer/state/backend.py`
 > has no callers — nothing reads from or writes to Redis. All durable
@@ -672,7 +759,7 @@ python -m benchmarks.eval --errors                   # every miss, every false p
 python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 567 tests
+pytest tests/ -q                                     # 573 tests
 ```
 
 ### Extraction quality — precision, recall and F1
@@ -688,7 +775,7 @@ Measured on v0.5.0:
 | Pending tasks | 100% | 90% | **95%** |
 | Decisions | 90% | 95% | **92%** |
 | Completed tasks | 92% | 90% | **91%** |
-| Errors | 92% | 89% | **90%** |
+| Errors | 93% | 96% | **94%** |
 | | | **macro F1** | **94%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
@@ -704,9 +791,9 @@ run rather than kept in a drawer:
 | Corpus origin | Sessions | Macro F1 |
 |---|---|---|
 | Synthetic (hand-written) | 8 | **95%** |
-| Real (captured transcripts) | 6 | **88%** |
+| Real (captured transcripts) | 6 | **90%** |
 
-**Treat 88% as the number that describes real sessions.** The seven-point
+**Treat 90% as the number that describes real sessions.** The five-point
 gap is the honest measure of how much the heuristics are fitted to text
 we wrote ourselves. Closing it needs more real transcripts, which is the
 single most useful contribution anyone could make here.
@@ -728,11 +815,11 @@ author. Label quality, scored separately because a correct-but-sprawling
 label still wastes resume budget: 15% truncated mid-word, 1% spanning more
 than one sentence, mean length 35 characters.
 
-Errors are the weakest category at 90%. The three misses are defects
-stated as plain prose with no exception name, status code or symptom
-noun to key on —
-"stats reported healthy over an empty database". Regex heuristics have no
-purchase there; that is what `use_llm_extraction` is for.
+Across 172 labelled items the extractor now misses four and invents
+three. The residue is where regexes genuinely stop: a defect stated as a
+measurement ("error recall is 8 percent"), and one failure named twice in
+words that share no tokens ("backfill is timing out" / "the backfill
+timeout"). That is what `use_llm_extraction` is for.
 
 To get a number for *your* workload, label a few of your own sessions in
 the format documented in `benchmarks/eval/corpus.py` and run
@@ -901,11 +988,20 @@ Open a PR — [CONTRIBUTING.md](CONTRIBUTING.md) covers setup and review expecta
 
 ## Support the project
 
-TokenMizer is built and maintained by one person. If it saved you tokens, time, or a lost session:
+TokenMizer is built and maintained by one person.
 
-- ⭐ **[Star the repo](https://github.com/Shweta-Mishra-ai/tokenmizer)** — the single best way to help others find it
-- 🐛 [Report a bug](https://github.com/Shweta-Mishra-ai/tokenmizer/issues) — especially extraction misses
-- 📣 Share your before/after token numbers (`tokenmizer stats`) — real usage data shapes the roadmap
+The most useful thing you can send is **a session where extraction got it
+wrong.** The eval corpus is 14 sessions and every label in it was written
+by the same author — that is the honest ceiling on how much the reported
+numbers can tell you about *your* workload, and the only way past it is
+transcripts nobody here wrote. Label a few of your own in the format in
+[`benchmarks/eval/corpus.py`](benchmarks/eval/corpus.py) and open a PR, or
+just [open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues)
+with the turn that was missed.
+
+Also welcome: your before/after numbers from `tokenmizer stats`, and a
+[star](https://github.com/Shweta-Mishra-ai/tokenmizer) if it saved you a
+session.
 
 ---
 

@@ -59,11 +59,29 @@ def test_marketplace_manifest_matches_package():
 
 
 def test_fastapi_app_version_matches_package():
+    """Checked at runtime, on the object /docs and /openapi.json read from.
+
+    Grepping the source for a literal was the previous check. It passed for
+    four releases while the literal itself was stale, because a test that
+    compares a hardcoded string to another hardcoded string only fails when
+    someone updates exactly one of them.
+    """
+    from tokenmizer.api.app import app
+    assert app.version == tokenmizer.__version__, (
+        f"/docs would show {app.version}, package is {tokenmizer.__version__}"
+    )
+
+
+def test_fastapi_app_does_not_hardcode_a_version():
+    """The version must be derived from `__version__`, not written out.
+
+    A literal here is a string nobody thinks to update at release time.
+    Deriving it removes the drift instead of testing for it.
+    """
     text = (ROOT / "tokenmizer" / "api" / "app.py").read_text(encoding="utf-8")
-    m = re.search(r'version\s*=\s*"(\d+\.\d+\.\d+)"', text)
-    assert m, "app.py FastAPI(version=...) pin not found"
-    assert m.group(1) == tokenmizer.__version__, (
-        f"/docs page would show {m.group(1)}, package is {tokenmizer.__version__}"
+    body = text.split("app = FastAPI(", 1)[-1].split(")", 1)[0]
+    assert not re.search(r'version\s*=\s*["\']\d+\.\d+\.\d+', body), (
+        "app.py pins a literal version — use `version=__version__`"
     )
 
 

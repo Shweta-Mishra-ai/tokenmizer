@@ -173,7 +173,7 @@ class TestQualityFloors:
         ("pending_tasks",   0.82),   # measured 0.95
         ("decisions",       0.84),   # measured 0.92
         ("files",           0.92),   # measured 0.99
-        ("errors",          0.82),   # measured 0.90
+        ("errors",          0.86),   # measured 0.94
     ])
     def test_category_f1_floor(self, result, category, min_f1):
         assert result["micro"][category]["f1"] >= min_f1
@@ -190,7 +190,7 @@ class TestQualityFloors:
         assert len(real) >= 6, "real-transcript sample shrank"
         sub = evaluate(real)
         f1s = [m["f1"] for m in sub["micro"].values()]
-        assert sum(f1s) / len(f1s) >= 0.80   # measured 0.87
+        assert sum(f1s) / len(f1s) >= 0.84   # measured 0.90
 
     def test_label_quality_floor(self, result):
         """Before clipping: 23% truncated, 27% multi-sentence."""
@@ -409,3 +409,49 @@ class TestRestatedErrors:
         with_422 = [e for e in errors if "422" in e]
         assert len(with_422) == 1, with_422
         assert "email validation" in with_422[0], with_422
+
+
+class TestSilentFailures:
+    """The worst class of bug: nothing raises, nothing logs, and the
+    monitoring says everything is fine. The whole sentence is made of
+    words that normally mean success, so no failure vocabulary reaches it."""
+
+    def _errors(self, text):
+        return get_hybrid_extractor().heuristic_extract(
+            [{"role": "assistant", "content": text}]).errors
+
+    def test_health_reported_over_a_broken_system_is_an_error(self):
+        errors = self._errors(
+            "The persistence_broken flag stayed False, so stats reported "
+            "healthy over an empty database.")
+        assert any("reported healthy" in e for e in errors), errors
+
+    def test_cause_and_effect_in_one_sentence_is_one_failure(self):
+        """Both halves match the same pattern and share no content words,
+        so word-overlap dedup cannot see they are one bug."""
+        errors = self._errors(
+            "The persistence_broken flag stayed False, so stats reported "
+            "healthy over an empty database.")
+        assert len(errors) == 1, errors
+        assert "reported healthy" in errors[0], "kept the less informative half"
+
+    def test_a_list_of_failures_in_one_sentence_stays_a_list(self):
+        """The dedup keys on the causal connective, not the sentence. A
+        sentence may equally enumerate three genuinely different bugs."""
+        errors = self._errors(
+            "Three failure modes: a port collision in the integration tests, "
+            "a race in the fixture teardown, and an OOM on the Windows runner.")
+        joined = " ".join(errors).lower()
+        assert "collision" in joined and "teardown" in joined
+        assert "oom" in joined or "memory" in joined
+
+    def test_misclassification_is_an_error(self):
+        errors = self._errors(
+            "Any task whose label ends in a file path was retyped as a FILE "
+            "node by validator.py.")
+        assert any("as a file node" in e.lower() for e in errors), errors
+
+    def test_plain_type_description_is_not_an_error(self):
+        """`re`/`mis`/`wrongly` is required — a bare "typed as" is ordinary
+        description, not a defect."""
+        assert self._errors("The created_at field is typed as a timestamp.") == []

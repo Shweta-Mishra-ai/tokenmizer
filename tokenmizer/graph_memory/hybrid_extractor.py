@@ -395,6 +395,16 @@ def _drop_leading_sentence(text: str) -> str:
     return s[last.end():].strip() if last else s
 
 
+def _sentence_index(text: str, position: int) -> int:
+    """Which sentence of `text` contains `position` (0-based)."""
+    return sum(1 for m in _SENTENCE_BOUNDARY.finditer(text) if m.end() <= position)
+
+
+def _content_words(text: str) -> int:
+    """How much a label actually says — distinct words over two characters."""
+    return len({w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2})
+
+
 def _clip(text: str, max_chars: int = 90) -> str:
     """Trim a captured span to one readable clause.
 
@@ -641,6 +651,14 @@ _ALREADY_FIXED = re.compile(
     re.IGNORECASE,
 )
 
+# Marks the second clause as a CONSEQUENCE of the first rather than a second
+# item in a list. See the sentence-level dedup in _extract_one_message.
+_CAUSAL_LINK = re.compile(
+    r'\b(?:so|so that|which (?:meant|means|left|made)|therefore|hence|thus|'
+    r'as a result|with the result that|leaving|meaning)\b',
+    re.IGNORECASE,
+)
+
 # Vulnerability classes are named, not described, and were invisible to every
 # other pattern. No trailing context: the class name IS the label, and the
 # clause after it is prose about the fix.
@@ -653,6 +671,38 @@ _ERROR_VULN = re.compile(
     r'\b(IDOR|XSS|CSRF|SSRF|RCE|SQLi|TOCTOU|CVE-\d{4}-\d+|'
     r'(?i:SQL injection|path traversal|privilege escalation|'
     r'session fixation|open redirect|prototype pollution))\b',
+)
+
+# Silent failure — the system reporting health it does not have.
+#
+# "The persistence_broken flag stayed False, so stats reported healthy over an
+# empty database" is the worst class of bug there is: nothing raises, nothing
+# logs, and the monitoring says everything is fine. It is also invisible to
+# every other pattern here, because the vocabulary of failure never appears —
+# the whole sentence is made of words that normally mean success.
+#
+# Keyed on a reporting verb followed by a health claim. The claim is what
+# makes it a defect rather than good news: a turn only bothers to write
+# "reported healthy" when the point is that it was not.
+_ERROR_FALSE_HEALTH = re.compile(
+    r'\b(' + _subject_window(30) +
+    r'(?:reported|reports|returned|showed|shows|said|says|stayed|remained|'
+    r'still (?:read|reads|showed|shows))\s+'
+    r'(?:healthy|green|ok|okay|fine|clean|success\w*|passing|valid|'
+    r'False|True|zero|empty|0)\b' + _object_run(40) + r')',
+    re.IGNORECASE,
+)
+
+# Misclassification. "any task whose label ends in a file path was retyped as
+# a FILE node" — the data is not lost or corrupt, it is filed under the wrong
+# thing, which is why nothing errors and the symptom shows up somewhere else
+# entirely. The `re`/`mis`/`wrongly` prefix is required: a bare "typed as" is
+# ordinary description ("the field is typed as a string").
+_ERROR_MISCLASSIFIED = re.compile(
+    r'\b((?:re|mis|wrongly\s+|incorrectly\s+|silently\s+)'
+    r'(?:typed|classified|label(?:l?ed)?|categor(?:ised|ized)|routed|parsed|'
+    r'mapped|counted|attributed)\s+as\s+' + _object_run(40) + r')',
+    re.IGNORECASE,
 )
 
 # Absence defects. "missing X", "no dial timeout", "lacks a retry" is one of
@@ -1083,8 +1133,10 @@ class HybridExtractor:
         # important thing to carry into a resume. Gating on recency meant
         # a session that diagnosed three failures early and spent the rest
         # of its turns fixing them carried none of them forward.
+        sentence_claims: dict[tuple[int, int], tuple[str, int]] = {}
         for pattern in (_ERROR_TYPED, _ERROR_VULN, _ERROR_INTEGRITY,
                         _ERROR_DAMAGE, _ERROR_ABSENCE, _ERROR_INERT,
+                        _ERROR_FALSE_HEALTH, _ERROR_MISCLASSIFIED,
                         _ERROR_SYMPTOM):
             for m in pattern.finditer(content):
                 before = content[max(0, m.start(1) - 60):m.start(1)]
@@ -1099,9 +1151,18 @@ class HybridExtractor:
                     continue   # "no longer resurrects a prune" is the fix
                 if _ERROR_HANDLED.search(before):
                     continue   # the exception is being caught, not raised
-                err = _drop_leading_sentence(m.group(1))
+                raw = m.group(1)
+                err = _drop_leading_sentence(raw)
+                # Where the label really starts. The subject window may open
+                # on the PREVIOUS sentence's full stop — `[\w./\- ]` has to
+                # allow dots for `moment.js` — so `m.start(1)` can sit one
+                # sentence too early, which would file the two halves of one
+                # cause-and-effect statement under different sentences and
+                # defeat the dedup below.
+                label_start = m.start(1) + raw.rfind(err) if err else m.start(1)
                 err = _clip(_FIX_PREFIX.sub("", err.strip()), 70)
                 err = _ERROR_DETERMINER.sub("", err).strip()
+                err = _LEADING_CONNECTIVE.sub("", err).strip()
                 # `IDOR`, `XSS`, `RCE` are four and three characters. A flat
                 # minimum length rejected the entire vulnerability vocabulary,
                 # which is the highest-signal thing an error label can carry.
@@ -1110,6 +1171,34 @@ class HybridExtractor:
                     continue
                 if any(self._subsumes(err, e) for e in result.errors):
                     continue
+
+                # A sentence often states the cause and the effect of ONE
+                # bug — "The persistence_broken flag stayed False, SO stats
+                # reported healthy over an empty database" — and a single
+                # pattern matches both halves. They share no content words,
+                # so the subsumption check above cannot see they are one
+                # failure, and the resume block reported it twice.
+                #
+                # The test is the connective, not the sentence. A sentence
+                # may equally list several genuinely different failures —
+                # "a port collision in the integration tests, a race in the
+                # fixture teardown, AND an OOM on the Windows runner" — and
+                # collapsing those loses two real bugs. Only a causal link
+                # ("so", "which meant", "as a result") means the second
+                # clause is the consequence of the first rather than a
+                # second item. Keep the half that carries more of it.
+                key = (id(pattern), _sentence_index(content, label_start))
+                prior = sentence_claims.get(key)
+                # The window reaches a little INTO the current match: a
+                # subject window routinely swallows the connective it starts
+                # after ("…stayed False, |so stats| reported healthy"), which
+                # would otherwise hide the link that identifies the pair.
+                if prior is not None and _CAUSAL_LINK.search(
+                        content[prior[1]:m.start(1) + 15]):
+                    if _content_words(err) <= _content_words(prior[0]):
+                        continue
+                    result.errors.remove(prior[0])
+                sentence_claims[key] = (err, m.end(1))
                 result.errors.append(err)
 
         # Dependencies

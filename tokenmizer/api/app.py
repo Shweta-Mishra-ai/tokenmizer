@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
+from tokenmizer import __version__
 from tokenmizer.analytics.engine import AnalyticsEngine
 from tokenmizer.api.rate_limiter import get_rate_limiter
 from tokenmizer.checkpoints.manager import CheckpointManager
@@ -503,10 +504,17 @@ async def lifespan(app: FastAPI):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
+# Derived, never literal. A hardcoded version here is a string nobody
+# thinks to update at release time: it drifted for four releases before a
+# consistency test caught it, and in the meantime /docs and the OpenAPI
+# schema advertised a version the package had not been on for months.
+# The data files that cannot import Python (server.json, plugin.json,
+# marketplace.json) still pin literals, and tests/unit/test_version_
+# consistency.py holds those to __version__.
 app = FastAPI(
     title="TokenMizer",
     description="Never lose your AI context again.",
-    version="0.5.0",
+    version=__version__,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
