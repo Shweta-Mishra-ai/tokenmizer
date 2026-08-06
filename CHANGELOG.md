@@ -198,6 +198,30 @@ percentage reads as a broken program on someone's very first command.
 the reader needs, which is `tokenmizer serve`. Connect and timeout errors
 now say what to do; anything else still shows the real error.
 
+#### Changed — the README is 257 lines instead of 1062
+It had grown to document everything in one file: architecture, every
+configuration key, deployment, the full API surface, three benchmark
+suites, comparisons and the roadmap. That is a reference manual wearing a
+README's clothes, and the effect is that nobody reads either.
+
+The README now answers the three questions someone has in their first
+minute — what is this, does it work, how do I try it — and links out. The
+detail moved to `docs/`, unabridged:
+
+| | |
+|---|---|
+| `docs/architecture.md` | Request pipeline, graph data model, decision lifecycle |
+| `docs/configuration.md` | Every setting, environment variables, precedence, providers |
+| `docs/api.md` | Endpoints, CLI, MCP tools, Claude Code integration |
+| `docs/deployment.md` | Docker, multiple workers, durability, isolation, security |
+| `docs/benchmarks.md` | Extraction, memory and storage numbers, and running your own |
+| `docs/comparisons.md` | Mem0, Zep, longer context windows, roadmap |
+
+The two guards that read the README — the endpoint table check and the
+test-count check — now scan `docs/` as well, so moving content out cannot
+quietly disable them. Every internal link and heading anchor across all
+eight files is verified.
+
 #### Known limits
 Errors remain the weakest category at 94%. Across 172 labelled items it now
 misses four and invents three; the residue is a defect stated as a

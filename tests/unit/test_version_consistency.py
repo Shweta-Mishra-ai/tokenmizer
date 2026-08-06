@@ -129,12 +129,18 @@ def test_readme_documents_every_endpoint_and_no_others():
     Found six live endpoints missing from the table, and one documented
     endpoint (`/api/analyze`) that did not exist. Docs drift silently;
     a script does not.
+
+    Scans README.md and every page under docs/, so moving the table out
+    of the README — as the v0.5.0 split did — does not quietly disable
+    this check.
     """
     import re
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2]
-    readme = (root / "README.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8") + "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted((root / "docs").glob("*.md"))
+    )
 
     declared = set()
     for py in (root / "tokenmizer" / "api").rglob("*.py"):
@@ -251,9 +257,12 @@ def test_readme_test_count_matches_reality():
     assert m, f"could not read the collected count from pytest:\n{out[-500:]}"
     actual = int(m.group(1))
 
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    text = (ROOT / "README.md").read_text(encoding="utf-8") + "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((ROOT / "docs").glob("*.md")) + [ROOT / "CONTRIBUTING.md"]
+    )
     quoted = [int(x) for x in re.findall(r'#\s*(\d+) tests', text)]
-    assert quoted, "README no longer quotes a test count — drop this guard too"
+    assert quoted, "no doc quotes a test count any more — drop this guard too"
 
     for n in quoted:
         assert abs(n - actual) <= max(5, actual * 0.05), (
