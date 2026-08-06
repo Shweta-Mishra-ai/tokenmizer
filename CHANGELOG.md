@@ -222,6 +222,29 @@ test-count check — now scan `docs/` as well, so moving content out cannot
 quietly disable them. Every internal link and heading anchor across all
 eight files is verified.
 
+#### Fixed — the documentation split dropped things it should not have
+Two of them, both caught by review rather than by any test, which is why
+both now have one.
+
+**Contributor credit.** The README's Contributors section went with the
+split — three people and six merged pull requests, removed by a
+restructure that nothing was watching. Credit is the only thing an
+outside contributor gets, and losing it in a refactor is worse than never
+having written it. Restored, and `test_every_merged_contributor_is_
+credited` fails if a credited handle ever disappears again.
+
+**Setup.** The Claude Code plugin, the MCP server configuration and the
+proxy wiring all moved to `docs/`, leaving a README that explained the
+design well and never showed how to actually use the thing. Those are the
+first thing anyone needs. They are back above the fold as "Use it from
+your tools", with a guard asserting the README still shows how to
+install, how to add the plugin, how to configure MCP, and how to point a
+client at the proxy.
+
+The support section also stopped explaining itself. A star first, a
+sponsorship link second, both optional, no paragraph defending the fact
+that the project is free.
+
 #### Known limits
 Errors remain the weakest category at 94%. Across 172 labelled items it now
 misses four and invents three; the residue is a defect stated as a
