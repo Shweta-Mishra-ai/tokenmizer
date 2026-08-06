@@ -141,7 +141,7 @@ now collapse to the one that says what actually broke.
   inert code ("the fallback is unreachable") and vulnerability classes.
 * 34 tests, including a floor on real transcripts scored separately so the
   synthetic half cannot carry the headline, and a scan-cost bound that
-  fails if the patterns return to superlinear. 533 → 578 tests.
+  fails if the patterns return to superlinear. 533 → 584 tests.
 
 #### Fixed — the lock sweep never removed anything on Windows
 `sweep_stale_locks` unlinked the lock file while its own handle was still
@@ -183,6 +183,20 @@ asserts the image serves cache hits with `--network none` and no model.
 
 The tiktoken bake stays hard-required, and the difference is the point:
 token counting runs on every request, the embedding model does not.
+
+#### Fixed — the first two commands a new reader runs
+Found by installing the built wheel into a clean virtualenv rather than
+trusting the repo checkout.
+
+`tokenmizer analyze` on a small CSV printed **"-536% smaller"**. A digest
+can legitimately be bigger than its source — three rows become a schema,
+column types and summary statistics — but reporting that as a negative
+percentage reads as a broken program on someone's very first command.
+
+`tokenmizer stats` with nothing running printed **"Cannot reach server:
+[Errno 111] Connection refused"**. That is what the stack knows, not what
+the reader needs, which is `tokenmizer serve`. Connect and timeout errors
+now say what to do; anything else still shows the real error.
 
 #### Known limits
 Errors remain the weakest category at 94%. Across 172 labelled items it now

@@ -518,8 +518,8 @@ other two rather than competing with them.
 
 | Layer | Tool | Where it acts |
 |---|---|---|
-| Output length | [Caveman](https://github.com/Shweta-Mishra-ai/caveman) | Shortens what the model writes back |
-| Input trimming | [CodeBurn](https://github.com/Shweta-Mishra-ai/codeburn) | Trims the context you send |
+| Output length | **Caveman** | Shortens what the model writes back |
+| Input trimming | **CodeBurn** | Trims the context you send |
 | **Memory** | **TokenMizer** | Keeps the decisions, files and errors across the context limit |
 
 > **If you run Caveman too,** set `terse_output.enabled: false` in
@@ -935,7 +935,7 @@ Summaries lose structure. You can't query "all superseded decisions" or "what tr
 Mem0 and Zep store *facts* ("user prefers Python"). TokenMizer stores *decisions with rationale* — the full causal chain: what was decided, what replaced it, why, what evidence triggered the change, and how confidence shifted. If you need "remember my name across sessions," use Mem0. If you need "remember that we switched from PostgreSQL to SQLite because of cost, and here's the evidence," use TokenMizer.
 
 **Why not just a longer context window?**
-Longer context = higher cost + slower inference + model attention dilution on long histories. TokenMizer compresses a 50-turn session into ~246 tokens of structured context — not by summarizing, but by extracting what actually matters: goals, active decisions, current tasks, recent errors.
+Longer context = higher cost + slower inference + model attention dilution on long histories. TokenMizer compresses a session into a resume block averaging **249 tokens** (measured, n=3 — see [Benchmarks](#benchmarks)) — not by summarizing, but by extracting what actually matters: goals, active decisions, current tasks, recent errors.
 
 ---
 
@@ -992,7 +992,7 @@ Contributions welcome — this project merges fast (median PR review < 1 day).
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -v && ruff check tokenmizer/     # 495 tests, must stay green
+pytest tests/ -v && ruff check tokenmizer/     # 578 tests, must stay green
 python scripts/mcp_e2e_check.py                # full-pipeline e2e check
 ```
 
@@ -1019,20 +1019,33 @@ Open a PR — [CONTRIBUTING.md](CONTRIBUTING.md) covers setup and review expecta
 
 ## Support the project
 
-TokenMizer is built and maintained by one person.
+TokenMizer is built and maintained by one person, and is MIT licensed —
+everything here works, forever, without paying anything.
 
-The most useful thing you can send is **a session where extraction got it
-wrong.** The eval corpus is 14 sessions and every label in it was written
-by the same author — that is the honest ceiling on how much the reported
-numbers can tell you about *your* workload, and the only way past it is
+**The most valuable thing you can send is a session where extraction got
+it wrong.** The eval corpus is 14 sessions and the same person wrote
+every label in it. That is the honest ceiling on how much the numbers
+above can tell you about *your* workload, and the only way past it is
 transcripts nobody here wrote. Label a few of your own in the format in
-[`benchmarks/eval/corpus.py`](benchmarks/eval/corpus.py) and open a PR, or
-just [open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues)
-with the turn that was missed.
+[`benchmarks/eval/corpus.py`](benchmarks/eval/corpus.py) and open a PR —
+or just [open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues)
+with the turn that was missed. Redact freely; the shape of the prose is
+what matters, not its content.
 
-Also welcome: your before/after numbers from `tokenmizer stats`, and a
-[star](https://github.com/Shweta-Mishra-ai/tokenmizer) if it saved you a
-session.
+Other things that genuinely help, in rough order of usefulness:
+
+| | |
+|---|---|
+| **A failing transcript** | Moves a number that nothing else can move |
+| **A bug report** | Especially concurrency, migration, or anything platform-specific |
+| **Your `tokenmizer stats` output** | Real before/after usage shapes the roadmap |
+| **A ⭐ star** | How other people find it |
+
+If it saved you real time and you would like to put something behind it,
+the **Sponsor** button at the top of this repository is there. It is
+entirely optional and changes nothing about the project — no paid tier,
+no sponsors-only features, no gated support. Everyone gets the same
+software and the same attention on issues.
 
 ---
 

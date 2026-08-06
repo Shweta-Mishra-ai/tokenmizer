@@ -68,7 +68,11 @@ class TestStatsCommand:
         monkeypatch.setattr(httpx, "get", fake_get)
         result = runner.invoke(app, ["stats"])
         assert result.exit_code == 1
-        assert "Cannot reach server" in result.output
+        # Asserts the reader is told what to DO, not the exact prose. The
+        # previous wording was "Cannot reach server: [Errno 111]
+        # Connection refused", which is what the stack knows rather than
+        # what the reader needs.
+        assert "tokenmizer serve" in result.output, result.output
 
 
 class TestCheckpointCommand:
@@ -281,3 +285,49 @@ class TestAnalyzeEndpoint:
         with TestClient(app_module.app) as c:
             r = c.post("/api/analyze", json={"file_path": "/etc/passwd"})
         assert r.status_code == 422
+
+
+class TestFirstRunOutput:
+    """The first two commands a new reader runs are `analyze` and
+    `stats`. Both printed something that reads as a broken program."""
+
+    def test_a_digest_larger_than_its_source_is_not_reported_as_negative(self, tmp_path):
+        """A three-row CSV becomes a schema, types and statistics — bigger
+        than the source, and correct. The header said "-536% smaller"."""
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        f = tmp_path / "tiny.csv"
+        f.write_text("id,name,amount\n1,alpha,10\n2,beta,20\n3,gamma,30\n")
+        res = CliRunner().invoke(cli_app, ["analyze", str(f)])
+        assert res.exit_code == 0
+        assert "-536" not in res.output and "% smaller" not in res.output, res.output
+        assert "larger" in res.output, res.output
+
+    @pytest.mark.parametrize("command", [
+        ["stats"],
+        ["checkpoint", "sess"],
+        ["resume", "sess"],
+    ])
+    def test_an_unreachable_server_says_what_to_do(self, command):
+        """"[Errno 111] Connection refused" is what the stack knows, not
+        what the reader needs — which is `tokenmizer serve`."""
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        res = CliRunner().invoke(
+            cli_app, command + ["--server", "http://127.0.0.1:9"])
+        assert res.exit_code == 1
+        assert "tokenmizer serve" in res.output, res.output
+        assert "Errno" not in res.output, res.output
+
+    def test_the_suggested_flag_actually_exists(self):
+        """The message tells the reader to pass `--server`. It nearly told
+        them to set an environment variable that does not exist."""
+        from typer.testing import CliRunner
+
+        from tokenmizer.cli import app as cli_app
+
+        assert "--server" in CliRunner().invoke(cli_app, ["stats", "--help"]).output

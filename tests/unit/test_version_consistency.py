@@ -229,3 +229,33 @@ def test_no_source_file_hardcodes_a_stale_version():
         "version strings referring to releases that do not exist:\n  "
         + "\n  ".join(sorted(offenders))
     )
+
+
+def test_readme_test_count_matches_reality():
+    """The README quotes a test count next to a command you can run.
+
+    It said 495 while the suite had 578 — a reader's very first command
+    disagreeing with the README is a bad first impression, and nothing
+    catches it because the number lives in prose. A tolerance is allowed
+    so that adding one test does not red the build; a drift of more than
+    5% means the number was simply never updated.
+    """
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", str(ROOT / "tests")],
+        capture_output=True, text=True, cwd=ROOT,
+    ).stdout
+    m = re.search(r'(\d+)\s+tests? collected', out)
+    assert m, f"could not read the collected count from pytest:\n{out[-500:]}"
+    actual = int(m.group(1))
+
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    quoted = [int(x) for x in re.findall(r'#\s*(\d+) tests', text)]
+    assert quoted, "README no longer quotes a test count — drop this guard too"
+
+    for n in quoted:
+        assert abs(n - actual) <= max(5, actual * 0.05), (
+            f"README says {n} tests, the suite collects {actual}"
+        )
