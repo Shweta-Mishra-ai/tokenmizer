@@ -55,6 +55,19 @@ RUN set -eu; \
     [ "$baked" = 1 ] || \
       echo "WARNING: no embedding model baked in — the semantic cache will run in exact-match mode"
 
+# Runtime-only: never let a cache miss on HF_HOME retry over the network.
+# huggingface_hub's default client retries each file it can't find up to
+# 5 times with exponential backoff, and SentenceTransformer probes several
+# files (config, adapter, processor, preprocessor...) — on a host with no
+# route to huggingface.co that is several minutes of blocking retries
+# before EmbeddingEngine._load() finally catches the failure. Long enough
+# to expire a cache entry's TTL between the set() that triggered the
+# probe and the get() right after it, which is worse than the "no
+# semantic cache" degradation this is supposed to be. HF_HUB_OFFLINE=1
+# makes a missing file fail immediately from the local cache check alone,
+# with no network attempt — same-cache-hit behavior is unaffected.
+ENV HF_HUB_OFFLINE=1
+
 # Pre-download tiktoken's BPE vocabulary at BUILD time.
 #
 # tiktoken ships no vocabulary — it fetches one from

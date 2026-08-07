@@ -292,6 +292,26 @@ longer exists and claimed 23 stdlib tests where the script now runs 25 —
 rewritten to describe the current suite (600 tests, `pytest`-driven)
 rather than a frozen snapshot of one past debugging session.
 
+#### Fixed — an offline cache miss could block for minutes and expire its own entry
+`EmbeddingEngine._load()` already caught the case where the embedding
+model can't be downloaded (see "the embedding model could raise on the
+request path" below), but catching the exception only helps once the
+call *returns*. On a host with no route to huggingface.co,
+`SentenceTransformer(...)` doesn't fail fast — the underlying HTTP
+client retries each file it can't fetch (config, adapter, processor,
+preprocessor...) up to 5 times with exponential backoff, which measured
+at just under 4 minutes in CI's `--network none` Docker check. A
+`SemanticCache.set()` that triggers that probe blocks for the whole
+4 minutes before returning, so a `get()` called right after it can find
+the entry already past its TTL — the exact-match cache, which is
+supposed to work with no network at all, silently missing because the
+network *attempt* it doesn't depend on took longer than the entry's
+lifetime. Fixed by setting `HF_HUB_OFFLINE=1` in the image at runtime
+(not during the build step that bakes the model, which still needs the
+network the one time it's available): a cache miss on `HF_HOME` now
+fails immediately instead of retrying, with no change to the
+already-cached path.
+
 #### Added — "Why TokenMizer and not X?" restored to the README
 It answers Git history, RAG, plain summaries, Mem0/Zep, and a longer
 context window, and had been moved into `docs/comparisons.md` during the
