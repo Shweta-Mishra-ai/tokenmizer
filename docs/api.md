@@ -85,7 +85,7 @@ Then use skills directly:
 
 ### Option B — MCP server (Claude Desktop, Claude Code, Cursor, VS Code, Zed)
 
-mcp-name: io.github.Shweta-Mishra-ai/tokenmizer
+<!-- mcp-name: io.github.Shweta-Mishra-ai/tokenmizer -->
 
 Add this `mcpServers` block to your client's MCP config file:
 
