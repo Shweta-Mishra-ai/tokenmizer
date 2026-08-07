@@ -80,9 +80,11 @@ the format documented in `benchmarks/eval/corpus.py` and run
 
 `benchmarks/checkpoint_accuracy/runner_v2.py`, n=3 synthetic sessions:
 the graph preserves **89%** of labelled information against **79%** for a
-plain-summary baseline (Δ +10%), in an average resume block of **249
-tokens** versus ~1,500+ tokens of raw history. The advantage is
-concentrated in decision recall; on tasks it ties the baseline.
+plain-summary baseline (Δ +10%), in an average resume block of **178
+tokens** (197 / 193 / 144 across the three sessions) versus ~1,500+
+tokens of raw history. The advantage is concentrated in decision recall
+(92% vs a baseline that drops as low as 50%); on tasks it ties the
+baseline (76% both).
 
 ## Storage — schema v2 (per-row)
 
@@ -95,8 +97,10 @@ concentrated in decision recall; on tasks it ties the baseline.
 | …to a 200-node graph | 201 | **1** (−99.5%) |
 | Rows written when a turn changes nothing | 100 | **0** |
 
-Persist latency, one added node on a 200-node graph: **median 9.3 ms,
-p95 11.7 ms**.
+Persist latency, one added node on a 200-node graph: **median 6.4 ms,
+p95 7.0 ms** (measured on this machine across three runs; expect this to
+move with hardware — the write-amplification and correctness numbers
+above do not).
 
 Concurrency (4 OS processes writing one session, 25 nodes each):
 **100/100 nodes persisted, zero lost.** A stale writer holding a

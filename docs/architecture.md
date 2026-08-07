@@ -192,7 +192,9 @@ Files: api/auth.py, api/models.py, config.py
 Continue: Implement token refresh endpoint
 ```
 
-**247 tokens** replaces **25,000+ tokens** of conversation history.
+A resume block like this — typically under 200 tokens, [measured](benchmarks.md#memory-quality--graph-vs-a-plain-summary)
+at 178 on average — replaces tens of thousands of tokens of raw
+conversation history.
 
 ### The loop, end to end
 

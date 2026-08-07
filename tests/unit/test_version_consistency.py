@@ -356,3 +356,23 @@ def test_docs_pages_have_sane_heading_structure():
         assert footer_count == 1, (
             f"{path.name}: {footer_count} back-to-README links, want exactly 1"
         )
+
+
+def test_mcp_name_tag_is_never_visible_prose():
+    """The MCP registry ownership marker must stay an HTML comment.
+
+    docs/api.md carried it as a bare line — "mcp-name:
+    io.github.Shweta-Mishra-ai/tokenmizer" — rendering as a stray,
+    out-of-place sentence in the middle of the MCP setup instructions.
+    The registry only needs the comment to be present in the page source;
+    it was never meant to be read by a human.
+    """
+
+    for path in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]:
+        text = path.read_text(encoding="utf-8")
+        for line in text.split("\n"):
+            if "mcp-name:" in line and "<!--" not in line:
+                raise AssertionError(
+                    f"{path.name}: 'mcp-name:' outside an HTML comment "
+                    f"renders as visible text: {line!r}"
+                )

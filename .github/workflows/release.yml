@@ -155,15 +155,24 @@ jobs:
           git tag -a "v$VERSION" -m "v$VERSION"
           git push origin "v$VERSION"
 
-      # Body comes from the CHANGELOG section for this version, so the
-      # release notes and the changelog cannot drift apart.
+      # Title and body both come from the CHANGELOG heading and section
+      # for this version, so neither can drift from what the changelog
+      # actually says. The heading line is
+      # "## [0.5.0] — 2026-08-07 — audit, durability, and measured
+      # extraction quality" — the description after the second em dash
+      # becomes the release title ("v0.5.0 — Audit, Durability, and
+      # Measured Extraction Quality"), not a bare version number, which
+      # is what `gh release create` uses as a title when none is given
+      # and what this looked like before someone pointed out it read as
+      # an afterthought. Falls back to the bare tag if the heading can't
+      # be parsed, rather than failing a release over a title.
       #
-      # The file is written directly with an explicit encoding rather than
+      # Files are written directly with an explicit encoding rather than
       # printed and shell-redirected. The changelog contains arrow and
       # em-dash characters, and `print` encodes with whatever stdout
       # happens to be: on a runner that is not UTF-8 the script dies with
       # UnicodeEncodeError — after PyPI already has the upload, which is
-      # the worst possible moment. Writing the file removes the dependence
+      # the worst possible moment. Writing files removes the dependence
       # on ambient locale entirely.
       - name: Create the GitHub Release
         env:
@@ -174,6 +183,30 @@ jobs:
           import pathlib, re, sys
           version = sys.argv[1]
           text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+
+          # Standard title case: every word capitalised except a short
+          # list of minor words, and always the first word regardless.
+          # Plain `.title()` also capitalises "And"/"Of" mid-title, which
+          # reads as a typo rather than a style choice.
+          _MINOR = {"a", "an", "and", "as", "at", "but", "by", "for",
+                    "in", "nor", "of", "on", "or", "the", "to", "with"}
+
+          def _title_case(s: str) -> str:
+              words = s.split(" ")
+              return " ".join(
+                  w if (i > 0 and w.lower() in _MINOR) else w.capitalize()
+                  for i, w in enumerate(words)
+              )
+
+          heading = re.search(
+              rf"^## \[{re.escape(version)}\][^\n]*—[^\n]*—\s*(.+)$",
+              text, re.MULTILINE)
+          if heading:
+              title = f"v{version} — {_title_case(heading.group(1).strip())}"
+          else:
+              title = f"v{version}"
+          pathlib.Path("title.txt").write_text(title, encoding="utf-8")
+
           m = re.search(
               rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
               text, re.MULTILINE | re.DOTALL)
@@ -181,6 +214,6 @@ jobs:
           pathlib.Path("notes.md").write_text(body, encoding="utf-8")
           PY
           gh release create "v$VERSION" \
-            --title "v$VERSION" \
+            --title "$(cat title.txt)" \
             --notes-file notes.md \
             --repo "$GITHUB_REPOSITORY"

@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.5.0] — 2026-08-06 — audit, durability, and measured extraction quality
+## [0.5.0] — 2026-08-07 — audit, durability, and measured extraction quality
 
 Everything between 0.4.0 — the last version published to PyPI — and here,
 shipped as one release.
@@ -264,6 +264,62 @@ reproducing the original bug.
 
 Two stale test counts (578, 584) were also found and corrected to 600
 while fixing this.
+
+#### Fixed — a pre-launch number audit, run against the live code
+Every quantitative claim in the README and docs was re-measured against
+a fresh run of the actual benchmark scripts rather than trusted from
+memory. Two were wrong:
+
+- **"Our benchmark shows graph memory preserves +5% more information
+  than a summary baseline"** — the real, currently-measured delta is
+  **+10 points** (89% vs 79%), and +10 is what every other mention of
+  this benchmark already said. The +5% was never updated after the
+  underlying number moved.
+- **A resume block averaging "249 tokens"**, cited in two places as
+  "measured, n=3" — re-running `benchmarks/checkpoint_accuracy/runner_v2.py`
+  today gives **178 tokens** (197 / 193 / 144 across the three sessions).
+  The extraction code changed enough since 249 was last measured that the
+  number quietly went stale while still being presented as a live
+  measurement. A third, unrelated "247 tokens" attached to a *fictional*
+  worked example in `docs/architecture.md` was measured against nothing —
+  removed rather than replaced with another fake-precise number.
+
+Also fixed: `docs/api.md` carried the MCP registry's `mcp-name:` ownership
+marker as bare visible text instead of an HTML comment, so it rendered as
+a stray, out-of-place line in the middle of the MCP setup instructions.
+`TESTING.md` described a "no network access" audit environment that no
+longer exists and claimed 23 stdlib tests where the script now runs 25 —
+rewritten to describe the current suite (600 tests, `pytest`-driven)
+rather than a frozen snapshot of one past debugging session.
+
+#### Fixed — an offline cache miss could block for minutes and expire its own entry
+`EmbeddingEngine._load()` already caught the case where the embedding
+model can't be downloaded (see "the embedding model could raise on the
+request path" below), but catching the exception only helps once the
+call *returns*. On a host with no route to huggingface.co,
+`SentenceTransformer(...)` doesn't fail fast — the underlying HTTP
+client retries each file it can't fetch (config, adapter, processor,
+preprocessor...) up to 5 times with exponential backoff, which measured
+at just under 4 minutes in CI's `--network none` Docker check. A
+`SemanticCache.set()` that triggers that probe blocks for the whole
+4 minutes before returning, so a `get()` called right after it can find
+the entry already past its TTL — the exact-match cache, which is
+supposed to work with no network at all, silently missing because the
+network *attempt* it doesn't depend on took longer than the entry's
+lifetime. Fixed by setting `HF_HUB_OFFLINE=1` in the image at runtime
+(not during the build step that bakes the model, which still needs the
+network the one time it's available): a cache miss on `HF_HOME` now
+fails immediately instead of retrying, with no change to the
+already-cached path.
+
+#### Added — "Why TokenMizer and not X?" restored to the README
+It answers Git history, RAG, plain summaries, Mem0/Zep, and a longer
+context window, and had been moved into `docs/comparisons.md` during the
+documentation split — one click away from the page most likely to be the
+first thing a new reader scrolls past. It is the README's canonical copy
+now; the comparisons page links back to it instead of holding a second
+copy that can drift out of sync the way the two token-count numbers just
+did.
 
 #### Known limits
 Errors remain the weakest category at 94%. Across 172 labelled items it now

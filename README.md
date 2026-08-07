@@ -260,6 +260,23 @@ is a small sample and the same person wrote every label.
 → [**Benchmarks**](docs/benchmarks.md) — memory quality against a
 plain-summary baseline, storage, and how to score your own sessions.
 
+## Why TokenMizer and not X?
+
+**Why not just use Git history?**
+Git stores *what changed*, not *why you decided to change it*. You can't ask Git "what did we decide about auth?" or "why did we switch from MySQL to PostgreSQL?" TokenMizer stores decisions with trigger, reason, and evidence — not diffs.
+
+**Why not RAG (retrieval-augmented generation)?**
+RAG retrieves *relevant chunks* — it doesn't model *decision state*. If you switched from bcrypt to Argon2 mid-session, RAG might retrieve both and confuse the model about which is current. TokenMizer tracks decision supersession explicitly: the old decision is marked `SUPERSEDED`, the new one `ACTIVE`, and the resume context only includes current state.
+
+**Why not a plain summary at the start of each session?**
+Summaries lose structure. You can't query "all superseded decisions" or "what triggered the auth change" from a blob of text. Our benchmark shows graph memory preserves **89%** of labelled information against **79%** for a summary baseline — +10 points — and unlike a summary, the graph is queryable, editable, and grows incrementally instead of being re-summarized every turn. See [Benchmarks](docs/benchmarks.md#memory-quality--graph-vs-a-plain-summary).
+
+**Why not Mem0 or Zep?**
+Mem0 and Zep store *facts* ("user prefers Python"). TokenMizer stores *decisions with rationale* — the full causal chain: what was decided, what replaced it, why, what evidence triggered the change. If you need "remember my name across sessions," use Mem0. If you need "remember that we switched from PostgreSQL to SQLite because of cost, and here's the evidence," use TokenMizer.
+
+**Why not just a longer context window?**
+Longer context means higher cost, slower inference, and attention dilution on long histories. TokenMizer compresses a session into a resume block averaging **178 tokens** (measured, n=3 — see [Benchmarks](docs/benchmarks.md)) by extracting what actually matters, not by summarizing.
+
 ## What is not implemented
 
 Two settings are accepted by the config and do nothing. They are listed
@@ -281,6 +298,7 @@ here rather than left to be discovered:
 | [**Benchmarks**](docs/benchmarks.md) | Extraction quality, memory quality, storage, running your own |
 | [**Comparisons**](docs/comparisons.md) | Mem0, Zep, longer context windows, running alongside other token tools, and the roadmap |
 | [**Contributing**](CONTRIBUTING.md) | Setup, layer rules, and how to improve extraction |
+| [**Testing**](TESTING.md) | How to run the suite, the coverage floor, and known limits of the local audit scripts |
 | [**Changelog**](CHANGELOG.md) · [**Security**](SECURITY.md) | Release history and how to report a vulnerability |
 
 ## Contributing
