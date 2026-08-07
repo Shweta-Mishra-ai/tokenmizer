@@ -1,12 +1,12 @@
 # Testing
 
-The suite is 600 tests under `pytest`, and it is the source of truth —
+The suite is 606 tests under `pytest`, and it is the source of truth —
 if a claim elsewhere in the docs disagrees with what the suite does, the
 suite is right and the docs are a bug.
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -v              # 600 tests
+pytest tests/ -v              # 606 tests
 ruff check tokenmizer/ tests/ # lint, import order
 ```
 
