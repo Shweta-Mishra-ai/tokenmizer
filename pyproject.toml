@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tokenmizer"
-version = "0.5.1"
+version = "0.5.2"
 description = "Graph-backed checkpoint and resume for LLM sessions. An OpenAI-compatible proxy that remembers decisions across context limits."
 readme = "README.md"
 requires-python = ">=3.10"

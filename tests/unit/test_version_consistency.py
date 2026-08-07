@@ -399,3 +399,70 @@ def test_readme_has_no_repo_relative_links_or_images():
         "these README links/images are repo-relative and will break on "
         f"PyPI's standalone rendering: {offenders}"
     )
+
+
+def _github_slug(heading_text: str) -> str:
+    """Reproduce GitHub's heading-anchor slug closely enough to check a
+    link against it: lowercase, drop anything that isn't a word
+    character/space/hyphen (this is what makes an em dash disappear
+    while the space on each side of it survives), then turn each
+    remaining space into a hyphen — deliberately not collapsed, since
+    that is what turns "quality — graph" into "quality--graph"."""
+    s = heading_text.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"\s", "-", s)
+    return s
+
+
+def test_internal_markdown_anchors_point_at_real_headings():
+    """A link to `file.md#some-anchor` renders as a working link
+    regardless of whether `some-anchor` exists — Markdown does not
+    validate fragments, and neither does an HTTP status check, since a
+    fragment is resolved by the browser after the page already loaded
+    with a 200. The only way this class of bug surfaces is a reader
+    clicking it and landing at the top of the wrong page instead of the
+    section that was promised.
+    """
+    docs_dir = ROOT / "docs"
+    scanned = [ROOT / "README.md", *sorted(docs_dir.glob("*.md"))]
+
+    def headings_of(path: Path) -> set[str]:
+        text = path.read_text(encoding="utf-8")
+        return {
+            _github_slug(h)
+            for h in re.findall(r"^#{1,6}\s+(.+?)\s*$", text, re.MULTILINE)
+        }
+
+    heading_cache = {p: headings_of(p) for p in scanned}
+
+    def resolve(path_str: str, from_file: Path) -> Path | None:
+        if not path_str:
+            return from_file
+        candidate = (from_file.parent / path_str).resolve()
+        return candidate if candidate.exists() else None
+
+    offenders = []
+    prefix = "https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/"
+    for path in scanned:
+        text = path.read_text(encoding="utf-8")
+        links = re.findall(r'\(([^)]+)\)', text) + re.findall(r'href="([^"]+)"', text)
+        for link in links:
+            if link.startswith(prefix) and "#" in link:
+                rel, frag = link[len(prefix):].split("#", 1)
+            elif link.startswith("#"):
+                rel, frag = "", link[1:]
+            elif not link.startswith(("http://", "https://")) and ".md#" in link:
+                rel, frag = link.split("#", 1)
+            else:
+                continue
+
+            target = resolve(rel, path)
+            if target is None or target not in heading_cache:
+                continue  # covered by other guards; not this test's job
+            if frag not in heading_cache[target]:
+                offenders.append(f"{path.name}: #{frag} -> {target.name}")
+
+    assert not offenders, (
+        "these links point at a fragment no heading actually produces "
+        f"(dead in-page anchor once clicked): {offenders}"
+    )

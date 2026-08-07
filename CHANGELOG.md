@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.2] — 2026-08-07 — a stale test count, and a guard for dead in-page anchors
+
+`README.md`, `TESTING.md`, `CONTRIBUTING.md` and `docs/benchmarks.md` all
+quoted "600 tests" next to a command a reader can actually run. The
+suite had already grown to 606 by the time this was checked — the
+existing guard (`test_readme_test_count_matches_reality`) allows a 5%
+drift on purpose so one new test doesn't red the build, and a 6-test
+drift fell inside it. Correct here means exact, not within tolerance,
+so all four are now the real number a fresh `pytest -q` reports.
+
+Also added `test_internal_markdown_anchors_point_at_real_headings`:
+`file.md#some-anchor` renders as a clickable link whether or not
+`some-anchor` exists — Markdown doesn't validate fragments, and neither
+does an HTTP status check, since the fragment is resolved by the
+browser after the page has already returned 200. The two anchors this
+project links to internally (`docs/benchmarks.md#memory-quality--…`,
+`README.md#why-tokenmizer-and-not-x`) were checked by hand against
+GitHub's slug algorithm and are correct; the new test makes that
+mechanical instead of something someone has to redo by hand next time
+either heading's wording changes.
+
+No functional changes. 606 tests, ruff clean.
+
 ## [0.5.1] — 2026-08-07 — fix the PyPI README
 
 The logo and demo GIF used repo-relative paths (`docs/assets/logo.svg`).
