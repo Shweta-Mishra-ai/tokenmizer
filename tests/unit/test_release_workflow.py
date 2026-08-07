@@ -217,3 +217,20 @@ class TestReleaseNotes:
         assert not mid_title_minor_caps, (
             f"minor word(s) capitalised mid-title: {mid_title_minor_caps} in {title!r}"
         )
+
+    def test_the_title_does_not_mangle_words_that_are_already_capitalised(
+        self, wf, tmp_path
+    ):
+        """`.capitalize()` lowercases everything after the first letter,
+        so an acronym run through it unconditionally turns "PyPI" into
+        "Pypi" and "README" into "Readme" — the same shape of bug as the
+        minor-word one above, in the same function, caught only once a
+        heading happened to contain one. The current version's own
+        heading does ("fix the PyPI README"), so this runs the real
+        extractor rather than a copy of its logic."""
+        import tokenmizer
+
+        _, _, title = self._run(wf, tokenmizer.__version__, tmp_path)
+        assert "Pypi" not in title and "Readme" not in title, (
+            f"acronym mangled by title-casing: {title!r}"
+        )

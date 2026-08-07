@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.1] — 2026-08-07 — fix the PyPI README
+
+The logo and demo GIF used repo-relative paths (`docs/assets/logo.svg`).
+GitHub resolves those against the repo automatically; PyPI renders the
+README standalone with no base URL, so both images were broken on the
+PyPI project page while looking correct everywhere else — on GitHub, in
+any local Markdown preview, and in the built wheel's own README copy.
+Every relative link and image in `README.md` now points at an absolute
+`github.com`/`raw.githubusercontent.com` URL, so it renders identically
+wherever it's displayed. `test_readme_has_no_repo_relative_links_or_images`
+guards against this recurring.
+
+No functional changes. 604 tests, ruff clean.
+
 ## [0.5.0] — 2026-08-07 — audit, durability, and measured extraction quality
 
 Everything between 0.4.0 — the last version published to PyPI — and here,
