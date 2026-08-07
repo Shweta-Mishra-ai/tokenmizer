@@ -136,7 +136,7 @@ class TestReleaseNotes:
 
     def _run(self, wf, version, tmp_path, env=None):
         """Run the extractor exactly as the workflow does, in a copy of the
-        repo root so the notes.md it writes does not litter the checkout."""
+        repo root so notes.md/title.txt do not litter the checkout."""
         script = tmp_path / "notes.py"
         script.write_text(self._extractor(wf), encoding="utf-8")
         (tmp_path / "CHANGELOG.md").write_text(
@@ -147,12 +147,17 @@ class TestReleaseNotes:
             env={**os.environ, **(env or {})},
         )
         notes = tmp_path / "notes.md"
-        return res, (notes.read_text(encoding="utf-8") if notes.exists() else "")
+        title = tmp_path / "title.txt"
+        return (
+            res,
+            notes.read_text(encoding="utf-8") if notes.exists() else "",
+            title.read_text(encoding="utf-8") if title.exists() else "",
+        )
 
     def test_extracts_exactly_the_current_versions_section(self, wf, tmp_path):
         import tokenmizer
 
-        res, body = self._run(wf, tokenmizer.__version__, tmp_path)
+        res, body, _ = self._run(wf, tokenmizer.__version__, tmp_path)
         assert res.returncode == 0, res.stderr
         assert len(body.strip()) > 500, "release notes came out empty"
         assert "## [" not in body, "bled into an adjacent version's section"
@@ -161,9 +166,13 @@ class TestReleaseNotes:
         """A release whose CHANGELOG section is missing should still
         publish with a pointer, not fail after PyPI already has the
         upload."""
-        res, body = self._run(wf, "9.9.9", tmp_path)
+        fake_version = "9.9.9"
+        res, body, title = self._run(wf, fake_version, tmp_path)
         assert res.returncode == 0, res.stderr
         assert "CHANGELOG" in body
+        assert title == f"v{fake_version}", (
+            "an unparseable heading must fall back to the bare tag, not crash"
+        )
 
     def test_it_does_not_depend_on_the_runner_locale(self, wf, tmp_path):
         """The changelog contains arrows and em-dashes. `print` encodes
@@ -173,7 +182,7 @@ class TestReleaseNotes:
         upload. Forcing a legacy codec here reproduces that exactly."""
         import tokenmizer
 
-        res, body = self._run(
+        res, body, _ = self._run(
             wf, tokenmizer.__version__, tmp_path,
             env={"PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"},
         )
@@ -182,3 +191,29 @@ class TestReleaseNotes:
             + res.stderr
         )
         assert "\u2192" in body or len(body) > 500
+
+    def test_the_release_title_is_not_a_bare_version_number(self, wf, tmp_path):
+        """A release title of just "v0.5.0" is what this looked like before
+        someone pointed out it read as an afterthought. The title must
+        carry the same one-line description the CHANGELOG heading does."""
+        import tokenmizer
+
+        _, _, title = self._run(wf, tokenmizer.__version__, tmp_path)
+        assert title.startswith(f"v{tokenmizer.__version__} — ")
+        assert len(title) > len(f"v{tokenmizer.__version__}") + 10
+
+    def test_the_title_does_not_capitalise_minor_words_mid_title(self, wf, tmp_path):
+        """Plain str.title() turns "and"/"of"/"the" into "And"/"Of"/"The"
+        wherever they land — not a style choice, reads as a typo."""
+        import tokenmizer
+
+        _, _, title = self._run(wf, tokenmizer.__version__, tmp_path)
+        rest = title.split(" — ", 1)[1]
+        words = rest.split(" ")
+        mid_title_minor_caps = [
+            w for w in words[1:]
+            if w.rstrip(",:") in {"And", "Of", "The", "For", "With", "To"}
+        ]
+        assert not mid_title_minor_caps, (
+            f"minor word(s) capitalised mid-title: {mid_title_minor_caps} in {title!r}"
+        )
