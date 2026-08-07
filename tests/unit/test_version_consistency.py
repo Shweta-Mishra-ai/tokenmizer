@@ -376,3 +376,26 @@ def test_mcp_name_tag_is_never_visible_prose():
                     f"{path.name}: 'mcp-name:' outside an HTML comment "
                     f"renders as visible text: {line!r}"
                 )
+
+
+def test_readme_has_no_repo_relative_links_or_images():
+    """A relative path resolves on GitHub because GitHub knows the repo
+    root — it resolves against nothing on PyPI, which renders this same
+    file standalone with no base URL. `docs/assets/logo.svg` was a
+    broken image on the PyPI project page while looking correct in every
+    local preview and on GitHub itself, which is exactly why this needs
+    a test rather than a glance. Same-page anchors (`#quick-start`) are
+    fine everywhere and excluded.
+    """
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    offenders = []
+    for target in re.findall(r'(?:href|src)="([^"]+)"', readme):
+        if not target.startswith(("http://", "https://", "#")):
+            offenders.append(target)
+    for target in re.findall(r'\[[^\]]+\]\(([^)]+)\)', readme):
+        if not target.startswith(("http://", "https://", "#")):
+            offenders.append(target)
+    assert not offenders, (
+        "these README links/images are repo-relative and will break on "
+        f"PyPI's standalone rendering: {offenders}"
+    )

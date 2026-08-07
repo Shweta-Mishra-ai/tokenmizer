@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/logo.svg" width="140" alt="TokenMizer"/>
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/logo.svg" width="140" alt="TokenMizer"/>
 
   <h1>TokenMizer</h1>
 
@@ -21,7 +21,7 @@
     <a href="https://pypi.org/project/tokenmizer"><img src="https://img.shields.io/pypi/dm/tokenmizer?color=5ee7c8&style=flat-square" alt="Downloads"/></a>
     <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/actions"><img src="https://img.shields.io/github/actions/workflow/status/Shweta-Mishra-ai/tokenmizer/ci.yml?branch=main&style=flat-square&color=4ade80" alt="CI"/></a>
     <a href="https://registry.modelcontextprotocol.io/v0/servers?search=tokenmizer"><img src="https://img.shields.io/badge/MCP%20Registry-published-5ee7c8?style=flat-square" alt="MCP Registry"/></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4ade80?style=flat-square"/></a>
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-4ade80?style=flat-square"/></a>
     <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/stargazers"><img src="https://img.shields.io/github/stars/Shweta-Mishra-ai/tokenmizer?style=flat-square&color=f9d84a" alt="Stars"/></a>
     <a href="https://glama.ai/mcp/servers/Shweta-Mishra-ai/tokenmizer"><img src="https://glama.ai/mcp/servers/Shweta-Mishra-ai/tokenmizer/badges/score.svg" alt="Glama Score"/></a>
     <a href="https://github.com/sponsors/Shweta-Mishra-ai"><img src="https://img.shields.io/badge/sponsor-%E2%9D%A4-db61a2?style=flat-square" alt="Sponsor"/></a>
@@ -30,14 +30,14 @@
   <p>
     <a href="#quick-start"><b>Quick start</b></a> ·
     <a href="#use-it-from-your-tools"><b>Claude Code &amp; MCP</b></a> ·
-    <a href="docs/architecture.md"><b>Architecture</b></a> ·
-    <a href="docs/benchmarks.md"><b>Benchmarks</b></a> ·
-    <a href="docs/configuration.md"><b>Configuration</b></a> ·
-    <a href="docs/api.md"><b>API &amp; CLI</b></a> ·
-    <a href="CONTRIBUTING.md"><b>Contributing</b></a>
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/architecture.md"><b>Architecture</b></a> ·
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md"><b>Benchmarks</b></a> ·
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/configuration.md"><b>Configuration</b></a> ·
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md"><b>API &amp; CLI</b></a> ·
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md"><b>Contributing</b></a>
   </p>
 
-  <img src="docs/assets/demo.gif" width="860" alt="TokenMizer demo: 40-turn session checkpointed at 87% context, resumed next day in 233 tokens"/>
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/demo.gif" width="860" alt="TokenMizer demo: 40-turn session checkpointed at 87% context, resumed next day in 233 tokens"/>
   <br/>
   <sub>Real run: 25-node graph, checkpoint <code>ckpt_21a0959c3ddf</code>, 233-token resume. Regenerate with <code>python scripts/gen_demo_gif.py</code>.</sub>
 </div>
@@ -90,7 +90,7 @@ replaced is marked superseded rather than deleted. The resume block is a
 filtered projection of it: active decisions, open work, unresolved
 errors, in a few hundred tokens.
 
-→ [**Architecture**](docs/architecture.md) — the request sequence, the
+→ [**Architecture**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/architecture.md) — the request sequence, the
 data model, and the decision lifecycle.
 
 ## Quick start
@@ -147,8 +147,8 @@ docker compose up -d
 
 Full installation notes, every provider's environment variable, and the
 configuration reference are in
-[**docs/configuration.md**](docs/configuration.md) and
-[**docs/deployment.md**](docs/deployment.md).
+[**docs/configuration.md**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/configuration.md) and
+[**docs/deployment.md**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/deployment.md).
 </details>
 
 ## Use it from your tools
@@ -194,7 +194,7 @@ Then, in any session:
 | Claude Code | `.mcp.json` in the project, or `~/.claude/settings.json` |
 | Cursor | Settings → MCP → Add server, same JSON |
 | VS Code / Zed | their MCP settings, same `command` and `env` |
-| Codex CLI | `~/.codex/config.toml` — TOML, see [docs/api.md](docs/api.md) |
+| Codex CLI | `~/.codex/config.toml` — TOML, see [docs/api.md](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) |
 
 Restart the client afterwards. Keep `tokenmizer serve` running for the
 checkpoint, resume, stats and reasoning tools; file analysis works
@@ -213,7 +213,7 @@ Any OpenAI-compatible client works by pointing `base_url` at
 Continue.dev, Aider, LangChain, LlamaIndex, the OpenAI SDKs in every
 language, and `curl`.
 
-→ [**API & CLI reference**](docs/api.md) — every endpoint, every command,
+→ [**API & CLI reference**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) — every endpoint, every command,
 every MCP tool.
 
 ## What a resume looks like
@@ -257,7 +257,7 @@ than real transcripts and a single headline hides that: **synthetic 95%,
 real 90%.** Treat 90% as the number that describes real sessions. n=14
 is a small sample and the same person wrote every label.
 
-→ [**Benchmarks**](docs/benchmarks.md) — memory quality against a
+→ [**Benchmarks**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) — memory quality against a
 plain-summary baseline, storage, and how to score your own sessions.
 
 ## Why TokenMizer and not X?
@@ -269,13 +269,13 @@ Git stores *what changed*, not *why you decided to change it*. You can't ask Git
 RAG retrieves *relevant chunks* — it doesn't model *decision state*. If you switched from bcrypt to Argon2 mid-session, RAG might retrieve both and confuse the model about which is current. TokenMizer tracks decision supersession explicitly: the old decision is marked `SUPERSEDED`, the new one `ACTIVE`, and the resume context only includes current state.
 
 **Why not a plain summary at the start of each session?**
-Summaries lose structure. You can't query "all superseded decisions" or "what triggered the auth change" from a blob of text. Our benchmark shows graph memory preserves **89%** of labelled information against **79%** for a summary baseline — +10 points — and unlike a summary, the graph is queryable, editable, and grows incrementally instead of being re-summarized every turn. See [Benchmarks](docs/benchmarks.md#memory-quality--graph-vs-a-plain-summary).
+Summaries lose structure. You can't query "all superseded decisions" or "what triggered the auth change" from a blob of text. Our benchmark shows graph memory preserves **89%** of labelled information against **79%** for a summary baseline — +10 points — and unlike a summary, the graph is queryable, editable, and grows incrementally instead of being re-summarized every turn. See [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md#memory-quality--graph-vs-a-plain-summary).
 
 **Why not Mem0 or Zep?**
 Mem0 and Zep store *facts* ("user prefers Python"). TokenMizer stores *decisions with rationale* — the full causal chain: what was decided, what replaced it, why, what evidence triggered the change. If you need "remember my name across sessions," use Mem0. If you need "remember that we switched from PostgreSQL to SQLite because of cost, and here's the evidence," use TokenMizer.
 
 **Why not just a longer context window?**
-Longer context means higher cost, slower inference, and attention dilution on long histories. TokenMizer compresses a session into a resume block averaging **178 tokens** (measured, n=3 — see [Benchmarks](docs/benchmarks.md)) by extracting what actually matters, not by summarizing.
+Longer context means higher cost, slower inference, and attention dilution on long histories. TokenMizer compresses a session into a resume block averaging **178 tokens** (measured, n=3 — see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md)) by extracting what actually matters, not by summarizing.
 
 ## What is not implemented
 
@@ -291,15 +291,15 @@ here rather than left to be discovered:
 
 | | |
 |---|---|
-| [**Architecture**](docs/architecture.md) | Request pipeline, graph data model, decision lifecycle, file intelligence |
-| [**Configuration**](docs/configuration.md) | Every setting, environment variables, precedence, providers |
-| [**API & CLI**](docs/api.md) | Endpoints, commands, MCP tools, Claude Code integration |
-| [**Deployment**](docs/deployment.md) | Docker, multiple workers, durability, session isolation, security |
-| [**Benchmarks**](docs/benchmarks.md) | Extraction quality, memory quality, storage, running your own |
-| [**Comparisons**](docs/comparisons.md) | Mem0, Zep, longer context windows, running alongside other token tools, and the roadmap |
-| [**Contributing**](CONTRIBUTING.md) | Setup, layer rules, and how to improve extraction |
-| [**Testing**](TESTING.md) | How to run the suite, the coverage floor, and known limits of the local audit scripts |
-| [**Changelog**](CHANGELOG.md) · [**Security**](SECURITY.md) | Release history and how to report a vulnerability |
+| [**Architecture**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/architecture.md) | Request pipeline, graph data model, decision lifecycle, file intelligence |
+| [**Configuration**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/configuration.md) | Every setting, environment variables, precedence, providers |
+| [**API & CLI**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) | Endpoints, commands, MCP tools, Claude Code integration |
+| [**Deployment**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/deployment.md) | Docker, multiple workers, durability, session isolation, security |
+| [**Benchmarks**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) | Extraction quality, memory quality, storage, running your own |
+| [**Comparisons**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/comparisons.md) | Mem0, Zep, longer context windows, running alongside other token tools, and the roadmap |
+| [**Contributing**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md) | Setup, layer rules, and how to improve extraction |
+| [**Testing**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/TESTING.md) | How to run the suite, the coverage floor, and known limits of the local audit scripts |
+| [**Changelog**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CHANGELOG.md) · [**Security**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/SECURITY.md) | Release history and how to report a vulnerability |
 
 ## Contributing
 
@@ -315,12 +315,12 @@ wrong.** The eval corpus is 14 sessions and the same person wrote every
 label in it — that is the honest ceiling on what the numbers above can
 tell you about *your* workload, and the only way past it is transcripts
 nobody here wrote. Label a few of your own in the format documented in
-[`benchmarks/eval/corpus.py`](benchmarks/eval/corpus.py) and open a PR,
+[`benchmarks/eval/corpus.py`](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/benchmarks/eval/corpus.py) and open a PR,
 or [open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues)
 with the turn that was missed. Redact freely — the shape of the prose is
 what matters, not its content.
 
-[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, the layer rules, and how
+[CONTRIBUTING.md](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md) covers setup, the layer rules, and how
 to run the eval harness.
 
 ### Contributors

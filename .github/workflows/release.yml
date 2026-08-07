@@ -188,15 +188,28 @@ jobs:
           # list of minor words, and always the first word regardless.
           # Plain `.title()` also capitalises "And"/"Of" mid-title, which
           # reads as a typo rather than a style choice.
+          #
+          # A word that already carries a capital letter (PyPI, README,
+          # MCP, CI) is left untouched rather than run through
+          # `.capitalize()`, which lowercases everything after the first
+          # letter and turns "PyPI" into "Pypi" — a second typo-shaped
+          # bug in the same function, caught only once a heading actually
+          # contained an acronym.
           _MINOR = {"a", "an", "and", "as", "at", "but", "by", "for",
                     "in", "nor", "of", "on", "or", "the", "to", "with"}
 
           def _title_case(s: str) -> str:
               words = s.split(" ")
-              return " ".join(
-                  w if (i > 0 and w.lower() in _MINOR) else w.capitalize()
-                  for i, w in enumerate(words)
-              )
+              out = []
+              for i, w in enumerate(words):
+                  core = w.rstrip(",:;")
+                  if core != core.lower():
+                      out.append(w)  # already capitalised somewhere — leave it
+                  elif i > 0 and w.lower() in _MINOR:
+                      out.append(w)
+                  else:
+                      out.append(w.capitalize())
+              return " ".join(out)
 
           heading = re.search(
               rf"^## \[{re.escape(version)}\][^\n]*—[^\n]*—\s*(.+)$",
