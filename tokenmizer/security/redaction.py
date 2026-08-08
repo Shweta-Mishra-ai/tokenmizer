@@ -118,10 +118,21 @@ def _redact_content(content):
             elif isinstance(block, dict):
                 if block.get("type") == "text" and "text" in block:
                     cleaned.append({**block, "text": redact(str(block["text"]))})
-                elif "content" in block and isinstance(block.get("content"), str):
-                    cleaned.append({**block, "content": redact(block["content"])})
+                elif "content" in block and isinstance(block.get("content"), (str, list)):
+                    # tool_result content is `str | list[block]` per the
+                    # Anthropic/OpenAI schema — a tool returning structured
+                    # output (e.g. a file-read result) commonly shapes it as
+                    # [{"type": "text", "text": ...}], not a bare string. The
+                    # str-only check this replaced left that list branch
+                    # matching neither this arm nor "leave untouched" for a
+                    # good reason, silently passing a secret embedded in a
+                    # tool result straight through to the graph, checkpoints,
+                    # and the background extraction LLM. Recursing through
+                    # _redact_content (which already handles both shapes)
+                    # covers it the same way the top-level list does.
+                    cleaned.append({**block, "content": _redact_content(block["content"])})
                 else:
-                    # image/document/tool_use/tool_result blocks — leave untouched
+                    # image/document/tool_use blocks — leave untouched
                     cleaned.append(block)
             else:
                 cleaned.append(block)

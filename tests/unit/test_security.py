@@ -139,6 +139,31 @@ class TestRedaction:
         cleaned = redact_messages(messages)  # must not raise
         assert "sk-proj" not in cleaned[0]["content"][1]
 
+    def test_tool_result_with_nested_list_content_is_redacted(self):
+        """FIXED BUG: a tool_result block's `content` is `str | list[block]`
+        per the Anthropic/OpenAI schema — a tool returning structured output
+        (e.g. a file-read result) commonly shapes it as
+        [{"type": "text", "text": ...}], not a bare string. The old code
+        only redacted block["content"] when it was a str, so a secret
+        embedded in a tool_result's nested list content passed straight
+        through to the graph, checkpoints, and the background extraction
+        LLM — silently, with no error and no test catching it."""
+        messages = [{
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [
+                    {"type": "text", "text": "file contents: sk-ant-api03-"
+                     "abcdefghij1234567890-ABCDEFGHIJ1234567890KLMNOP"},
+                ],
+            }],
+        }]
+        cleaned = redact_messages(messages)
+        nested_text = cleaned[0]["content"][0]["content"][0]["text"]
+        assert "sk-ant" not in nested_text
+        assert "[REDACTED]" in nested_text
+
     # ── URL-embedded credentials and additional provider key formats ────────
 
     def test_connection_string_password_redacted(self):
