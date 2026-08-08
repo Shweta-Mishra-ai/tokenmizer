@@ -13,6 +13,13 @@
       "identifier": "tokenmizer",
       "version": "0.5.2",
       "transport": { "type": "stdio" },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "Runs the MCP stdio server. The pypi console script matching this package's own name (tokenmizer) is the CLI, not the MCP server — 'mcp' selects the MCP subcommand so an installer that runs `tokenmizer <packageArguments>` reaches it (the server.json schema has no separate field for a differently named entry point)."
+        }
+      ],
       "environmentVariables": [
         {
           "name": "TOKENMIZER_URL",

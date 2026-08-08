@@ -353,5 +353,22 @@ def resume(
     ))
 
 
+@app.command()
+def mcp():
+    """Run the MCP stdio server (same entrypoint as `tokenmizer-mcp`).
+
+    Registries that install a pypi package and invoke it by the package's
+    own name (`uvx tokenmizer`, `pip install tokenmizer && tokenmizer`)
+    reach this CLI, not the separate `tokenmizer-mcp` console script — the
+    MCP server.json schema has no field to point them at a differently
+    named entry point (see server.json's `packageArguments`, which passes
+    `mcp` to land here). Without this subcommand, a registry using that
+    convention got Typer's usage text instead of an MCP JSON-RPC
+    handshake and treated the server as broken.
+    """
+    from tokenmizer.mcp.server import run_stdio_server
+    run_stdio_server()
+
+
 if __name__ == "__main__":
     app()

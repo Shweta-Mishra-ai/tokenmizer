@@ -347,3 +347,22 @@ class TestFirstRunOutput:
 
         out = _plain(CliRunner().invoke(cli_app, ["stats", "--help"]).output)
         assert "--server" in out, out
+
+
+class TestMcpCommand:
+    """`tokenmizer mcp` — registries that install the pypi package and
+    invoke it by its own name (`uvx tokenmizer`, or `tokenmizer` after a
+    plain `pip install`) reach this CLI, not the separate `tokenmizer-mcp`
+    console script. server.json's packageArguments passes "mcp" so that
+    convention lands on the MCP stdio server instead of Typer's usage
+    text — see server.json and the mcp() command's docstring."""
+
+    def test_dispatches_to_the_stdio_server(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "tokenmizer.mcp.server.run_stdio_server",
+            lambda: calls.append(True),
+        )
+        res = runner.invoke(app, ["mcp"])
+        assert res.exit_code == 0, res.output
+        assert calls == [True]

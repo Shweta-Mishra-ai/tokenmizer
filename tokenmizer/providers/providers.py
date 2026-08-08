@@ -215,15 +215,25 @@ class AnthropicProvider(BaseProvider):
 
             if stream:
                 full_text = ""
-                input_tokens = count_messages_tokens(conv, model)
                 async with client.messages.stream(
                     model=model, messages=conv, max_tokens=max_tokens, **kwargs_clean
                 ) as s:
                     async for chunk in s.text_stream:
                         full_text += chunk
-                output_tokens = count_tokens(full_text, model)
-                return LLMResponse(text=full_text, input_tokens=input_tokens,
-                                   output_tokens=output_tokens, model=model, provider="anthropic")
+                    # Real API-reported usage, not a local estimate — the
+                    # estimate this replaced counted `conv` only (Anthropic
+                    # takes system as a separate top-level param, stripped
+                    # out of `conv` above) and never added the system
+                    # prompt's tokens back in, silently undercounting
+                    # input_tokens for every streamed call with a system
+                    # prompt. The non-streaming branch below already uses
+                    # resp.usage for the same reason.
+                    final = await s.get_final_message()
+                return LLMResponse(text=full_text,
+                                   input_tokens=final.usage.input_tokens,
+                                   output_tokens=final.usage.output_tokens,
+                                   model=model, provider="anthropic",
+                                   finish_reason=final.stop_reason or "stop")
 
             resp = await client.messages.create(
                 model=model, messages=conv, max_tokens=max_tokens, **kwargs_clean
@@ -497,8 +507,23 @@ class GeminiProvider(BaseProvider):
                 generation_config=genai.GenerationConfig(**gen_kw),
             )
             text = resp.text or ""
-            input_tokens = count_messages_tokens(conversation, model)
-            output_tokens = count_tokens(text, model)
+            # Real API-reported usage when the SDK provides it.
+            # prompt_token_count is the full effective prompt size
+            # (Google's own docs: "includes ... cached content"), so unlike
+            # the local estimate below it correctly counts
+            # system_instruction — which lives outside `conversation` here
+            # the same way Anthropic's system param lives outside `conv`,
+            # and was silently missing from every token count that used
+            # to fall back to count_messages_tokens(conversation, model)
+            # unconditionally, undercounting input_tokens on every call
+            # that set a system prompt.
+            usage = getattr(resp, "usage_metadata", None)
+            if usage is not None and usage.prompt_token_count:
+                input_tokens = usage.prompt_token_count
+                output_tokens = usage.candidates_token_count
+            else:
+                input_tokens = count_messages_tokens(conversation, model)
+                output_tokens = count_tokens(text, model)
             return LLMResponse(
                 text=text,
                 input_tokens=input_tokens,
