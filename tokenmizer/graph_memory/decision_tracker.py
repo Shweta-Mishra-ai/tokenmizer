@@ -270,6 +270,48 @@ def _matched_topic_keywords(label: str, summary: str) -> frozenset:
     return frozenset(matched)
 
 
+# Stricter than reasoning.py's 0.55 recall bar — that one only widens
+# what gets SHOWN to a query, a low-stakes ranking decision where a false
+# positive is a slightly-too-long results list. This one decides whether
+# two decisions get SUPERSEDED (data mutation): a false positive here
+# would silently merge two decisions that should have stayed CONTESTED
+# and visible, the exact failure TM-09 (see test_contested_decisions.py)
+# already fixed once for the lexical case — a semantic false positive
+# would reopen the same hole through a different door. A false negative
+# just leaves the pair CONTESTED, same as today, so the bar favors
+# precision over recall.
+_SLOT_SEMANTIC_THRESHOLD = 0.72
+
+
+def _semantic_same_slot(new_label: str, existing_label: str) -> bool:
+    """Extra signal for _same_slot's ambiguous case: same topic bucket,
+    but lexical slot-word overlap says "probably not the same purpose."
+    A purpose can be phrased with zero shared words ("primary datastore"
+    vs "main persistence layer" both mean the same slot as "cache" vs
+    "cold storage" do NOT) — word overlap alone can't tell those apart,
+    which is exactly what genuinely complementary same-topic decisions
+    ("primary user data" vs "local offline cache") rely on to stay
+    distinct. Only ever used to turn an existing False into True (see
+    _same_slot) — never the reverse, so it can only ADD supersessions
+    that lexical matching missed, never suppress one lexical matching
+    already found correctly.
+
+    No-op (False) whenever the embedding model isn't available — same
+    graceful-degradation contract as reasoning.py's _semantic_matches,
+    reusing the same engine.
+    """
+    if not new_label.strip() or not existing_label.strip():
+        return False
+    from tokenmizer.semantic_cache.cache import EmbeddingEngine
+    engine = EmbeddingEngine.get()
+    if not engine.available:
+        return False
+    embs = engine.embed_batch([new_label, existing_label])
+    if embs is None:
+        return False
+    return EmbeddingEngine.cosine(embs[0], embs[1]) >= _SLOT_SEMANTIC_THRESHOLD
+
+
 def _same_slot(new_label: str, new_summary: str, existing_label: str, existing_summary: str) -> bool:
     """
     True if two same-topic decisions are confidently about the SAME
@@ -284,7 +326,11 @@ def _same_slot(new_label: str, new_summary: str, existing_label: str, existing_s
     against — default to treating it as the same slot, matching this
     mechanism's original, simpler design intent for plain tech swaps.
     Otherwise require at least half of the smaller side's descriptive
-    words to overlap.
+    words to overlap — or, failing that, that the two labels are
+    semantically close enough to be the same purpose phrased differently
+    (see _semantic_same_slot; a no-op when no embedding model is
+    available, so this falls back to exactly today's word-overlap-only
+    behavior on a host without one).
     """
     new_keywords = _matched_topic_keywords(new_label, new_summary)
     existing_keywords = _matched_topic_keywords(existing_label, existing_summary)
@@ -296,7 +342,9 @@ def _same_slot(new_label: str, new_summary: str, existing_label: str, existing_s
     if not new_slot or not existing_slot:
         return True
     overlap = len(new_slot & existing_slot) / min(len(new_slot), len(existing_slot))
-    return overlap >= 0.5
+    if overlap >= 0.5:
+        return True
+    return _semantic_same_slot(new_label, existing_label)
 
 
 def find_contradicting_decisions(
@@ -410,8 +458,16 @@ def _find_by_word_overlap(
     overlap_threshold: float = 0.6,
 ) -> list[str]:
     """
-    Fallback: find decisions with high word overlap (same topic, unknown category).
-    Only used when topic classification returns None.
+    Fallback: find decisions with high word overlap (same topic, unknown
+    category). Only used when topic classification returns empty.
+
+    Below the word-overlap threshold, also tries _semantic_same_slot as a
+    second signal — the exact same gap _same_slot's ambiguous branch has
+    (a decision about an unlisted technology can be phrased with zero
+    words in common with an existing one about the same thing), just
+    reached from the topic-unknown path instead of the topic-known one.
+    Fixing one and not the other would leave the identical bug alive
+    behind a different condition.
     """
     from tokenmizer.graph_memory.graph import NodeStatus, NodeType
 
@@ -437,8 +493,10 @@ def _find_by_word_overlap(
         if not existing_words:
             continue
 
+        if _is_same_decision(new_label, node.label):
+            continue
         overlap = len(new_words & existing_words) / max(len(new_words), len(existing_words))
-        if overlap >= overlap_threshold and not _is_same_decision(new_label, node.label):
+        if overlap >= overlap_threshold or _semantic_same_slot(new_label, node.label):
             to_supersede.append(node_id)
 
     return to_supersede
