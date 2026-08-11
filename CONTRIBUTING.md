@@ -84,6 +84,7 @@ tokenmizer/
 │   │   ├── types.py              # NodeType, NodeStatus, EdgeType, MemoryNode, MemoryEdge, DecisionTransition
 │   │   ├── graph.py               # GraphMemory: add_node, persistence, pruning, decay
 │   │   ├── hybrid_extractor.py    # LLM pass + heuristic pass + confidence-scored merge
+│   │   ├── patterns.py            # Regex vocabulary + pure helpers hybrid_extractor.py applies
 │   │   ├── decision_tracker.py    # Topic classification + same-decision / contradiction detection
 │   │   ├── validator.py           # Confidence scoring and hard-reject rules for candidate nodes
 │   │   ├── ontology.py            # Machine-readable node/edge semantics + status state machine
