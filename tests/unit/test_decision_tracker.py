@@ -320,3 +320,62 @@ class TestSemanticSlotMatching:
         # exactly like every ambiguous case did before Phase 2.
         assert new_id != old_id
         assert g._nodes[old_id].status == NodeStatus.CONTESTED
+
+
+# ── Semantic error dedup (Phase 3) ───────────────────────────────────────────
+#
+# _is_same_error / _semantic_same_error / _named_error_classes_conflict —
+# see decision_tracker.py's "Error dedup" section. Reuses the same
+# _install_fake_embedder helper and no-network/no-numpy approach as the
+# semantic-slot tests above.
+
+class TestSemanticErrorDedup:
+
+    def test_paraphrased_same_failure_is_recognized(self, monkeypatch):
+        from tokenmizer.graph_memory.decision_tracker import _semantic_same_error
+
+        _install_fake_embedder(monkeypatch, {
+            "Connection to the database times out": [1.0, 0.0],
+            "DB connection timeout after 30s on checkout": [0.95, 0.312],  # cos = 0.95
+        })
+        assert _semantic_same_error(
+            "DB connection timeout after 30s on checkout",
+            "Connection to the database times out",
+        ) is True
+
+    def test_unrelated_errors_are_not_merged(self, monkeypatch):
+        from tokenmizer.graph_memory.decision_tracker import _semantic_same_error
+
+        _install_fake_embedder(monkeypatch, {
+            "Connection to the database times out": [1.0, 0.0],
+            "CSS layout breaks on mobile Safari": [0.3, 0.954],  # cos = 0.3
+        })
+        assert _semantic_same_error(
+            "CSS layout breaks on mobile Safari",
+            "Connection to the database times out",
+        ) is False
+
+    def test_named_exception_class_conflict_overrides_high_similarity(self, monkeypatch):
+        """Even a fake similarity score of 1.0 must not merge two labels
+        naming different exception classes — the guard is checked FIRST
+        and short-circuits before the embedding comparison runs at all."""
+        from tokenmizer.graph_memory.decision_tracker import _semantic_same_error
+
+        _install_fake_embedder(monkeypatch, {
+            "TypeError: x is not a function": [1.0, 0.0],
+            "ReferenceError: x is not a function": [1.0, 0.0],  # cos = 1.0
+        })
+        assert _semantic_same_error(
+            "ReferenceError: x is not a function",
+            "TypeError: x is not a function",
+        ) is False
+
+    def test_no_semantic_merge_without_an_embedding_model(self):
+        from tokenmizer.graph_memory.decision_tracker import _semantic_same_error
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine
+
+        assert EmbeddingEngine.get().available is False
+        assert _semantic_same_error(
+            "DB connection timeout after 30s on checkout",
+            "Connection to the database times out",
+        ) is False

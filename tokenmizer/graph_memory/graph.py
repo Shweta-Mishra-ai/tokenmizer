@@ -67,6 +67,52 @@ def _get_validator():
     return get_validator()
 
 
+# Status precedence for add_node()'s dedup/merge paths (exact-hash,
+# DECISION fuzzy-merge, ERROR fuzzy-merge): a re-add of an existing node
+# may only move status FORWARD (e.g. a COMPLETED re-add must not resurrect
+# a SUPERSEDED node back to active). One shared table so a change to the
+# ordering can't drift between merge paths — it did, briefly, before this
+# was extracted: two of the three add_node() branches carried their own
+# copy of this exact dict.
+#
+# This ordering is right for DECISION/TASK, and WRONG for ERROR: it ranks
+# FAILED (3) above COMPLETED (2), so a "this is now fixed" re-mention
+# (add_node(..., NodeStatus.COMPLETED)) of an error already recorded as
+# FAILED could never win — 2 is not > 3 — and the graph kept reporting a
+# resolved bug as open forever. See _next_status(), which special-cases
+# ERROR instead of trying to force it into a single ordinal scale: unlike
+# every other type, FAILED/COMPLETED for an error aren't "behind" and
+# "ahead" of each other, they're two live states a real bug legitimately
+# oscillates between (fixed, then regresses, then fixed again).
+_STATUS_RANK: dict[NodeStatus, int] = {
+    NodeStatus.PENDING: 0,
+    NodeStatus.IN_PROGRESS: 1,
+    NodeStatus.COMPLETED: 2,
+    NodeStatus.FAILED: 3,
+    NodeStatus.ARCHIVED: 4,
+    NodeStatus.SUPERSEDED: 5,
+    NodeStatus.MODIFIED: 5,    # alias for SUPERSEDED
+    NodeStatus.INVALIDATED: 6,
+}
+
+
+def _next_status(node_type: NodeType, current: NodeStatus, incoming: NodeStatus) -> NodeStatus:
+    """Status to use after a duplicate/near-duplicate add_node() re-add.
+
+    ERROR: the latest mention wins outright, in either direction — see
+    the comment on _STATUS_RANK for why the monotonic model is wrong for
+    this one type.
+
+    Everything else: monotonic upgrade-only via _STATUS_RANK, unchanged
+    from before this function existed — a re-mention must never regress
+    an already-advanced node (e.g. a default-status "Use PostgreSQL"
+    re-add must not knock a COMPLETED decision back to IN_PROGRESS).
+    """
+    if node_type == NodeType.ERROR:
+        return incoming
+    return incoming if _STATUS_RANK.get(incoming, 0) > _STATUS_RANK.get(current, 0) else current
+
+
 # ── Graph ────────────────────────────────────────────────────────────────────
 
 class GraphMemory:
@@ -198,19 +244,9 @@ class GraphMemory:
             existing = self._nodes[node_id]
             existing.touch()
             self._dirty = True  # touch() always changes updated_at, must persist
-            # Only upgrade status (completed > in_progress > pending)
-            status_rank = {
-                NodeStatus.PENDING: 0,
-                NodeStatus.IN_PROGRESS: 1,
-                NodeStatus.COMPLETED: 2,
-                NodeStatus.FAILED: 3,
-                NodeStatus.ARCHIVED: 4,
-                NodeStatus.SUPERSEDED: 5,
-                NodeStatus.MODIFIED: 5,    # alias for SUPERSEDED
-                NodeStatus.INVALIDATED: 6,
-            }
-            if status_rank.get(status, 0) > status_rank.get(existing.status, 0):
-                existing.status = status
+            # Only upgrade status (completed > in_progress > pending) —
+            # except ERROR, see _next_status().
+            existing.status = _next_status(node_type, existing.status, status)
             if stored_summary and not existing.summary:
                 existing.summary = stored_summary
             return node_id
@@ -243,16 +279,43 @@ class GraphMemory:
                 if _is_same_decision(label, ex.label):
                     ex.touch()
                     self._dirty = True
-                    # Same status-upgrade-only rule as the exact-dedup branch
+                    # Same status rule as the exact-dedup branch above
                     # (a COMPLETED re-add must not resurrect a SUPERSEDED node)
-                    _rank = {
-                        NodeStatus.PENDING: 0, NodeStatus.IN_PROGRESS: 1,
-                        NodeStatus.COMPLETED: 2, NodeStatus.FAILED: 3,
-                        NodeStatus.ARCHIVED: 4, NodeStatus.SUPERSEDED: 5,
-                        NodeStatus.MODIFIED: 5, NodeStatus.INVALIDATED: 6,
-                    }
-                    if _rank.get(status, 0) > _rank.get(ex.status, 0):
-                        ex.status = status
+                    ex.status = _next_status(node_type, ex.status, status)
+                    if len(stored_label) > len(ex.label) and status == ex.status:
+                        ex.label = stored_label
+                    if stored_summary and not ex.summary:
+                        ex.summary = stored_summary
+                    return ex_id
+
+        # Fuzzy same-error merge (Phase 3 of the memory-improvement plan —
+        # see decision_tracker.py's "Error dedup" section for the full
+        # rationale). Exact-hash dedup above only catches identical
+        # normalized labels; the same underlying failure mentioned twice in
+        # different words became two separate ERROR nodes, and
+        # context_block.py's "Open issues" section (capped at the top 3 by
+        # importance) could silently drop a real bug to make room for what
+        # was actually a restatement of another one already shown.
+        if node_type == NodeType.ERROR:
+            from tokenmizer.graph_memory.decision_tracker import (
+                _is_same_error,
+                _semantic_same_error,
+            )
+            for ex_id, ex in self._nodes.items():
+                if ex.type != NodeType.ERROR or ex._evicted:
+                    continue
+                # Resolved errors are deliberately still eligible to absorb
+                # a match, same reasoning as the decision merge above: a
+                # recurrence of an already-fixed error must reopen that
+                # node, not create a disconnected duplicate that hides the
+                # fact it's the same bug coming back. _next_status() lets
+                # ERROR move either direction (FAILED <-> COMPLETED) on the
+                # latest mention — see its docstring for why that's right
+                # for errors specifically and wrong for every other type.
+                if _is_same_error(label, ex.label) or _semantic_same_error(label, ex.label):
+                    ex.touch()
+                    self._dirty = True
+                    ex.status = _next_status(node_type, ex.status, status)
                     if len(stored_label) > len(ex.label) and status == ex.status:
                         ex.label = stored_label
                     if stored_summary and not ex.summary:
