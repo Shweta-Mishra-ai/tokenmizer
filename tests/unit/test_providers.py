@@ -165,3 +165,99 @@ async def test_gemini_uses_real_usage_metadata_for_input_tokens(monkeypatch):
     # this figure, proving the fallback local estimate wasn't used.
     assert resp.input_tokens == 1234
     assert resp.output_tokens == 7
+
+
+class TestRetryClassification:
+    """Cohere, Gemini, and Ollama each had their own retry-classification
+    bug — the same class OpenAI's _RETRYABLE_TEXT docstring already warns
+    about, just never mirrored to the other providers:
+
+      - Cohere: `"rate" in str(e).lower()` — a bare substring match.
+        "rate" is inside "separate"/"moderate"/"generate", so an
+        unrelated permanent error mentioning any of those words was
+        retried 3 times for nothing, while a genuine rate-limit phrased
+        as "too many requests" (no literal "rate") was never retried.
+      - Gemini: only "quota"/"429" were recognized — every other
+        retryable shape (timeout, overloaded, service unavailable) was
+        wrongly treated as permanent for this provider only.
+      - Ollama: retryable=True unconditionally, on every exception,
+        including a malformed request or an unknown model name.
+    """
+
+    def test_cohere_uses_word_boundary_matching_not_bare_substring(self):
+        """Cohere's fix reuses _RETRYABLE_TEXT directly (see the source),
+        so this is really a test of that shared regex against the exact
+        false-positive/false-negative pair from the bug."""
+        from tokenmizer.providers.providers import _RETRYABLE_TEXT
+
+        # False positive the old `"rate" in str(e).lower()` check made:
+        assert not _RETRYABLE_TEXT.search("Invalid parameter: separate stop sequences required")
+        # False negative the old check made:
+        assert _RETRYABLE_TEXT.search("429 Too Many Requests")
+
+    @pytest.mark.asyncio
+    async def test_gemini_retries_on_timeout_not_just_quota(self, monkeypatch):
+        genai = pytest.importorskip("google.generativeai")
+
+        class _FakeChat:
+            async def send_message_async(self, *a, **kw):
+                raise RuntimeError("upstream request timed out")
+
+        class _FakeModel:
+            def start_chat(self, history=None):
+                return _FakeChat()
+
+        monkeypatch.setattr(genai, "configure", lambda **kw: None)
+        monkeypatch.setattr(genai, "GenerativeModel", lambda *a, **kw: _FakeModel())
+
+        provider = GeminiProvider(api_key="test-key")
+        with pytest.raises(Exception) as exc_info:
+            await provider._call(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-1.5-pro", max_tokens=10, stream=False, system="",
+            )
+        assert exc_info.value.retryable is True, (
+            "a timeout with no 'quota'/'429' in the message must still retry"
+        )
+
+
+class TestOllamaRetryClassification:
+
+    def test_client_side_timeout_is_retryable(self):
+        import httpx
+
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        assert _ollama_error_is_retryable(httpx.TimeoutException("timed out")) is True
+
+    def test_connect_error_is_retryable(self):
+        """Local server not up yet — the single most common real-world
+        Ollama failure mode, and worth retrying unconditionally."""
+        import httpx
+
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        assert _ollama_error_is_retryable(httpx.ConnectError("connection refused")) is True
+
+    def test_5xx_status_is_retryable(self):
+        import httpx
+
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        req = httpx.Request("POST", "http://localhost:11434/api/chat")
+        resp = httpx.Response(503, request=req)
+        err = httpx.HTTPStatusError("server error", request=req, response=resp)
+        assert _ollama_error_is_retryable(err) is True
+
+    def test_4xx_status_is_not_retryable(self):
+        """A bad request (e.g. unknown model name) must not be retried —
+        this is exactly the case the old unconditional retryable=True
+        got wrong."""
+        import httpx
+
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        req = httpx.Request("POST", "http://localhost:11434/api/chat")
+        resp = httpx.Response(400, request=req)
+        err = httpx.HTTPStatusError("bad request", request=req, response=resp)
+        assert _ollama_error_is_retryable(err) is False
+
+    def test_generic_error_with_no_retryable_text_is_not_retryable(self):
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        assert _ollama_error_is_retryable(ValueError("model 'nonexistent' not found")) is False

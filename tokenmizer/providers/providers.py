@@ -68,6 +68,31 @@ def _openai_error_is_retryable(exc: Exception) -> bool:
     return bool(_RETRYABLE_TEXT.search(str(exc)))
 
 
+def _ollama_error_is_retryable(exc: Exception) -> bool:
+    """True if an Ollama request error is worth retrying.
+
+    Every OllamaProvider error used to be marked retryable=True
+    unconditionally — a malformed request or an unknown model name got
+    the same 1+2+4s of pointless retries as a genuinely transient
+    failure before the permanent error finally surfaced. Mirrors
+    _openai_error_is_retryable's shape: typed check first (an HTTP
+    status Ollama actually returned), then _RETRYABLE_TEXT as the text
+    fallback — but a bare connection failure or client-side timeout
+    reaching a LOCAL server is retried unconditionally, unlike the
+    remote-API providers: those most often mean the server is still
+    starting up, not that the request itself is bad.
+    """
+    try:
+        import httpx
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in (408, 429, 500, 502, 503, 504)
+        if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
+            return True
+    except Exception:
+        pass
+    return bool(_RETRYABLE_TEXT.search(str(exc)))
+
+
 # ── Response dataclass ────────────────────────────────────────────────────────
 
 @dataclass
@@ -446,7 +471,17 @@ class CohereProvider(BaseProvider):
                 provider="cohere",
             )
         except Exception as e:
-            raise ProviderError("cohere", "api_error", str(e), retryable="rate" in str(e).lower())
+            # Word-boundary matching, not a bare substring check: "rate" is
+            # inside "separate", "moderate", "generate" — the exact
+            # collision _RETRYABLE_TEXT's own docstring warns about for
+            # OpenAI, just never mirrored here. A malformed-request error
+            # mentioning any of those words was marked retryable (three
+            # pointless retries before the real error surfaced), and a
+            # genuine rate-limit phrased without the literal word "rate"
+            # ("too many requests") was marked NOT retryable when it should
+            # have been.
+            raise ProviderError("cohere", "api_error", str(e),
+                                retryable=bool(_RETRYABLE_TEXT.search(str(e))))
 
 
 # ── Gemini ───────────────────────────────────────────────────────────────────
@@ -532,7 +567,13 @@ class GeminiProvider(BaseProvider):
                 provider="gemini",
             )
         except Exception as e:
-            retryable = "quota" in str(e).lower() or "429" in str(e)
+            # "quota"/"429" are real Gemini-specific signals, kept — but
+            # alone they miss every other retryable shape _RETRYABLE_TEXT
+            # already knows how to recognize (timeout, overloaded, service
+            # unavailable, internal server error, bad gateway), so those
+            # were all wrongly marked permanent for this provider only.
+            retryable = ("quota" in str(e).lower() or "429" in str(e)
+                        or bool(_RETRYABLE_TEXT.search(str(e))))
             raise ProviderError("gemini", "api_error", str(e), retryable=retryable)
 
 
@@ -579,7 +620,8 @@ class OllamaProvider(BaseProvider):
                     provider="ollama",
                 )
             except Exception as e:
-                raise ProviderError("ollama", "api_error", str(e), retryable=True)
+                raise ProviderError("ollama", "api_error", str(e),
+                                    retryable=_ollama_error_is_retryable(e))
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -610,7 +652,8 @@ class OllamaProvider(BaseProvider):
         except ProviderError:
             raise
         except Exception as e:
-            raise ProviderError("ollama", "api_error", str(e), retryable=True)
+            raise ProviderError("ollama", "api_error", str(e),
+                                retryable=_ollama_error_is_retryable(e))
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
