@@ -286,6 +286,7 @@ here rather than left to be discovered:
 |---|---|
 | `routing.*` | No implementation. `savings.routing` is always `0`. Enabling it logs a warning and changes nothing. |
 | `state_backend: redis` | Accepted and unused. `tokenmizer/state/backend.py` has no callers; all durable state is SQLite. |
+| `tools` / `tool_choice` (function calling) | Accepted (the request body isn't validated against a strict schema, so a standard OpenAI client sending them never gets a 422) but not forwarded to any provider. The model responds with no knowledge of the tools it was given. Logs a warning server-side per request. |
 
 ## Documentation
 
@@ -307,7 +308,7 @@ here rather than left to be discovered:
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 606 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 639 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

@@ -434,3 +434,66 @@ class TestStreamDoesNotCacheTruncatedResponses:
             "a truncated response was cached and will be served to future callers"
         )
         app_module._cache.clear()
+
+
+class TestToolCallingFieldsAreNotSilentlyIgnored:
+    """ChatRequest uses extra="allow" so a standard OpenAI client sending
+    `tools`/`tool_choice` never gets a 422 — but no provider adapter
+    forwards them, so a caller relying on tool use got a 200 response
+    that quietly ignored what it asked for, with nothing pointing at
+    why. Can't become a hard error without breaking extra="allow" for
+    every other unrecognized field, so this only checks it stopped being
+    silent to the operator."""
+
+    def _client(self, monkeypatch, tmp_path):
+        import tokenmizer.api.app as app_module
+        from tokenmizer.providers.providers import LLMResponse
+        from tokenmizer.security.ownership import OwnershipStore
+
+        monkeypatch.setattr(app_module, "_ownership", OwnershipStore(storage_dir=str(tmp_path)))
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "storage_dir", str(tmp_path))
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
+        monkeypatch.setattr(app_module.settings.cache, "enabled", False)
+
+        class FakeProvider:
+            async def chat(self, messages, model="", max_tokens=0, stream=False, **kw):
+                return LLMResponse(text="hi", input_tokens=1, output_tokens=1,
+                                   model=model, provider="fake")
+
+        monkeypatch.setattr(app_module, "_get_provider", lambda: FakeProvider())
+        return app_module
+
+    def test_tools_field_logs_a_warning(self, monkeypatch, tmp_path, caplog):
+        import logging
+
+        from fastapi.testclient import TestClient
+
+        app_module = self._client(monkeypatch, tmp_path)
+
+        with caplog.at_level(logging.WARNING), TestClient(app_module.app) as c:
+            r = c.post("/v1/chat/completions", json={
+                "messages": [{"role": "user", "content": "what's the weather?"}],
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+                "session_id": "s-tools",
+            })
+        assert r.status_code == 200, "extra='allow' must still accept the request, not 422"
+        assert any("tool" in rec.message.lower() and "ignored" in rec.message.lower()
+                  for rec in caplog.records), (
+            "a request with unsupported tool-calling fields must warn, not silently drop them"
+        )
+
+    def test_request_without_tools_does_not_warn(self, monkeypatch, tmp_path, caplog):
+        import logging
+
+        from fastapi.testclient import TestClient
+
+        app_module = self._client(monkeypatch, tmp_path)
+
+        with caplog.at_level(logging.WARNING), TestClient(app_module.app) as c:
+            r = c.post("/v1/chat/completions", json={
+                "messages": [{"role": "user", "content": "hello"}],
+                "session_id": "s-no-tools",
+            })
+        assert r.status_code == 200
+        assert not any("tool" in rec.message.lower() and "ignored" in rec.message.lower()
+                      for rec in caplog.records)

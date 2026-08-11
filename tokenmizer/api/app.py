@@ -1034,6 +1034,25 @@ async def chat_completions(req: ChatRequest, request: Request):
     model      = req.model or settings.default_model
     savings: dict[str, int] = {}
 
+    # ChatRequest uses extra="allow" precisely so a standard OpenAI client
+    # sending its full request shape never gets a 422 — but that means
+    # tool/function-calling fields are accepted with a 200 and silently
+    # have NO effect: no provider path here forwards them. A caller
+    # relying on tool use gets a response that quietly ignored what it
+    # asked for, with nothing in the API response pointing at why. This
+    # can't become a hard error without breaking the extra="allow"
+    # contract for every OTHER unrecognized field, so at minimum it must
+    # not be silent to whoever operates the proxy.
+    _unsupported = (req.model_extra or {}).keys() & {"tools", "tool_choice", "functions", "function_call"}
+    if _unsupported:
+        logger.warning(
+            "Request for session %r included %s — tool/function-calling "
+            "is not implemented by any provider adapter and these fields "
+            "are ignored. The model will respond with no knowledge of "
+            "the tools it was given.",
+            session_id, sorted(_unsupported),
+        )
+
     await _check_rate_limit(request)
 
     # Bind the session to this caller (or verify an existing binding).
