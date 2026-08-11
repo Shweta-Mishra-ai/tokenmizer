@@ -509,7 +509,7 @@ document.getElementById("exportPng").onclick=()=>{
     const ctx=cv.getContext("2d");ctx.scale(2,2);ctx.drawImage(img,0,0);
     URL.revokeObjectURL(url);
     const a=document.createElement("a");
-    a.download="tokenmizer-__SESSION__.png";a.href=cv.toDataURL("image/png");a.click();
+    a.download="tokenmizer-"+DATA.session_id.replace(/[^\\w.-]/g,"_")+".png";a.href=cv.toDataURL("image/png");a.click();
   };
   img.src=url;
 };
@@ -533,7 +533,34 @@ def to_share_html(graph: "GraphMemory") -> str:
       - per-type filter chips, "Active only" toggle, text search,
         wheel-zoom/pan, and one-click PNG export
     """
+    import html as _html
     import json as _json
+
+    # session_id is client-supplied (see security/ownership.py), and node
+    # labels/summaries/decision text come straight from conversation
+    # content — none of it is safe to drop into this template unescaped.
+    # This is a genuine injection surface, not a theoretical one: the
+    # docstring above literally says "share" — the intended use is
+    # downloading this file and handing it to someone else, so a payload
+    # here isn't just self-XSS, it runs in whoever opens the shared file.
+    #
+    # Two different escaping rules for two different sink contexts, not
+    # one shared substitution:
+    #  - __SESSION__ appears in plain HTML text (title, header) — needs
+    #    HTML escaping. It used to ALSO appear inside a JS string literal
+    #    (the PNG filename) with the same unescaped value; that call site
+    #    now reads DATA.session_id instead of a template-substituted raw
+    #    string, so there is exactly one sink left needing exactly one
+    #    escaping rule.
+    #  - __DATA__/__COLORS__ go inside a <script> block as JSON. json.dumps
+    #    already makes the result valid, safely-quoted JS — but it does
+    #    NOT escape "</", so a label containing the literal text
+    #    "</script>" would still terminate the block early and let
+    #    whatever followed run as HTML. Escaping "<" to its unicode
+    #    escape blocks that (and "<!--") without changing the decoded
+    #    value on the JS side.
+    def _script_json(value) -> str:
+        return _json.dumps(value).replace("<", "\\u003c")
 
     vis = graph.to_vis_json()
     nodes = vis.get("nodes", [])
@@ -541,13 +568,14 @@ def to_share_html(graph: "GraphMemory") -> str:
     transitions = vis.get("transitions", [])
     decisions = sum(1 for n in nodes if n.get("type") == "decision")
     html = (_SHARE_HTML_TEMPLATE
-            .replace("__SESSION__", graph.session_id)
+            .replace("__SESSION__", _html.escape(graph.session_id, quote=True))
             .replace("__NODES__", str(len(nodes)))
             .replace("__EDGES__", str(len(edges)))
             .replace("__DECISIONS__", str(decisions))
             .replace("__TRANSITIONS__", str(len(transitions)))
-            .replace("__DATA__", _json.dumps({
+            .replace("__DATA__", _script_json({
                 "nodes": nodes, "edges": edges, "transitions": transitions,
+                "session_id": graph.session_id,
             }))
-            .replace("__COLORS__", _json.dumps(_TYPE_COLOR)))
+            .replace("__COLORS__", _script_json(_TYPE_COLOR)))
     return html
