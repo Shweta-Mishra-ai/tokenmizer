@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.5.3] — 2026-08-08 — registry MCP launch, token-count accuracy, and a redaction gap
+
+Four fixes from a codebase audit, each with a regression test.
+
+**Registry-launched MCP server was unreachable.** `server.json` pins the
+pypi package `identifier` as `tokenmizer`, and the schema has no field
+to point a registry launcher at a differently-named entry point. Any
+launcher that installs the package and runs it by that identifier alone
+(`uvx tokenmizer`, or `tokenmizer` after `pip install tokenmizer` — what
+MCP registries and directories like Glama do) landed on the CLI console
+script, not the MCP server (`tokenmizer-mcp`), and got Typer's "Missing
+command" usage error instead of an MCP handshake. This is the most
+likely cause of prior MCP-directory build failures for this package.
+README's own `.mcp.json` setup (`python3 -m tokenmizer.mcp.server`) was
+never affected. Added a `tokenmizer mcp` subcommand and
+`packageArguments: ["mcp"]` in `server.json` so a convention-following
+launcher reaches it.
+
+**Silent token-count undercounts in two providers.** `AnthropicProvider`'s
+buffered-streaming branch and `GeminiProvider` both computed
+`input_tokens` from a local estimate that excluded the system prompt
+(each SDK takes system content as a separate param, outside the message
+list the estimate counted), instead of reading the real usage the SDK
+already reports. Both now use real API-reported usage — no more silent
+undercounting of the token-savings/cost analytics this project exists to
+report accurately.
+
+**Redaction gap: secrets in nested tool_result content survived.** A
+`tool_result` block's `content` is `str | list[block]` per the
+Anthropic/OpenAI schema — a tool returning structured output (e.g. a
+file-read result) commonly shapes it as a list of text blocks, not a
+bare string. Redaction only handled the string shape, so a secret
+embedded in a tool_result's nested list content (an API key inside file
+contents a tool returned, for example) passed straight through to the
+graph, checkpoints, and the background extraction LLM — unredacted, with
+no error. Confirmed and fixed; redaction now recurses through both
+shapes.
+
+610 tests, ruff clean.
+
 ## [0.5.2] — 2026-08-07 — a stale test count, and a guard for dead in-page anchors
 
 `README.md`, `TESTING.md`, `CONTRIBUTING.md` and `docs/benchmarks.md` all

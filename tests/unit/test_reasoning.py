@@ -122,6 +122,107 @@ class TestWhy:
         assert why(story_graph, "")["matches"] == []
 
 
+# ── Semantic recall ────────────────────────────────────────────────────────
+#
+# why()/impact() widen their substring match with embedding similarity via
+# _semantic_matches (tokenmizer/graph_memory/reasoning.py), reusing the same
+# EmbeddingEngine the semantic cache uses. Every test in this suite runs
+# with EmbeddingEngine._load stubbed to a no-op (see conftest.py), so
+# .available is False and these two paths behave IDENTICALLY without a
+# model — that's covered here explicitly. The "does it actually widen
+# recall" behavior is tested with a fake model (deterministic, unit
+# vectors, no network) rather than the real one, matching how
+# test_cache.py already tests this engine.
+
+def _install_fake_embedder(monkeypatch, vectors: dict):
+    """Point the shared EmbeddingEngine singleton at fixed vectors for one
+    test, and swap `.cosine` for a pure-Python dot product so this needs
+    no numpy (the real `.cosine`/`.encode` require it, same as the real
+    sentence-transformers model would, but the fake model's plain-list
+    vectors don't need the array machinery). monkeypatch restores the
+    real (untrained, unavailable) state afterward — this can't leak into
+    other tests."""
+    from tokenmizer.semantic_cache.cache import EmbeddingEngine
+
+    class _FakeModel:
+        def encode(self, text_or_texts, normalize_embeddings=True):
+            if isinstance(text_or_texts, str):
+                return vectors[text_or_texts]
+            return [vectors[t] for t in text_or_texts]
+
+    def _dot(a, b) -> float:
+        if a is None or b is None:
+            return 0.0
+        return float(sum(x * y for x, y in zip(a, b)))
+
+    engine = EmbeddingEngine.get()
+    monkeypatch.setattr(engine, "_model", _FakeModel())
+    monkeypatch.setattr(EmbeddingEngine, "cosine", staticmethod(_dot))
+    return engine
+
+
+class TestSemanticRecall:
+
+    def test_why_finds_a_paraphrase_with_no_shared_words(self, graph, monkeypatch):
+        graph.add_node(NodeType.DECISION, "Use PostgreSQL for storage",
+                       NodeStatus.COMPLETED, summary="")
+        graph.add_node(NodeType.DECISION, "Switch UI framework to Svelte",
+                       NodeStatus.COMPLETED, summary="")
+        _install_fake_embedder(monkeypatch, {
+            "database choice": [1.0, 0.0],
+            "Use PostgreSQL for storage": [0.8, 0.6],   # cos = 0.8 — close
+            "Switch UI framework to Svelte": [0.0, 1.0],  # cos = 0.0 — unrelated
+        })
+
+        result = why(graph, "database choice")
+
+        labels = {m["label"] for m in result["matches"]}
+        assert "Use PostgreSQL for storage" in labels, (
+            "shares zero words with the query — only semantic recall finds it"
+        )
+        assert "Switch UI framework to Svelte" not in labels
+
+    def test_semantic_recall_is_additive_not_a_replacement(self, graph, monkeypatch):
+        """A substring match must survive even if its embedding similarity
+        would fall below the semantic threshold — semantic recall only
+        ever ADDS candidates, never removes the lexical floor."""
+        graph.add_node(NodeType.DECISION, "Use PostgreSQL for storage",
+                       NodeStatus.COMPLETED, summary="")
+        _install_fake_embedder(monkeypatch, {
+            "postgresql": [1.0, 0.0],
+            "Use PostgreSQL for storage": [0.0, 1.0],  # cos = 0.0
+        })
+
+        result = why(graph, "postgresql")
+
+        assert any(m["label"] == "Use PostgreSQL for storage" for m in result["matches"])
+
+    def test_no_semantic_widening_without_an_embedding_model(self, story_graph):
+        """Every other test in this suite runs exactly this way (see the
+        module comment above) — asserted explicitly here so a future
+        change to the default stub is caught."""
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine
+        assert EmbeddingEngine.get().available is False
+        result = why(story_graph, "kubernetes")
+        assert result["matches"] == []
+
+    def test_impact_is_also_widened(self, graph, monkeypatch):
+        dec_id = graph.add_node(NodeType.DECISION, "Use PostgreSQL for storage",
+                                NodeStatus.COMPLETED, summary="")
+        file_id = graph.add_node(NodeType.FILE, "db/schema.sql", NodeStatus.COMPLETED)
+        graph.add_edge(dec_id, file_id, EdgeType.IMPLEMENTS)
+        _install_fake_embedder(monkeypatch, {
+            "database choice": [1.0, 0.0],
+            "Use PostgreSQL for storage": [0.9, 0.436],
+            "db/schema.sql": [0.0, 1.0],  # unrelated by embedding — reached via the edge instead
+        })
+
+        result = impact(graph, "database choice")
+
+        assert any(m["label"] == "Use PostgreSQL for storage" for m in result["matches"])
+        assert any(c["target"]["label"] == "db/schema.sql" for c in result["connections"])
+
+
 # ── impact / history / consistency ───────────────────────────────────────────
 
 class TestReasoningViews:

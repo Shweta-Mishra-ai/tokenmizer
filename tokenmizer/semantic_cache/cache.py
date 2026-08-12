@@ -121,6 +121,19 @@ class EmbeddingEngine:
             return None
         return self._model.encode(text[:1000], normalize_embeddings=True)
 
+    def embed_batch(self, texts: list[str]):
+        """Batch version of embed() — one model call instead of N.
+
+        Every caller that ranks several candidates against a query (graph
+        recall, and the decision-conflict/error-dedup work planned to
+        reuse this same engine) needs this same batching, so it lives here
+        once instead of being reimplemented per caller.
+        """
+        self._load()
+        if self._model is None or not texts:
+            return None
+        return self._model.encode([t[:1000] for t in texts], normalize_embeddings=True)
+
     @staticmethod
     def cosine(a, b) -> float:
         if a is None or b is None:

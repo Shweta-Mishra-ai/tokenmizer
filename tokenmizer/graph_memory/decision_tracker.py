@@ -18,6 +18,12 @@ Topic detection approach:
 
 This runs on every add_node(NodeType.DECISION, ...) call.
 Zero external dependencies. Zero LLM calls. ~0.1ms per check.
+
+Also hosts _is_same_error/_semantic_same_error (used by
+add_node(NodeType.ERROR, ...) in graph.py) — the same "is this text A
+the same underlying thing as text B" fuzzy-matching problem, just for
+error labels instead of decision labels, so it lives alongside
+_is_same_decision/_semantic_same_slot rather than in a second file.
 """
 from __future__ import annotations
 
@@ -270,6 +276,48 @@ def _matched_topic_keywords(label: str, summary: str) -> frozenset:
     return frozenset(matched)
 
 
+# Stricter than reasoning.py's 0.55 recall bar — that one only widens
+# what gets SHOWN to a query, a low-stakes ranking decision where a false
+# positive is a slightly-too-long results list. This one decides whether
+# two decisions get SUPERSEDED (data mutation): a false positive here
+# would silently merge two decisions that should have stayed CONTESTED
+# and visible, the exact failure TM-09 (see test_contested_decisions.py)
+# already fixed once for the lexical case — a semantic false positive
+# would reopen the same hole through a different door. A false negative
+# just leaves the pair CONTESTED, same as today, so the bar favors
+# precision over recall.
+_SLOT_SEMANTIC_THRESHOLD = 0.72
+
+
+def _semantic_same_slot(new_label: str, existing_label: str) -> bool:
+    """Extra signal for _same_slot's ambiguous case: same topic bucket,
+    but lexical slot-word overlap says "probably not the same purpose."
+    A purpose can be phrased with zero shared words ("primary datastore"
+    vs "main persistence layer" both mean the same slot as "cache" vs
+    "cold storage" do NOT) — word overlap alone can't tell those apart,
+    which is exactly what genuinely complementary same-topic decisions
+    ("primary user data" vs "local offline cache") rely on to stay
+    distinct. Only ever used to turn an existing False into True (see
+    _same_slot) — never the reverse, so it can only ADD supersessions
+    that lexical matching missed, never suppress one lexical matching
+    already found correctly.
+
+    No-op (False) whenever the embedding model isn't available — same
+    graceful-degradation contract as reasoning.py's _semantic_matches,
+    reusing the same engine.
+    """
+    if not new_label.strip() or not existing_label.strip():
+        return False
+    from tokenmizer.semantic_cache.cache import EmbeddingEngine
+    engine = EmbeddingEngine.get()
+    if not engine.available:
+        return False
+    embs = engine.embed_batch([new_label, existing_label])
+    if embs is None:
+        return False
+    return EmbeddingEngine.cosine(embs[0], embs[1]) >= _SLOT_SEMANTIC_THRESHOLD
+
+
 def _same_slot(new_label: str, new_summary: str, existing_label: str, existing_summary: str) -> bool:
     """
     True if two same-topic decisions are confidently about the SAME
@@ -284,7 +332,11 @@ def _same_slot(new_label: str, new_summary: str, existing_label: str, existing_s
     against — default to treating it as the same slot, matching this
     mechanism's original, simpler design intent for plain tech swaps.
     Otherwise require at least half of the smaller side's descriptive
-    words to overlap.
+    words to overlap — or, failing that, that the two labels are
+    semantically close enough to be the same purpose phrased differently
+    (see _semantic_same_slot; a no-op when no embedding model is
+    available, so this falls back to exactly today's word-overlap-only
+    behavior on a host without one).
     """
     new_keywords = _matched_topic_keywords(new_label, new_summary)
     existing_keywords = _matched_topic_keywords(existing_label, existing_summary)
@@ -296,7 +348,9 @@ def _same_slot(new_label: str, new_summary: str, existing_label: str, existing_s
     if not new_slot or not existing_slot:
         return True
     overlap = len(new_slot & existing_slot) / min(len(new_slot), len(existing_slot))
-    return overlap >= 0.5
+    if overlap >= 0.5:
+        return True
+    return _semantic_same_slot(new_label, existing_label)
 
 
 def find_contradicting_decisions(
@@ -410,8 +464,16 @@ def _find_by_word_overlap(
     overlap_threshold: float = 0.6,
 ) -> list[str]:
     """
-    Fallback: find decisions with high word overlap (same topic, unknown category).
-    Only used when topic classification returns None.
+    Fallback: find decisions with high word overlap (same topic, unknown
+    category). Only used when topic classification returns empty.
+
+    Below the word-overlap threshold, also tries _semantic_same_slot as a
+    second signal — the exact same gap _same_slot's ambiguous branch has
+    (a decision about an unlisted technology can be phrased with zero
+    words in common with an existing one about the same thing), just
+    reached from the topic-unknown path instead of the topic-known one.
+    Fixing one and not the other would leave the identical bug alive
+    behind a different condition.
     """
     from tokenmizer.graph_memory.graph import NodeStatus, NodeType
 
@@ -437,8 +499,10 @@ def _find_by_word_overlap(
         if not existing_words:
             continue
 
+        if _is_same_decision(new_label, node.label):
+            continue
         overlap = len(new_words & existing_words) / max(len(new_words), len(existing_words))
-        if overlap >= overlap_threshold and not _is_same_decision(new_label, node.label):
+        if overlap >= overlap_threshold or _semantic_same_slot(new_label, node.label):
             to_supersede.append(node_id)
 
     return to_supersede
@@ -564,3 +628,99 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
         return True
     overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
     return overlap >=   0.82
+
+
+# ── Error dedup (Phase 3) ─────────────────────────────────────────────────
+#
+# Same dedup problem _is_same_decision solves, unaddressed for errors:
+# graph.add_node() only merges DECISION near-duplicates, so the same
+# underlying failure mentioned twice in different words ("connection to
+# the DB times out" ... two turns later ... "DB connection timeout after
+# 30s on checkout") became two separate ERROR nodes. context_block.py's
+# "Open issues" section is capped at the top 3 by importance, so one real
+# bug silently pushed out a genuinely different one instead of both being
+# recognized as the same node with importance reinforced by a second hit.
+
+_ERROR_CLASS_NAME = re.compile(r'\b[A-Z]\w*(?:Error|Exception)\b')
+
+
+def _named_error_classes_conflict(label_a: str, label_b: str) -> bool:
+    """True if both labels name a specific exception/error class and the
+    classes differ (TypeError vs ValueError) — the error equivalent of
+    _names_competing_alternatives for decisions. Checked first in both
+    _is_same_error and _semantic_same_error: near-identical error text
+    that differs only in the exception class name ("TypeError: x is not
+    a function" vs "ReferenceError: x is not a function") shares almost
+    every other word, so without this guard it would clear the overlap
+    threshold below and merge two genuinely different failures into one
+    node — the same precision hole _names_competing_alternatives closes
+    for decisions, just reachable from the error path instead.
+    """
+    classes_a = {m.upper() for m in _ERROR_CLASS_NAME.findall(label_a)}
+    classes_b = {m.upper() for m in _ERROR_CLASS_NAME.findall(label_b)}
+    if not classes_a or not classes_b:
+        return False       # no named class on one side — no signal either way
+    return not (classes_a & classes_b)
+
+
+def _is_same_error(label_a: str, label_b: str) -> bool:
+    """True if two error labels describe the same underlying failure,
+    phrased identically or near-identically. Mirrors _is_same_decision's
+    containment/overlap tail, minus the enable/disable-style negation
+    handling — an error either is or isn't the same failure; there's no
+    "opposite" of an error the way there's an opposite of a decision.
+    """
+    if _named_error_classes_conflict(label_a, label_b):
+        return False
+
+    def _norm(s: str) -> str:
+        s = s.lower().rstrip(".,!?;:")
+        s = re.sub(r"[^\w\s]", " ", s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    a, b = _norm(label_a), _norm(label_b)
+    if a == b:
+        return True
+
+    words_a, words_b = set(a.split()), set(b.split())
+    if not words_a or not words_b:
+        return False
+
+    smaller, larger = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
+    if len(smaller) >= 2 and smaller <= larger:
+        return True
+    overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
+    return overlap >= 0.82
+
+
+# Same precision-favoring bar as Phase 2's _SLOT_SEMANTIC_THRESHOLD, for
+# the same reason: this decides a MERGE (discarding one of two error
+# nodes), a data mutation, not a ranking. A false negative just leaves
+# two nodes instead of one — a minor "Open issues" clutter, not a wrong
+# claim about the codebase's state — so the bar favors precision.
+_ERROR_SEMANTIC_THRESHOLD = 0.72
+
+
+def _semantic_same_error(label_a: str, label_b: str) -> bool:
+    """Extra signal for _is_same_error's miss case: the same failure
+    restated with little or no shared vocabulary (a stack-trace fragment
+    the first time, a plain-English restatement two turns later). Named-
+    exception-class conflicts are refused here too — see
+    _named_error_classes_conflict — a semantic false positive on two
+    truly different exception types would reopen the same hole through
+    this path instead. No-op (False) whenever the embedding model isn't
+    installed, reusing the same EmbeddingEngine reasoning.py's semantic
+    recall and _semantic_same_slot already use.
+    """
+    if _named_error_classes_conflict(label_a, label_b):
+        return False
+    if not label_a.strip() or not label_b.strip():
+        return False
+    from tokenmizer.semantic_cache.cache import EmbeddingEngine
+    engine = EmbeddingEngine.get()
+    if not engine.available:
+        return False
+    embs = engine.embed_batch([label_a, label_b])
+    if embs is None:
+        return False
+    return EmbeddingEngine.cosine(embs[0], embs[1]) >= _ERROR_SEMANTIC_THRESHOLD

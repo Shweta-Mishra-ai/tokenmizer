@@ -117,38 +117,52 @@ class _FakeGeminiResponse:
         self.usage_metadata = usage
 
 
-class _FakeChat:
-    def __init__(self, response: _FakeGeminiResponse):
+class _FakeGeminiChat:
+    def __init__(self, response, received_config: dict):
         self._response = response
+        self._received_config = received_config
 
-    async def send_message_async(self, *args, **kwargs):
+    async def send_message(self, *args, **kwargs):
+        if isinstance(self._response, Exception):
+            raise self._response
         return self._response
 
 
-class _FakeGenerativeModel:
-    def __init__(self, response: _FakeGeminiResponse, **kwargs):
-        self._response = response
-        # Constructor is called with system_instruction=... when a system
-        # prompt is present — the bug this test guards against is that
-        # system_instruction's tokens never made it into input_tokens.
-        self.received_kwargs = kwargs
+class _FakeGeminiChats:
+    """Fakes client.aio.chats — the google-genai (not google-generativeai)
+    entry point GeminiProvider._call uses since the SDK migration."""
 
-    def start_chat(self, history=None):
-        return _FakeChat(self._response)
+    def __init__(self, response, received_config: dict):
+        self._response = response
+        self._received_config = received_config
+
+    def create(self, *, model, history=None, config=None):
+        # Constructor is called with system_instruction set on `config`
+        # when a system prompt is present — the bug an earlier test
+        # guarded against is that system_instruction's tokens never made
+        # it into input_tokens.
+        self._received_config["config"] = config
+        return _FakeGeminiChat(self._response, self._received_config)
+
+
+class _FakeGeminiClient:
+    def __init__(self, response, received_config: dict, **kwargs):
+        class _Aio:
+            chats = _FakeGeminiChats(response, received_config)
+        self.aio = _Aio()
 
 
 @pytest.mark.asyncio
 async def test_gemini_uses_real_usage_metadata_for_input_tokens(monkeypatch):
-    genai = pytest.importorskip("google.generativeai")
+    genai = pytest.importorskip("google.genai")
 
     fake_response = _FakeGeminiResponse(
         text="hi there",
         usage=_FakeGeminiUsage(prompt_token_count=1234, candidates_token_count=7),
     )
-    fake_model = _FakeGenerativeModel(fake_response)
-
-    monkeypatch.setattr(genai, "configure", lambda **kw: None)
-    monkeypatch.setattr(genai, "GenerativeModel", lambda *a, **kw: fake_model)
+    received: dict = {}
+    monkeypatch.setattr(genai, "Client",
+                        lambda **kw: _FakeGeminiClient(fake_response, received))
 
     provider = GeminiProvider(api_key="test-key")
     resp = await provider._call(
@@ -165,3 +179,108 @@ async def test_gemini_uses_real_usage_metadata_for_input_tokens(monkeypatch):
     # this figure, proving the fallback local estimate wasn't used.
     assert resp.input_tokens == 1234
     assert resp.output_tokens == 7
+    assert received["config"].system_instruction is not None
+
+
+class TestRetryClassification:
+    """Cohere, Gemini, and Ollama each had their own retry-classification
+    bug — the same class OpenAI's _RETRYABLE_TEXT docstring already warns
+    about, just never mirrored to the other providers:
+
+      - Cohere: `"rate" in str(e).lower()` — a bare substring match.
+        "rate" is inside "separate"/"moderate"/"generate", so an
+        unrelated permanent error mentioning any of those words was
+        retried 3 times for nothing, while a genuine rate-limit phrased
+        as "too many requests" (no literal "rate") was never retried.
+      - Gemini: only "quota"/"429" were recognized — every other
+        retryable shape (timeout, overloaded, service unavailable) was
+        wrongly treated as permanent for this provider only.
+      - Ollama: retryable=True unconditionally, on every exception,
+        including a malformed request or an unknown model name.
+    """
+
+    def test_cohere_uses_word_boundary_matching_not_bare_substring(self):
+        """Cohere's fix reuses _RETRYABLE_TEXT directly (see the source),
+        so this is really a test of that shared regex against the exact
+        false-positive/false-negative pair from the bug."""
+        from tokenmizer.providers.providers import _RETRYABLE_TEXT
+
+        # False positive the old `"rate" in str(e).lower()` check made:
+        assert not _RETRYABLE_TEXT.search("Invalid parameter: separate stop sequences required")
+        # False negative the old check made:
+        assert _RETRYABLE_TEXT.search("429 Too Many Requests")
+
+    @pytest.mark.asyncio
+    async def test_gemini_retries_on_timeout_not_just_quota(self, monkeypatch):
+        genai = pytest.importorskip("google.genai")
+
+        received: dict = {}
+        monkeypatch.setattr(genai, "Client", lambda **kw: _FakeGeminiClient(
+            RuntimeError("upstream request timed out"), received))
+
+        provider = GeminiProvider(api_key="test-key")
+        with pytest.raises(Exception) as exc_info:
+            await provider._call(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-1.5-pro", max_tokens=10, stream=False, system="",
+            )
+        assert exc_info.value.retryable is True, (
+            "a timeout with no 'quota'/'429' in the message must still retry"
+        )
+
+    def test_gemini_apierror_uses_the_real_status_code(self):
+        """The google-genai SDK exposes a typed APIError with the actual
+        HTTP status the API returned — authoritative, checked before the
+        text fallback. A 400 (bad request) must never retry even though
+        nothing in a typical message would trip the text fallback either
+        way; a 503 must, even with no 'quota'/'429' text at all."""
+        errors = pytest.importorskip("google.genai.errors")
+        from tokenmizer.providers.providers import _gemini_error_is_retryable
+
+        bad_request = errors.APIError(400, {"error": {"message": "invalid argument"}})
+        assert _gemini_error_is_retryable(bad_request) is False
+
+        overloaded = errors.APIError(503, {"error": {"message": "model overloaded"}})
+        assert _gemini_error_is_retryable(overloaded) is True
+
+
+class TestOllamaRetryClassification:
+
+    def test_client_side_timeout_is_retryable(self):
+        import httpx
+
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        assert _ollama_error_is_retryable(httpx.TimeoutException("timed out")) is True
+
+    def test_connect_error_is_retryable(self):
+        """Local server not up yet — the single most common real-world
+        Ollama failure mode, and worth retrying unconditionally."""
+        import httpx
+
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        assert _ollama_error_is_retryable(httpx.ConnectError("connection refused")) is True
+
+    def test_5xx_status_is_retryable(self):
+        import httpx
+
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        req = httpx.Request("POST", "http://localhost:11434/api/chat")
+        resp = httpx.Response(503, request=req)
+        err = httpx.HTTPStatusError("server error", request=req, response=resp)
+        assert _ollama_error_is_retryable(err) is True
+
+    def test_4xx_status_is_not_retryable(self):
+        """A bad request (e.g. unknown model name) must not be retried —
+        this is exactly the case the old unconditional retryable=True
+        got wrong."""
+        import httpx
+
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        req = httpx.Request("POST", "http://localhost:11434/api/chat")
+        resp = httpx.Response(400, request=req)
+        err = httpx.HTTPStatusError("bad request", request=req, response=resp)
+        assert _ollama_error_is_retryable(err) is False
+
+    def test_generic_error_with_no_retryable_text_is_not_retryable(self):
+        from tokenmizer.providers.providers import _ollama_error_is_retryable
+        assert _ollama_error_is_retryable(ValueError("model 'nonexistent' not found")) is False

@@ -57,6 +57,79 @@ class TestNodeDeduplication:
         assert graph._nodes[id1].label == label[:120]
 
 
+class TestErrorDeduplication:
+    """Phase 3 of the memory-improvement plan: ERROR nodes get a fuzzy
+    near-duplicate merge (like DECISION already had), plus a real bug
+    fix found while building it — see _next_status() in graph.py.
+
+    Bug: the shared status-upgrade-only rule ranked FAILED (3) above
+    COMPLETED (2) — correct for DECISION/TASK, where a re-mention must
+    never regress an already-advanced node, but wrong for ERROR: a
+    "this is fixed now" re-add (NodeStatus.COMPLETED) of an error
+    already recorded as FAILED could never win (2 is not > 3), so the
+    graph reported a resolved bug as open forever. No test caught this
+    before — the first two tests below are that regression test.
+    """
+
+    def test_resolved_re_add_now_actually_resolves_it(self, graph):
+        id1 = graph.add_node(NodeType.ERROR, "Connection to DB times out",
+                             NodeStatus.FAILED, importance=0.9)
+        id2 = graph.add_node(NodeType.ERROR, "Connection to DB times out",
+                             NodeStatus.COMPLETED, importance=0.5)
+        assert id1 == id2
+        assert graph._nodes[id1].status == NodeStatus.COMPLETED, (
+            f"a 'fixed now' re-add must resolve the error, got {graph._nodes[id1].status}"
+        )
+
+    def test_a_fixed_error_can_reopen(self, graph):
+        """The reverse direction matters too: a bug that regresses must
+        be able to go from COMPLETED back to FAILED, not get stuck
+        showing as resolved forever."""
+        id1 = graph.add_node(NodeType.ERROR, "Connection to DB times out",
+                             NodeStatus.COMPLETED, importance=0.5)
+        id2 = graph.add_node(NodeType.ERROR, "Connection to DB times out",
+                             NodeStatus.FAILED, importance=0.9)
+        assert id1 == id2
+        assert graph._nodes[id1].status == NodeStatus.FAILED
+
+    def test_decision_status_still_only_upgrades(self, graph):
+        """The _next_status refactor must not change DECISION/TASK
+        behavior — only ERROR gets the latest-wins rule."""
+        id1 = graph.add_node(NodeType.DECISION, "Use PostgreSQL for storage",
+                             NodeStatus.COMPLETED)
+        graph.add_node(NodeType.DECISION, "Use PostgreSQL for storage",
+                       NodeStatus.PENDING)
+        assert graph._nodes[id1].status == NodeStatus.COMPLETED, (
+            "a stale re-mention must not regress an already-COMPLETED decision"
+        )
+
+    def test_near_duplicate_error_merges_lexically(self, graph):
+        """Containment: 'Connection timeout' inside a longer restatement
+        merges without any embedding model — same rule _is_same_decision
+        already used for decisions, applied to errors."""
+        id1 = graph.add_node(NodeType.ERROR, "Connection timeout",
+                             NodeStatus.FAILED, importance=0.9)
+        id2 = graph.add_node(
+            NodeType.ERROR, "Connection timeout on retry attempt 3",
+            NodeStatus.FAILED, importance=0.9,
+        )
+        assert id1 == id2
+        assert sum(1 for n in graph._nodes.values() if n.type == NodeType.ERROR) == 1
+
+    def test_named_exception_classes_never_merge_despite_high_overlap(self, graph):
+        """'TypeError: x is not a function' and 'ReferenceError: x is not
+        a function' share every word except the exception class — high
+        enough overlap to clear the containment/0.82 threshold, but they
+        are genuinely different failures. See
+        _named_error_classes_conflict in decision_tracker.py."""
+        id1 = graph.add_node(NodeType.ERROR, "TypeError: x is not a function",
+                             NodeStatus.FAILED, importance=0.9)
+        id2 = graph.add_node(NodeType.ERROR, "ReferenceError: x is not a function",
+                             NodeStatus.FAILED, importance=0.9)
+        assert id1 != id2
+        assert sum(1 for n in graph._nodes.values() if n.type == NodeType.ERROR) == 2
+
+
 class TestNodeTypes:
 
     def test_all_new_node_types_accepted(self, graph):

@@ -201,3 +201,181 @@ def test_real_supersession_still_fires_after_merge_fix(tmp_path):
     assert new_id != old_id
     assert g._nodes[old_id].status == NodeStatus.SUPERSEDED
     assert len(g.get_transitions()) == 1
+
+
+# ── Semantic slot-matching (Phase 2 of the memory-improvement plan) ─────────
+#
+# _same_slot / _find_by_word_overlap widen their lexical "is this a genuine
+# replacement" check with embedding similarity via _semantic_same_slot
+# (decision_tracker.py), reusing the same EmbeddingEngine reasoning.py's
+# semantic recall already uses. Every test in this suite runs with
+# EmbeddingEngine._load stubbed to a no-op (conftest.py), so .available is
+# False and all the tests above this point behave IDENTICALLY without a
+# model — that continues to hold, and is exactly why they didn't need any
+# changes to keep passing. The "does it actually widen detection" behavior
+# is tested here with a fake model (deterministic vectors, no network),
+# matching the pattern already used in test_cache.py and test_reasoning.py.
+
+def _install_fake_embedder(monkeypatch, vectors: dict):
+    """Point the shared EmbeddingEngine singleton at fixed vectors for one
+    test, with a pure-Python `.cosine` so no numpy is needed. monkeypatch
+    restores the real (untrained, unavailable) state afterward."""
+    from tokenmizer.semantic_cache.cache import EmbeddingEngine
+
+    class _FakeModel:
+        def encode(self, text_or_texts, normalize_embeddings=True):
+            if isinstance(text_or_texts, str):
+                return vectors[text_or_texts]
+            return [vectors[t] for t in text_or_texts]
+
+    def _dot(a, b) -> float:
+        if a is None or b is None:
+            return 0.0
+        return float(sum(x * y for x, y in zip(a, b)))
+
+    engine = EmbeddingEngine.get()
+    monkeypatch.setattr(engine, "_model", _FakeModel())
+    monkeypatch.setattr(EmbeddingEngine, "cosine", staticmethod(_dot))
+    return engine
+
+
+class TestSemanticSlotMatching:
+
+    def test_paraphrased_same_purpose_now_supersedes(self, tmp_path, monkeypatch):
+        """'primary datastore' vs 'main persistence layer' share zero
+        slot words — before Phase 2 this stayed CONTESTED forever."""
+        _install_fake_embedder(monkeypatch, {
+            "Use PostgreSQL for the primary datastore":
+                [1.0, 0.0],
+            "Switch to CockroachDB as the main persistence layer":
+                [0.95, 0.312],   # cos = 0.95 — clearly the same purpose
+        })
+        g = GraphMemory(session_id="t-sem-slot-1", storage_dir=str(tmp_path))
+        old_id = g.add_node(NodeType.DECISION,
+                            "Use PostgreSQL for the primary datastore",
+                            NodeStatus.COMPLETED)
+        new_id = g.add_node(NodeType.DECISION,
+                            "Switch to CockroachDB as the main persistence layer",
+                            NodeStatus.COMPLETED)
+        assert new_id != old_id
+        assert g._nodes[old_id].status == NodeStatus.SUPERSEDED, (
+            f"expected SUPERSEDED via semantic slot match, got {g._nodes[old_id].status}"
+        )
+
+    def test_genuinely_complementary_decisions_stay_contested(self, tmp_path, monkeypatch):
+        """The exact TM-09 case (test_contested_decisions.py) must not
+        regress: same topic, genuinely different purpose. A real model
+        would score this pair well below the 0.72 threshold; simulated
+        here with an explicitly low fake similarity to prove the
+        threshold — not just "no model" — is what keeps it correctly
+        unmerged."""
+        _install_fake_embedder(monkeypatch, {
+            "Use PostgreSQL for primary user data": [1.0, 0.0],
+            "Use SQLite for the local offline cache": [0.3, 0.954],  # cos = 0.3
+        })
+        g = GraphMemory(session_id="t-sem-slot-2", storage_dir=str(tmp_path))
+        old_id = g.add_node(NodeType.DECISION, "Use PostgreSQL for primary user data",
+                            NodeStatus.COMPLETED, summary="relational integrity matters")
+        new_id = g.add_node(NodeType.DECISION, "Use SQLite for the local offline cache",
+                            NodeStatus.COMPLETED, summary="zero-config embedded")
+        assert g._nodes[old_id].status == NodeStatus.CONTESTED
+        assert g._nodes[new_id].status == NodeStatus.CONTESTED
+
+    def test_unknown_topic_fallback_is_also_widened(self, tmp_path, monkeypatch):
+        """_find_by_word_overlap (the unknown-topic path — see its
+        docstring) gets the identical fix, not just _same_slot's
+        known-topic path — same root cause, two call sites."""
+        from tokenmizer.graph_memory.decision_tracker import find_contradicting_decisions
+
+        _install_fake_embedder(monkeypatch, {
+            "Adopt Zephyrmesh for service discovery": [1.0, 0.0],
+            "Move to Nebulawire as our discovery layer": [0.9, 0.436],  # cos = 0.9
+        })
+        g = GraphMemory(session_id="t-sem-slot-3", storage_dir=str(tmp_path))
+        old_id = g.add_node(NodeType.DECISION,
+                            "Adopt Zephyrmesh for service discovery",
+                            NodeStatus.COMPLETED)
+        assert classify_topics("Adopt Zephyrmesh for service discovery") == set(), (
+            "fixture assumes these made-up tech names hit zero taxonomy keywords"
+        )
+        hits = find_contradicting_decisions(
+            "Move to Nebulawire as our discovery layer", "", g._nodes,
+        )
+        assert old_id in hits
+
+    def test_no_semantic_widening_without_an_embedding_model(self, tmp_path):
+        """Every other test in this file runs exactly this way (see the
+        module comment above) — asserted explicitly so a future change
+        to the default stub is caught."""
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine
+        assert EmbeddingEngine.get().available is False
+        g = GraphMemory(session_id="t-sem-slot-4", storage_dir=str(tmp_path))
+        old_id = g.add_node(NodeType.DECISION,
+                            "Use PostgreSQL for the primary datastore",
+                            NodeStatus.COMPLETED)
+        new_id = g.add_node(NodeType.DECISION,
+                            "Switch to CockroachDB as the main persistence layer",
+                            NodeStatus.COMPLETED)
+        # Zero shared slot words AND no model available — stays contested,
+        # exactly like every ambiguous case did before Phase 2.
+        assert new_id != old_id
+        assert g._nodes[old_id].status == NodeStatus.CONTESTED
+
+
+# ── Semantic error dedup (Phase 3) ───────────────────────────────────────────
+#
+# _is_same_error / _semantic_same_error / _named_error_classes_conflict —
+# see decision_tracker.py's "Error dedup" section. Reuses the same
+# _install_fake_embedder helper and no-network/no-numpy approach as the
+# semantic-slot tests above.
+
+class TestSemanticErrorDedup:
+
+    def test_paraphrased_same_failure_is_recognized(self, monkeypatch):
+        from tokenmizer.graph_memory.decision_tracker import _semantic_same_error
+
+        _install_fake_embedder(monkeypatch, {
+            "Connection to the database times out": [1.0, 0.0],
+            "DB connection timeout after 30s on checkout": [0.95, 0.312],  # cos = 0.95
+        })
+        assert _semantic_same_error(
+            "DB connection timeout after 30s on checkout",
+            "Connection to the database times out",
+        ) is True
+
+    def test_unrelated_errors_are_not_merged(self, monkeypatch):
+        from tokenmizer.graph_memory.decision_tracker import _semantic_same_error
+
+        _install_fake_embedder(monkeypatch, {
+            "Connection to the database times out": [1.0, 0.0],
+            "CSS layout breaks on mobile Safari": [0.3, 0.954],  # cos = 0.3
+        })
+        assert _semantic_same_error(
+            "CSS layout breaks on mobile Safari",
+            "Connection to the database times out",
+        ) is False
+
+    def test_named_exception_class_conflict_overrides_high_similarity(self, monkeypatch):
+        """Even a fake similarity score of 1.0 must not merge two labels
+        naming different exception classes — the guard is checked FIRST
+        and short-circuits before the embedding comparison runs at all."""
+        from tokenmizer.graph_memory.decision_tracker import _semantic_same_error
+
+        _install_fake_embedder(monkeypatch, {
+            "TypeError: x is not a function": [1.0, 0.0],
+            "ReferenceError: x is not a function": [1.0, 0.0],  # cos = 1.0
+        })
+        assert _semantic_same_error(
+            "ReferenceError: x is not a function",
+            "TypeError: x is not a function",
+        ) is False
+
+    def test_no_semantic_merge_without_an_embedding_model(self):
+        from tokenmizer.graph_memory.decision_tracker import _semantic_same_error
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine
+
+        assert EmbeddingEngine.get().available is False
+        assert _semantic_same_error(
+            "DB connection timeout after 30s on checkout",
+            "Connection to the database times out",
+        ) is False

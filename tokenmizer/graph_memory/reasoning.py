@@ -18,7 +18,11 @@ The graph stores facts (nodes), relations (edges), and causal history
   summarize_reasoning(graph) One dict combining the above — the payload
                              behind GET /api/graph/{session}/reasoning.
 
-Everything here is read-only and deterministic — no LLM calls, no writes.
+Everything here is read-only — no LLM calls, no writes. why()/impact()
+optionally widen their substring match with local embedding similarity
+(see _semantic_matches) when sentence-transformers is installed; that
+stays deterministic given a fixed model and never runs a network call
+on the query path (same local model the semantic cache already uses).
 """
 from __future__ import annotations
 
@@ -66,11 +70,56 @@ def _transition_brief(t: DecisionTransition) -> dict:
     }
 
 
+# Retrieval bar, not the semantic cache's 0.92 answer-reuse bar — that
+# threshold means "close enough to serve the same cached answer verbatim";
+# this one means "worth surfacing as a candidate alongside an exact
+# substring hit", a much looser bar by design. Picked empirically against
+# the paraphrase/unrelated-pair cases in test_reasoning.py; a query and a
+# same-topic decision typically land at 0.6-0.8 with all-MiniLM-L6-v2,
+# unrelated pairs well under 0.4.
+_SEMANTIC_RECALL_THRESHOLD = 0.55
+_SEMANTIC_RECALL_LIMIT = 5
+
+
+def _semantic_matches(query: str, candidates: list[MemoryNode]) -> list[MemoryNode]:
+    """Nodes semantically close to `query` beyond what substring matching
+    catches — e.g. a query for "database choice" finding a decision
+    labeled "Use PostgreSQL" that shares no words with it.
+
+    Purely additive: callers already have their substring matches as the
+    floor and pass only the nodes NOT already in that set here, so this
+    only ever adds recall, never removes or reorders anything. No-op
+    (empty list) when sentence-transformers isn't installed — the same
+    graceful-degradation contract semantic_cache already has, so why()/
+    impact() behave exactly as before on a host without it.
+    """
+    if not query.strip() or not candidates:
+        return []
+    from tokenmizer.semantic_cache.cache import EmbeddingEngine
+    engine = EmbeddingEngine.get()
+    if not engine.available:
+        return []
+
+    q_emb = engine.embed(query)
+    texts = [f"{n.label} {n.summary}".strip() for n in candidates]
+    c_embs = engine.embed_batch(texts)
+    if q_emb is None or c_embs is None:
+        return []
+
+    scored = sorted(
+        ((EmbeddingEngine.cosine(q_emb, c_embs[i]), n) for i, n in enumerate(candidates)),
+        key=lambda pair: pair[0], reverse=True,
+    )
+    return [n for score, n in scored if score >= _SEMANTIC_RECALL_THRESHOLD][:_SEMANTIC_RECALL_LIMIT]
+
+
 def why(graph: "GraphMemory", query: str) -> dict:
     """
     Trace the causal chain behind a decision.
 
     Matches decision nodes whose label contains `query` (case-insensitive),
+    widened with any decision that's semantically close to `query` even
+    without shared words (e.g. "database choice" finding "Use PostgreSQL"),
     then walks the transition graph in BOTH directions (what this decision
     replaced, and what replaced it) until the chain ends. The result reads
     as a story: earliest choice → ... → current active choice, each hop
@@ -82,6 +131,10 @@ def why(graph: "GraphMemory", query: str) -> dict:
 
     matched = [n for n in graph._nodes.values()
                if n.type == NodeType.DECISION and q in n.label.lower()]
+    matched_ids = {n.id for n in matched}
+    remaining = [n for n in graph._nodes.values()
+                 if n.type == NodeType.DECISION and n.id not in matched_ids]
+    matched += _semantic_matches(query, remaining)
 
     transitions = graph.get_transitions()
     # One decision can be superseded once, but a NEW decision may supersede
@@ -139,10 +192,17 @@ def impact(graph: "GraphMemory", query: str) -> dict:
     """
     Typed 1-hop neighborhood of every node matching `query` — which files,
     tasks, errors, dependencies are connected, and via which relation.
+    Widened with semantic matches the same way why() is — see
+    _semantic_matches.
     """
     q = (query or "").lower().strip()
     matched = [n for n in graph._nodes.values() if q and q in n.label.lower()]
     matched_ids = {n.id for n in matched}
+    if q:
+        remaining = [n for n in graph._nodes.values() if n.id not in matched_ids]
+        extra = _semantic_matches(query, remaining)
+        matched += extra
+        matched_ids |= {n.id for n in extra}
 
     connections = []
     for e in graph._edges:

@@ -68,6 +68,31 @@ def _openai_error_is_retryable(exc: Exception) -> bool:
     return bool(_RETRYABLE_TEXT.search(str(exc)))
 
 
+def _ollama_error_is_retryable(exc: Exception) -> bool:
+    """True if an Ollama request error is worth retrying.
+
+    Every OllamaProvider error used to be marked retryable=True
+    unconditionally — a malformed request or an unknown model name got
+    the same 1+2+4s of pointless retries as a genuinely transient
+    failure before the permanent error finally surfaced. Mirrors
+    _openai_error_is_retryable's shape: typed check first (an HTTP
+    status Ollama actually returned), then _RETRYABLE_TEXT as the text
+    fallback — but a bare connection failure or client-side timeout
+    reaching a LOCAL server is retried unconditionally, unlike the
+    remote-API providers: those most often mean the server is still
+    starting up, not that the request itself is bad.
+    """
+    try:
+        import httpx
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in (408, 429, 500, 502, 503, 504)
+        if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
+            return True
+    except Exception:
+        pass
+    return bool(_RETRYABLE_TEXT.search(str(exc)))
+
+
 # ── Response dataclass ────────────────────────────────────────────────────────
 
 @dataclass
@@ -446,17 +471,61 @@ class CohereProvider(BaseProvider):
                 provider="cohere",
             )
         except Exception as e:
-            raise ProviderError("cohere", "api_error", str(e), retryable="rate" in str(e).lower())
+            # Word-boundary matching, not a bare substring check: "rate" is
+            # inside "separate", "moderate", "generate" — the exact
+            # collision _RETRYABLE_TEXT's own docstring warns about for
+            # OpenAI, just never mirrored here. A malformed-request error
+            # mentioning any of those words was marked retryable (three
+            # pointless retries before the real error surfaced), and a
+            # genuine rate-limit phrased without the literal word "rate"
+            # ("too many requests") was marked NOT retryable when it should
+            # have been.
+            raise ProviderError("cohere", "api_error", str(e),
+                                retryable=bool(_RETRYABLE_TEXT.search(str(e))))
 
 
 # ── Gemini ───────────────────────────────────────────────────────────────────
 
+def _gemini_error_is_retryable(exc: Exception) -> bool:
+    """True if a google-genai API error is worth retrying.
+
+    Mirrors _openai_error_is_retryable's shape: the typed exception is
+    authoritative when available (APIError.code is the real HTTP status
+    the API returned), word-boundary text matching is the fallback.
+    "quota"/"429" are kept as an extra Gemini-specific signal even in
+    the fallback — some quota errors surface as a plain-text message
+    that doesn't set a matching HTTP status.
+    """
+    try:
+        from google.genai import errors
+        if isinstance(exc, errors.APIError):
+            return exc.code in (408, 429, 500, 502, 503, 504)
+    except Exception:
+        pass  # SDK missing or shaped differently — fall through to text
+    return ("quota" in str(exc).lower() or "429" in str(exc)
+            or bool(_RETRYABLE_TEXT.search(str(exc))))
+
+
 class GeminiProvider(BaseProvider):
     """
-    Fixed version:
+    Uses the google-genai SDK — the actively maintained, unified SDK.
+    google-generativeai (used until this migration) reached end of life
+    in January 2026 and prints a deprecation warning on import; nothing
+    about this adapter's SDK dependency was broken before the migration,
+    it was heading there.
+
+    Fixed version (carried over from the pre-migration adapter):
     - Full conversation history (not just last message)
-    - Native async via generate_content_async (not run_in_executor)
-    - asyncio.get_running_loop() instead of deprecated get_event_loop()
+    - Native async via the SDK's own .aio client (not run_in_executor)
+
+    Also strictly better than before on two counts the SDK swap enabled:
+    - The API key is passed per-Client (genai.Client(api_key=...)) rather
+      than through the old SDK's process-global genai.configure() — a
+      proxy that may hold different provider credentials per caller had
+      no business mutating global SDK state on every request.
+    - Retry classification now has a real typed exception with the
+      actual HTTP status code (see _gemini_error_is_retryable) instead
+      of guessing from message text alone.
     """
 
     def __init__(self, api_key: str, model: str = "gemini-1.5-pro"):
@@ -464,11 +533,12 @@ class GeminiProvider(BaseProvider):
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
-            import google.generativeai as genai
+            from google import genai
+            from google.genai import types
         except ImportError:
-            raise ImportError("pip install google-generativeai")
+            raise ImportError("pip install google-genai")
 
-        genai.configure(api_key=self.api_key)
+        client = genai.Client(api_key=self.api_key)
 
         # Extract system prompt
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
@@ -478,34 +548,34 @@ class GeminiProvider(BaseProvider):
 
         conversation = [m for m in messages if m.get("role") != "system"]
 
-        m_instance = genai.GenerativeModel(
-            model,
-            **({"system_instruction": system_instruction} if system_instruction else {}),
-        )
-
-        # Build full history (all turns except last)
+        # Build full history (all turns except last). Each part must be a
+        # dict/Part with a "text" key — unlike the old SDK, a bare string
+        # in `parts` is a validation error, not an implicit text part.
         history = []
         for msg in conversation[:-1]:
             role = "user" if msg["role"] == "user" else "model"
-            history.append({"role": role, "parts": [msg["content"]]})
+            history.append({"role": role, "parts": [{"text": msg["content"]}]})
 
         last_msg = conversation[-1]["content"] if conversation else ""
 
         try:
-            chat = m_instance.start_chat(history=history)
             s = _sampling(kwargs)
             gen_kw = {"max_output_tokens": max_tokens}
+            if system_instruction:
+                gen_kw["system_instruction"] = system_instruction
             if "temperature" in s:
                 gen_kw["temperature"] = s["temperature"]
             if "top_p" in s:
                 gen_kw["top_p"] = s["top_p"]
             if "stop" in s:
                 gen_kw["stop_sequences"] = _as_stop_list(s["stop"])
-            # Use native async — not run_in_executor
-            resp = await chat.send_message_async(
-                last_msg,
-                generation_config=genai.GenerationConfig(**gen_kw),
+
+            chat = client.aio.chats.create(
+                model=model, history=history,
+                config=types.GenerateContentConfig(**gen_kw),
             )
+            # Native async — not run_in_executor
+            resp = await chat.send_message(last_msg)
             text = resp.text or ""
             # Real API-reported usage when the SDK provides it.
             # prompt_token_count is the full effective prompt size
@@ -517,7 +587,7 @@ class GeminiProvider(BaseProvider):
             # to fall back to count_messages_tokens(conversation, model)
             # unconditionally, undercounting input_tokens on every call
             # that set a system prompt.
-            usage = getattr(resp, "usage_metadata", None)
+            usage = resp.usage_metadata
             if usage is not None and usage.prompt_token_count:
                 input_tokens = usage.prompt_token_count
                 output_tokens = usage.candidates_token_count
@@ -532,8 +602,8 @@ class GeminiProvider(BaseProvider):
                 provider="gemini",
             )
         except Exception as e:
-            retryable = "quota" in str(e).lower() or "429" in str(e)
-            raise ProviderError("gemini", "api_error", str(e), retryable=retryable)
+            raise ProviderError("gemini", "api_error", str(e),
+                                retryable=_gemini_error_is_retryable(e))
 
 
 # ── Ollama (local) ────────────────────────────────────────────────────────────
@@ -579,7 +649,8 @@ class OllamaProvider(BaseProvider):
                     provider="ollama",
                 )
             except Exception as e:
-                raise ProviderError("ollama", "api_error", str(e), retryable=True)
+                raise ProviderError("ollama", "api_error", str(e),
+                                    retryable=_ollama_error_is_retryable(e))
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -610,7 +681,8 @@ class OllamaProvider(BaseProvider):
         except ProviderError:
             raise
         except Exception as e:
-            raise ProviderError("ollama", "api_error", str(e), retryable=True)
+            raise ProviderError("ollama", "api_error", str(e),
+                                retryable=_ollama_error_is_retryable(e))
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
