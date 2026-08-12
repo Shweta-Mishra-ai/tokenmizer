@@ -1,8 +1,11 @@
 # Changelog
 
-## [0.5.3] — 2026-08-08 — registry MCP launch, token-count accuracy, and a redaction gap
+## [0.5.3] — 2026-08-12 — registry MCP launch, memory improvements, and a stored-XSS fix
 
-Four fixes from a codebase audit, each with a regression test.
+A codebase audit that grew from three fixes into ten, each with a
+regression test. Grouped by what actually changed:
+
+### Fixed
 
 **Registry-launched MCP server was unreachable.** `server.json` pins the
 pypi package `identifier` as `tokenmizer`, and the schema has no field
@@ -16,14 +19,16 @@ likely cause of prior MCP-directory build failures for this package.
 README's own `.mcp.json` setup (`python3 -m tokenmizer.mcp.server`) was
 never affected. Added a `tokenmizer mcp` subcommand and
 `packageArguments: ["mcp"]` in `server.json` so a convention-following
-launcher reaches it.
+launcher reaches it. Verified against a real fresh install from PyPI,
+not just the test suite.
 
-**Silent token-count undercounts in two providers.** `AnthropicProvider`'s
-buffered-streaming branch and `GeminiProvider` both computed
+**Silent token-count undercounts in three providers.** `AnthropicProvider`'s
+buffered-streaming branch, `GeminiProvider`, and (separately)
+`GeminiProvider` again after its SDK migration below all computed
 `input_tokens` from a local estimate that excluded the system prompt
 (each SDK takes system content as a separate param, outside the message
 list the estimate counted), instead of reading the real usage the SDK
-already reports. Both now use real API-reported usage — no more silent
+already reports. All now use real API-reported usage — no more silent
 undercounting of the token-savings/cost analytics this project exists to
 report accurately.
 
@@ -35,10 +40,81 @@ bare string. Redaction only handled the string shape, so a secret
 embedded in a tool_result's nested list content (an API key inside file
 contents a tool returned, for example) passed straight through to the
 graph, checkpoints, and the background extraction LLM — unredacted, with
-no error. Confirmed and fixed; redaction now recurses through both
-shapes.
+no error. Redaction now recurses through both shapes.
 
-610 tests, ruff clean.
+**Stored XSS in the shareable graph HTML export** (`GET
+/api/graph/{id}/html`). `session_id` (client-supplied) and conversation-
+derived node text were embedded across HTML and JS contexts using one
+unescaped substitution reused everywhere, plus an unguarded `</script>`
+breakout for the embedded graph JSON. The endpoint is auth-gated, but
+its own docstring says "share" — the intended use is downloading the
+file and handing it to someone else, so a payload here ran in whoever
+opened the shared file, not just the caller. Fixed with per-context
+escaping; zero tests existed for this module before this release.
+
+**A resolved error could never be marked resolved.** ERROR nodes share
+a status-upgrade-only rule with DECISION/TASK nodes that ranks `FAILED`
+above `COMPLETED` — correct for those types (a re-mention must never
+regress an already-advanced node), silently wrong for errors: a "this
+is fixed now" re-add could never overwrite an existing `FAILED` status,
+so the graph reported resolved bugs as open forever. Errors now take
+the latest mention in either direction; every other type's behavior is
+unchanged.
+
+**Decision-conflict detection missed paraphrases.** Two decisions about
+the same purpose with zero shared descriptive words (`"primary
+datastore"` vs `"main persistence layer"`) stayed `CONTESTED` forever
+instead of resolving. Widened with embedding similarity as a tie-
+breaker after lexical matching says no — additive only, and the
+original complementary-decisions regression (two genuinely different
+purposes sharing a topic) still passes under an explicit low similarity
+score, not just because no embedding model is installed.
+
+**ERROR nodes had no near-duplicate merge.** DECISION nodes already
+merged near-duplicate restatements; ERROR nodes didn't, so the same
+failure mentioned twice in different words became two nodes competing
+for the 3 slots `to_context_block()`'s "Open issues" section shows.
+Same lexical-then-semantic pattern as above, guarded against merging
+different named exception classes (`TypeError` vs `ValueError`) even at
+high text similarity.
+
+**Tool/function-calling request fields were silently dropped.**
+`ChatRequest` accepts unknown fields (`extra="allow"`) so a standard
+OpenAI client sending its full request shape never gets a 422 — but
+`tools`/`tool_choice` had no effect on any provider, with nothing
+indicating why. Now logs a warning per request; documented in README's
+"What is not implemented" table.
+
+**Provider retry-classification bugs in Cohere, Gemini, and Ollama.**
+Cohere used a bare `"rate" in str(e).lower()` substring match (false
+positive on "separate"/"moderate"/"generate", false negative on "too
+many requests"). Gemini only recognized "quota"/"429". Ollama marked
+every exception retryable unconditionally, including permanent errors
+like an unknown model name. All three now classify consistently with
+OpenAI's existing word-boundary-safe approach.
+
+### Changed
+
+**`why_decision`/`impact` recall widened with embedding similarity**
+(reusing the semantic cache's existing local embedding engine, no new
+dependency) on top of the existing substring match — a query like
+"database choice" now finds a decision labeled "Use PostgreSQL for
+storage" even with zero shared words. Additive only: never removes or
+reorders an existing lexical match, and degrades to exactly the prior
+behavior when no embedding model is installed.
+
+**`GeminiProvider` migrated from `google-generativeai` to `google-genai`**
+— the old SDK reached end of life in January 2026. The API key is now
+passed per-`Client` instead of mutating the old SDK's process-global
+config state, and retry classification reads a real typed HTTP status
+code instead of guessing from error text.
+
+**`hybrid_extractor.py` split** (1651 lines, the largest file in the
+codebase) into itself plus `patterns.py` (the regex vocabulary and pure
+helper functions). No behavior change — the extraction eval's F1
+numbers are identical to the digit before and after.
+
+647 tests, ruff clean.
 
 ## [0.5.2] — 2026-08-07 — a stale test count, and a guard for dead in-page anchors
 
