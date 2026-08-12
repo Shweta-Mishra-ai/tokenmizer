@@ -117,38 +117,52 @@ class _FakeGeminiResponse:
         self.usage_metadata = usage
 
 
-class _FakeChat:
-    def __init__(self, response: _FakeGeminiResponse):
+class _FakeGeminiChat:
+    def __init__(self, response, received_config: dict):
         self._response = response
+        self._received_config = received_config
 
-    async def send_message_async(self, *args, **kwargs):
+    async def send_message(self, *args, **kwargs):
+        if isinstance(self._response, Exception):
+            raise self._response
         return self._response
 
 
-class _FakeGenerativeModel:
-    def __init__(self, response: _FakeGeminiResponse, **kwargs):
-        self._response = response
-        # Constructor is called with system_instruction=... when a system
-        # prompt is present — the bug this test guards against is that
-        # system_instruction's tokens never made it into input_tokens.
-        self.received_kwargs = kwargs
+class _FakeGeminiChats:
+    """Fakes client.aio.chats — the google-genai (not google-generativeai)
+    entry point GeminiProvider._call uses since the SDK migration."""
 
-    def start_chat(self, history=None):
-        return _FakeChat(self._response)
+    def __init__(self, response, received_config: dict):
+        self._response = response
+        self._received_config = received_config
+
+    def create(self, *, model, history=None, config=None):
+        # Constructor is called with system_instruction set on `config`
+        # when a system prompt is present — the bug an earlier test
+        # guarded against is that system_instruction's tokens never made
+        # it into input_tokens.
+        self._received_config["config"] = config
+        return _FakeGeminiChat(self._response, self._received_config)
+
+
+class _FakeGeminiClient:
+    def __init__(self, response, received_config: dict, **kwargs):
+        class _Aio:
+            chats = _FakeGeminiChats(response, received_config)
+        self.aio = _Aio()
 
 
 @pytest.mark.asyncio
 async def test_gemini_uses_real_usage_metadata_for_input_tokens(monkeypatch):
-    genai = pytest.importorskip("google.generativeai")
+    genai = pytest.importorskip("google.genai")
 
     fake_response = _FakeGeminiResponse(
         text="hi there",
         usage=_FakeGeminiUsage(prompt_token_count=1234, candidates_token_count=7),
     )
-    fake_model = _FakeGenerativeModel(fake_response)
-
-    monkeypatch.setattr(genai, "configure", lambda **kw: None)
-    monkeypatch.setattr(genai, "GenerativeModel", lambda *a, **kw: fake_model)
+    received: dict = {}
+    monkeypatch.setattr(genai, "Client",
+                        lambda **kw: _FakeGeminiClient(fake_response, received))
 
     provider = GeminiProvider(api_key="test-key")
     resp = await provider._call(
@@ -165,6 +179,7 @@ async def test_gemini_uses_real_usage_metadata_for_input_tokens(monkeypatch):
     # this figure, proving the fallback local estimate wasn't used.
     assert resp.input_tokens == 1234
     assert resp.output_tokens == 7
+    assert received["config"].system_instruction is not None
 
 
 class TestRetryClassification:
@@ -197,18 +212,11 @@ class TestRetryClassification:
 
     @pytest.mark.asyncio
     async def test_gemini_retries_on_timeout_not_just_quota(self, monkeypatch):
-        genai = pytest.importorskip("google.generativeai")
+        genai = pytest.importorskip("google.genai")
 
-        class _FakeChat:
-            async def send_message_async(self, *a, **kw):
-                raise RuntimeError("upstream request timed out")
-
-        class _FakeModel:
-            def start_chat(self, history=None):
-                return _FakeChat()
-
-        monkeypatch.setattr(genai, "configure", lambda **kw: None)
-        monkeypatch.setattr(genai, "GenerativeModel", lambda *a, **kw: _FakeModel())
+        received: dict = {}
+        monkeypatch.setattr(genai, "Client", lambda **kw: _FakeGeminiClient(
+            RuntimeError("upstream request timed out"), received))
 
         provider = GeminiProvider(api_key="test-key")
         with pytest.raises(Exception) as exc_info:
@@ -219,6 +227,21 @@ class TestRetryClassification:
         assert exc_info.value.retryable is True, (
             "a timeout with no 'quota'/'429' in the message must still retry"
         )
+
+    def test_gemini_apierror_uses_the_real_status_code(self):
+        """The google-genai SDK exposes a typed APIError with the actual
+        HTTP status the API returned — authoritative, checked before the
+        text fallback. A 400 (bad request) must never retry even though
+        nothing in a typical message would trip the text fallback either
+        way; a 503 must, even with no 'quota'/'429' text at all."""
+        errors = pytest.importorskip("google.genai.errors")
+        from tokenmizer.providers.providers import _gemini_error_is_retryable
+
+        bad_request = errors.APIError(400, {"error": {"message": "invalid argument"}})
+        assert _gemini_error_is_retryable(bad_request) is False
+
+        overloaded = errors.APIError(503, {"error": {"message": "model overloaded"}})
+        assert _gemini_error_is_retryable(overloaded) is True
 
 
 class TestOllamaRetryClassification:
