@@ -6,12 +6,12 @@
     "url": "https://github.com/Shweta-Mishra-ai/tokenmizer",
     "source": "github"
   },
-  "version": "0.5.3",
+  "version": "0.5.4",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "tokenmizer",
-      "version": "0.5.3",
+      "version": "0.5.4",
       "transport": { "type": "stdio" },
       "packageArguments": [
         {

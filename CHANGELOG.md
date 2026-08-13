@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.5.4] — 2026-08-13 — decision and error extraction, targeted at an external benchmark
+
+An independent 100-session, 8-method benchmark
+(`Shweta-Mishra-ai/tokenmizer-research`) scored this extractor's two
+weakest categories — decisions (50% F1) and errors (36% F1) — well
+behind two comparison methods (65% and 66%). Every regex above still
+runs on this repo's own 14-session eval corpus (`python -m
+benchmarks.eval`), which stayed at 90%/95% decisions and 93%/96% errors
+through this change: that corpus does not contain the specific gaps
+found below, so it is a regression guard here, not the signal that
+found the problem.
+
+### Fixed — a question weighing options was recorded as a decision made
+"Should we go with Postgres on the approach, or is Redis better here?"
+matched Pass 1's "go with" and Pass 3's "Postgres"/"Redis" the same as a
+real decision — the negation guard only looks backward from a match for
+words like "not", and a question has none. Added `_is_question_context`,
+which looks forward to the end of the current clause: if it ends in `?`,
+the match is discarded. Wired into all four decision passes.
+
+### Added — trigger verbs and tech names the vocabulary was missing
+The benchmark's missed-items list named specific gaps, not a general
+recall problem: "leaning toward" and "recommend(ed/s)" as decision verbs;
+`sqlc`, `dbt`, `nats`, `pnpm`, `uv`, `ruff`, `kong`, `airflow` added to
+the closed tech-name whitelist that Pass 3 and `_tech_mention_is_a_decision`
+share. Each addition was checked against the eval corpus individually
+before being kept.
+
+### Rejected — a generic tech-shape fallback, and adding "vite"
+Two more general fixes were tried and measurably made things worse, so
+neither is in this release:
+* A whitelist-free fallback matching CamelCase/kebab-case/ALLCAPS-shaped
+  tokens as tech names, to close the whitelist gap structurally instead
+  of one name at a time. It raised decision recall but dropped precision
+  from 90% to 81% on the eval corpus — it matched too much that was
+  never a decision.
+* Adding "vite" to the whitelist on its own regressed precision to 88%:
+  "Completed: project scaffold with Vite" was extracted as a "Use Vite"
+  decision, because a completed-task sentence can contain a tech name
+  without it being chosen there.
+
+### Added — error symptom vocabulary
+`nil pointer dereference` (and the `null pointer exception/dereference`
+variants), `gc pressure`, `poison message`, `consumer lag`, `schema
+drift`, `partition skew`, `goroutine leak`, `connection churn`,
+`thundering herd`. The trailing-context capture after a symptom now also
+follows `between`/`during`/`under`/`while`/`across` and a gerund
+continuation (`halting`, `blocking`, `breaking`, `rejecting`,
+`overwhelming`, `causing`, `growing`, `putting`, `discarding`), so a
+symptom named mid-sentence ("a deadlock between the two mutexes...")
+keeps its qualifying clause instead of stopping at the first noun.
+
 ## [0.5.3] — 2026-08-12 — registry MCP launch, memory improvements, and a stored-XSS fix
 
 A codebase audit that grew from three fixes into ten, each with a

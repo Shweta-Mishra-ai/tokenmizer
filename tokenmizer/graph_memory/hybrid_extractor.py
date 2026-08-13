@@ -78,6 +78,7 @@ from tokenmizer.graph_memory.patterns import (
     _drop_leading_sentence,
     _is_negated_context,
     _is_only_paths,
+    _is_question_context,
     _sentence_index,
     _tech_mention_is_a_decision,
 )
@@ -291,7 +292,7 @@ class HybridExtractor:
 
         # Decision Pass 1: explicit verb
         for m in _DECISION.finditer(content):
-            if _is_negated_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
                 continue
             label = _clip(m.group(1))
             norm  = self._normalize(label)
@@ -301,7 +302,7 @@ class HybridExtractor:
 
         # Decision Pass 2: header format
         for m in _DECISION_HEADER.finditer(content):
-            if _is_negated_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
                 continue
             label = _clip(m.group(1))
             norm  = self._normalize(label)
@@ -311,7 +312,7 @@ class HybridExtractor:
 
         # Decision Pass 3: tech names
         for m in _DECISION_FOR.finditer(content):
-            if _is_negated_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
                 continue
             # A bare tech name is only a decision with choosing context —
             # see _tech_mention_is_a_decision.
@@ -325,7 +326,7 @@ class HybridExtractor:
 
         # Decision Pass 4: passive (bcrypt with cost factor 12)
         for m in _DECISION_PASSIVE.finditer(content):
-            if _is_negated_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
                 continue
             label = "Use " + m.group(1).strip()[:60]
             norm  = self._normalize(label)

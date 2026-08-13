@@ -111,7 +111,8 @@ _CLAUSE_SPAN = r'((?:(?![.!?](?=\s|$))[^\n]){5,80})'
 # Pass 1: explicit verb ("decided:", "going with", "will use")
 _DECISION = re.compile(
     r'(?:decided?|going with|will use|chose?|switching? to|opted for|settled on|'
-    r'picked|sticking with|selected?|using|went with|we.ll use|let.s use)'
+    r'picked|sticking with|selected?|using|went with|we.ll use|let.s use|'
+    r'leaning toward|recommends?|recommended)'
     r'[\s:\-]+' + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
@@ -137,7 +138,9 @@ _DECISION_FOR = re.compile(
     r'sqlalchemy|prisma|drizzle|typeorm|'
     r'pydantic|zod|yup|marshmallow|'
     r'slowapi|authlib|httpx|aiohttp|'
-    r'openai|anthropic|gemini|langchain|llamaindex'
+    r'openai|anthropic|gemini|langchain|llamaindex|'
+    r'sqlc|dbt|nats|'
+    r'pnpm|uv|ruff|kong|airflow'
     r')\b(?:(?!\s+(?:to|with|for)\s+\w)[^.!?\n,—\-]){0,40})',
     re.IGNORECASE,
 )
@@ -154,7 +157,8 @@ _DECISION_FOR = re.compile(
 _DECISION_CONTEXT_BEFORE = re.compile(
     r"(?:decided?|decision|going with|will use|we'?ll use|let'?s use|chose|"
     r"choosing|opted for|settled on|picked|sticking with|selected|switch(?:ing)? to|"
-    r"moved? to|migrat\w+ to|adopt(?:ed|ing)?|use|using|with)\s*[:\-]?\s*$",
+    r"moved? to|migrat\w+ to|adopt(?:ed|ing)?|use|using|with|"
+    r"leaning toward|recommends?|recommended)\s*[:\-]?\s*$",
     re.IGNORECASE,
 )
 _DECISION_PURPOSE_AFTER = re.compile(
@@ -223,6 +227,21 @@ def _is_negated_context(content: str, match_start: int) -> bool:
             clause_start = i + 1
             break
     return bool(_NEGATION_WORDS.search(content[clause_start:match_start]))
+
+
+# "Should we go with Postgres or Redis for this?" matches Pass 1's "go
+# with" and Pass 3's "Postgres"/"Redis" — a question weighing options,
+# not a decision made. Scoped forward to the end of the current clause:
+# the match sits mid-question, so the terminator that disambiguates it
+# is ahead, not behind.
+def _is_question_context(content: str, match_start: int) -> bool:
+    """True if the clause containing `match_start` ends in a question mark."""
+    clause_end = len(content)
+    for i in range(match_start, len(content)):
+        if content[i] in ".!?\n":
+            clause_end = i
+            break
+    return content[clause_end:clause_end + 1] == "?"
 
 
 # Pass 5: config decisions — "expires in 15 minutes", "cost factor 12"
@@ -735,9 +754,15 @@ _ERROR_SYMPTOM = re.compile(
     r'(?:out of memory|oom|segfaults?|segmentation fault|stack overflow|'
     r'deadlocks?|race condition|race|collisions?|memory leaks?|'
     r'timing out|timed out|times out|timeouts?|hangs?|hanging|flaky|'
-    r'panics?|crash(?:es|ed|ing)?|regressions?|null pointer|infinite loop|'
-    r'not triggering|borrow checker error|fails? intermittently)'
-    r'(?:\s+(?:in|on|from)\s+' + _object_run(30) + r')?)',
+    r'panics?|crash(?:es|ed|ing)?|regressions?|'
+    r'nil pointer(?:\s+dereference)?|null pointer(?:\s+(?:exception|dereference))?|'
+    r'infinite loop|not triggering|borrow checker error|fails? intermittently|'
+    r'gc pressure|garbage collection pressure|poison messages?|consumer lag|'
+    r'schema drift|partition skew|goroutine leaks?|connection churn|'
+    r'thundering herd)'
+    r'(?:\s+(?:in|on|from|between|during|under|while|across)\s+' + _object_run(30) +
+    r'|\s+(?:halting|blocking|breaking|rejecting|overwhelming|causing|growing|'
+    r'putting|discarding)' + _object_run(30) + r')?)',
     re.IGNORECASE,
 )
 
