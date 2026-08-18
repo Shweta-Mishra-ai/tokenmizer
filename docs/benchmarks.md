@@ -18,7 +18,7 @@ pytest tests/ -q                                     # 664 tests
 `python -m benchmarks.eval` scores extraction against a labelled corpus:
 **14 sessions, 144 turns, 172 labelled items, 14 domains** (Go, Rust,
 Python, TypeScript, React, SQL, CI, ML, plus six real audit sessions).
-Measured on v0.5.0:
+Measured on v0.5.4:
 
 | Category | Precision | Recall | F1 |
 |---|---|---|---|
@@ -26,8 +26,8 @@ Measured on v0.5.0:
 | Pending tasks | 100% | 90% | **95%** |
 | Decisions | 90% | 95% | **92%** |
 | Completed tasks | 92% | 90% | **91%** |
-| Errors | 93% | 96% | **94%** |
-| | | **macro F1** | **94%** |
+| Errors | 96% | 96% | **96%** |
+| | | **macro F1** | **95%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
 whole transcript as one node scores 100% recall; that is why recall-only
@@ -41,7 +41,7 @@ run rather than kept in a drawer:
 
 | Corpus origin | Sessions | Macro F1 |
 |---|---|---|
-| Synthetic (hand-written) | 8 | **95%** |
+| Synthetic (hand-written) | 8 | **96%** |
 | Real (captured transcripts) | 6 | **90%** |
 
 **Treat 90% as the number that describes real sessions.** The five-point
@@ -66,8 +66,8 @@ author. Label quality, scored separately because a correct-but-sprawling
 label still wastes resume budget: 15% truncated mid-word, 1% spanning more
 than one sentence, mean length 35 characters.
 
-Across 172 labelled items the extractor now misses four and invents
-three. The residue is where regexes genuinely stop: a defect stated as a
+Across 172 labelled items the extractor now misses eight and invents
+nine. The residue is where regexes genuinely stop: a defect stated as a
 measurement ("error recall is 8 percent"), and one failure named twice in
 words that share no tokens ("backfill is timing out" / "the backfill
 timeout"). That is what `use_llm_extraction` is for.
@@ -80,8 +80,8 @@ the format documented in `benchmarks/eval/corpus.py` and run
 
 `benchmarks/checkpoint_accuracy/runner_v2.py`, n=3 synthetic sessions:
 the graph preserves **89%** of labelled information against **79%** for a
-plain-summary baseline (Δ +10%), in an average resume block of **178
-tokens** (197 / 193 / 144 across the three sessions) versus ~1,500+
+plain-summary baseline (Δ +10%), in an average resume block of **161
+tokens** (180 / 168 / 136 across the three sessions) versus ~1,500+
 tokens of raw history. The advantage is concentrated in decision recall
 (92% vs a baseline that drops as low as 50%); on tasks it ties the
 baseline (76% both).

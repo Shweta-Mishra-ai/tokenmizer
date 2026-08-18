@@ -242,10 +242,10 @@ of 14 sessions, 6 of them real transcripts:
 |---|---|---|---|
 | Files | 98% | 100% | **99%** |
 | Pending tasks | 100% | 90% | **95%** |
-| Errors | 93% | 96% | **94%** |
+| Errors | 96% | 96% | **96%** |
 | Decisions | 90% | 95% | **92%** |
 | Completed tasks | 92% | 90% | **91%** |
-| | | **macro F1** | **94%** |
+| | | **macro F1** | **95%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
 whole transcript as one node scores 100% recall, which is why
@@ -253,7 +253,7 @@ recall-only extraction numbers should be distrusted — including our own
 earlier ones.
 
 Scored separately by origin, because hand-written fixtures are easier
-than real transcripts and a single headline hides that: **synthetic 95%,
+than real transcripts and a single headline hides that: **synthetic 96%,
 real 90%.** Treat 90% as the number that describes real sessions. n=14
 is a small sample and the same person wrote every label.
 
@@ -286,7 +286,7 @@ Summaries lose structure. You can't query "all superseded decisions" or "what tr
 Mem0 and Zep store *facts* ("user prefers Python"). TokenMizer stores *decisions with rationale* — the full causal chain: what was decided, what replaced it, why, what evidence triggered the change. If you need "remember my name across sessions," use Mem0. If you need "remember that we switched from PostgreSQL to SQLite because of cost, and here's the evidence," use TokenMizer.
 
 **Why not just a longer context window?**
-Longer context means higher cost, slower inference, and attention dilution on long histories. TokenMizer compresses a session into a resume block averaging **178 tokens** (measured, n=3 — see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md)) by extracting what actually matters, not by summarizing.
+Longer context means higher cost, slower inference, and attention dilution on long histories. TokenMizer compresses a session into a resume block averaging **161 tokens** (measured, n=3 — see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md)) by extracting what actually matters, not by summarizing.
 
 ## What is not implemented
 
