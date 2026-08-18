@@ -237,7 +237,7 @@ from tokenmizer.filters.file_intelligence import FileIntelligence
 fi = FileIntelligence()
 result = fi.process(open("sales.csv","rb").read(), "sales.csv",
                     token_budget=500, query="which regions underperforming")
-# 412,000 tokens → 447 tokens  (99.9% saved)
+# 400,000 tokens → 450 tokens  (99.9% saved)
 ```
 
 | File | Savings |

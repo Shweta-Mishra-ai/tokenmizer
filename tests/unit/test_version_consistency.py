@@ -259,9 +259,18 @@ def test_readme_test_count_matches_reality():
 
     text = (ROOT / "README.md").read_text(encoding="utf-8") + "\n".join(
         p.read_text(encoding="utf-8")
-        for p in sorted((ROOT / "docs").glob("*.md")) + [ROOT / "CONTRIBUTING.md"]
+        for p in sorted((ROOT / "docs").glob("*.md"))
+        + [ROOT / "CONTRIBUTING.md", ROOT / "TESTING.md"]
     )
-    quoted = [int(x) for x in re.findall(r'#\s*(\d+) tests', text)]
+    # Not anchored to "#" — CONTRIBUTING.md's tree comment
+    # ("# 48 files, 662 tests") has other words between the marker and
+    # the count, which `#\s*(\d+) tests` never matched, leaving that
+    # line's number free to drift with nothing to catch it. Filtered to
+    # >=100: README's demo transcript says "18 tests passing" about a
+    # fictional example session, not the suite — a real suite-size claim
+    # is always in the hundreds here, so this drops that false match
+    # without re-introducing the anchoring gap above.
+    quoted = [int(x) for x in re.findall(r'(\d+) tests\b', text) if int(x) >= 100]
     assert quoted, "no doc quotes a test count any more — drop this guard too"
 
     for n in quoted:
@@ -424,7 +433,10 @@ def test_internal_markdown_anchors_point_at_real_headings():
     section that was promised.
     """
     docs_dir = ROOT / "docs"
-    scanned = [ROOT / "README.md", *sorted(docs_dir.glob("*.md"))]
+    scanned = [
+        ROOT / "README.md", ROOT / "CONTRIBUTING.md", ROOT / "TESTING.md",
+        *sorted(docs_dir.glob("*.md")),
+    ]
 
     def headings_of(path: Path) -> set[str]:
         text = path.read_text(encoding="utf-8")

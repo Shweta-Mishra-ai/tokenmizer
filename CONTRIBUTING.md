@@ -133,7 +133,7 @@ tokenmizer/
 │   ├── graph_retrieval/          # category recall
 │   ├── persistence/              # write amplification + concurrency
 │   └── latency/                  # end-to-end proxy latency (needs a running server)
-└── tests/                        # 47 files, 639 tests — see TESTING.md for how to run them
+└── tests/                        # 49 files, 664 tests — see TESTING.md for how to run them
 ```
 
 ---
@@ -312,7 +312,7 @@ pytest tests/ -v                                # full suite
 pytest tests/unit/test_decision_tracker.py -v   # a single module
 pytest tests/memory_accuracy/ -v                # extraction-accuracy regression
 python scripts/mcp_e2e_check.py                 # MCP stdio transport, end to end
-pytest tests/ --cov=tokenmizer --cov-report=term-missing   # coverage report (no enforced floor)
+pytest tests/ --cov=tokenmizer --cov-report=term-missing   # coverage report (50% floor enforced, see pyproject.toml)
 
 ### Changing extraction
 

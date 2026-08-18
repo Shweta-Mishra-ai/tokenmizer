@@ -32,9 +32,9 @@ other two rather than competing with them.
 |---|---|
 | **v0.3** | SSE streaming passthrough (checkpoint on stream close) |
 | **v0.4** | Graph ontology · deterministic reasoning API (`why`, `impact`, consistency checks) |
-| **v0.5** | Per-row storage schema · cross-process write safety · session ownership · durability guarantees · measured extraction quality *(this release)* |
-| v0.6 | Cross-session memory · embedding-based edge linking · LLM-assisted extraction for the defects regexes cannot reach |
-| Research | Real-transcript benchmark suite → paper ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research)) |
+| **v0.5** | Per-row storage schema · cross-process write safety · session ownership · durability guarantees · embedding-based semantic recall and conflict/dedup matching · measured extraction quality *(this release)* |
+| v0.6 | Cross-session memory · LLM-assisted extraction for the defects regexes cannot reach |
+| Research | 100-session, 8-method benchmark → paper ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research)) — TokenMizer 0.5.4 ties for first at 60% macro F1, level with Mem0-style and Graphiti-style |
 
 Have a use case that doesn't fit? [Open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/new/choose) — extraction misses have their own issue template.
 
