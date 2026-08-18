@@ -7,7 +7,7 @@ An independent 100-session, 8-method benchmark
 weakest categories — decisions (50% F1) and errors (36% F1) — well
 behind two comparison methods (65% and 66%). Every regex above still
 runs on this repo's own 14-session eval corpus (`python -m
-benchmarks.eval`), which stayed at 90%/95% decisions and 93%/96% errors
+benchmarks.eval`), which stayed at 90%/95% decisions and 96%/96% errors
 through this change: that corpus does not contain the specific gaps
 found below, so it is a regression guard here, not the signal that
 found the problem.
@@ -64,6 +64,23 @@ Graphiti-style 59%, GraphRAG-style 44%, MemGPT-style 35%, naive
 baselines ≤20%). Decisions and errors remain the weakest categories
 relative to the two methods TokenMizer ties overall — real progress, not
 yet parity.
+
+### Fixed — the local eval and checkpoint-accuracy numbers were stale, not fabricated
+The intro line above ("93%/96% errors") and README/docs/benchmarks.md's
+extraction table were still quoting a `v0.5.0` run instead of the
+extractor 0.5.4 actually ships: a fresh `python -m benchmarks.eval` gives
+**errors 96%/96% (F1 96%)** and **macro F1 95%** (synthetic 96%, real
+90%), and `--errors` shows 8 misses / 9 spurious against the 172-item
+corpus, not the "four and three" the prose cited. Separately,
+`benchmarks/checkpoint_accuracy/runner_v2.py`'s resume-block average had
+drifted the same way it did once before (see 0.5.0's "249 → 178 tokens"
+entry below): still-quoted 178 tokens is now **161 tokens** (180 / 168 /
+136 across the three sessions). Both were re-measured directly against
+the `v0.5.4` tag, not just current `main`, confirming these numbers were
+already wrong at release rather than drifting afterward. No extraction
+logic changed — this is a docs-only fix. The underlying gap is the same
+one #54 closed for test coverage but not for numbers: nothing in CI ties
+a published figure to the runner that's supposed to produce it.
 
 ## [0.5.3] — 2026-08-12 — registry MCP launch, memory improvements, and a stored-XSS fix
 
