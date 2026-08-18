@@ -30,8 +30,16 @@ def check(name: str, cond: bool, detail: str = ""):
         FAILURES.append(name)
 
 
-def _start_proxy_in_thread(port: int) -> None:
-    """Run the real FastAPI app via uvicorn in a daemon thread."""
+def _start_proxy_in_thread(port: int):
+    """Run the real FastAPI app via uvicorn in a daemon thread.
+
+    Returns (server, thread) so the caller can shut the server down and
+    join the thread before the process exits. Left running, the daemon
+    thread still owns a live asyncio event loop (uvloop, under
+    uvicorn[standard] on Linux) when CPython starts finalizing modules —
+    a known source of segfaults during interpreter shutdown, since the
+    loop's C-level state can be torn down out from under it mid-iteration.
+    """
     import threading
     import time
 
@@ -45,9 +53,14 @@ def _start_proxy_in_thread(port: int) -> None:
     t.start()
     for _ in range(50):  # wait up to 5s for startup
         if server.started:
-            return
+            return server, t
         time.sleep(0.1)
     raise RuntimeError("proxy did not start within 5s")
+
+
+def _stop_proxy(server, thread) -> None:
+    server.should_exit = True
+    thread.join(timeout=5)
 
 
 def _seed_session_graph(session_id: str) -> None:
@@ -69,7 +82,7 @@ def _seed_session_graph(session_id: str) -> None:
 def main() -> int:
     port = 8765
     _seed_session_graph("mcp-e2e-test")
-    _start_proxy_in_thread(port)
+    server, server_thread = _start_proxy_in_thread(port)
     os.environ["TOKENMIZER_URL"] = f"http://127.0.0.1:{port}"
     print(f"proxy up on :{port}")
 
@@ -162,6 +175,13 @@ def main() -> int:
     finally:
         proc.stdin.close()
         proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+        _stop_proxy(server, server_thread)
 
     print()
     if FAILURES:
