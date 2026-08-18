@@ -257,6 +257,17 @@ than real transcripts and a single headline hides that: **synthetic 95%,
 real 90%.** Treat 90% as the number that describes real sessions. n=14
 is a small sample and the same person wrote every label.
 
+**Independently verified against 7 other methods.** A separate
+100-session benchmark ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research),
+a different corpus and scorer than the numbers above) ties TokenMizer
+0.5.4 for first place at **60% macro F1** — level with Mem0-style (60%)
+and Graphiti-style (59%), ahead of GraphRAG-style (44%), MemGPT-style
+(35%), and every naive baseline (≤20%). Decisions and errors are still
+its weakest categories relative to the two methods it ties overall —
+59%/44% F1 against 65%/66% for Graphiti/Mem0-style, up from 50%/36% in
+0.5.3 after a fix (see [CHANGELOG](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CHANGELOG.md))
+targeted at the specific gaps that benchmark found.
+
 → [**Benchmarks**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) — memory quality against a
 plain-summary baseline, storage, and how to score your own sessions.
 
@@ -308,7 +319,7 @@ here rather than left to be discovered:
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 639 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 664 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

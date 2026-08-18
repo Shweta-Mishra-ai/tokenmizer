@@ -200,6 +200,7 @@ def _get(path: str) -> dict:
     except ImportError:
         return {"error": "pip install httpx  — required for MCP server"}
     except Exception as e:
+        logger.warning(f"GET {path} against the proxy failed: {e}")
         return {"error": str(e)}
 
 
@@ -212,6 +213,7 @@ def _post(path: str, body: dict) -> dict:
     except ImportError:
         return {"error": "pip install httpx  — required for MCP server"}
     except Exception as e:
+        logger.warning(f"POST {path} against the proxy failed: {e}")
         return {"error": str(e)}
 
 

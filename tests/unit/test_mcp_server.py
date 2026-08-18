@@ -227,3 +227,41 @@ class TestSessionIdIsUrlEncoded:
         captured = self._capture_get_url(monkeypatch)
         mcp.handle_get_graph_stats({"session_id": "session#fragment"})
         assert "session#fragment" not in captured["path"]
+
+
+class TestProxyRequestFailuresAreLogged:
+    """_get/_post returned {"error": str(e)} to the caller on a failed
+    proxy request but never logged anything server-side — a flaky
+    TOKENMIZER_URL connection left zero trace for anyone debugging via
+    server logs, only visible in whatever the MCP client showed the
+    end user."""
+
+    def test_get_logs_a_warning_on_failure(self, monkeypatch, caplog):
+        import httpx as httpx_mod
+
+        def _raise_get(*a, **kw):
+            raise httpx_mod.ConnectError("connection refused")
+        monkeypatch.setattr(httpx_mod, "get", _raise_get)
+
+        with caplog.at_level("WARNING"):
+            result = mcp._get("/api/stats")
+
+        assert "error" in result
+        assert any("connection refused" in rec.message for rec in caplog.records), (
+            f"expected a warning log mentioning the failure, got: {[r.message for r in caplog.records]}"
+        )
+
+    def test_post_logs_a_warning_on_failure(self, monkeypatch, caplog):
+        import httpx as httpx_mod
+
+        def _raise_post(*a, **kw):
+            raise httpx_mod.ConnectError("connection refused")
+        monkeypatch.setattr(httpx_mod, "post", _raise_post)
+
+        with caplog.at_level("WARNING"):
+            result = mcp._post("/api/checkpoint", {})
+
+        assert "error" in result
+        assert any("connection refused" in rec.message for rec in caplog.records), (
+            f"expected a warning log mentioning the failure, got: {[r.message for r in caplog.records]}"
+        )

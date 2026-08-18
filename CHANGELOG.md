@@ -52,6 +52,19 @@ continuation (`halting`, `blocking`, `breaking`, `rejecting`,
 symptom named mid-sentence ("a deadlock between the two mutexes...")
 keeps its qualifying clause instead of stopping at the first noun.
 
+### Verified — the external benchmark re-scored 0.5.4 after this fix
+This entry originally shipped with no external confirmation that the
+fixes above actually helped — only that they didn't regress this repo's
+own eval corpus, which doesn't contain the gaps they targeted.
+`tokenmizer-research` has since re-run its 100-session benchmark against
+0.5.4: decisions went 50% → **59%** F1 and errors 36% → **44%** F1
+(comparison methods: 65% and 66%). Macro F1 across all categories is now
+**60%**, tying for first among all 8 methods scored (Mem0-style 60%,
+Graphiti-style 59%, GraphRAG-style 44%, MemGPT-style 35%, naive
+baselines ≤20%). Decisions and errors remain the weakest categories
+relative to the two methods TokenMizer ties overall — real progress, not
+yet parity.
+
 ## [0.5.3] — 2026-08-12 — registry MCP launch, memory improvements, and a stored-XSS fix
 
 A codebase audit that grew from three fixes into ten, each with a
