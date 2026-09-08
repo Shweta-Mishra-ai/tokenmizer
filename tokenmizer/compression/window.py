@@ -67,8 +67,31 @@ class SmartMessageWindow:
         if len(conv_msgs) <= self.protect_recent:
             return messages, 0  # not enough history to window
 
-        recent = conv_msgs[-self.protect_recent:]
-        old = conv_msgs[:-self.protect_recent]
+        split = len(conv_msgs) - self.protect_recent
+
+        # The window must open on a user turn. A chat request always ends on
+        # one, so an even protect_recent (the default is 10) lands the split
+        # on an assistant message — and Anthropic rejects an assistant-first
+        # conversation with 400 "first message must use the 'user' role"
+        # (Gemini likewise). Since windowing only engages once a session
+        # exceeds max_tokens_before_summary, and a session never drops back
+        # under it, that failed EVERY remaining turn of the session.
+        #
+        # Advance the split past any leading assistant turn instead of
+        # keeping it: that message is the answer to a question already being
+        # replaced by the graph context block below, so keeping it strands a
+        # reply with no question. Costs at most one turn of verbatim history.
+        while split < len(conv_msgs) and conv_msgs[split].get("role") != "user":
+            split += 1
+
+        recent = conv_msgs[split:]
+        old = conv_msgs[:split]
+
+        if not recent:
+            # No user turn in the protected tail at all — nothing safe to
+            # window down to. Send the conversation unchanged rather than an
+            # empty one; the provider guard would otherwise reject it.
+            return messages, 0
 
         # Build graph context to replace old turns
         graph_ctx = graph.to_context_block(token_budget=self.graph_context_budget)

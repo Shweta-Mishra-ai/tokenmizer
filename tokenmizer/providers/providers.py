@@ -32,6 +32,35 @@ def _sampling(kwargs: dict) -> dict:
     return {k: kwargs[k] for k in _SAMPLING_KEYS if kwargs.get(k) is not None}
 
 
+def conversation_messages(messages: list[dict]) -> list[dict]:
+    """Strip system messages and return a conversation a strict API accepts.
+
+    Anthropic and Gemini take the system prompt as a separate top-level
+    parameter, so the conversation handed to them is `messages` minus every
+    system entry. Both then require that conversation to BEGIN WITH A USER
+    TURN — Anthropic returns 400 "first message must use the 'user' role",
+    Gemini rejects a history whose first entry is a model turn.
+
+    Nothing upstream guaranteed that. SmartMessageWindow keeps the last N
+    conversation messages, and a chat request always ends on a user turn, so
+    an even N (the default is 10) always sliced from an assistant turn. The
+    result was a 400 on every turn of any session long enough to be windowed
+    — i.e. exactly the sessions TokenMizer exists to serve. Windowing was
+    fixed at its source, but the invariant belongs here too: this is the last
+    point before the wire and it is shared by all three call sites, so no
+    future layer can violate it silently.
+
+    A leading assistant turn is dropped rather than repaired: it is the
+    orphaned half of an exchange whose user turn was already windowed away,
+    and its content is in the graph context block that replaced it.
+    """
+    conv = [m for m in messages if m.get("role") != "system"]
+    first_user = next((i for i, m in enumerate(conv) if m.get("role") == "user"), None)
+    if first_user is None:
+        return []
+    return conv[first_user:]
+
+
 def _as_stop_list(stop) -> list[str]:
     return [stop] if isinstance(stop, str) else list(stop)
 
@@ -227,7 +256,7 @@ class AnthropicProvider(BaseProvider):
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
             sys_parts.insert(0, system)
-        conv = [m for m in messages if m.get("role") != "system"]
+        conv = conversation_messages(messages)
         system_text = "\n\n".join(sys_parts) if sys_parts else None
 
         try:
@@ -291,7 +320,7 @@ class AnthropicProvider(BaseProvider):
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
             sys_parts.insert(0, system)
-        conv = [m for m in messages if m.get("role") != "system"]
+        conv = conversation_messages(messages)
         kwargs_clean = _sampling(kwargs)
         if "stop" in kwargs_clean:
             kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
@@ -546,7 +575,7 @@ class GeminiProvider(BaseProvider):
             sys_parts.insert(0, system)
         system_instruction = "\n\n".join(sys_parts) if sys_parts else None
 
-        conversation = [m for m in messages if m.get("role") != "system"]
+        conversation = conversation_messages(messages)
 
         # Build full history (all turns except last). Each part must be a
         # dict/Part with a "text" key — unlike the old SDK, a bare string
