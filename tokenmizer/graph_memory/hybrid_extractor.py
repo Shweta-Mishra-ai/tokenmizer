@@ -42,11 +42,14 @@ from tokenmizer.graph_memory.patterns import (
     _ERROR_ABSENCE,
     _ERROR_DAMAGE,
     _ERROR_DETERMINER,
+    _ERROR_FAILING,
     _ERROR_FALSE_HEALTH,
     _ERROR_HANDLED,
     _ERROR_INERT,
     _ERROR_INTEGRITY,
     _ERROR_MISCLASSIFIED,
+    _ERROR_STATUS,
+    _ERROR_STATUS_NAMED,
     _ERROR_STOPWORDS,
     _ERROR_SYMPTOM,
     _ERROR_TYPED,
@@ -325,8 +328,17 @@ class HybridExtractor:
                 seen_decisions.add(norm)
 
         # Decision Pass 4: passive (bcrypt with cost factor 12)
+        #
+        # Gated by _tech_mention_is_a_decision for the same reason Pass 3 is:
+        # this pass also infers a decision from a bare technology name, and a
+        # name being mentioned is not a name being chosen. It was the only
+        # bare-tech pass without the gate, and its `with` branch turned
+        # "migrate 40M rows from MySQL to Postgres with no downtime" — a
+        # statement of the problem — into the decision "Use Postgres".
         for m in _DECISION_PASSIVE.finditer(content):
             if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+                continue
+            if not _tech_mention_is_a_decision(content, m.start(1), m.end(1)):
                 continue
             label = "Use " + m.group(1).strip()[:60]
             norm  = self._normalize(label)
@@ -410,10 +422,16 @@ class HybridExtractor:
         # a session that diagnosed three failures early and spent the rest
         # of its turns fixing them carried none of them forward.
         sentence_claims: dict[tuple[int, int], tuple[str, int]] = {}
-        for pattern in (_ERROR_TYPED, _ERROR_VULN, _ERROR_INTEGRITY,
+        # Order is precedence: the first pattern to claim a span keeps it.
+        # _ERROR_STATUS / _ERROR_STATUS_NAMED sit directly after _ERROR_TYPED
+        # because they were split out of it — moving them to the end of the
+        # tuple let _ERROR_SYMPTOM claim status-code spans first and cost 7
+        # points of error F1 on the corpus.
+        for pattern in (_ERROR_TYPED, _ERROR_STATUS, _ERROR_STATUS_NAMED,
+                        _ERROR_VULN, _ERROR_INTEGRITY,
                         _ERROR_DAMAGE, _ERROR_ABSENCE, _ERROR_INERT,
                         _ERROR_FALSE_HEALTH, _ERROR_MISCLASSIFIED,
-                        _ERROR_SYMPTOM):
+                        _ERROR_SYMPTOM, _ERROR_FAILING):
             for m in pattern.finditer(content):
                 before = content[max(0, m.start(1) - 60):m.start(1)]
                 if _SOLUTION_VERB.search(before):

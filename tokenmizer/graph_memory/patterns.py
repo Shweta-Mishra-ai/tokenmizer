@@ -158,7 +158,12 @@ _DECISION_CONTEXT_BEFORE = re.compile(
     r"(?:decided?|decision|going with|will use|we'?ll use|let'?s use|chose|"
     r"choosing|opted for|settled on|picked|sticking with|selected|switch(?:ing)? to|"
     r"moved? to|migrat\w+ to|adopt(?:ed|ing)?|use|using|with|"
-    r"leaning toward|recommends?|recommended)\s*[:\-]?\s*$",
+    r"leaning toward|recommends?|recommended|"
+    # "Should talk gRPC to the inventory service" states a choice without a
+    # choosing verb. Restricted to verbs of adoption: a bare "should" also
+    # heads work items ("should fix the Redis timeout"), which are tasks,
+    # not decisions. Questions are excluded upstream by _is_question_context.
+    r"should (?:talk|speak|use|run on|target|go with|adopt|be on))\s*[:\-]?\s*$",
     re.IGNORECASE,
 )
 _DECISION_PURPOSE_AFTER = re.compile(
@@ -264,7 +269,12 @@ _SUPERSEDED = re.compile(
     r'replaced?\s+\w+\s+with|'
     r'moving\s+(?:away\s+from|from)'
     r')'
-    r'\s+(\w[\w\s\.\-]{2,30}?)\s+(?:to|with|for)\s+(\w[\w\s\.\-]{2,30})',
+    # `/` and `@` belong in both sides: real dependency names carry them
+    # (`cenkalti/backoff`, `@scope/pkg`, `psf/black`). Without `/`, the old
+    # side could only match up to the slash and the whole supersession
+    # failed to parse — "Switching from cenkalti/backoff to a hand-rolled
+    # retry loop" recorded no transition and lost the new decision with it.
+    r'\s+(\w[\w\s\./@\-]{2,30}?)\s+(?:to|with|for)\s+(\w[\w\s\./@\-]{2,30})',
     re.IGNORECASE,
 )
 
@@ -615,13 +625,53 @@ def _object_run(max_chars: int) -> str:
 # error/response/status. Named exceptions need neither: the class name is
 # already the failure.
 _ERROR_TYPED = re.compile(
-    r'\b((?:[A-Z]\w*(?:Error|Exception)\b|Traceback|'
-    + _subject_window(30) +
+    # A qualified exception path is the normal way libraries name their
+    # exceptions in a traceback — `psycopg2.errors.UniqueViolation`,
+    # `sqlalchemy.exc.IntegrityError`, `requests.exceptions.ConnectionError`.
+    # The bare-class branch below could not reach any of them: the class is
+    # preceded by a dotted module path, and UniqueViolation does not end in
+    # Error or Exception at all. Anchored on an `errors`/`exceptions`/`exc`
+    # module segment so an ordinary dotted attribute (`config.Settings`) is
+    # not mistaken for a failure. Flat run, no nested quantifier — see _TOKEN.
+    r'\b((?:[\w.]{0,40}\.(?:errors?|exceptions?|exc)\.[A-Z]\w+\b|'
+    r'[A-Z]\w*(?:Error|Exception)\b|Traceback)'
+    r'(?:[\s:-]+[^.!?,;\n]{0,60})?)',
+)
+
+# HTTP status failures, split out of _ERROR_TYPED so this half can be
+# case-insensitive.
+#
+# _ERROR_TYPED must stay case-SENSITIVE: its `[A-Z]\w*(?:Error|Exception)`
+# branch is what distinguishes the class `TimeoutError` from the English word
+# "error", and IGNORECASE there would match "an error occurred" as an
+# exception class. But that sensitivity also applied to the production verbs,
+# so a status report that OPENED a sentence — "Getting a 500 from
+# /api/orders", "Returns 502 under load" — never matched, because the verb
+# was capitalised. Mid-sentence reports matched and sentence-initial ones did
+# not, which is not a distinction anyone intends.
+#
+# Scoped inline flags — `(?i:...)` — would express this in one pattern, but
+# they need Python 3.11 and this package supports 3.10.
+#
+# The guard the original carried is preserved: a bare code is not a failure.
+# "Decided: 404 rather than 403" is a design choice, so the code must either
+# follow a production verb or be followed by error/response/status.
+_ERROR_STATUS = re.compile(
+    r'\b(' + _subject_window(30) +
     r'(?:returns?|returning|returned|throws?|throwing|threw|gives?|got|getting|'
     r'receives?|received|responds? with|responded with|fails? with|'
-    r'failing with)\s+(?:HTTP\s*)?[45]\d{2}\b|'
-    r'(?:HTTP\s*)?[45]\d{2}\s+(?:error|errors|response|status)\b)'
+    # A determiner between the verb and the code is the ordinary way this is
+    # written ("getting a 500", "got an HTTP 502"); requiring \s+ straight
+    # onto the digits missed every one of them.
+    r'failing with)\s+(?:an?\s+|the\s+)?(?:HTTP\s*)?[45]\d{2}\b'
     r'(?:[\s:-]+[^.!?,;\n]{0,60})?)',
+    re.IGNORECASE,
+)
+
+_ERROR_STATUS_NAMED = re.compile(
+    r'\b((?:HTTP\s*)?[45]\d{2}\s+(?:error|errors|response|status)\b'
+    r'(?:[\s:-]+[^.!?,;\n]{0,60})?)',
+    re.IGNORECASE,
 )
 
 # Data-integrity failures are stated as an adjective in front of the thing that
@@ -749,6 +799,37 @@ _ERROR_INERT = re.compile(
 
 # Symptom vocabulary, with the noun phrase that precedes it — the subject
 # is what identifies the failure ("teardown race", not "race").
+# The plainest way anybody reports a defect — "the build fails", "CI is
+# failing on the Windows runner", "Docker build broke after the base image
+# bump" — had no pattern at all. _ERROR_SYMPTOM keys on a vocabulary of
+# named symptoms (deadlock, segfault, timeout) and _ERROR_TYPED needs an
+# exception class or a status code, so a bare failure verb was invisible.
+# Probed against ordinary phrasings rather than the corpus, this was the
+# single largest source of missed errors.
+#
+# Same flat-run construction as the patterns above, for the same
+# backtracking reason — no nested quantifiers.
+#
+# `fixed`/`resolved` are deliberately absent: those are repair verbs,
+# handled separately. The past participle "broken" is included but
+# "breaking" is not — "breaking change" is a description of an intended
+# change, not a failure.
+_ERROR_FAILING = re.compile(
+    r'\b(' + _subject_window(40) +
+    r'(?:fails?|failed|failing|broke|broken|errored|erroring|'
+    r'blew up|fell over|went red)'
+    # The object clause is REQUIRED, not optional. Without it the pattern
+    # matched a bare noun ("cache the fail") and every fragmentary restatement
+    # of a failure already captured elsewhere ("Three fail", "21 percent of
+    # the test suite fails") — measured on the corpus, that cost 13 points of
+    # error precision for no recall. A failure worth carrying into a resume
+    # says what it happened to: "fails with exit code 1", "failing on the
+    # Windows runner", "broke after the base image bump".
+    r'\s+(?:with|on|in|at|during|after|because of|halfway)\s+'
+    + _object_run(40) + r')',
+    re.IGNORECASE,
+)
+
 _ERROR_SYMPTOM = re.compile(
     r'\b(' + _subject_window(40) +
     r'(?:out of memory|oom|segfaults?|segmentation fault|stack overflow|'

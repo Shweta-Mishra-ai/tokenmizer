@@ -243,9 +243,9 @@ of 14 sessions, 6 of them real transcripts:
 | Files | 98% | 100% | **99%** |
 | Pending tasks | 100% | 90% | **95%** |
 | Errors | 96% | 96% | **96%** |
-| Decisions | 90% | 95% | **92%** |
+| Decisions | 93% | 100% | **96%** |
 | Completed tasks | 92% | 90% | **91%** |
-| | | **macro F1** | **95%** |
+| | | **macro F1** | **96%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
 whole transcript as one node scores 100% recall, which is why
@@ -253,7 +253,7 @@ recall-only extraction numbers should be distrusted — including our own
 earlier ones.
 
 Scored separately by origin, because hand-written fixtures are easier
-than real transcripts and a single headline hides that: **synthetic 96%,
+than real transcripts and a single headline hides that: **synthetic 97%,
 real 90%.** Treat 90% as the number that describes real sessions. n=14
 is a small sample and the same person wrote every label.
 
@@ -319,7 +319,7 @@ here rather than left to be discovered:
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 664 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 701 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it
