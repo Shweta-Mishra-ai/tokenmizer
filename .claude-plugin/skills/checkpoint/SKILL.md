@@ -5,52 +5,47 @@ description: Save the current session to TokenMizer graph memory. Creates a pers
 
 Save the current session to TokenMizer graph memory.
 
+## Session ID
+
+Do not ask for one. `$ARGUMENTS`, if given, is the session ID. If it is empty,
+TokenMizer derives the ID from the working directory name — stable across
+sessions on the same project, and the convention the docs already recommend
+(`~/projects/auth-service` → `auth-service`). The command prints the ID it
+chose.
+
+Ask only if the command exits 2, which means the directory has no usable name
+to derive from (a filesystem root, or a generic folder such as `tmp`). Then
+ask exactly: `Which session ID should this be saved under?`
+
 ## What to do
 
-1. Ask the user for a session ID if not provided (suggest a slug based on what you're working on, e.g. "auth-service", "data-pipeline", "my-project")
-2. Call the TokenMizer checkpoint API:
-
 ```bash
-curl -s -X POST "http://localhost:8000/api/checkpoint?session_id=$ARGUMENTS" \
-  -H "Content-Type: application/json"
+tokenmizer checkpoint $ARGUMENTS
 ```
 
-3. Show the user what was saved:
-   - Checkpoint ID
-   - Number of nodes in graph
-   - Resume token count
-   - The resume context block
+Relay the command's output. Do not restate it in your own words, do not add
+commentary or congratulation, and do not address the operator by name.
 
-## If TokenMizer is not running
+## Output
 
-Tell the user to start it first:
-```bash
-tokenmizer serve
-# or
-python3 -m tokenmizer.api.app
-```
-
-## Session ID rules
-- Use lowercase slugs: `auth-service` not `Auth Service`
-- Keep it short and meaningful
-- Same ID across sessions for the same project
-
-## Example output to show user
+Report the result in exactly this shape, filled from the command's output:
 
 ```
-✅ Session 'auth-service' saved
+Checkpoint saved — auth-service
+  checkpoint     ckpt_a3f9b2
+  nodes          14 (6 tasks, 4 decisions, 3 files, 1 error)
+  resume cost    247 tokens
 
-Checkpoint: ckpt_a3f9b2
-Nodes: 14 (6 tasks, 4 decisions, 3 files, 1 error)
-Resume size: 247 tokens
-
-Resume context:
-Goal: Build FastAPI auth service with JWT
-Done: Project setup | User model | Login endpoint | Fix 422
-In progress: Refresh token rotation
-Decided: PostgreSQL | bcrypt | Redis for tokens
-Files: api/auth.py, api/models.py, config.py
-Continue: Implement token refresh endpoint
+Resume with: tokenmizer resume auth-service
 ```
 
-If $ARGUMENTS is empty, ask: "What should I call this session? (e.g. my-project)"
+If the command exits non-zero, show its error text unchanged. It already says
+what to do — an unreachable server prints the `tokenmizer serve` instruction
+itself.
+
+## Notes
+
+- Session IDs are lowercase slugs: `auth-service`, not `Auth Service`.
+- Use the same ID across sessions for the same project. That is what makes a
+  later resume find anything.
+- The server must be running for this command; `tokenmizer serve` starts it.

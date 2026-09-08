@@ -20,7 +20,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 app = typer.Typer(
     name="tokenmizer",
-    help="🧠 TokenMizer — Never lose your AI context again.",
+    help="TokenMizer — Never lose your AI context again.",
     add_completion=False,
 )
 console = Console()
@@ -77,6 +77,32 @@ def _cli_post(url: str, headers: dict, timeout: float):
     except httpx.HTTPError as e:
         _report_unreachable(e)
         raise typer.Exit(1)
+
+
+def _resolve_session_id(session_id: Optional[str]) -> str:
+    """Use the id given, else derive one from the working directory.
+
+    Nothing had a default, so the plugin skills instructed the assistant to
+    ask for one in prose — which is why the same command greeted different
+    people differently. The derived id is announced rather than applied
+    silently: a default the reader cannot see is worse than a prompt.
+    """
+    if session_id:
+        return session_id
+
+    from tokenmizer.core.session import default_session_id
+
+    derived = default_session_id()
+    if derived is None:
+        console.print(
+            "[red]No session ID given, and this directory has no usable "
+            "name to derive one from.[/red]\n"
+            "[dim]Pass one explicitly, e.g. tokenmizer checkpoint my-project[/dim]"
+        )
+        raise typer.Exit(2)
+
+    console.print(f"[dim]Session: {derived} (from the current directory)[/dim]")
+    return derived
 
 
 def _require_fields(data: dict, *fields: str) -> bool:
@@ -214,7 +240,7 @@ def serve(
         )
 
     console.print(Panel.fit(
-        "[bold green]🧠 TokenMizer[/bold green]\n"
+        "[bold green]TokenMizer[/bold green]\n"
         f"[dim]Proxy:     http://{actual_host}:{actual_port}/v1/chat/completions[/dim]\n"
         f"[dim]Dashboard: http://{actual_host}:{actual_port}[/dim]\n"
         f"[dim]API Docs:  http://{actual_host}:{actual_port}/docs[/dim]\n"
@@ -277,13 +303,16 @@ def stats(
 
 @app.command()
 def checkpoint(
-    session_id: str = typer.Argument(..., help="Session ID to checkpoint"),
+    session_id: Optional[str] = typer.Argument(
+        None, help="Session ID (default: the current directory name)"),
     server: str = typer.Option("http://localhost:8000"),
     api_key: Optional[str] = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
     level: str = typer.Option("standard", help="Resume level: critical | standard | full"),
 ):
     """Create a manual checkpoint and show resume context."""
     from urllib.parse import quote
+
+    session_id = _resolve_session_id(session_id)
 
     headers = {}
     if api_key:
@@ -302,7 +331,7 @@ def checkpoint(
         raise typer.Exit(1)
 
     console.print(Panel.fit(
-        f"[green]✅ Checkpoint created[/green]\n"
+        f"[green]Checkpoint created[/green]\n"
         f"[dim]ID:            {data['checkpoint_id']}[/dim]\n"
         f"[dim]Nodes:         {data.get('node_count', 0)}[/dim]\n"
         f"[dim]Resume tokens: {data['resume_tokens']}[/dim]\n\n"
@@ -314,13 +343,16 @@ def checkpoint(
 
 @app.command()
 def resume(
-    session_id: str = typer.Argument(..., help="Session ID to resume"),
+    session_id: Optional[str] = typer.Argument(
+        None, help="Session ID (default: the current directory name)"),
     server: str = typer.Option("http://localhost:8000"),
     level: str = typer.Option("standard", help="critical | standard | full"),
     api_key: Optional[str] = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
 ):
     """Get the resume context for a session checkpoint."""
     from urllib.parse import quote
+
+    session_id = _resolve_session_id(session_id)
 
     headers = {}
     if api_key:

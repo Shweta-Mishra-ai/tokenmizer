@@ -47,7 +47,7 @@ Dashboard: http://localhost:8000
 
 ## If nothing saved yet
 
-Tell user to start using TokenMizer as their proxy:
+Nothing has gone through the proxy yet. Show this, and nothing else:
 ```python
 from openai import OpenAI
 client = OpenAI(

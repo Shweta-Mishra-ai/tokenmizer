@@ -5,29 +5,33 @@ description: Load a previous session from TokenMizer graph memory. Returns a com
 
 Load a previous session from TokenMizer graph memory.
 
+## Session ID
+
+Do not ask for one. The first word of `$ARGUMENTS` is the session ID. If
+`$ARGUMENTS` is empty, TokenMizer derives the ID from the working directory
+name, the same way `checkpoint` does, and prints the ID it chose.
+
+Ask only if the command exits 2, which means the directory has no usable name
+to derive from. Then ask exactly: `Which session ID should I resume?`
+
+## Level
+
+The second word of `$ARGUMENTS`, if present:
+
+| Level | Size | Contents |
+|---|---|---|
+| `critical` | ~100 tokens | open blockers and key decisions only |
+| `standard` | ~300 tokens | the default |
+| `full` | ~600 tokens | adds environment, schemas, endpoints |
+
 ## What to do
 
-1. Get the session ID from $ARGUMENTS (or ask the user if not provided)
-2. Determine the level from $ARGUMENTS:
-   - `critical` = ~100 tokens, only open blockers + key decisions
-   - `standard` = ~300 tokens, normal resume (default)
-   - `full` = ~600 tokens, everything including env, schemas, endpoints
-
-3. Call the TokenMizer resume API:
-
 ```bash
-SESSION_ID=$(echo "$ARGUMENTS" | awk '{print $1}')
-LEVEL=$(echo "$ARGUMENTS" | awk '{print $2}')
-LEVEL=${LEVEL:-standard}
-
-curl -s "http://localhost:8000/api/resume/${SESSION_ID}?level=${LEVEL}"
+tokenmizer resume $ARGUMENTS
 ```
 
-4. Inject the returned `resume_context` as a system message at the top of the conversation — NOT as a user message.
-
-5. Tell the user: "Loaded [X] tokens of context for '[session-id]'. Continuing from: [next_action]"
-
-## Format for system injection
+Then inject the returned resume context as a **system** message at the top of
+the conversation, never as a user message, in this wrapper:
 
 ```
 [TokenMizer — session: {session_id}]
@@ -35,15 +39,24 @@ curl -s "http://localhost:8000/api/resume/${SESSION_ID}?level=${LEVEL}"
 [End of session context — continue from here]
 ```
 
-## If no checkpoint found
+## Output
 
-Tell the user: "No checkpoint found for '[session-id]'. Either the session hasn't been checkpointed yet, or TokenMizer isn't running."
+Report in exactly this shape:
 
-Suggest: `tokenmizer checkpoint {session-id}` to save the current session first.
+```
+Resumed auth-service — 247 tokens, standard
+Next: implement the token refresh endpoint
+```
 
-## Examples of $ARGUMENTS
+Take `Next` from the resume context's continue line. If it has none, omit the
+line rather than inventing one. Add no commentary, and do not address the
+operator by name.
 
-- `auth-service` → load standard resume for auth-service
-- `auth-service full` → load full 600-token resume
-- `auth-service critical` → load critical 100-token resume
-- (empty) → ask user which project to resume
+## If no checkpoint is found
+
+The command exits 1 and prints what happened. Relay that, then:
+
+```
+Nothing saved for auth-service yet. Save the current session first:
+  tokenmizer checkpoint auth-service
+```
