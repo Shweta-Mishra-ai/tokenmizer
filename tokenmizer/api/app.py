@@ -1088,7 +1088,16 @@ async def chat_completions(req: ChatRequest, request: Request):
     # instead of relying on each call site to remember to redact.
     raw_messages = [{"role": m.role, "content": m.text()} for m in req.messages]
     raw_messages = redact_messages(raw_messages)
-    messages     = raw_messages[:]
+    # Per-dict copy, not raw_messages[:]. A shallow list copy shares every
+    # dict, so Layer 2's terse-prompt injection — which prepends onto the
+    # system message in place — rewrote raw_messages too. raw_messages is
+    # the baseline: it feeds orig_input_tokens (the denominator of
+    # tokens_saved and of every savings percentage reported to the client,
+    # /api/stats and the dashboard), graph extraction, and checkpoint
+    # storage. TokenMizer was counting its own injected prompt as part of
+    # the request the user sent — overstating savings on every call, and
+    # handing its own instructions to the extractor as session content.
+    messages     = [dict(m) for m in raw_messages]
     user_query   = next(
         (m["content"] for m in reversed(raw_messages) if m.get("role") == "user"), ""
     )
