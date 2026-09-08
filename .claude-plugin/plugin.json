@@ -26,11 +26,7 @@
   ],
   "mcpServers": {
     "tokenmizer": {
-      "command": "python3",
-      "args": [
-        "-m",
-        "tokenmizer.mcp.server"
-      ],
+      "command": "tokenmizer-mcp",
       "env": {
         "TOKENMIZER_URL": "http://localhost:8000"
       }
