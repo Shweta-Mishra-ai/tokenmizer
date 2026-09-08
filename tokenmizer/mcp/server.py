@@ -247,9 +247,9 @@ def handle_checkpoint_session(args: dict) -> tuple[str, bool]:
     # matching the one handler (why_decision) that already did this.
     result = _post(f"/api/checkpoint?session_id={quote(session_id, safe='')}", {})
     if "error" in result:
-        return f"❌ Checkpoint failed: {result['error']}", True
+        return f"Checkpoint failed: {result['error']}", True
     return (
-        f"✅ Session '{session_id}' checkpointed\n"
+        f"Session '{session_id}' checkpointed\n"
         f"Checkpoint ID: {result.get('checkpoint_id', 'unknown')}\n"
         f"Nodes in graph: {result.get('node_count', 0)}\n"
         f"Resume size: {result.get('resume_tokens', 0)} tokens\n\n"
@@ -266,7 +266,7 @@ def handle_resume_session(args: dict) -> tuple[str, bool]:
         )
     result = _get(f"/api/resume/{quote(session_id, safe='')}?level={level}")
     if "error" in result:
-        return f"❌ Resume failed: {result['error']}", True
+        return f"Resume failed: {result['error']}", True
     ctx = result.get("resume_context", "")
     tokens = result.get("token_count", 0)
     if not ctx:
@@ -291,7 +291,7 @@ def handle_get_graph_stats(args: dict) -> tuple[str, bool]:
     session_id = _require_str(args, "session_id")
     result = _get(f"/api/graph/{quote(session_id, safe='')}")
     if "error" in result:
-        return f"❌ Graph stats failed: {result['error']}", True
+        return f"Graph stats failed: {result['error']}", True
     by_type = result.get("by_type", {})
     by_status = result.get("by_status", {})
     lines = [
@@ -326,7 +326,7 @@ def handle_analyze_file(args: dict) -> tuple[str, bool]:
         from pathlib import Path
         path = Path(file_path)
         if not path.exists():
-            return f"❌ File not found: {file_path}", True
+            return f"File not found: {file_path}", True
 
         content = path.read_bytes()
         from tokenmizer.filters.file_intelligence import FileIntelligence
@@ -342,7 +342,7 @@ def handle_analyze_file(args: dict) -> tuple[str, bool]:
         ), False
     except Exception as e:
         logger.warning(f"analyze_file failed for {file_path}: {type(e).__name__}: {e}")
-        return f"❌ File analysis error: {type(e).__name__}: {e}", True
+        return f"File analysis error: {type(e).__name__}: {e}", True
 
 
 def handle_why_decision(args: dict) -> tuple[str, bool]:
@@ -350,7 +350,7 @@ def handle_why_decision(args: dict) -> tuple[str, bool]:
     query = _require_str(args, "query")
     result = _get(f"/api/graph/{quote(session_id, safe='')}/why?q={quote(query)}")
     if "error" in result:
-        return f"❌ Reasoning query failed: {result['error']}", True
+        return f"Reasoning query failed: {result['error']}", True
 
     matches = result.get("matches", [])
     chain = result.get("chain", [])
@@ -380,7 +380,7 @@ def handle_why_decision(args: dict) -> tuple[str, bool]:
         lines.append(f"  ✓ CURRENT: {current['label']}"
                      + (f" — {current['summary']}" if current.get("summary") else ""))
     else:
-        lines.append("  ⚠ No active decision on this topic (superseded or "
+        lines.append("  Note: no active decision on this topic (superseded or "
                      "invalidated without replacement).")
     return "\n".join(lines), False
 
@@ -388,7 +388,7 @@ def handle_why_decision(args: dict) -> tuple[str, bool]:
 def handle_get_savings_stats(args: dict) -> tuple[str, bool]:
     result = _get("/api/stats")
     if "error" in result:
-        return f"❌ Stats failed: {result['error']}", True
+        return f"Stats failed: {result['error']}", True
     d = result.get("daily", {})
     w = result.get("weekly", {})
     breakdown = result.get("layer_breakdown", {})
