@@ -10,7 +10,7 @@ python -m benchmarks.eval --errors                   # every miss, every false p
 python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 664 tests
+pytest tests/ -q                                     # 701 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -24,10 +24,10 @@ Measured on v0.5.4:
 |---|---|---|---|
 | Files | 98% | 100% | **99%** |
 | Pending tasks | 100% | 90% | **95%** |
-| Decisions | 90% | 95% | **92%** |
+| Decisions | 93% | 100% | **96%** |
 | Completed tasks | 92% | 90% | **91%** |
 | Errors | 96% | 96% | **96%** |
-| | | **macro F1** | **95%** |
+| | | **macro F1** | **96%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
 whole transcript as one node scores 100% recall; that is why recall-only
@@ -41,7 +41,7 @@ run rather than kept in a drawer:
 
 | Corpus origin | Sessions | Macro F1 |
 |---|---|---|
-| Synthetic (hand-written) | 8 | **96%** |
+| Synthetic (hand-written) | 8 | **97%** |
 | Real (captured transcripts) | 6 | **90%** |
 
 **Treat 90% as the number that describes real sessions.** The five-point
