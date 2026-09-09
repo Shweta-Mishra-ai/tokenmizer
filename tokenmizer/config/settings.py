@@ -38,6 +38,22 @@ class GraphCheckpointSettings(BaseModel):
     use_llm_extraction: bool = False  # set True for 80%+ recall (needs API key, ~$0.001/turn)
     extraction_model: str = ""        # leave empty = auto-pick cheapest model for your provider
     min_confidence: float = 0.65      # minimum validation confidence threshold
+    # Blend embedding similarity into GraphMemory.query(), the ranker that
+    # decides which nodes get injected into the prompt each turn.
+    #
+    # Default off, and the reason is the size of the evidence, not doubt about
+    # the direction: measured on benchmarks/graph_retrieval/query_eval it
+    # takes recall@6 from 85% to 92% on paraphrased questions — one question
+    # out of thirteen. That is a real gain on a small sample, not a
+    # established one, and turning it on puts a model forward pass on the
+    # request path. Run the eval on your own sessions before enabling it.
+    #
+    # Requires sentence-transformers, which ships in the `cache` extra
+    # (pip install "tokenmizer[cache]") — the same model semantic_cache,
+    # reasoning.py and decision_tracker.py already share, so enabling this
+    # adds no new dependency and no second model in memory.
+    # Without it this silently stays off rather than failing.
+    semantic_retrieval: bool = False
 
 
 class RoutingSettings(BaseModel):
