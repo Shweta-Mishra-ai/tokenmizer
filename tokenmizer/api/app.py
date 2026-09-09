@@ -671,6 +671,22 @@ def _apply_compression_layers(
     return messages
 
 
+def _last_substantive_query(raw_messages: list[dict], min_words: int = 4) -> str:
+    """The most recent user turn long enough to retrieve against.
+
+    A follow-up like "why?" carries its subject in the turn before it. Walks
+    backwards past the short turns rather than giving up on retrieval, so the
+    graph is still searched with the topic actually under discussion.
+    """
+    for message in reversed(raw_messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content") or ""
+        if len(content.split()) >= min_words:
+            return content
+    return ""
+
+
 async def _update_graph(
     session_id: str,
     graph,
@@ -755,9 +771,24 @@ async def _update_graph(
     else:
         savings["windowing"] = 0
 
-    # Context injection — only when graph has enough signal
-    if len(graph._nodes) >= 3 and len(user_query.split()) >= 4:
-        relevant = graph.query(user_query, top_k=8)
+    # Context injection — only when graph has enough signal.
+    #
+    # There used to be a `len(user_query.split()) >= 4` condition here, so a
+    # short turn got no memory at all: "why?", "continue", "fix it", "same as
+    # before" and "run the tests" were all below the bar. Those are exactly
+    # the turns where the model most needs to be told what "it" and "before"
+    # refer to — the graph held the answer and the proxy declined to pass it
+    # on, on a word count.
+    #
+    # A short turn is not a turn with no topic; it is a turn whose topic is
+    # in the previous one. So retrieve against the last substantive user
+    # message instead of skipping retrieval, and let relevance decide.
+    retrieval_query = user_query
+    if len(user_query.split()) < 4:
+        retrieval_query = _last_substantive_query(raw_messages) or user_query
+
+    if len(graph._nodes) >= 3 and retrieval_query.strip():
+        relevant = graph.query(retrieval_query, top_k=8)
         if relevant:
             ctx_parts = [
                 f"  {n.type.value}: {n.label}"
@@ -1114,14 +1145,27 @@ async def chat_completions(req: ChatRequest, request: Request):
     checkpoint_status: dict = {"attempted": False, "succeeded": False, "checkpoint_id": None}
     if settings.graph_checkpoint.enabled:
         graph    = await _get_graph_async(session_id)
-        # Hold the session in-use for as long as we're mutating its graph,
-        # so a concurrent request's cache eviction can't force-persist and
-        # detach this instance out from under us (which would silently
-        # drop everything added below).
-        with _session_in_use(session_id):
-            messages, checkpoint_status = await _update_graph(
-                session_id, graph, raw_messages, messages, model, savings, user_query
-            )
+        # Two separate protections, for two separate hazards.
+        #
+        # _session_in_use keeps a concurrent request's cache eviction from
+        # force-persisting and detaching this instance out from under us,
+        # which would silently drop everything added below.
+        #
+        # The session lock keeps this out of the background extractor's way.
+        # _background_extract already runs under _get_session_lock and
+        # mutates the same graph — extract_from_messages, prune() and
+        # _persist() — but the foreground path took no lock at all, so turn
+        # N's background extraction could interleave with turn N+1's
+        # foreground mutation. Both mutators are synchronous, so this does
+        # not corrupt the node dict outright; what it did allow is a
+        # prune-to-200 and a persist-diff observing inconsistent
+        # intermediate state. Rare, silent, and unreproducible for whoever
+        # hits it. One lock, both paths.
+        async with _get_session_lock(session_id):
+            with _session_in_use(session_id):
+                messages, checkpoint_status = await _update_graph(
+                    session_id, graph, raw_messages, messages, model, savings, user_query
+                )
 
     # Measured AFTER _update_graph(), so it reflects both the reduction
     # from windowing and the addition from graph-context injection —
