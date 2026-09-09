@@ -201,7 +201,52 @@ def _get(path: str) -> dict:
         return {"error": "pip install httpx  — required for MCP server"}
     except Exception as e:
         logger.warning(f"GET {path} against the proxy failed: {e}")
-        return {"error": str(e)}
+        return {"error": _explain(e)}
+
+
+def _explain(exc: Exception) -> str:
+    """Turn a transport failure into something the reader can act on.
+
+    Every graph tool here talks to the proxy, and the proxy is a separate
+    process the plugin install does not start. So the single most likely
+    outcome of a fresh install is every tool answering
+    "[Errno 111] Connection refused" — which names a socket, not a next step,
+    and reads as a broken plugin rather than a stopped server. cli.py already
+    solved exactly this for the same failure; MCP clients deserve the same
+    sentence.
+
+    Also keeps SDK exception text out of the reply: it routinely embeds the
+    request URL and query string, which for these endpoints contains the
+    session id. Full detail still goes to the log.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return f"{type(exc).__name__}: {exc}"
+
+    if isinstance(exc, httpx.ConnectError):
+        return (
+            f"TokenMizer is not running at {TOKENMIZER_URL}. Start it with "
+            "`tokenmizer serve`, then try again. (Set TOKENMIZER_URL if it "
+            "runs somewhere else.) File analysis works without the server; "
+            "checkpoint, resume, graph and savings tools need it."
+        )
+    if isinstance(exc, httpx.TimeoutException):
+        return (
+            f"TokenMizer did not respond within the timeout at {TOKENMIZER_URL}. "
+            "It may still be starting up, or busy with a long request."
+        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code in (401, 403):
+            return (
+                f"TokenMizer rejected the request ({code}). Set TOKENMIZER_API_KEY "
+                "in the MCP server's env to match the proxy's api_key."
+            )
+        if code == 404:
+            return "Not found — nothing has been checkpointed under that session id yet."
+        return f"TokenMizer returned HTTP {code}."
+    return f"{type(exc).__name__}"
 
 
 def _post(path: str, body: dict) -> dict:
@@ -214,7 +259,7 @@ def _post(path: str, body: dict) -> dict:
         return {"error": "pip install httpx  — required for MCP server"}
     except Exception as e:
         logger.warning(f"POST {path} against the proxy failed: {e}")
-        return {"error": str(e)}
+        return {"error": _explain(e)}
 
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
