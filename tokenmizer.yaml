@@ -55,6 +55,9 @@ graph_checkpoint:
   storage_dir: ./checkpoints  # SQLite DB stored here
   max_resume_tokens: 400      # cap on standard resume block size
   use_llm_extraction: false   # true = use cheap LLM (haiku) for better accuracy
+  semantic_retrieval: false   # true = blend embedding similarity into graph
+                              # retrieval. recall@6 85% -> 92% on the query
+                              # eval (n=13); needs tokenmizer[cache]
                               # costs ~$0.001 per turn, much more accurate
 
 # ── Compression ───────────────────────────────────────────────────────────────

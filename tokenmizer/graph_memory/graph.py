@@ -125,8 +125,15 @@ class GraphMemory:
     # (measured from the moment of supersession — see apply_importance_decay).
     ARCHIVE_SUPERSEDED_AFTER_DAYS: float = 7.0
 
-    def __init__(self, session_id: str, storage_dir: str = "./checkpoints"):
+    def __init__(self, session_id: str, storage_dir: str = "./checkpoints",
+                 semantic_retrieval: bool = False):
         self.session_id = session_id
+        # Blend embedding similarity into query(). Off by default and passed
+        # in rather than read from Settings, so this module stays independent
+        # of config the way the rest of it is; api/app.py supplies the value.
+        self.semantic_retrieval = semantic_retrieval
+        # node id -> (text embedded, vector). See _node_embeddings.
+        self._embedding_cache: dict[str, tuple] = {}
         self._nodes: dict[str, MemoryNode] = {}
         self._edges: list[MemoryEdge] = []
         self._transitions: list[DecisionTransition] = []   # full causal history
@@ -772,15 +779,161 @@ class GraphMemory:
 
     # ── Query ────────────────────────────────────────────────────────────────
 
+    # How many nodes the semantic pass may surface per query, by similarity
+    # rank. Deliberately a RANK cutoff and not a cosine threshold.
+    #
+    # The embedding model here is all-MiniLM-L6-v2, which semantic_cache
+    # already loads. It is a *symmetric* similarity model: it was trained to
+    # score two sentences of the same kind against each other, which is why
+    # the thresholds elsewhere in this package work well — decision_tracker
+    # compares label to label at 0.72, reasoning compares label to label at
+    # 0.55.
+    #
+    # A retrieval query is not that shape. It compares a QUESTION ("what are
+    # we storing orders in") against a short FACT ("Use PostgreSQL"), and the
+    # absolute cosine for a genuinely correct pair lands anywhere between
+    # 0.30 and 0.78 depending on how the fact happens to be worded. Measured
+    # over benchmarks/graph_retrieval/query_eval, no single cutoff separates
+    # right from wrong: a first draft used 0.35 and was a silent no-op,
+    # because the correct answer to "what are we storing orders in" scores
+    # 0.14 against "Use PostgreSQL".
+    #
+    # The RANK is stable where the value is not — over the same set the
+    # correct node is in the top 3 by cosine for 10 of 12 questions. So take
+    # the best few and ignore the absolute number, which also means this code
+    # does not silently break if the model is ever swapped.
+    _SEMANTIC_RESCUE_LIMIT = 4
+
+    # Weight of the semantic signal against the keyword score. Below the
+    # keyword weight (0.6) on purpose: exact vocabulary overlap is stronger
+    # evidence where it exists, and this pass is here for where it does not.
+    _SEMANTIC_WEIGHT = 0.4
+
+    def _blend_semantic(self, task, scored, weak, type_boost):
+        """Fold embedding similarity into the keyword ranking.
+
+        Additive by construction — a node the keyword pass already accepted
+        can only gain score here, never lose it — so turning this on cannot
+        drop a result the keyword ranker would have returned. What it adds is
+        the `weak` set: nodes that share no vocabulary with the question,
+        which is the entire class of query keyword ranking cannot serve and
+        the reason Mem0, Zep and Graphiti retrieve by embedding.
+
+        Silently a no-op when sentence-transformers is not installed or the
+        model weights are not cached — the same graceful-degradation contract
+        semantic_cache and reasoning.py already have, so a host without it
+        behaves exactly as before.
+        """
+        if not task.strip():
+            return scored
+
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine
+        engine = EmbeddingEngine.get()
+        if not engine.available:
+            return scored
+
+        nodes = [n for _, n in scored] + weak
+        if not nodes:
+            return scored
+
+        q_emb = engine.embed(task)
+        if q_emb is None:
+            return scored
+
+        vectors = self._node_embeddings(engine, nodes)
+        if vectors is None:
+            return scored
+
+        similarities = [
+            (EmbeddingEngine.cosine(q_emb, vector), node)
+            for node, vector in zip(nodes, vectors) if vector is not None
+        ]
+        if not similarities:
+            return scored
+        similarities.sort(key=lambda pair: pair[0], reverse=True)
+        top = similarities[:self._SEMANTIC_RESCUE_LIMIT]
+
+        # Scale the boost against the best match in THIS query rather than
+        # against a fixed number, for the same reason the cutoff is a rank:
+        # the absolute cosine varies with how the fact happens to be worded,
+        # so only the relative ordering carries information.
+        best = top[0][0] or 1.0
+        boosted = {
+            id(node): (similarity / best) * self._SEMANTIC_WEIGHT
+                      * type_boost.get(node.type, 1.0)
+            for similarity, node in top
+        }
+
+        blended = [(base + boosted.pop(id(node), 0.0), node) for base, node in scored]
+        # Whatever is left in `boosted` is a node the keyword pass rejected
+        # and the embedding rescued — the case this whole path exists for.
+        by_id = {id(node): node for _, node in similarities}
+        blended.extend((boost, by_id[node_id]) for node_id, boost in boosted.items())
+        return blended
+
+    def _node_embeddings(self, engine, nodes):
+        """Embeddings for `nodes`, cached per node on its searchable text.
+
+        Embedding every node on every turn would put a model forward pass on
+        the request path for content that has not changed. The cache key is
+        the text itself, so an edited label or summary re-embeds and a
+        pruned node's entry is dropped with it.
+        """
+        cache = self._embedding_cache
+        texts = [
+            (node.label if not node.summary else f"{node.label} {node.summary}")
+            for node in nodes
+        ]
+        missing = [
+            text for node, text in zip(nodes, texts)
+            if cache.get(node.id, (None, None))[0] != text
+        ]
+        if missing:
+            fresh = engine.embed_batch(missing)
+            if fresh is None:
+                return None
+            for text, vector in zip(missing, fresh):
+                for node, node_text in zip(nodes, texts):
+                    if node_text == text:
+                        cache[node.id] = (text, vector)
+        # Drop entries for nodes that no longer exist, so a long session's
+        # cache cannot outgrow the graph it describes.
+        if len(cache) > len(self._nodes) * 2:
+            live = set(self._nodes)
+            for node_id in [k for k in cache if k not in live]:
+                del cache[node_id]
+        return [cache.get(node.id, (None, None))[1] for node in nodes]
+
+    # Words a node can be found by. Deliberately label AND summary: the
+    # summary is where a decision's rationale and an error's detail live
+    # ("Reason: connection pooling under load"), and ranking read only
+    # `label`, so none of that text was reachable by any query. A node whose
+    # label is "Use PostgreSQL" could not be found by "connection pooling"
+    # even with the phrase sitting in its own summary field.
+    def _search_words(self, node: MemoryNode) -> frozenset:
+        text = node.label if not node.summary else f"{node.label} {node.summary}"
+        return frozenset(
+            w.strip(".,!?:;()[]").lower() for w in text.split() if len(w) > 2
+        )
+
     def query(self, task: str, top_k: int = 12) -> list[MemoryNode]:
         """
-        Keyword + importance + type-boosted ranked retrieval.
-        Uses alias expansion so 'auth' matches 'authentication', 'PG' matches 'PostgreSQL'.
-        Type boost: DECISION/GOAL nodes score 20% higher when relevant.
+        Keyword + importance + type-boosted ranked retrieval, over each node's
+        label and summary.
+
+        Uses alias expansion so 'auth' matches 'authentication', 'PG' matches
+        'PostgreSQL'. Type boost: DECISION/GOAL nodes score 20% higher when
+        relevant. When `semantic_retrieval` is on, embedding similarity is
+        blended in — see _blend_semantic.
         """
         query_words = self._expand_with_aliases(
             frozenset(w.strip(".,!?:;()[]").lower() for w in task.split() if len(w) > 2)
         )
+        # Nodes the keyword pass rejected. Kept because they are exactly the
+        # ones a semantic pass exists to rescue: a node sharing no vocabulary
+        # with the question is the case token overlap cannot serve.
+        weak: list[MemoryNode] = []
+        candidates: list[MemoryNode] = []
 
         # Type boost factors — decisions and goals are most valuable to surface
         _TYPE_BOOST = {
@@ -804,9 +957,7 @@ class GraphMemory:
             if node.status in INACTIVE_STATUSES:
                 continue
 
-            node_words = self._expand_with_aliases(
-                frozenset(w.strip(".,!?:;()[]").lower() for w in node.label.split() if len(w) > 2)
-            )
+            node_words = self._expand_with_aliases(self._search_words(node))
             if not node_words:
                 continue
 
@@ -819,6 +970,12 @@ class GraphMemory:
 
             if score > 0.05:  # minimum threshold — don't return completely unrelated nodes
                 scored.append((score, node))
+                candidates.append(node)
+            else:
+                weak.append(node)
+
+        if self.semantic_retrieval:
+            scored = self._blend_semantic(task, scored, weak, _TYPE_BOOST)
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [n for _, n in scored[:top_k]]

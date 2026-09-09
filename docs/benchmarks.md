@@ -9,8 +9,9 @@ python -m benchmarks.eval                            # extraction P/R/F1
 python -m benchmarks.eval --errors                   # every miss, every false positive
 python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
+python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 733 tests
+pytest tests/ -q                                     # 741 tests
 ```
 
 ## Extraction quality — precision, recall and F1

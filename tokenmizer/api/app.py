@@ -367,6 +367,7 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
             _graph_cache[session_id] = GraphMemory(
                 session_id,
                 storage_dir=settings.graph_checkpoint.storage_dir,
+                semantic_retrieval=settings.graph_checkpoint.semantic_retrieval,
             )
         _graph_cache_touch(session_id)
         return _graph_cache[session_id]
