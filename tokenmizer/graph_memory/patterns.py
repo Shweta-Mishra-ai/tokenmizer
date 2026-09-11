@@ -112,16 +112,35 @@ _CLAUSE_SPAN = r'((?:(?![.!?](?=\s|$))[^\n]){5,80})'
 _DECISION = re.compile(
     r'(?:decided?|going with|will use|chose?|switching? to|opted for|settled on|'
     r'picked|sticking with|selected?|using|went with|we.ll use|let.s use|'
-    r'leaning toward|recommends?|recommended)'
+    r'leaning toward|recommends?|recommended|'
+    # Probed against phrasings the corpus does not use: "standardise on",
+    # "let's do", "moving (everything) to", "consolidate on" are how people
+    # commit to a choice without saying "decided". "moving to" carries an
+    # optional object between verb and destination — "moving everything to
+    # Postgres" — which `switching to` never needed.
+    r'standardi[sz](?:e|ing) on|let.s (?:do|go)|consensus is|committing to|'
+    r'went ahead with|locked in(?: on)?|'
+    r'mov(?:e|ing) (?:(?:everything|all|it|over) )?to|consolidat(?:e|ing) on)'
     r'[\s:\-]+' + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
 # Pass 2: header format ("Decision: X", "Tech choice: X")
 _DECISION_HEADER = re.compile(
-    r'(?:^|\n)\s*(?:decision|tech choice|architecture choice|approach|stack)\s*[:\-]\s*'
+    r'(?:^|\n)\s*(?:decision|tech choice|architecture choice|approach|stack|'
+    # The word people type when closing a discussion is rarely "decision".
+    r'agreed|final call|verdict|conclusion|going with|settled|locked in|'
+    r'going forward|consensus)\s*[:\-]\s*'
     + _CLAUSE_SPAN,
     re.IGNORECASE,
+)
+
+# "OK, Kafka it is." — the choice is the subject, the verb comes after,
+# and nothing else in the sentence marks it. The capitalised-name
+# requirement keeps this to proper nouns; "it is" after a common word is
+# ordinary prose ("that's how it is").
+_DECISION_IT_IS = re.compile(
+    r'\b([A-Z][\w.+-]{1,30}(?:\s+[A-Z][\w.+-]{1,30})?)\s+it\s+is[.!,]',
 )
 
 # Pass 3: known tech names — expanded (was missing bcrypt, slowapi, etc.)
@@ -140,7 +159,19 @@ _DECISION_FOR = re.compile(
     r'slowapi|authlib|httpx|aiohttp|'
     r'openai|anthropic|gemini|langchain|llamaindex|'
     r'sqlc|dbt|nats|'
-    r'pnpm|uv|ruff|kong|airflow'
+    r'pnpm|uv|ruff|kong|airflow|'
+    # Probed against current tooling the list had drifted behind. The gate
+    # (_tech_mention_is_a_decision) still applies to every name here, so a
+    # name only becomes a decision with choosing context around it.
+    r'vite|webpack|esbuild|turbopack|bun|deno|tailwind|astro|remix|htmx|'
+    r'mongo|firebase|planetscale|neon|clickhouse|duckdb|elasticsearch|opensearch|'
+    r'meilisearch|typesense|pgvector|qdrant|weaviate|pinecone|chroma|milvus|'
+    r'sentry|datadog|grafana|prometheus|opentelemetry|otel|temporal|helm|argo|'
+    r'pulumi|vercel|netlify|cloudflare|lambda|ecs|eks|gke|'
+    r'tokio|axum|actix|gin|fiber|spring|rails|laravel|phoenix|hono|trpc|'
+    r'zustand|redux|tanstack|mypy|pyright|black|isort|poetry|pytorch|torch|'
+    r'tensorflow|jax|transformers|vllm|ollama|litellm|langgraph|crewai|'
+    r'styled-components|cypress'
     r')\b(?:(?!\s+(?:to|with|for)\s+\w)[^.!?\n,—\-]){0,40})',
     re.IGNORECASE,
 )
@@ -179,12 +210,37 @@ _MIGRATION_SOURCE = re.compile(
 )
 
 
+# A clause that opens with a work-item header. "Completed: project scaffold
+# with Vite" and "Working on: rate limiting using slowapi" mention a
+# technology inside a statement about WORK, and the weak choosing cues
+# (`with`, `using`) fire on both. The clause is a task; the technology
+# named in it is how the task was done, not a decision that was made.
+# Measured: this single confusion produced two of the four spurious
+# decisions on the corpus.
+_TASK_HEADER_AT_CLAUSE_START = re.compile(
+    r'^\s*(?:completed|finished|done|implemented|fixed|added|built|shipped|'
+    r'created|wrote|updated|deployed|working on|implementing|building|'
+    r'currently|in progress|todo|next|pending|wip)\s*[:\-]',
+    re.IGNORECASE,
+)
+
+
+def _clause_start(content: str, pos: int) -> int:
+    for i in range(pos - 1, -1, -1):
+        if content[i] in ".!?\n":
+            return i + 1
+    return 0
+
+
 def _tech_mention_is_a_decision(content: str, start: int, end: int) -> bool:
     """True if a bare technology name at [start:end] is stated as a choice."""
     before = content[max(0, start - 40):start]
     after = content[end:end + 40]
     if _MIGRATION_SOURCE.search(before):
         return False        # the thing being migrated away from
+    clause = content[_clause_start(content, start):start]
+    if _TASK_HEADER_AT_CLAUSE_START.match(clause):
+        return False        # named inside a work item, not chosen
     return bool(_DECISION_CONTEXT_BEFORE.search(before)
                 or _DECISION_PURPOSE_AFTER.match(after))
 
@@ -634,7 +690,15 @@ _ERROR_TYPED = re.compile(
     # module segment so an ordinary dotted attribute (`config.Settings`) is
     # not mistaken for a failure. Flat run, no nested quantifier — see _TOKEN.
     r'\b((?:[\w.]{0,40}\.(?:errors?|exceptions?|exc)\.[A-Z]\w+\b|'
-    r'[A-Z]\w*(?:Error|Exception)\b|Traceback)'
+    r'[A-Z]\w*(?:Error|Exception)\b|Traceback|'
+    # Runtime error codes and runtime-level failures that carry no
+    # Error/Exception suffix: POSIX errno names (ECONNREFUSED, ENOENT,
+    # EADDRINUSE), Node's ERR_* codes, a Go panic, an unhandled promise
+    # rejection. Each is unambiguous on its own — nobody writes ECONNREFUSED
+    # in prose about anything but a failure — so no context is required.
+    r'E[A-Z]{4,14}\b|ERR_[A-Z_]{3,30}\b|OOMKilled|'
+    r'panic:|runtime error:|[Uu]nhandled (?:promise rejection|exception|error)|'
+    r'[Uu]ncaught (?:exception|error|TypeError|ReferenceError))'
     r'(?:[\s:-]+[^.!?,;\n]{0,60})?)',
 )
 
@@ -663,13 +727,22 @@ _ERROR_STATUS = re.compile(
     # A determiner between the verb and the code is the ordinary way this is
     # written ("getting a 500", "got an HTTP 502"); requiring \s+ straight
     # onto the digits missed every one of them.
-    r'failing with)\s+(?:an?\s+|the\s+)?(?:HTTP\s*)?[45]\d{2}\b'
+    # `s?`: "started returning 503s" pluralises the code.
+    r'failing with)\s+(?:an?\s+|the\s+)?(?:HTTP\s*)?[45]\d{2}s?\b'
     r'(?:[\s:-]+[^.!?,;\n]{0,60})?)',
     re.IGNORECASE,
 )
 
 _ERROR_STATUS_NAMED = re.compile(
-    r'\b((?:HTTP\s*)?[45]\d{2}\s+(?:error|errors|response|status)\b'
+    r'\b((?:HTTP\s*)?[45]\d{2}\s+(?:error|errors|response|status|'
+    # The standard reason phrase is the other way a status is named as a
+    # failure — "502 Bad Gateway from nginx" — and it is as unambiguous as
+    # the word "error" after the code. "404 rather than 403" still has
+    # neither and is still a design choice.
+    r'bad gateway|internal server error|not found|unauthori[sz]ed|forbidden|'
+    r'gateway timeout|service unavailable|too many requests|'
+    r'unprocessable (?:entity|content)|request timeout|conflict|'
+    r'method not allowed|bad request|payload too large)\b'
     r'(?:[\s:-]+[^.!?,;\n]{0,60})?)',
     re.IGNORECASE,
 )
@@ -830,6 +903,72 @@ _ERROR_FAILING = re.compile(
     re.IGNORECASE,
 )
 
+# The past-tense forms with a named subject — "Deploy failed, rolled back",
+# "The migration errored out halfway", "the cron job stopped running" —
+# are complete reports on their own; the object clause _ERROR_FAILING
+# demands exists to keep out the bare noun ("the fail") and the bare
+# present tense ("Three fail"), neither of which these forms can be. The
+# subject is REQUIRED here (at least one word before the verb) so a
+# sentence-initial "Failed." fragment does not qualify.
+#
+# The subject is a FLAT bounded run — `[\w./\- ]{1,40}\s` — not
+# `[\w./\-]+(?: [\w./\-]+){0,5}`. The token-repeat form is the latent
+# denial of service _TOKEN's comment above describes: a first draft of this
+# pattern used it and took 1.1 seconds on the 15 KB `"word."` payload the
+# ReDoS test feeds it, against ~4 ms for every neighbouring pattern. The
+# flat run costs a subject that may open mid-phrase, which
+# _drop_leading_sentence already cleans up for the other patterns.
+_ERROR_FAILED_SUBJECT = re.compile(
+    r'\b([\w./\- ]{1,40}\s'
+    r'(?:failed|errored(?: out)?|crashed|died|'
+    r'stopped (?:running|working|responding|processing)|'
+    r'(?:is|are|got|gets|was|were) (?:stuck|hung|wedged|unresponsive)|'
+    r'exits? (?:with )?(?:code )?[1-9]\d{0,2}|exit code [1-9]\d{0,2}|'
+    r'exited (?:with )?(?:code )?[1-9]\d{0,2}|'
+    r'(?:is|are|went|was|were) (?:down|offline|unreachable)|'
+    r'keeps? (?:crashing|restarting|rebalancing|dropping|failing|timing out)|'
+    r'(?:can.?t|cannot|could not|couldn.?t|fails? to) (?:find|locate|resolve|connect|open|load|reach))'
+    r'(?:\s+[^.!?,;\n]{0,40})?)',
+    re.IGNORECASE,
+)
+
+# The same inability reported with no subject at all — "Can't connect to
+# Redis from the worker pod" opens the sentence. _ERROR_FAILED_SUBJECT
+# requires a subject to keep out fragments; this form is anchored to the
+# start of a sentence instead, which is its own guarantee that it is a
+# report and not a clause of something else.
+_ERROR_CANNOT_INITIAL = re.compile(
+    r'(?:^|[.!?\n]\s+)((?:can.?t|cannot|could not|couldn.?t|unable to|failed to)\s+'
+    r'(?:find|locate|resolve|connect|open|load|reach|start|bind|write|read|parse)'
+    r'\s+[^.!?,;\n]{3,50})',
+    re.IGNORECASE,
+)
+
+# Test-runner and CI summaries: "3 failed, 41 passed", "1 error". The count
+# is the whole report.
+_ERROR_COUNT = re.compile(
+    r'\b((?:[1-9]\d{0,4}) (?:failed|failures?|errors?)(?:, \d+ passed)?)\b',
+    re.IGNORECASE,
+)
+
+# A latency regression stated as two numbers: "takes 12 seconds, used to
+# take 200ms", "went from 200ms to 12s". The COMPARISON is the failure and
+# it is required: "the dashboard takes 4.2s to first paint, needs to be
+# under 1.5s" is a measurement and a target — the goal of a performance
+# session, which the corpus labels as such — not a report that something
+# got worse. A first draft made the comparison optional and recorded that
+# goal as an error.
+_ERROR_SLOWER = re.compile(
+    r'\b(' + _subject_window(40) +
+    r'(?:(?:now )?takes|taking|took|jumped to|regressed to|climbed to|slowed to)'
+    r'\s+\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds?|minutes?|min)'
+    r'[^.!?\n]{0,40}?(?:used to|it was|was|instead of|down from|up from)\s+[^.!?\n]{0,30}'
+    r'|' + _subject_window(40) +
+    r'(?:went|regressed|slowed) from\s+\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds?|minutes?|min)'
+    r'\s+to\s+\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds?|minutes?|min))',
+    re.IGNORECASE,
+)
+
 _ERROR_SYMPTOM = re.compile(
     r'\b(' + _subject_window(40) +
     r'(?:out of memory|oom|segfaults?|segmentation fault|stack overflow|'
@@ -840,8 +979,16 @@ _ERROR_SYMPTOM = re.compile(
     r'infinite loop|not triggering|borrow checker error|fails? intermittently|'
     r'gc pressure|garbage collection pressure|poison messages?|consumer lag|'
     r'schema drift|partition skew|goroutine leaks?|connection churn|'
-    r'thundering herd)'
-    r'(?:\s+(?:in|on|from|between|during|under|while|across)\s+' + _object_run(30) +
+    r'thundering herd|'
+    # User-visible symptoms named as nouns: what a person reports before
+    # anyone has a stack trace.
+    r'stale (?:data|reads?|cache|results?)|blank (?:page|screen)|white screen|'
+    r'spinner forever|never (?:loads?|finishes|returns|completes)|'
+    r'silently (?:stopped|fails?|drops?|ignores?)|dropped under load)'
+    # `after` and `when` are how the trigger is usually named ("timeout
+    # after 30s", "crashes when the input is empty"); they were missing
+    # from the connective list, so the object was cut off.
+    r'(?:\s+(?:in|on|from|between|during|under|while|across|after|when|at)\s+' + _object_run(30) +
     r'|\s+(?:halting|blocking|breaking|rejecting|overwhelming|causing|growing|'
     r'putting|discarding)' + _object_run(30) + r')?)',
     re.IGNORECASE,
