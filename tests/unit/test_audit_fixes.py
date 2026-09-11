@@ -174,6 +174,10 @@ class TestTokenizerFailsSoft:
             raise ConnectionError("offline")
 
         tk._get_encoding.cache_clear()
+        # count_tokens is memoised on (text, model) too; an earlier test may
+        # have cached this exact call, which would never reach _get_encoding
+        # and make this assertion vacuous.
+        tk.count_tokens.cache_clear()
         monkeypatch.setattr(tiktoken, "encoding_for_model", boom)
         monkeypatch.setattr(tiktoken, "get_encoding", boom)
         try:
@@ -182,6 +186,7 @@ class TestTokenizerFailsSoft:
             assert len(calls) == 1
         finally:
             tk._get_encoding.cache_clear()
+            tk.count_tokens.cache_clear()
 
 
 class TestEnvOverridesYaml:
