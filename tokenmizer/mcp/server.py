@@ -17,18 +17,22 @@ Tools exposed:
                           (supersession chain with reasons/evidence)
 
 Run standalone:
-  python3 -m tokenmizer.mcp.server
+  tokenmizer-mcp
 
-Or via MCP stdio transport (for Claude Code .mcp.json):
+Or via MCP stdio transport (Claude Code .mcp.json, Cursor, VS Code, Zed,
+Codex — every client takes the same shape):
   {
     "mcpServers": {
       "tokenmizer": {
-        "command": "python3",
-        "args": ["-m", "tokenmizer.mcp.server"],
+        "command": "tokenmizer-mcp",
         "env": { "TOKENMIZER_URL": "http://localhost:8000" }
       }
     }
   }
+
+`tokenmizer-mcp` is the console script declared in pyproject.toml. Do not
+substitute a bare `python3`: on Windows that name is the Microsoft Store
+alias and the server never starts.
 """
 from __future__ import annotations
 
@@ -411,7 +415,7 @@ def handle_why_decision(args: dict) -> tuple[str, bool]:
     lines = [f"Decision trail for '{query}' — session: {session_id}", ""]
     if chain:
         for t in chain:
-            lines.append(f"  ✗ {t['from_label']}")
+            lines.append(f"  replaced: {t['from_label']}")
             hop = f"      └─ replaced by: {t['to_label']}"
             if t.get("reason"):
                 hop += f" — {t['reason']}"
@@ -422,7 +426,7 @@ def handle_why_decision(args: dict) -> tuple[str, bool]:
         lines.append("  (no supersessions — this decision has never changed)")
     lines.append("")
     if current:
-        lines.append(f"  ✓ CURRENT: {current['label']}"
+        lines.append(f"  current:  {current['label']}"
                      + (f" — {current['summary']}" if current.get("summary") else ""))
     else:
         lines.append("  Note: no active decision on this topic (superseded or "

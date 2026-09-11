@@ -324,7 +324,7 @@ class CheckpointManager:
 
         # Invalidated decisions are surfaced as an explicit warning rather
         # than dropped, matching the documented 4-state model (README:
-        # INVALIDATED = "⚠️ Always (warning)"). Resuming without them
+        # INVALIDATED = "Always (warning)"). Resuming without them
         # invites the model to cheerfully re-propose the exact thing the
         # user already rejected — but they must never be presented as
         # current decisions, which is what the unfiltered version did.

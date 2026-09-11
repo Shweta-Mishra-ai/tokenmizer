@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 0.5.x | ✅ Active |
-| < 0.5 | ❌ Not supported — upgrade |
+| 0.5.x | Active |
+| < 0.5 | Not supported — upgrade |
 
 Only the latest minor release receives security fixes. TokenMizer is a
 single-maintainer project; backporting to older lines is not something

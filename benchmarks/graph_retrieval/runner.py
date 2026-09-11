@@ -87,9 +87,9 @@ def run():
         print()
 
         if overall >= 0.80:
-            print("  ✅ Target met (≥80%)")
+            print("  PASS: Target met (≥80%)")
         else:
-            print("  ⚠️  Below target. Enable LLM extraction for higher recall.")
+            print("  Note:  Below target. Enable LLM extraction for higher recall.")
             print("     Set: use_llm_extraction: true in tokenmizer.yaml")
         print()
 

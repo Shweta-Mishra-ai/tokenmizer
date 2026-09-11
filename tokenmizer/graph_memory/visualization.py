@@ -216,8 +216,8 @@ def to_obsidian_canvas(graph: "GraphMemory") -> dict:
         f"**Nodes:** {len(canvas_nodes)}  **Edges:** {len(canvas_edges)}",
         "",
         "**Node types:**",
-        "🟣 GOAL  🟡 DECISION  🟢 TASK",
-        "🔵 FILE  🔴 ERROR  🩵 ENDPOINT",
+        "GOAL  |  DECISION  |  TASK",
+        "FILE  |  ERROR  |  ENDPOINT",
     ]
     canvas_nodes.insert(0, {
         "id": "legend", "type": "text",

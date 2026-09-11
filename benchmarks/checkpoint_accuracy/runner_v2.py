@@ -236,7 +236,7 @@ def run_comparison(name: str, session: dict) -> ComparisonResult:
 
 
 def run_all(save_json: bool = True) -> list[ComparisonResult]:
-    print("\n🧠 TokenMizer — Benchmark v2: Graph vs Summary")
+    print("\nTokenMizer — Benchmark v2: Graph vs Summary")
     print("=" * 65)
     print(f"{'Session':<22} {'Method':<12} {'Task R':>7} {'Decision R':>11} {'File R':>7} {'Info%':>7}")
     print("-" * 65)

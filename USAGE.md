@@ -70,7 +70,7 @@ tokenmizer serve
 
 You'll see:
 ```
-🧠 TokenMizer
+TokenMizer
 Proxy:     http://localhost:8000/v1/chat/completions
 Dashboard: http://localhost:8000
 API Docs:  http://localhost:8000/docs

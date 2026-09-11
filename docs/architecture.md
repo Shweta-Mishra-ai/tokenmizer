@@ -151,10 +151,10 @@ what still does.
 
 | Status | Meaning | In Resume |
 |---|---|---|
-| 🟢 `ACTIVE` | Current — in effect | ✅ Always |
-| 🟡 `SUPERSEDED` | Replaced by newer decision | ⚠️ 7 days |
-| 🔴 `INVALIDATED` | Explicitly wrong/cancelled | ⚠️ Always (warning) |
-| ⬜ `ARCHIVED` | Superseded >7 days ago — aged out | ❌ Never |
+| `ACTIVE` | Current — in effect | Always |
+| `SUPERSEDED` | Replaced by newer decision | 7 days |
+| `INVALIDATED` | Explicitly wrong/cancelled | Always, flagged |
+| `ARCHIVED` | Superseded >7 days ago — aged out | Never |
 
 History is **never deleted**. "Why did we switch from React to Next.js?" — always answerable:
 ask `GET /api/graph/{session}/why?q=react` (or the `why_decision` MCP tool) and get the full
