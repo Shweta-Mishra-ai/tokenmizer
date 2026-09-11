@@ -1,5 +1,147 @@
 # Changelog
 
+## [Unreleased] — session resilience, extraction recall, retrieval, and voice
+
+A deep audit found that the defects which remained were at the seams
+between layers — the one place a suite of 664 layer-internal tests does not
+look. Three of them fired only in long sessions, on Anthropic or Gemini, or
+on Windows: the conditions of a Claude Code user with a session worth
+remembering. Suite is now 769 tests; every published number below was
+re-derived from a run.
+
+### Fixed — every turn of a long session failed on Anthropic and Gemini
+`SmartMessageWindow` kept `conv_msgs[-protect_recent:]`. A chat request
+always ends on a user turn, so an even `protect_recent` (the default is 10)
+sliced from an assistant turn, and Anthropic rejects an assistant-first
+conversation with 400 "first message must use the 'user' role"; Gemini
+rejects the equivalent history. Windowing engages once a session exceeds
+`max_tokens_before_summary` and a session never drops back under it, so
+this failed every remaining turn. The caller saw only the generic 502. The
+window now opens on a user turn, and a shared `conversation_messages()`
+guard in the Anthropic and Gemini adapters enforces the invariant at the
+last point before the wire. `tests/unit/test_provider_message_contract.py`
+tests the seam, parametrised over both parities.
+
+### Fixed — the plugin's MCP server could not start on Windows
+The shipped manifests launched `python3`, which on Windows resolves to the
+Microsoft Store alias. They now launch the `tokenmizer-mcp` console script
+already declared in `pyproject.toml`; a test rejects bare interpreter names.
+
+### Fixed — TokenMizer counted its own injected prompt as the user's input
+`messages = raw_messages[:]` shared every dict, so the terse-prompt
+injection rewrote `raw_messages` — the baseline for `orig_input_tokens`,
+graph extraction, and checkpoints. Savings were overstated on every call by
+roughly the terse prompt's size. Working copy is now built per dict.
+
+### Improved — decision and error extraction
+Decisions 90/95 (F1 92) → 93/100 (F1 96); macro F1 95% → 96%. Pass 4 now
+uses the same context gate as Pass 3 (it fired once across the whole corpus,
+on a false positive); `_SUPERSEDED` accepts `/` and `@` in dependency
+names, so `cenkalti/backoff` and scoped npm packages no longer break the
+match; "should talk/use/adopt X" counts as adoption. Errors hold at 96/96 on
+the corpus while going from 0/8 to 8/8 on ordinary phrasings the corpus
+does not contain: plain failure verbs with an object ("the build fails with
+exit code 1"), qualified exception paths (`psycopg2.errors.UniqueViolation`),
+and sentence-initial status reports ("Getting a 500 from /api/orders").
+Pinned in `tests/unit/test_extraction_generalisation.py`.
+
+### Improved — graph retrieval
+`GraphMemory.query()` now scores `label` and `summary` together; the
+rationale behind every decision was unreachable before. Optional
+`graph_checkpoint.semantic_retrieval` blends embedding similarity in using
+the `EmbeddingEngine` the package already shares, with a rank cutoff rather
+than a cosine threshold (a question-vs-fact pair scores 0.30–0.78 for a
+correct match, so no absolute cutoff separates right from wrong). New
+`python -m benchmarks.graph_retrieval.query_eval` scores the ranker on
+paraphrased questions: recall@6 85% → 92% with the blend on. Off by
+default — one question in thirteen is a real gain, not an established one.
+
+### Improved — short follow-ups get session context
+Context injection was gated on four or more words, so "why?", "continue" and
+"fix it" received no memory. Retrieval now runs against the last substantive
+user turn instead.
+
+### Fixed — request path and background extractor share one lock
+The foreground path mutated the graph without the session lock the
+background extractor holds. Both now take it; a test confirms this
+serialises rather than deadlocks.
+
+### Fixed — analytics survive a restart
+Every savings figure lived in a Python list. `AnalyticsEngine` now keeps
+`analytics.db` in the storage directory, buffered and flushed on the same
+timer as the graph.
+
+### Changed — deterministic session IDs and a fixed output voice
+The skills told the assistant to ask for a session ID and narrate results
+in its own words, so the wording differed on every run and sometimes
+addressed the operator by name. `tokenmizer.core.session` derives the ID
+from the working directory name; `checkpoint` and `resume` take it as an
+optional argument; the skills render fixed templates. Emoji removed from
+CLI and MCP output. `tests/unit/test_skill_voice.py` rejects unqualified
+"ask the user" and "tell the user" directions.
+
+### Fixed — MCP clients are told the proxy is not running
+Five of six tools answered "[Errno 111] Connection refused" on a fresh
+install. The shared transport helpers now say `tokenmizer serve`, which
+tools still work without it, and keep the session id out of the reply.
+
+### Fixed — the compression layer corrupted code, prose and repeated replies
+Three information-loss defects on the default path, applied to every
+message older than the last three. The heuristic stages ran on whole
+messages before `CodeBlockGuard`, so a Python function had every
+indentation level collapsed to one space and repeated log lines were
+deleted as duplicates; the interjection filler pattern had no word
+boundary, so "pressure" became "pres" and "ensure" became "en"; and the
+history pruner keyed on a 60-character prefix, so three replies opening
+"Here's the updated auth.py:" lost their code, including the newest one.
+Heuristics now run per prose segment through the guard, the interjection
+pattern is anchored and bounded, and the pruner collapses only verbatim
+repeats in the older messages.
+
+### Improved — extraction recall on ordinary phrasings
+A 45-phrase probe of how developers actually state choices and report
+failures scored decisions 60% and errors 40% while the corpus read 96%.
+Pattern families were added against that probe with the corpus as the
+precision guard, then measured on phrasings written afterwards: the final
+untuned held-out set scores 100%/100% (n=22). Corpus decisions 93/100
+(F1 96) → 95/100 (F1 98); errors hold at 96/96. A first draft of one
+pattern used the nested-quantifier shape `patterns.py` documents as a
+denial of service and took 1.1s on the adversarial payload; rewritten as a
+flat run (2.7ms) and the test ceiling tightened from 2.0s to 0.5s.
+
+### Fixed — a rejected transformed request no longer ends the session
+If the request TokenMizer built fails and differs from what the client
+sent, it is retried once with the client's own messages. Success is a turn
+at full price with `tokenmizer.fallback` on the response and a counted
+silent failure; a second failure is the 502 it always was.
+
+### Added — `tokenmizer.agents.Memory`
+An in-process interface for agent loops: `add`, `search`, `decisions`,
+`errors`, `context`, `why`, `impact`. No server, no key, no network; the
+same SQLite store the proxy uses. `tokenmizer/agents/` was an empty
+package.
+
+### Added — `GET /api/sessions`, and the dashboard shows real sessions
+The interactive graph page at `/api/graph/{id}/html` was reachable only by
+URL; the dashboard rendered a hard-coded legend where a session list
+belongs. The list is scoped by ownership.
+
+### Added — `terse_output.style: minimal`
+Asks for smaller changes as well as shorter answers: reuse before writing,
+stdlib before a dependency, the shortest diff that works. One value on the
+existing layer, so it replaces a separate brevity prompt rather than adding
+one. The prompt is held under 140 tokens by a test; no saving is estimated
+for it.
+
+### Changed — no emoji anywhere
+CLI, MCP replies, dashboard, skills, runners, scripts, README and docs. A
+test scans every shipped surface.
+
+### Performance
+`count_tokens` is memoised on (text, model). The proxy counts the same list
+about five times per request and older turns are identical across turns;
+repeated counts drop from ~7ms to microseconds.
+
 ## [0.5.4] — 2026-08-13 — decision and error extraction, targeted at an external benchmark
 
 An independent 100-session, 8-method benchmark
