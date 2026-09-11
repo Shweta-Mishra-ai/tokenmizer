@@ -105,7 +105,14 @@ _FILLER = [
     r"As an AI(?:\s+language model)?,?\s*",
     r"I(?:'d| would) be (?:happy|glad|pleased) to\s+(?:help\s+)?",
     r"(?:That'?s?\s+a?\s*)?(?:great|excellent|good|wonderful|fantastic)\s+question[.!]\s*",
-    r"(?:Certainly|Of course|Sure|Absolutely|Indeed)[!.]?\s*",
+    # A one-word interjection is filler only where a sentence begins. With
+    # neither an anchor nor a word boundary this alternation matched INSIDE
+    # words and on every older prose message: "pressure" -> "pres",
+    # "measure" -> "mea", "ensure" -> "en", "insurer" -> "inr". The model was
+    # reading corrupted English. Anchored to start of text or to the space
+    # after sentence punctuation, and bounded on the right so "Surely" and
+    # "Absolutely" as an adverb mid-sentence are left alone.
+    r"(?:^|(?<=[.!?]\s))(?:Certainly|Of course|Sure|Absolutely|Indeed)\b[!.,]?\s*",
     r"It(?:'s| is) (?:worth noting|important to note|crucial to understand) that\s+",
     r"In this (?:case|context|scenario),?\s*",
     r"(?:Essentially|Basically|Simply put|In other words),?\s*",
@@ -266,9 +273,20 @@ class CommentStripper:
 
 class RepetitiveHistoryPruner:
     """
-    Detect and collapse repetitive assistant message patterns.
-    e.g. 3+ messages all starting with "Here is the code:" get deduplicated.
-    ~10-20% on long coding sessions.
+    Collapse an assistant reply that repeats an earlier one verbatim.
+
+    This used to key on the first 60 characters: three replies sharing an
+    opening were treated as one repeated message, and every one after the
+    second was cut to its first and last 100 characters. In a coding session
+    that opening is "Here's the updated auth.py:" and the cut-out middle is
+    the code — the highest-value content in the conversation, deleted on the
+    assumption that a shared preamble meant a shared body. Measured: three
+    replies with the same first line and different functions lost two of
+    the three functions.
+
+    Only a reply whose whole content matches an earlier reply is redundant.
+    That one is replaced by a short reference to the turn it repeats, which
+    is what the model needs to know and nothing it does not.
     """
 
     def apply(self, messages: List[Dict]) -> Tuple[List[Dict], str]:
@@ -276,23 +294,23 @@ class RepetitiveHistoryPruner:
             return messages, "history_pruning_skipped"
 
         result = []
-        prefix_count: Dict[str, int] = {}
+        first_seen: Dict[str, int] = {}
+        pruned = False
 
-        for msg in messages:
+        for i, msg in enumerate(messages):
             content = msg.get("content", "")
-            if msg.get("role") == "assistant":
-                # Get first 60 chars as "prefix signature"
-                prefix = content[:60].strip().lower()
-                prefix_count[prefix] = prefix_count.get(prefix, 0) + 1
-                # If this pattern appeared 3+ times, compress it
-                if prefix_count[prefix] > 2 and len(content) > 200:
-                    # Keep first 100 + last 100 chars
-                    compressed = content[:100] + "\n...[compressed]...\n" + content[-100:]
-                    result.append({**msg, "content": compressed})
+            if msg.get("role") == "assistant" and len(content) > 200:
+                key = " ".join(content.split()).lower()
+                if key in first_seen:
+                    turn = first_seen[key]
+                    result.append({**msg, "content":
+                                   f"[repeat of the reply at turn {turn + 1}, omitted]"})
+                    pruned = True
                     continue
+                first_seen[key] = i
             result.append(msg)
 
-        return result, "history_pruning"
+        return result, "history_pruning" if pruned else "history_pruning_skipped"
 
 
 # ─── File-type filters (NEW) ──────────────────────────────────────────────────
@@ -545,6 +563,41 @@ class CompressionPipeline:
         self.file_filter = FileContentFilter()
         self.lingua = LLMLinguaEngine(ratio=ratio) if enable_ml else None
 
+    def _apply_heuristics_to_prose(self, text: str) -> Tuple[str, List[str]]:
+        """Run the heuristic stages over the prose segments of `text` only.
+
+        Code segments (fenced blocks and inline spans, per CodeBlockGuard)
+        pass through byte-identical. The stages run per prose segment
+        rather than on the joined prose, so a duplicate-line check cannot
+        see across a code block and the segment boundaries stay exact.
+        """
+        stages = [self.whitespace, self.filler, self.dedup]
+        if self.strip_comments:
+            stages.append(self.comments)
+
+        applied: List[str] = []
+        out: List[Tuple[bool, str]] = []
+        for is_code, segment in CodeBlockGuard.segment(text):
+            if is_code:
+                out.append((True, segment))
+                continue
+            for stage in stages:
+                segment, name = stage.apply(segment)
+                if name not in applied:
+                    applied.append(name)
+            out.append((False, segment))
+
+        # Each stage strips its segment, which would glue a prose segment
+        # onto an adjacent code fence; keep a newline at the boundary.
+        pieces: List[str] = []
+        for i, (is_code, segment) in enumerate(out):
+            if not is_code and segment and i + 1 < len(out) and out[i + 1][0]:
+                segment = segment + "\n\n"
+            if not is_code and segment and i > 0 and out[i - 1][0]:
+                segment = "\n\n" + segment
+            pieces.append(segment)
+        return "".join(pieces), applied
+
     def compress_text(
         self,
         text: str,
@@ -573,18 +626,24 @@ class CompressionPipeline:
                 strategies.append(strat)
 
         # Heuristics (order matters)
-        text, s = self.whitespace.apply(text)
-        strategies.append(s)
-
-        text, s = self.filler.apply(text)
-        strategies.append(s)
-
-        text, s = self.dedup.apply(text)
-        strategies.append(s)
-
-        if self.strip_comments:
-            text, s = self.comments.apply(text)
-            strategies.append(s)
+        #
+        # Applied to PROSE ONLY. CodeBlockGuard already routes fenced and
+        # inline code around LLMLingua below, but these four stages used to
+        # run on the whole message first — so the guard protected code from
+        # the lossy ML stage and not from the lossy heuristics. Measured on
+        # the default configuration: WhitespaceNormalizer collapsed 4+ spaces
+        # to 3, then FillerRemover collapsed 2+ spaces to 1, so every
+        # indentation level of a Python function in any message older than
+        # the last three became a single space — the model was shown code
+        # that does not parse. DuplicateLineRemover deleted repeated lines
+        # from pasted logs and traces as "duplicates". Tabs became spaces in
+        # Makefiles. All of it silent, all of it on the input.
+        #
+        # Raw pastes with no fence markup are still reachable by these
+        # stages; that is the same documented gap CodeBlockGuard has for
+        # LLMLingua, not a new one.
+        text, applied = self._apply_heuristics_to_prose(text)
+        strategies.extend(applied)
 
         # Save the heuristic-only result BEFORE running ML compression so we can
         # actually revert to it if the quality gate below rejects the ML output.
@@ -644,8 +703,14 @@ class CompressionPipeline:
         if len(messages) <= protect_recent:
             return messages, 0
 
-        # First pass: prune repetitive history
-        messages, _ = self.history_pruner.apply(messages)
+        # Prune repeats in the OLDER messages only. The pruner used to see
+        # the whole list, so the newest reply — the one the user is reading
+        # right now — could be replaced by a reference to an earlier turn.
+        # protect_recent is a promise that those messages arrive untouched;
+        # every stage has to keep it, not just the per-message ones below.
+        cut = len(messages) - protect_recent
+        older, _ = self.history_pruner.apply(messages[:cut])
+        messages = older + messages[cut:]
 
         total_saved = 0
         result = []
