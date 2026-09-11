@@ -80,3 +80,23 @@ class TestAnthropicSdkFailureIsLogged:
             "an unexpected Anthropic SDK failure was silently swallowed with "
             "no log line at all"
         )
+
+
+def test_count_tokens_is_memoised_per_text_and_model():
+    """The proxy counts the same message list about five times per request
+    and older turns are byte-identical across requests; re-encoding them
+    every time was ~35 ms per request on a 60-turn session."""
+    from tokenmizer.core.tokenizer import count_tokens
+
+    count_tokens.cache_clear()
+    text = "the same message content " * 50
+    count_tokens(text, "gpt-4o")
+    before = count_tokens.cache_info().hits
+    count_tokens(text, "gpt-4o")
+    count_tokens(text, "gpt-4o")
+    assert count_tokens.cache_info().hits == before + 2
+
+    # A different model is a different count, not a cache hit.
+    misses = count_tokens.cache_info().misses
+    count_tokens(text, "claude-sonnet-4-6")
+    assert count_tokens.cache_info().misses == misses + 1
