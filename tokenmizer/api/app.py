@@ -888,6 +888,8 @@ async def _call_provider(
     user_content: str,
     session_id: str,
     savings: dict,
+    raw_messages: Optional[list[dict]] = None,
+    outcome: Optional[dict] = None,
 ) -> tuple[str, int, int, float, bool]:
     """
     Layer 3 + 5: Cache lookup → LLM call → output trim → cache write.
@@ -910,24 +912,66 @@ async def _call_provider(
     # shares one safe copy. Deliberately NOT re-redacted here: doing so
     # would mask a regression if ingestion ever stopped redacting.
     provider = _get_provider()
+    kwargs = dict(model=model, max_tokens=req.max_tokens or 4096, stream=False,
+                  **_sampling_kwargs(req))
     try:
-        resp  = await provider.chat(
-            messages=messages, model=model,
-            max_tokens=req.max_tokens or 4096, stream=False,
-            **_sampling_kwargs(req),
-        )
+        resp = await provider.chat(messages=messages, **kwargs)
     except Exception as e:
-        # Provider SDK exceptions routinely embed request URLs, query
-        # params and other internal detail, so str(e) must not reach the
-        # client. Full detail goes to the log under a correlation id the
-        # client is given to quote.
+        # The request that failed is the one TokenMizer BUILT — windowed,
+        # compressed, with context injected. If it differs from what the
+        # client actually sent, the fault may be in a transform rather than
+        # in the provider, and a session must not die on that: before this,
+        # a windowing bug that produced an assistant-first message list
+        # turned into a 502 on every remaining turn of every long session,
+        # with nothing pointing at the cause. So try once more with the
+        # client's own messages (already redacted). One extra provider
+        # call, only on a path that was returning an error anyway. If it
+        # succeeds the turn goes through at full price, the savings for
+        # this turn are zero, and the response says so; if it also fails,
+        # the 502 below stands.
         correlation_id = uuid.uuid4().hex[:12]
-        logger.error(f"Provider error [{correlation_id}]: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Provider request failed (ref: {correlation_id}). "
-                   f"Check server logs for details.",
-        )
+        if raw_messages is not None and raw_messages != messages:
+            logger.warning(
+                f"Provider rejected the transformed request [{correlation_id}] "
+                f"for session {session_id!r}; retrying with the untransformed "
+                f"messages: {type(e).__name__}"
+            )
+            try:
+                resp = await provider.chat(messages=raw_messages, **kwargs)
+            except Exception as e2:
+                logger.error(f"Provider error [{correlation_id}] (both attempts): "
+                             f"transformed={e!r}; untransformed={e2!r}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Provider request failed (ref: {correlation_id}). "
+                           f"Check server logs for details.",
+                )
+            else:
+                # The transforms were the problem. That is a TokenMizer bug
+                # and it must be visible, not absorbed: counted as a silent
+                # failure, and reported on the response.
+                logger.error(
+                    f"TokenMizer's transformed request was rejected but the "
+                    f"untransformed one succeeded [{correlation_id}] — a "
+                    f"pipeline layer produced a request the provider will not "
+                    f"accept. Original error: {e}"
+                )
+                _analytics.record_silent_failure("transform_rejected")
+                savings.clear()
+                if outcome is not None:
+                    outcome["transform_rejected"] = True
+                    outcome["ref"] = correlation_id
+        else:
+            # Provider SDK exceptions routinely embed request URLs, query
+            # params and other internal detail, so str(e) must not reach
+            # the client. Full detail goes to the log under a correlation
+            # id the client is given to quote.
+            logger.error(f"Provider error [{correlation_id}]: {e}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Provider request failed (ref: {correlation_id}). "
+                       f"Check server logs for details.",
+            )
 
     response_text  = resp.text
     output_tokens  = resp.output_tokens
@@ -1188,9 +1232,15 @@ async def chat_completions(req: ChatRequest, request: Request):
                                 session_id, savings, orig_input_tokens)
 
     # Layer 5: call provider (or return cache hit)
+    fallback: dict = {}
     response_text, input_tokens_actual, output_tokens, latency_ms, cache_hit = await _call_provider(
-        req, messages, model, user_content, session_id, savings
+        req, messages, model, user_content, session_id, savings,
+        raw_messages=raw_messages, outcome=fallback,
     )
+    if fallback:
+        # The transformed request was rejected and the client's own
+        # messages went through instead: what was sent is what they sent.
+        sent_input_tokens = orig_input_tokens
 
     # Analytics
     total_saved = sum(savings.values())
@@ -1233,6 +1283,10 @@ async def chat_completions(req: ChatRequest, request: Request):
             # Surfaced so a client can detect "my context wasn't saved"
             # here, rather than when a later resume returns nothing.
             "checkpoint": checkpoint_status,
+            # Present only when TokenMizer's transformed request was
+            # rejected and the turn went through untransformed. Zero
+            # savings this turn, and a bug to report with `ref`.
+            **({"fallback": fallback} if fallback else {}),
         },
     }
 
