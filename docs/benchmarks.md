@@ -11,7 +11,7 @@ python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 784 tests
+pytest tests/ -q                                     # 834 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -25,7 +25,7 @@ Measured on v0.5.4:
 |---|---|---|---|
 | Files | 98% | 100% | **99%** |
 | Pending tasks | 100% | 90% | **95%** |
-| Decisions | 93% | 100% | **96%** |
+| Decisions | 95% | 100% | **98%** |
 | Completed tasks | 92% | 90% | **91%** |
 | Errors | 96% | 96% | **96%** |
 | | | **macro F1** | **96%** |

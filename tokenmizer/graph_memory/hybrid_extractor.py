@@ -35,19 +35,24 @@ from tokenmizer.graph_memory.patterns import (
     _DECISION,
     _DECISION_FOR,
     _DECISION_HEADER,
+    _DECISION_IT_IS,
     _DECISION_PASSIVE,
     _DEPENDENCY,
     _ENDPOINT,
     _ENV,
     _ERROR_ABSENCE,
+    _ERROR_CANNOT_INITIAL,
+    _ERROR_COUNT,
     _ERROR_DAMAGE,
     _ERROR_DETERMINER,
+    _ERROR_FAILED_SUBJECT,
     _ERROR_FAILING,
     _ERROR_FALSE_HEALTH,
     _ERROR_HANDLED,
     _ERROR_INERT,
     _ERROR_INTEGRITY,
     _ERROR_MISCLASSIFIED,
+    _ERROR_SLOWER,
     _ERROR_STATUS,
     _ERROR_STATUS_NAMED,
     _ERROR_STOPWORDS,
@@ -313,6 +318,16 @@ class HybridExtractor:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
+        # Decision Pass 2b: "Kafka it is." — the choice precedes the verb.
+        for m in _DECISION_IT_IS.finditer(content):
+            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+                continue
+            label = "Use " + m.group(1).strip()
+            norm  = self._normalize(label)
+            if norm not in seen_decisions:
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
+                seen_decisions.add(norm)
+
         # Decision Pass 3: tech names
         for m in _DECISION_FOR.finditer(content):
             if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
@@ -431,7 +446,9 @@ class HybridExtractor:
                         _ERROR_VULN, _ERROR_INTEGRITY,
                         _ERROR_DAMAGE, _ERROR_ABSENCE, _ERROR_INERT,
                         _ERROR_FALSE_HEALTH, _ERROR_MISCLASSIFIED,
-                        _ERROR_SYMPTOM, _ERROR_FAILING):
+                        _ERROR_SYMPTOM, _ERROR_FAILING,
+                        _ERROR_FAILED_SUBJECT, _ERROR_COUNT, _ERROR_SLOWER,
+                        _ERROR_CANNOT_INITIAL):
             for m in pattern.finditer(content):
                 before = content[max(0, m.start(1) - 60):m.start(1)]
                 if _SOLUTION_VERB.search(before):

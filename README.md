@@ -243,7 +243,7 @@ of 14 sessions, 6 of them real transcripts:
 | Files | 98% | 100% | **99%** |
 | Pending tasks | 100% | 90% | **95%** |
 | Errors | 96% | 96% | **96%** |
-| Decisions | 93% | 100% | **96%** |
+| Decisions | 95% | 100% | **98%** |
 | Completed tasks | 92% | 90% | **91%** |
 | | | **macro F1** | **96%** |
 
@@ -319,7 +319,7 @@ here rather than left to be discovered:
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 784 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 834 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it
