@@ -216,6 +216,28 @@ language, and `curl`.
 → [**API & CLI reference**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) — every endpoint, every command,
 every MCP tool.
 
+### Inside an agent — in-process, no server
+
+For an agent loop that already owns its messages, use the memory directly.
+No proxy, no API key, no network; the same SQLite store the proxy uses, so
+an agent and the proxy can share a session.
+
+```python
+from tokenmizer.agents import Memory
+
+memory = Memory("order-service")          # default: the working directory name
+memory.add(messages)                      # {"role", "content"} dicts; idempotent
+memory.search("what are we storing orders in", top_k=5)
+memory.context(token_budget=400)          # resume block for the system prompt
+memory.why("postgres")                    # the decision trail
+```
+
+`search` returns plain dicts (`type`, `label`, `summary`, `status`,
+`confidence`); `decisions()` and `errors()` list each category. Works with
+LangGraph, CrewAI, AutoGen or a hand-written loop the same way: call `add`
+with the conversation so far, put `context()` in the system prompt.
+
+
 ## What a resume looks like
 
 ```
@@ -319,7 +341,7 @@ here rather than left to be discovered:
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 835 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 846 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it
