@@ -97,6 +97,17 @@ class CacheSettings(BaseModel):
 class TerseOutputSettings(BaseModel):
     enabled: bool = True
     level: Literal["lite", "full", "ultra"] = "full"
+    # What the injected instruction asks for.
+    #   terse    — shorter answers: no preamble, no closing, fragments allowed.
+    #   minimal  — shorter answers AND smaller changes: reuse what exists
+    #              before writing, stdlib before a dependency, the shortest
+    #              diff that works, no scaffolding for later. For coding
+    #              sessions this is where most of the tokens go — not in the
+    #              prose around a change, in the change itself.
+    # One field with one value, deliberately: two brevity prompts fight each
+    # other, which docs/comparisons.md already warns about for running any
+    # other brevity prompt alongside this layer.
+    style: Literal["terse", "minimal"] = "terse"
 
 
 class Settings(BaseSettings):

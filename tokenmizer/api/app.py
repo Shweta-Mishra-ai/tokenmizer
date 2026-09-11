@@ -665,7 +665,8 @@ def _apply_compression_layers(
 
     # Layer 2: Terse output injection
     if settings.terse_output.enabled:
-        terse = _compression.terse_system_prompt(settings.terse_output.level)
+        terse = _compression.terse_system_prompt(
+            settings.terse_output.level, style=settings.terse_output.style)
         has_system = any(m.get("role") == "system" for m in messages)
         if has_system:
             for m in messages:
