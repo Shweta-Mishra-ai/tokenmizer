@@ -1,10 +1,30 @@
-"""Analytics engine — daily/weekly/monthly rollups."""
+"""Analytics engine — daily/weekly/monthly rollups.
+
+Durability: graph state has WAL-mode SQLite, a periodic flusher, corruption
+quarantine and a shutdown drain. Analytics had none of it. Every record lived
+in a Python list and nothing was ever written to disk, so daily(), weekly()
+and monthly() reset to zero on any restart, redeploy or container recycle. A
+weekly figure that cannot survive a week is not a weekly figure, and `stats`
+is one of the first things a new user tries.
+
+Writes are buffered and flushed on a timer rather than written per request:
+record() is called synchronously from the chat handler, and an fsync per
+request would put disk latency on the hot path. That gives analytics the same
+guarantee the graph already documents — a hard kill loses at most one flush
+interval — instead of losing everything.
+"""
 from __future__ import annotations
 
+import json
+import logging
+import sqlite3
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -84,8 +104,18 @@ class AnalyticsEngine:
     MAX_RECORDS = 50_000
     MAX_RECORD_AGE_SECONDS = 31 * 86_400
 
-    def __init__(self, max_records: int = MAX_RECORDS):
+    def __init__(self, max_records: int = MAX_RECORDS, storage_dir: str | None = None):
         self._max_records = max_records
+        # Its own file, not the graph's. graph_memory.db is under a
+        # cross-process write lock held for every node/edge save; putting
+        # per-request analytics rows behind that lock would make the two
+        # contend for no reason, and a corrupt analytics file must never be
+        # able to take session memory with it.
+        self._db_path = Path(storage_dir) / "analytics.db" if storage_dir else None
+        # Rows written but not yet flushed. Bounded by flush frequency, not
+        # by request volume — flush() is called on the proxy's existing
+        # periodic timer and at shutdown.
+        self._pending: List[AnalyticsRecord] = []
         self._records: List[AnalyticsRecord] = []
         self._by_provider: Dict[str, List[AnalyticsRecord]] = defaultdict(list)
         # Provider counts must survive record trimming — a total that
@@ -104,6 +134,129 @@ class AnalyticsEngine:
         # stability even though it now covers a slightly broader category
         # than literal persistence (see record_silent_failure docstring).
         self._persist_failures: Dict[str, int] = defaultdict(int)
+
+        if self._db_path is not None:
+            self._init_db()
+            self._load()
+
+    # ── Durability ───────────────────────────────────────────────────────────
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
+    def _init_db(self) -> None:
+        """Create the store, or disable persistence and keep serving.
+
+        Analytics are reporting, not correctness. A broken analytics file
+        must degrade to the previous in-memory behaviour rather than fail a
+        request, so every path here is best-effort and says so in the log.
+        """
+        try:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._connect() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS requests (
+                        timestamp REAL NOT NULL,
+                        session_id TEXT, provider TEXT, model TEXT,
+                        input_tokens_original INTEGER, input_tokens_sent INTEGER,
+                        output_tokens INTEGER, tokens_saved INTEGER,
+                        latency_ms REAL, cache_hit INTEGER, layer_savings TEXT
+                    )""")
+                # Every read is a time window (daily/weekly/monthly) and
+                # trimming deletes by age, so this is the only index needed.
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(timestamp)")
+                # Provider totals and the request count must survive record
+                # trimming — a lifetime total that silently decreases as old
+                # rows age out is worse than no total at all.
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS counters (
+                        key TEXT PRIMARY KEY, value INTEGER NOT NULL
+                    )""")
+        except Exception as e:
+            logger.error(
+                "Analytics persistence disabled (%s): %s — stats will reset on "
+                "restart, requests are unaffected", self._db_path, e)
+            self._db_path = None
+
+    def _load(self) -> None:
+        """Restore the retained window and the lifetime counters."""
+        cutoff = time.time() - self.MAX_RECORD_AGE_SECONDS
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT timestamp, session_id, provider, model, "
+                    "input_tokens_original, input_tokens_sent, output_tokens, "
+                    "tokens_saved, latency_ms, cache_hit, layer_savings "
+                    "FROM requests WHERE timestamp >= ? ORDER BY timestamp "
+                    "LIMIT ?", (cutoff, self._max_records)).fetchall()
+                counters = dict(conn.execute(
+                    "SELECT key, value FROM counters").fetchall())
+        except Exception as e:
+            logger.error("Could not read analytics history: %s", e)
+            return
+
+        for row in rows:
+            try:
+                layer_savings = json.loads(row[10]) if row[10] else {}
+            except (TypeError, ValueError):
+                layer_savings = {}
+            record = AnalyticsRecord(
+                timestamp=row[0], session_id=row[1] or "", provider=row[2] or "",
+                model=row[3] or "", input_tokens_original=row[4] or 0,
+                input_tokens_sent=row[5] or 0, output_tokens=row[6] or 0,
+                tokens_saved=row[7] or 0, latency_ms=row[8] or 0.0,
+                cache_hit=bool(row[9]), layer_savings=layer_savings,
+            )
+            self._records.append(record)
+            self._by_provider[record.provider].append(record)
+
+        self._total_requests = int(counters.get("total_requests", 0))
+        for key, value in counters.items():
+            if key.startswith("provider:"):
+                self._provider_totals[key[len("provider:"):]] = int(value)
+        if rows:
+            logger.info("Analytics: restored %d records", len(rows))
+
+    def flush(self) -> bool:
+        """Write buffered records and the lifetime counters. Returns success.
+
+        Called from the proxy's periodic flusher and at shutdown, alongside
+        the graph flush, so both have the same worst-case exposure.
+        """
+        if self._db_path is None or not self._pending:
+            return True
+        batch, self._pending = self._pending, []
+        try:
+            with self._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO requests VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    [(r.timestamp, r.session_id, r.provider, r.model,
+                      r.input_tokens_original, r.input_tokens_sent,
+                      r.output_tokens, r.tokens_saved, r.latency_ms,
+                      int(r.cache_hit), json.dumps(r.layer_savings))
+                     for r in batch])
+                conn.executemany(
+                    "INSERT OR REPLACE INTO counters VALUES (?,?)",
+                    [("total_requests", self._total_requests)]
+                    + [(f"provider:{p}", n) for p, n in self._provider_totals.items()])
+                conn.execute("DELETE FROM requests WHERE timestamp < ?",
+                             (time.time() - self.MAX_RECORD_AGE_SECONDS,))
+            return True
+        except Exception as e:
+            # Put the batch back so the next flush retries it rather than
+            # dropping the window silently.
+            self._pending = batch + self._pending
+            logger.error("Analytics flush failed (%d records pending): %s",
+                         len(self._pending), e)
+            return False
 
     def record_silent_failure(self, source: str) -> None:
         """Track a failure that would otherwise be invisible outside debug
@@ -150,6 +303,8 @@ class AnalyticsEngine:
         self._by_provider[provider].append(r)
         self._provider_totals[provider] += 1
         self._total_requests += 1
+        if self._db_path is not None:
+            self._pending.append(r)
         self._trim()
 
     def _trim(self) -> None:

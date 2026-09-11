@@ -117,7 +117,9 @@ _checkpoint_mgr = CheckpointManager(
     max_resume_tokens=settings.graph_checkpoint.max_resume_tokens,
 )
 _ownership = OwnershipStore(storage_dir=settings.graph_checkpoint.storage_dir)
-_analytics = AnalyticsEngine()
+# storage_dir gives analytics the same durability the graph has. Without
+# it every savings figure resets to zero on restart — see engine.py.
+_analytics = AnalyticsEngine(storage_dir=settings.graph_checkpoint.storage_dir)
 _output_trimmer = OutputTrimmer()
 _rate_limiter = get_rate_limiter(rate=60, per_seconds=60, burst=10)
 
@@ -452,6 +454,10 @@ async def _periodic_flush() -> None:
         try:
             await asyncio.sleep(FLUSH_INTERVAL_SECONDS)
             await _flush_all_graphs("periodic")
+            # Same timer, same worst-case exposure: a hard kill loses at
+            # most one interval of analytics, not the whole history.
+            if not _analytics.flush():
+                _analytics.record_silent_failure("analytics_flush")
             cycles += 1
             # Roughly hourly at the default 30s interval. Lock files are
             # empty but one is created per session touched and never
@@ -500,6 +506,7 @@ async def lifespan(app: FastAPI):
             pass
         await _drain_background_tasks()
         await _flush_all_graphs("shutdown")
+        _analytics.flush()
         logger.info("TokenMizer stopped")
 
 
