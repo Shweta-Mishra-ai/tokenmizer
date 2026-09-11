@@ -362,6 +362,44 @@ async def create_manual_checkpoint(session_id: str):
         raise _internal_error(f"Manual checkpoint failed for session {session_id}", e)
 
 
+@router.get("/api/sessions", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+async def list_sessions(request: Request):
+    """The caller's sessions, with size and recency, newest first.
+
+    Scoped by ownership: graph_memory.db holds every principal's sessions in
+    one file, and listing from it would show one API key's sessions to
+    another. So the list comes from the ownership store, and per-session
+    detail is read only for ids the caller owns. This is what the dashboard
+    renders — it used to show a hard-coded demo legend because nothing could
+    tell it which sessions existed.
+    """
+    principal = getattr(request.state, "principal", None)
+    if principal is None:
+        raise HTTPException(status_code=503,
+                            detail="Session access could not be evaluated — request rejected.")
+    try:
+        owned = app_module._ownership.sessions_for(principal)
+    except OwnershipUnavailable as e:
+        logger.error(f"Ownership store unavailable listing sessions: {e}")
+        raise HTTPException(status_code=503,
+                            detail="Session ownership state unavailable.")
+
+    sessions = []
+    for session_id in owned:
+        graph = await app_module._get_graph_async(session_id)
+        stats = graph.stats()
+        sessions.append({
+            "session_id": session_id,
+            "node_count": stats.get("node_count", 0),
+            "edge_count": stats.get("edge_count", 0),
+            "by_type": stats.get("by_type", {}),
+            "updated_at": max((n.updated_at for n in graph._nodes.values()), default=0.0),
+            "graph_url": f"/api/graph/{session_id}/html",
+        })
+    sessions.sort(key=lambda s: s["updated_at"], reverse=True)
+    return {"sessions": sessions, "count": len(sessions)}
+
+
 @router.get("/api/checkpoints/{session_id}", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def list_checkpoints(session_id: str):
     return app_module._checkpoint_mgr.list_checkpoints(session_id)

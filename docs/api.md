@@ -19,6 +19,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 | `/api/graph/{id}/obsidian` | GET | Obsidian Canvas export |
 | `/api/cache/stats` | GET | Semantic cache hit rate and utilisation |
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
+| `/api/sessions` | GET | The caller's sessions with node counts, last activity and a link to each graph page. Scoped by ownership: one API key never sees another's sessions |
 | `/api/graph/{id}` | GET | Session graph stats |
 | `/api/graph/{id}/html` | GET | **Interactive graph page** — decision-history timeline, supersession arcs, type/status filters, search, zoom/pan, PNG export. Zero external dependencies (works offline) |
 | `/api/graph/{id}/why?q=` | GET | **Reasoning:** causal chain behind a decision (old → new with trigger/reason/evidence) |
@@ -34,8 +35,8 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 
 ```bash
 tokenmizer serve [--port 8000]
-tokenmizer checkpoint <session-id>
-tokenmizer resume <session-id> [--level standard|full|critical]
+tokenmizer checkpoint [session-id]      # default: the working directory name
+tokenmizer resume [session-id] [--level standard|full|critical]
 tokenmizer stats
 ```
 

@@ -341,7 +341,7 @@ here rather than left to be discovered:
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 846 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 850 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

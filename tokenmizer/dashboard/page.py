@@ -124,7 +124,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <header>
   <div class="status-dot"></div>
-  <div class="logo">🧠 Token<span>Mizer</span></div>
+  <div class="logo">Token<span>Mizer</span></div>
   <div class="tagline">Never lose your AI context again.</div>
 </header>
 
@@ -176,21 +176,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Live graph nodes (demo) -->
+    <!-- Sessions: real data from /api/sessions, each linking to the
+         interactive graph viewer at /api/graph/{id}/html. This card used
+         to be a hard-coded placeholder legend; the viewer existed, but
+         nothing on the dashboard led to it. -->
     <div class="card">
-      <h3>Graph Node Types</h3>
-      <div>
-        <span class="graph-node node-goal">🎯 Goal</span>
-        <span class="graph-node node-task">✅ Task</span>
-        <span class="graph-node node-decision">⚡ Decision</span>
-        <span class="graph-node node-file">📄 File</span>
-        <span class="graph-node node-error">🐛 Error</span>
-        <span class="graph-node node-dependency">📦 Dependency</span>
-        <span class="graph-node node-environment">🔧 Environment</span>
-        <span class="graph-node node-endpoint">🌐 Endpoint</span>
+      <h3>Sessions</h3>
+      <div id="sessions" style="font-size:0.85rem">
+        <span style="color:var(--muted)">Loading…</span>
       </div>
       <div style="margin-top:1rem;font-size:0.8rem;color:var(--muted)">
-        Session graphs are built live, survive restarts, and produce a compact resume block when context fills.
+        Each session is a graph of goals, tasks, decisions, files and errors,
+        built live and kept across restarts. Open one to explore it: decision
+        history with what replaced what and why, filters by type, search, and
+        PNG export.
       </div>
     </div>
   </div>
@@ -279,12 +278,50 @@ async function dashboardFetch(path) {
   return fetch(path, authOptions(apiKey));
 }
 
+function esc(text) {
+  return String(text).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function renderSessions(payload) {
+  const el = document.getElementById('sessions');
+  const sessions = (payload && payload.sessions) || [];
+  if (!sessions.length) {
+    el.innerHTML = '<span style="color:var(--muted)">No sessions yet. ' +
+      'Chat through the proxy with a <code>session_id</code>, or run ' +
+      '<code>tokenmizer checkpoint</code>.</span>';
+    return;
+  }
+  el.innerHTML = sessions.slice(0, 12).map(s => {
+    const t = s.by_type || {};
+    const parts = ['decision','task','error','file'].filter(k => t[k])
+      .map(k => `${t[k]} ${k}${t[k] === 1 ? '' : 's'}`).join(' · ');
+    const when = s.updated_at ? new Date(s.updated_at * 1000).toLocaleString() : '';
+    // session ids and counts are data from the store, so they are escaped;
+    // the href is built from the escaped id too.
+    return `<div style="display:flex;justify-content:space-between;gap:1rem;` +
+      `padding:0.45rem 0;border-bottom:1px solid var(--border)">` +
+      `<div><a href="/api/graph/${encodeURIComponent(s.session_id)}/html" ` +
+      `style="color:var(--accent);text-decoration:none;font-weight:600">` +
+      `${esc(s.session_id)}</a>` +
+      `<div style="color:var(--muted);font-size:0.78rem">${esc(parts || (s.node_count + ' nodes'))}</div></div>` +
+      `<div style="color:var(--muted);font-size:0.78rem;white-space:nowrap">${esc(when)}</div></div>`;
+  }).join('');
+}
+
 async function loadStats() {
   try {
-    const [statsRes, cacheRes] = await Promise.all([
+    const [statsRes, cacheRes, sessionsRes] = await Promise.all([
       dashboardFetch('/api/stats').catch(() => null),
       dashboardFetch('/api/cache/stats').catch(() => null),
+      dashboardFetch('/api/sessions').catch(() => null),
     ]);
+
+    if (sessionsRes && sessionsRes.ok) {
+      renderSessions(await sessionsRes.json());
+    } else {
+      renderSessions(null);
+    }
 
     if (statsRes && statsRes.ok) {
       const s = await statsRes.json();
