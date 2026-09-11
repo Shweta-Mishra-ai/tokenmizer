@@ -341,7 +341,7 @@ here rather than left to be discovered:
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 850 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 946 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it
@@ -368,7 +368,7 @@ Thanks to everyone who has sent a fix upstream:
 ## Support
 
 If TokenMizer is useful to you, please give it a
-[⭐ star](https://github.com/Shweta-Mishra-ai/tokenmizer). It takes a
+[star](https://github.com/Shweta-Mishra-ai/tokenmizer). It takes a
 second and it genuinely helps.
 
 [Sponsorship](https://github.com/sponsors/Shweta-Mishra-ai) is open too,

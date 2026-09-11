@@ -175,7 +175,7 @@ def run_session_benchmark(name: str, session: dict) -> BenchmarkResult:
 
 
 def run_all(save_json: bool = True) -> list[BenchmarkResult]:
-    print("\n🧠 TokenMizer — Checkpoint Accuracy Benchmark")
+    print("\nTokenMizer — Checkpoint Accuracy Benchmark")
     results = []
 
     for name, session in SESSIONS.items():

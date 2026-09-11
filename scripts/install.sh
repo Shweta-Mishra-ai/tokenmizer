@@ -10,13 +10,13 @@ set -euo pipefail
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
-ok()   { echo -e "${GREEN}✅ $*${RESET}"; }
-warn() { echo -e "${YELLOW}⚠️  $*${RESET}"; }
-err()  { echo -e "${RED}❌ $*${RESET}"; exit 1; }
+ok()   { echo -e "${GREEN}PASS: $*${RESET}"; }
+warn() { echo -e "${YELLOW}Note:  $*${RESET}"; }
+err()  { echo -e "${RED}FAIL: $*${RESET}"; exit 1; }
 info() { echo -e "${CYAN}   $*${RESET}"; }
 
 echo ""
-echo -e "${BOLD}🧠 TokenMizer Installer${RESET}"
+echo -e "${BOLD}TokenMizer Installer${RESET}"
 echo -e "   Never lose your AI context again."
 echo "   ─────────────────────────────────"
 
@@ -240,7 +240,7 @@ fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}${BOLD}✅ TokenMizer installed successfully!${RESET}"
+echo -e "${GREEN}${BOLD}PASS: TokenMizer installed successfully!${RESET}"
 echo ""
 echo -e "  ${BOLD}Start server:${RESET}"
 echo -e "    ${CYAN}tokenmizer serve${RESET}"

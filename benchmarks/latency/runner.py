@@ -50,9 +50,9 @@ async def run():
         try:
             r = await client.get(f"{URL}/health", timeout=5)
             assert r.status_code == 200
-            print("  ✅ Server reachable")
+            print("  PASS: Server reachable")
         except Exception as e:
-            print(f"  ❌ Server not reachable: {e}")
+            print(f"  FAIL: Server not reachable: {e}")
             print("     Start with: tokenmizer serve")
             return
 
@@ -74,10 +74,10 @@ async def run():
         if isinstance(r, float):
             latencies.append(r)
         else:
-            print(f"  ⚠️  Request failed: {r}")
+            print(f"  Note:  Request failed: {r}")
 
     if not latencies:
-        print("  ❌ No successful requests")
+        print("  FAIL: No successful requests")
         return
 
     latencies.sort()

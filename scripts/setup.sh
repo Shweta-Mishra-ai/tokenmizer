@@ -6,34 +6,34 @@ set -e
 BOLD="\033[1m"; GREEN="\033[32m"; YELLOW="\033[33m"; CYAN="\033[36m"; RESET="\033[0m"
 
 echo ""
-echo -e "${BOLD}🧠 TokenMizer Setup${RESET}"
+echo -e "${BOLD}TokenMizer Setup${RESET}"
 echo -e "Never lose your AI context again."
 echo "──────────────────────────────────"
 
 # Python check
 python3 -c "import sys; assert sys.version_info >= (3,10), 'Need Python 3.10+'" 2>/dev/null || {
-  echo "❌ Python 3.10+ required. Install from https://python.org"; exit 1
+  echo "FAIL: Python 3.10+ required. Install from https://python.org"; exit 1
 }
-echo -e "✅ Python $(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+echo -e "PASS: Python $(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 
 # Install
 echo -e "\n${CYAN}Installing TokenMizer...${RESET}"
 pip install "tokenmizer[cache]" -q 2>/dev/null || pip3 install "tokenmizer[cache]" -q
-echo -e "✅ TokenMizer installed"
+echo -e "PASS: TokenMizer installed"
 
 # Detect provider
 echo -e "\n${CYAN}Detecting provider...${RESET}"
 PROVIDER=""; MODEL=""
 if   [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$TOKENMIZER_ANTHROPIC_API_KEY" ]; then
-  PROVIDER="anthropic"; MODEL="claude-sonnet-4-6"; echo -e "✅ Anthropic detected"
+  PROVIDER="anthropic"; MODEL="claude-sonnet-4-6"; echo -e "PASS: Anthropic detected"
 elif [ -n "$OPENAI_API_KEY" ] || [ -n "$TOKENMIZER_OPENAI_API_KEY" ]; then
-  PROVIDER="openai"; MODEL="gpt-4o"; echo -e "✅ OpenAI detected"
+  PROVIDER="openai"; MODEL="gpt-4o"; echo -e "PASS: OpenAI detected"
 elif [ -n "$DEEPSEEK_API_KEY" ] || [ -n "$TOKENMIZER_DEEPSEEK_API_KEY" ]; then
-  PROVIDER="deepseek"; MODEL="deepseek-chat"; echo -e "✅ DeepSeek detected"
+  PROVIDER="deepseek"; MODEL="deepseek-chat"; echo -e "PASS: DeepSeek detected"
 elif curl -sf http://localhost:11434/api/tags &>/dev/null; then
-  PROVIDER="ollama"; MODEL="llama3"; echo -e "✅ Ollama detected (free, local)"
+  PROVIDER="ollama"; MODEL="llama3"; echo -e "PASS: Ollama detected (free, local)"
 else
-  echo -e "${YELLOW}⚠️  No provider found. Install Ollama (free): https://ollama.ai${RESET}"
+  echo -e "${YELLOW}Note:  No provider found. Install Ollama (free): https://ollama.ai${RESET}"
   PROVIDER="anthropic"; MODEL="claude-sonnet-4-6"
 fi
 
@@ -52,9 +52,9 @@ cache:
   enabled: true
 state_backend: memory
 YAML
-  echo -e "✅ Config written: tokenmizer.yaml"
+  echo -e "PASS: Config written: tokenmizer.yaml"
 else
-  echo -e "✅ Config exists — skipping"
+  echo -e "PASS: Config exists — skipping"
 fi
 
 # Claude Code MCP (if claude is installed)
@@ -76,11 +76,11 @@ if command -v claude &>/dev/null && [ ! -f ".mcp.json" ]; then
   }
 }
 JSON
-  echo -e "✅ .mcp.json written — Claude Code MCP ready"
+  echo -e "PASS: .mcp.json written — Claude Code MCP ready"
 fi
 
 echo ""
-echo -e "${GREEN}${BOLD}✅ Ready!${RESET}"
+echo -e "${GREEN}${BOLD}PASS: Ready!${RESET}"
 echo ""
 echo -e "  Start:     ${CYAN}tokenmizer serve${RESET}"
 echo -e "  Dashboard: ${CYAN}http://localhost:8000${RESET}"
