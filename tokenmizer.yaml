@@ -80,6 +80,11 @@ cache:
 terse_output:
   enabled: true
   level: full                 # lite | full | ultra
+  style: terse                # terse = shorter answers
+                              # minimal = shorter answers and smaller
+                              #   changes: reuse before writing, stdlib
+                              #   before a dependency, shortest diff that
+                              #   works. One style at a time.
 
 # ── Context Routing ───────────────────────────────────────────────────────────
 # NOT IMPLEMENTED. Nothing reads these fields — setting enabled: true

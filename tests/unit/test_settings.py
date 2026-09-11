@@ -158,3 +158,43 @@ class TestNestedSubconfigsDoNotReadBareEnvVars:
         monkeypatch.setenv("TOKENMIZER_TERSE_OUTPUT__LEVEL", "ultra")
         s = Settings()
         assert s.terse_output.level == "ultra"
+
+
+class TestTerseStyle:
+    """terse_output.style selects which instruction the proxy injects."""
+
+    def test_default_style_is_terse_and_unchanged(self):
+        from tokenmizer.compression.engine import CompressionPipeline
+        from tokenmizer.config.settings import TerseOutputSettings
+
+        assert TerseOutputSettings().style == "terse"
+        pipeline = CompressionPipeline()
+        assert pipeline.terse_system_prompt("full") == \
+               pipeline.terse_system_prompt("full", style="terse")
+
+    def test_minimal_style_asks_for_smaller_changes_not_just_shorter_text(self):
+        from tokenmizer.compression.engine import CompressionPipeline
+
+        prompt = CompressionPipeline().terse_system_prompt("full", style="minimal")
+        for phrase in ("reuse", "standard library", "shortest diff", "root cause"):
+            assert phrase in prompt, phrase
+        assert "Preserve code, paths and URLs exactly" in prompt
+
+    def test_minimal_prompt_is_paid_for_every_turn_so_it_stays_short(self):
+        from tokenmizer.compression.engine import CompressionPipeline
+        from tokenmizer.core.tokenizer import count_tokens
+
+        prompt = CompressionPipeline().terse_system_prompt("full", style="minimal")
+        assert count_tokens(prompt, "gpt-4o") < 140, (
+            "the style prompt is injected on every request; every token of it "
+            "is a token spent to save tokens"
+        )
+
+    def test_unknown_style_is_rejected_at_load(self):
+        import pydantic
+        import pytest
+
+        from tokenmizer.config.settings import TerseOutputSettings
+
+        with pytest.raises(pydantic.ValidationError):
+            TerseOutputSettings(style="verbose")

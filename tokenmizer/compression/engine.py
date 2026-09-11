@@ -731,8 +731,28 @@ class CompressionPipeline:
 
         return result, total_saved
 
-    def terse_system_prompt(self, level: str = "full") -> str:
-        """Return terse-output instruction to inject into system prompt."""
+    def terse_system_prompt(self, level: str = "full", style: str = "terse") -> str:
+        """Return the output instruction to inject into the system prompt.
+
+        `style="minimal"` asks for smaller changes as well as shorter
+        answers. Every token of this prompt is spent on every turn, so it is
+        the compact statement of the rule and nothing more; the saving it
+        buys is in what the model writes back, and that is measured after
+        the fact by the output trimmer's numbers, never estimated here.
+        """
+        if style == "minimal":
+            return (
+                "Work like a senior engineer who writes as little as possible. "
+                "Before writing code: reuse what already exists in this codebase, "
+                "then the standard library, then an installed dependency; add a "
+                "new one only when a few lines cannot do it. Ship the shortest "
+                "diff that works. No speculative abstractions, no scaffolding "
+                "for later, no config for a value that never changes. Fix the "
+                "root cause once where all callers pass through, not the symptom "
+                "at each call site. Answer first, then at most three short lines "
+                "on what was skipped and when to add it. No preamble, no closing. "
+                "Preserve code, paths and URLs exactly."
+            )
         levels = {
             "lite": (
                 "Be concise. No preamble (e.g., 'Sure!', 'Great question!'). "
