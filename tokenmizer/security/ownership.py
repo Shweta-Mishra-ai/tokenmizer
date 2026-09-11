@@ -158,6 +158,27 @@ class OwnershipStore:
             raise OwnershipUnavailable(str(e)) from e
         return row[0] if row else None
 
+    def sessions_for(self, principal: str) -> list[str]:
+        """Every session `principal` owns, newest claim first.
+
+        The only correct source for a session list: graph_memory.db holds
+        every principal's sessions in one file, so listing from there would
+        show one API key's sessions to another. Ownership is the boundary,
+        so ownership is what is listed.
+        """
+        try:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT session_id FROM session_owners WHERE owner=? "
+                    "ORDER BY created_at DESC", (principal,)
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            raise OwnershipUnavailable(str(e)) from e
+        return [r[0] for r in rows]
+
     def check_access(self, session_id: str, principal: str, *, claim: bool = True) -> None:
         """Raise SessionAccessDenied if `principal` may not touch this
         session. With claim=True an unowned session is claimed.
