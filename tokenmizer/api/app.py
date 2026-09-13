@@ -1040,12 +1040,19 @@ async def _call_provider(
 
 
 def _stream_response(req, messages, model, user_content, session_id,
-                     savings, orig_input_tokens) -> StreamingResponse:
+                     savings, orig_input_tokens, raw_messages=None) -> StreamingResponse:
     """True SSE passthrough (OpenAI chat.completion.chunk format).
 
     Cache hits stream as a single chunk. After the stream closes, analytics
     and the semantic-cache write run on the accumulated text — same
     bookkeeping as the non-stream path, minus output trimming.
+
+    Transform-rejected fallback, matching _call_provider(): if the
+    transformed `messages` fail before any content has reached the
+    client, retry once with `raw_messages`. Once content has streamed,
+    a failure can never retry — the client already has an unrecoverable
+    partial answer, and resending would duplicate or interleave output —
+    so it is always the existing mid-stream error event.
     """
     import json as _json
 
@@ -1064,18 +1071,22 @@ def _stream_response(req, messages, model, user_content, session_id,
     resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
-    def _chunk(delta: dict, finish: str | None = None) -> str:
-        return "data: " + _json.dumps({
+    def _chunk(delta: dict, finish: str | None = None, extra: dict | None = None) -> str:
+        payload = {
             "id": resp_id, "object": "chat.completion.chunk",
             "created": created, "model": model, "session_id": session_id,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-        }) + "\n\n"
+        }
+        if extra:
+            payload.update(extra)
+        return "data: " + _json.dumps(payload) + "\n\n"
 
     async def _gen():
         full_text = ""
         t0 = time.monotonic()
         cache_hit = False
         stream_failed = False
+        transform_rejected = False
         yield _chunk({"role": "assistant"})
         try:
             cached = (
@@ -1090,14 +1101,58 @@ def _stream_response(req, messages, model, user_content, session_id,
                 full_text = cached.response
                 yield _chunk({"content": full_text})
             else:
-                async for piece in provider.chat_stream(
-                    messages=messages,
-                    model=model,
-                    max_tokens=req.max_tokens or 4096,
-                    **_sampling_kwargs(req),
-                ):
-                    full_text += piece
-                    yield _chunk({"content": piece})
+                candidates = [messages]
+                if raw_messages is not None and raw_messages != messages:
+                    candidates.append(raw_messages)
+
+                last_error: Exception | None = None
+                succeeded = False
+                for attempt, candidate in enumerate(candidates):
+                    last_error = None
+                    try:
+                        async for piece in provider.chat_stream(
+                            messages=candidate,
+                            model=model,
+                            max_tokens=req.max_tokens or 4096,
+                            **_sampling_kwargs(req),
+                        ):
+                            full_text += piece
+                            yield _chunk({"content": piece})
+                        succeeded = True
+                        transform_rejected = attempt > 0
+                        break
+                    except Exception as e:
+                        last_error = e
+                        # Content already reached the client — an
+                        # unrecoverable partial answer is out the door, so
+                        # retrying now would duplicate or interleave
+                        # output. This failure is final regardless of
+                        # attempts left.
+                        if full_text:
+                            break
+                        if attempt == 0 and len(candidates) > 1:
+                            correlation_id = uuid.uuid4().hex[:12]
+                            logger.warning(
+                                f"Provider rejected the transformed stream "
+                                f"request [{correlation_id}] for session "
+                                f"{session_id!r}; retrying with the "
+                                f"untransformed messages: {type(e).__name__}"
+                            )
+                            continue
+                        break
+
+                if not succeeded:
+                    raise last_error
+                if transform_rejected:
+                    logger.error(
+                        f"TokenMizer's transformed stream request was "
+                        f"rejected but the untransformed one succeeded for "
+                        f"session {session_id!r} — a pipeline layer "
+                        f"produced a request the provider will not accept. "
+                        f"Original error: {last_error}"
+                    )
+                    _analytics.record_silent_failure("transform_rejected")
+                    savings.clear()
 
         except ProviderError as e:
             # Mid-stream failure: SSE can't change the status code anymore —
@@ -1118,13 +1173,22 @@ def _stream_response(req, messages, model, user_content, session_id,
                 {"error": {"message": f"Stream failed (ref: {correlation_id})",
                            "type": "internal_error"}}
             ) + "\n\n"
-        yield _chunk({}, finish="stop")
+        yield _chunk(
+            {}, finish="stop",
+            extra={"tokenmizer": {"fallback": {"transform_rejected": True}}}
+            if transform_rejected else None,
+        )
         yield "data: [DONE]\n\n"
 
-        # Post-stream bookkeeping
+        # Post-stream bookkeeping. When the transformed request was
+        # rejected, what was actually SENT is raw_messages — mirrors
+        # _call_provider()'s `sent_input_tokens = orig_input_tokens`.
         latency_ms = (time.monotonic() - t0) * 1000
         output_tokens = count_tokens(full_text, model)
-        input_tokens = count_messages_tokens(messages, model)
+        input_tokens = (
+            orig_input_tokens if transform_rejected
+            else count_messages_tokens(messages, model)
+        )
         # Never cache a response that didn't finish. `full_text` after a
         # mid-stream failure holds however many tokens arrived before the
         # error — writing that to the cache would serve a silently
@@ -1274,7 +1338,8 @@ async def chat_completions(req: ChatRequest, request: Request):
     # input-side layers (file intel, compression, graph context) still apply.
     if req.stream:
         return _stream_response(req, messages, model, user_content,
-                                session_id, savings, orig_input_tokens)
+                                session_id, savings, orig_input_tokens,
+                                raw_messages=raw_messages)
 
     # Layer 5: call provider (or return cache hit)
     fallback: dict = {}
