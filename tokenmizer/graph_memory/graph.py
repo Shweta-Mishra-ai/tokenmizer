@@ -1124,6 +1124,7 @@ class GraphMemory:
             decision_tracking_failures=self._decision_tracking_failures,
             persistence_broken=self._persistence_broken,
             data_loss_detected=self._data_loss_detected,
+            load_failed=self._load_failed,
         )
         # Return as dict for JSON serialization — DTO used for type safety at boundary
         from dataclasses import asdict

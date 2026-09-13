@@ -55,6 +55,12 @@ class GraphStatsDTO:
     # that no longer exists. Without it, a health check watching
     # node_count cannot tell "new session" from "we lost your memory".
     data_loss_detected: bool = False
+    # True when the last SQLite read failed (lock contention, mostly) and
+    # this instance holds an empty graph that does not reflect what is
+    # stored. persist() refuses to write while it is set, so nothing is
+    # lost — but a node_count of 0 under this flag is not the truth, and
+    # a page rendering it must say "could not read", not "empty".
+    load_failed: bool = False
 
 
 # ── Checkpoint layer ──────────────────────────────────────────────────────────
