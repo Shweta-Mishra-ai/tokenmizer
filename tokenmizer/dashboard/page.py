@@ -273,6 +273,33 @@ function esc(text) {
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// A link cannot carry the Authorization header the other dashboard
+// requests send, so with api_key set the graph page answered 401 straight
+// from the dashboard. Without a stored key the anchor navigates natively
+// (dev mode, middle-click, copy-link all keep working). With one, the tab
+// is opened synchronously inside the click — after an await the user
+// gesture is gone and popup blocking eats it — then the page is fetched
+// with the key and written into that tab (or this one, where popups are
+// blocked). The page is self-contained, so nothing in it needs auth, and
+// writing the document avoids a blob: navigation, which embedded browsers
+// refuse. The key never goes in a URL.
+async function openGraph(ev) {
+  const link = ev.target.closest('a[data-graph]');
+  if (!link || !getStoredApiKey()) return;
+  ev.preventDefault();
+  const tab = window.open('', '_blank');
+  try {
+    const r = await dashboardFetch(link.getAttribute('href'));
+    if (!r.ok) { if (tab) tab.close(); return; }
+    const html = await r.text();
+    const doc = tab ? tab.document : document;
+    doc.open(); doc.write(html); doc.close();
+  } catch (e) {
+    if (tab) tab.close();
+    console.warn('Graph page load failed:', e);
+  }
+}
+
 function renderSessions(payload) {
   const el = document.getElementById('sessions');
   const sessions = (payload && payload.sessions) || [];
@@ -291,7 +318,7 @@ function renderSessions(payload) {
     // the href is built from the escaped id too.
     return `<div style="display:flex;justify-content:space-between;gap:1rem;` +
       `padding:0.45rem 0;border-bottom:1px solid var(--border)">` +
-      `<div><a href="/api/graph/${encodeURIComponent(s.session_id)}/html" ` +
+      `<div><a href="/api/graph/${encodeURIComponent(s.session_id)}/html" data-graph ` +
       `style="color:var(--accent);text-decoration:none;font-weight:600">` +
       `${esc(s.session_id)}</a>` +
       `<div style="color:var(--muted);font-size:0.78rem">${esc(parts || (s.node_count + ' nodes'))}</div></div>` +
@@ -334,6 +361,7 @@ async function loadStats() {
   }
 }
 
+document.getElementById('sessions').addEventListener('click', openGraph);
 loadStats();
 setInterval(loadStats, 15000);
 </script>
