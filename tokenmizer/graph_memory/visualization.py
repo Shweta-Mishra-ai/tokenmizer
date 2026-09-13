@@ -90,11 +90,59 @@ _EDGE_LABEL = {
 }
 
 
+# Community colors for the graph page. Distinct from _TYPE_COLOR on purpose:
+# the page fills a node by community and rings it by type, so the two
+# palettes must not be confusable. Index mod len().
+_COMMUNITY_PALETTE = (
+    "#7c6af7", "#5ee7c8", "#f472b6", "#fbbf24", "#60a5fa", "#4ade80",
+    "#fb923c", "#c084fc", "#22d3ee", "#a3e635", "#f87171", "#e879f9",
+)
+_UNCLUSTERED_COLOR = "#8b8fa8"
+_UNCLUSTERED_NAME = "Unclustered"
+
+
+def _communities(vis_nodes: list[dict], vis_edges: list[dict]) -> list[dict]:
+    """Assign each node a community index (mutates the node dicts) and
+    return the community list for meta. A community is named after its
+    most important, best-connected member \u2014 the label a person would
+    use to refer to that part of the graph."""
+    from tokenmizer.graph_memory.communities import detect_communities
+
+    assignment = detect_communities(
+        [n["id"] for n in vis_nodes],
+        [(e["source"], e["target"], e["weight"]) for e in vis_edges],
+    )
+    degree: dict[str, int] = {}
+    for e in vis_edges:
+        degree[e["source"]] = degree.get(e["source"], 0) + 1
+        degree[e["target"]] = degree.get(e["target"], 0) + 1
+
+    members: dict[int, list[dict]] = {}
+    for n in vis_nodes:
+        n["community"] = assignment[n["id"]]
+        members.setdefault(n["community"], []).append(n)
+
+    communities = []
+    for index in sorted(members):
+        group = members[index]
+        singleton_group = all(degree.get(n["id"], 0) == 0 for n in group)
+        if singleton_group:
+            name, color = _UNCLUSTERED_NAME, _UNCLUSTERED_COLOR
+        else:
+            lead = min(group, key=lambda n: (-n["importance"], -degree.get(n["id"], 0), n["id"]))
+            name = lead["full_label"][:40]
+            color = _COMMUNITY_PALETTE[index % len(_COMMUNITY_PALETTE)]
+        communities.append({"id": index, "name": name, "color": color, "count": len(group)})
+    return communities
+
+
 def to_vis_json(graph: "GraphMemory") -> dict:
     """
     Export graph as D3-compatible JSON: {nodes, edges, transitions, meta}.
-    Node colors and sizes encode type + status.
-    Only exports active (non-evicted, non-archived) nodes.
+    Node colors and sizes encode type + status; `community` groups nodes
+    by detected cluster (see communities.py), listed in meta.communities.
+    Only exports non-evicted nodes. meta also carries the health fields
+    the graph page needs to explain an empty graph honestly.
     """
     vis_nodes = []
     active_ids: set[str] = set()
@@ -131,6 +179,8 @@ def to_vis_json(graph: "GraphMemory") -> dict:
             "color":  _EDGE_COLOR.get(e.type.value, "#4a4d5e"),
         })
 
+    communities = _communities(vis_nodes, vis_edges)
+
     vis_transitions = [
         {
             "id":               t.id,
@@ -161,6 +211,12 @@ def to_vis_json(graph: "GraphMemory") -> dict:
                 for t in _TYPE_COLOR
                 if any(n["type"] == t for n in vis_nodes)
             },
+            "communities":        communities,
+            # Why the graph may be empty — the page's only data path.
+            "processed_messages": len(graph._processed_hashes),
+            "load_failed":        graph._load_failed,
+            "persistence_broken": graph._persistence_broken,
+            "data_loss_detected": graph._data_loss_detected,
         },
     }
 
