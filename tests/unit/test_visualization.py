@@ -18,11 +18,33 @@ it runs in whoever opens the shared file.
 from __future__ import annotations
 
 from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
+from tokenmizer.graph_memory.types import EdgeType
 from tokenmizer.graph_memory.visualization import (
+    _EDGE_COLOR,
+    _TYPE_COLOR,
+    _TYPE_SIZE,
     to_obsidian_canvas,
     to_share_html,
     to_vis_json,
 )
+
+
+class TestColorMaps:
+    """The maps are the only place a node type gets a color, and
+    to_vis_json's meta.by_type iterates _TYPE_COLOR — a type missing from
+    it was silently dropped from the counts as well as drawn grey."""
+
+    def test_every_node_type_has_a_color(self):
+        assert set(_TYPE_COLOR) == {t.value for t in NodeType}
+
+    def test_every_node_type_has_a_size(self):
+        assert set(_TYPE_SIZE) == {t.value for t in NodeType}
+
+    def test_edge_colors_match_edge_type(self):
+        assert set(_EDGE_COLOR) == {e.value for e in EdgeType}
+
+    def test_type_colors_are_distinct(self):
+        assert len(set(_TYPE_COLOR.values())) == len(_TYPE_COLOR)
 
 
 def _graph(tmp_path, session_id="t-viz"):

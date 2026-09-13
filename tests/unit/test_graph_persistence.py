@@ -130,6 +130,16 @@ class TestPersistenceHealthSignals:
         assert stats["decision_tracking_failures"] == 0
         assert stats["persistence_broken"] is False
 
+    def test_stats_reports_load_failed(self, graph):
+        """_load_failed (set when the SQLite read fails, e.g. lock
+        contention) leaves an EMPTY in-memory graph that persist() refuses
+        to write. stats() reported that instance as healthy with
+        node_count 0, so a page reading it could not tell 'nothing stored'
+        from 'could not read what is stored'."""
+        assert graph.stats()["load_failed"] is False
+        graph._load_failed = True
+        assert graph.stats()["load_failed"] is True
+
 
 class TestDirectMutationRequiresForce:
     """

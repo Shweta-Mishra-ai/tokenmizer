@@ -68,16 +68,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .session-progress { width: 100%; height: 4px; background: var(--border); border-radius: 2px; margin: 0.5rem 0; }
   .session-bar { height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
 
-  .graph-node { display: inline-flex; align-items: center; gap: 0.4rem; padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 500; margin: 3px; }
-  .node-task       { background: #1a2e1a; color: var(--green); }
-  .node-decision   { background: #1e1a40; color: #a78bfa; }
-  .node-file       { background: #1a2040; color: var(--accent); }
-  .node-error      { background: #2e1a1a; color: var(--red); }
-  .node-dependency { background: #2a2010; color: var(--yellow); }
-  .node-environment { background: #1a2a2a; color: var(--accent2); }
-  .node-goal       { background: #2a1a2e; color: #e879f9; }
-  .node-endpoint   { background: #101a2e; color: #60a5fa; }
-
   .endpoint-box {
     background: var(--bg);
     border: 1px solid var(--border);

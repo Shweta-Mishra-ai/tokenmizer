@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from tokenmizer.graph_memory.graph import GraphMemory
 
 
+# One entry per NodeType, enforced by tests/unit/test_visualization.py:
+# to_vis_json's meta.by_type iterates this map, so a type missing here
+# was not only drawn grey but dropped from the counts as well.
 _TYPE_COLOR = {
     "goal":        "#e879f9",
     "task":        "#4ade80",
@@ -26,11 +29,17 @@ _TYPE_COLOR = {
     "environment": "#5ee7c8",
     "endpoint":    "#38bdf8",
     "schema":      "#fb923c",
+    "concept":     "#c084fc",
+    "api":         "#22d3ee",
+    "project":     "#f472b6",
+    "agent":       "#a3e635",
+    "test":        "#facc15",
 }
 
 _TYPE_SIZE = {
-    "goal": 22, "decision": 18, "task": 14,
-    "error": 14, "endpoint": 12, "schema": 12,
+    "goal": 22, "decision": 18, "project": 16, "task": 14,
+    "error": 14, "endpoint": 12, "schema": 12, "api": 12,
+    "concept": 11, "agent": 11, "test": 10,
     "file": 10, "dependency": 9, "environment": 9,
 }
 
@@ -40,14 +49,18 @@ _STATUS_OPACITY = {
     "modified": 0.5, "invalidated": 0.2,
 }
 
+# One entry per EdgeType (same test). The previous map carried
+# "references"/"derived_from", which no edge has ever had, and lacked
+# fixes/blocks/conflicts_with, which fell through to the fallback grey.
 _EDGE_COLOR = {
-    "related_to":   "#8b8fa8",
-    "implements":   "#60a5fa",
-    "part_of":      "#a78bfa",
-    "depends_on":   "#fbbf24",
-    "supersedes":   "#f87171",
-    "references":   "#5ee7c8",
-    "derived_from": "#fb923c",
+    "related_to":     "#8b8fa8",
+    "implements":     "#60a5fa",
+    "part_of":        "#a78bfa",
+    "depends_on":     "#fbbf24",
+    "supersedes":     "#f87171",
+    "fixes":          "#4ade80",
+    "blocks":         "#f87171",
+    "conflicts_with": "#fb923c",
 }
 
 _CLUSTER_CENTERS: dict[str, tuple[float, float]] = {
@@ -66,13 +79,14 @@ _TYPE_COLOR_OBS = {
     "goal": "6", "decision": "3", "task": "1",
     "file": "5", "error": "1", "endpoint": "4",
     "schema": "2", "dependency": "3", "environment": "4",
+    "concept": "3", "api": "4", "project": "6", "agent": "1", "test": "2",
 }
 
 _EDGE_LABEL = {
     "related_to": "related", "implements": "implements",
     "part_of": "part of", "depends_on": "depends on",
-    "supersedes": "supersedes", "references": "ref",
-    "derived_from": "derived",
+    "supersedes": "supersedes", "fixes": "fixes",
+    "blocks": "blocks", "conflicts_with": "conflicts with",
 }
 
 
