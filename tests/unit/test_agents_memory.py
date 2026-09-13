@@ -95,6 +95,45 @@ def test_no_derivable_session_id_is_an_explicit_error(tmp_path, monkeypatch):
         Memory(storage_dir=str(tmp_path))
 
 
+def test_search_results_are_tagged_with_their_own_session_id(memory):
+    memory.add(SESSION)
+    results = memory.search("postgres")
+    assert results
+    assert all(r["session_id"] == "agent-test" for r in results)
+
+
+def test_cross_session_recall_is_off_by_default(tmp_path):
+    a = Memory("cs-a", storage_dir=str(tmp_path))
+    b = Memory("cs-b", storage_dir=str(tmp_path))
+    a.add(SESSION)
+    assert b.search("orders") == []
+
+
+def test_cross_session_recall_finds_other_sessions_when_enabled(tmp_path):
+    a = Memory("cs-a2", storage_dir=str(tmp_path), cross_session_recall=True)
+    b = Memory("cs-b2", storage_dir=str(tmp_path), cross_session_recall=True)
+    a.add(SESSION)
+
+    results = b.search("what are we storing orders in")
+
+    assert results, "expected session cs-a2's node to be found from cs-b2"
+    assert any(r["session_id"] == "cs-a2" for r in results)
+    assert any("postgres" in r["label"].lower() for r in results)
+
+
+def test_cross_session_recall_defaults_from_settings(tmp_path, monkeypatch):
+    import tokenmizer.config.settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module.get_settings().graph_checkpoint, "cross_session_recall", True
+    )
+    a = Memory("cs-a3", storage_dir=str(tmp_path))
+    b = Memory("cs-b3", storage_dir=str(tmp_path))
+    a.add(SESSION)
+
+    assert b.search("orders"), "Memory() should follow the settings default when not overridden"
+
+
 def test_works_with_no_server_no_key_no_network(memory, monkeypatch):
     """The point of the module. If anything here tries the network it is a
     regression."""

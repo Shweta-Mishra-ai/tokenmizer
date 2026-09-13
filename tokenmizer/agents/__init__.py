@@ -39,6 +39,8 @@ class Memory:
         session_id: Optional[str] = None,
         storage_dir: str = "./checkpoints",
         semantic_retrieval: bool = False,
+        cross_session_recall: Optional[bool] = None,
+        principal: Optional[str] = None,
     ):
         if not session_id:
             from tokenmizer.core.session import default_session_id
@@ -49,10 +51,40 @@ class Memory:
                     "usable name to derive one from; pass session_id explicitly."
                 )
         self.session_id = session_id
+        self._storage_dir = storage_dir
         self._graph = GraphMemory(
             session_id, storage_dir=storage_dir,
             semantic_retrieval=semantic_retrieval,
         )
+        if cross_session_recall is None:
+            from tokenmizer.config.settings import get_settings
+            cross_session_recall = get_settings().graph_checkpoint.cross_session_recall
+        self._cross_session_recall = cross_session_recall
+        # No API key exists at this layer (Memory works with no server, no
+        # key, no network — see the module docstring), so there is no
+        # credential to derive a principal from the way api/app.py does.
+        # DEV_PRINCIPAL is security/ownership.py's own sentinel for exactly
+        # this case: every caller with no credential is the same principal.
+        # Passing an explicit `principal` is only useful when several
+        # independent local callers share one storage_dir and must not see
+        # each other's sessions in cross-session recall.
+        if principal is None:
+            from tokenmizer.security.ownership import DEV_PRINCIPAL
+            principal = DEV_PRINCIPAL
+        self._principal = principal
+        # Claimed unconditionally, not gated by cross_session_recall: the
+        # proxy claims ownership for every chat request the same way (see
+        # api/app.py), and cross-session recall can only discover a
+        # session that was claimed. Gating this on the setting would mean
+        # a session created while the setting was off stays invisible
+        # forever even after it's turned on. Best-effort — a store that
+        # can't be written just means this session won't be discoverable
+        # from another one; Memory has no request to fail closed on.
+        try:
+            from tokenmizer.security.ownership import OwnershipStore
+            OwnershipStore(storage_dir=storage_dir).claim(session_id, principal)
+        except Exception:
+            pass
 
     # ── Write ────────────────────────────────────────────────────────────────
 
@@ -79,17 +111,65 @@ class Memory:
 
         `types` filters to node types by name ("decision", "error", "task",
         "file", "goal", ...). Each result carries the fields an agent can
-        act on; the graph's internal ids stay internal.
+        act on, plus `session_id` — the session it was retrieved from,
+        always the current one unless cross_session_recall is on (see
+        __init__ and Settings.graph_checkpoint.cross_session_recall), in
+        which case it may name one of this principal's other sessions.
+        The graph's internal ids stay internal.
         """
         wanted = {NodeType(t) for t in types} if types else None
+        pool_k = top_k * 2 if wanted else top_k
+        if self._cross_session_recall:
+            pairs = self._cross_session_pool(query, pool_k)
+        else:
+            pairs = [(n, self.session_id) for n in self._graph.query(query, top_k=pool_k)]
         results = []
-        for node in self._graph.query(query, top_k=top_k * 2 if wanted else top_k):
+        for node, session_id in pairs:
             if wanted and node.type not in wanted:
                 continue
-            results.append(self._to_dict(node))
+            d = self._to_dict(node)
+            d["session_id"] = session_id
+            results.append(d)
             if len(results) >= top_k:
                 break
         return results
+
+    def _cross_session_pool(self, query: str, top_k: int) -> list[tuple]:
+        from tokenmizer.graph_memory.cross_session import query_across_sessions
+        return query_across_sessions(
+            self._graph, self._other_session_ids(), query, top_k,
+            self._load_other_graph,
+        )
+
+    def _other_session_ids(self) -> list[str]:
+        """Every OTHER session this principal owns, per security/ownership.py.
+
+        Claims this session for self._principal if it is not yet owned by
+        anyone — Memory has no HTTP-layer request to deny access on, so
+        unlike api/app.py this never rejects; a session already claimed by
+        a different principal (e.g. through the proxy) is simply left
+        alone and contributes nothing here.
+        """
+        from tokenmizer.security.ownership import OwnershipStore
+
+        store = OwnershipStore(storage_dir=self._storage_dir)
+        try:
+            owner = store.claim(self.session_id, self._principal)
+        except Exception:
+            return []
+        if owner != self._principal:
+            return []
+        try:
+            sessions = store.sessions_for(owner)
+        except Exception:
+            return []
+        return [sid for sid in sessions if sid != self.session_id]
+
+    def _load_other_graph(self, session_id: str) -> GraphMemory:
+        return GraphMemory(
+            session_id, storage_dir=self._storage_dir,
+            semantic_retrieval=self._graph.semantic_retrieval,
+        )
 
     def decisions(self) -> list[dict]:
         """Every active decision, most important first."""
