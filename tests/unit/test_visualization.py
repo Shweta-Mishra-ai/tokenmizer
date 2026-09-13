@@ -73,6 +73,30 @@ class TestToVisJson:
         vis = to_vis_json(g)
         assert nid not in {n["id"] for n in vis["nodes"]}
 
+    def test_nodes_carry_community_and_meta_lists_them(self, tmp_path):
+        from tokenmizer.graph_memory.types import EdgeType
+
+        g = _graph(tmp_path)
+        ids = {n.type.value: nid for nid, n in g._nodes.items()}
+        g.add_edge(ids["goal"], ids["decision"], EdgeType.IMPLEMENTS)
+        vis = to_vis_json(g)
+
+        assert all("community" in n for n in vis["nodes"])
+        coms = vis["meta"]["communities"]
+        assert coms[0]["count"] == 2, "goal and decision are linked, so they cluster"
+        assert {"id", "name", "color", "count"} <= set(coms[0])
+        assert coms[0]["name"] in {"Build auth service", "Use PostgreSQL for storage"}
+        assert coms[-1]["name"] == "Unclustered"
+        assert coms[-1]["count"] == 1
+
+    def test_meta_carries_the_health_fields_the_page_needs(self, tmp_path):
+        vis = to_vis_json(_graph(tmp_path))
+        meta = vis["meta"]
+        assert meta["processed_messages"] == 0
+        assert meta["load_failed"] is False
+        assert meta["persistence_broken"] is False
+        assert meta["data_loss_detected"] is False
+
 
 class TestToObsidianCanvas:
 
