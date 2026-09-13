@@ -229,7 +229,7 @@ measured before/after.
 Known, unchanged: `/api/sessions` instantiates every owned graph to count
 nodes, which is slow on a store with hundreds of sessions.
 
-Suite is now 1017 tests.
+Suite is now 1074 tests.
 
 ## [0.5.4] — 2026-08-13 — decision and error extraction, targeted at an external benchmark
 

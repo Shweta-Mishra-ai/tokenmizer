@@ -225,55 +225,6 @@ def _get_extraction_provider():
         return None
     return _extraction_provider
 
-    from tokenmizer.providers.providers import AnthropicProvider, OpenAIProvider
-
-    provider = settings.provider.lower()
-    key = settings.get_api_key_for_provider(provider)
-
-    # `graph_checkpoint.extraction_model` is documented as "leave empty =
-    # auto-pick cheapest model for your provider", implying a non-empty
-    # value is honoured. Nothing read it — the models below were
-    # hardcoded, so anyone pinning a specific extraction model was
-    # silently ignored. An explicit value now wins; empty keeps the
-    # documented auto-pick.
-    override = (settings.graph_checkpoint.extraction_model or "").strip()
-
-    if provider in ("anthropic", "claude") and key:
-        _cheap_provider = AnthropicProvider(key, model=override or "claude-haiku-4-5")
-    elif provider in ("openai", "gpt") and key:
-        _cheap_provider = OpenAIProvider(key, model=override or "gpt-4o-mini")
-    elif provider == "deepseek" and key:
-        from tokenmizer.providers.providers import DeepSeekProvider
-        _cheap_provider = DeepSeekProvider(key, model=override or "deepseek-chat")
-    elif provider == "ollama":
-        # Local model server, no key. An 8B open-weight instruction model
-        # is enough for the structured extraction prompt, and it is the
-        # only path to LLM extraction without a hosted-model budget.
-        # ponytail: base_url stays the class default; add a setting only
-        # when someone runs the model server off-host.
-        from tokenmizer.providers.providers import OllamaProvider
-        _cheap_provider = OllamaProvider(model=override or "qwen3:8b")
-    elif provider == "openrouter" and key:
-        # The router's free-tier model ids rotate, so there is no id worth
-        # hardcoding as a default; the operator has to name one.
-        if override:
-            from tokenmizer.providers.providers import OpenRouterProvider
-            _cheap_provider = OpenRouterProvider(key, model=override)
-        else:
-            logger.warning(
-                "use_llm_extraction is on with provider=openrouter but "
-                "graph_checkpoint.extraction_model is empty. That provider's "
-                "free-tier model ids change over time, so none is assumed — "
-                "set extraction_model to a model id (append ':free' for the "
-                "free tier). Falling back to heuristic extraction."
-            )
-            _cheap_provider = None
-    else:
-        # No cheap model available — will fall back to heuristic
-        _cheap_provider = None
-
-    return _cheap_provider
-
 
 def _get_provider():
     global _provider
