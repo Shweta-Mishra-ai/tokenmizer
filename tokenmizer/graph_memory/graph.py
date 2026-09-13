@@ -916,10 +916,13 @@ class GraphMemory:
             w.strip(".,!?:;()[]").lower() for w in text.split() if len(w) > 2
         )
 
-    def query(self, task: str, top_k: int = 12) -> list[MemoryNode]:
-        """
-        Keyword + importance + type-boosted ranked retrieval, over each node's
-        label and summary.
+    def _score_nodes(self, task: str) -> list[tuple[float, MemoryNode]]:
+        """Score every live node against `task`. Unsorted, unsliced —
+        extracted from query() so cross-session recall (see
+        graph_memory/cross_session.py) can merge scored nodes from several
+        GraphMemory instances before sorting and taking top_k, instead of
+        picking each instance's own top_k first and losing the correct
+        cross-session ordering.
 
         Uses alias expansion so 'auth' matches 'authentication', 'PG' matches
         'PostgreSQL'. Type boost: DECISION/GOAL nodes score 20% higher when
@@ -977,6 +980,14 @@ class GraphMemory:
         if self.semantic_retrieval:
             scored = self._blend_semantic(task, scored, weak, _TYPE_BOOST)
 
+        return scored
+
+    def query(self, task: str, top_k: int = 12) -> list[MemoryNode]:
+        """
+        Keyword + importance + type-boosted ranked retrieval, over each node's
+        label and summary. See _score_nodes for the scoring itself.
+        """
+        scored = self._score_nodes(task)
         scored.sort(key=lambda x: x[0], reverse=True)
         return [n for _, n in scored[:top_k]]
 
