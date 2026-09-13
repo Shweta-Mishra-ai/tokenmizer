@@ -188,9 +188,12 @@ _cheap_provider = None   # lazy — only built if use_llm_extraction=True
 
 def _get_cheap_provider():
     """
-    Build a cheap model provider for LLM extraction.
-    Uses haiku/gpt-4o-mini — costs ~$0.001 per extraction turn.
-    Only instantiated when use_llm_extraction=True.
+    Build the provider for LLM extraction: the smallest model of the
+    configured provider, since extraction is a background structured-
+    output task that a small model handles well. Hosted providers cost
+    on the order of $0.001 per extraction turn; a local model server
+    costs nothing and needs no key. Only instantiated when
+    use_llm_extraction=True; None means "heuristic extraction only".
     """
     global _cheap_provider
     if _cheap_provider is not None:
@@ -216,6 +219,29 @@ def _get_cheap_provider():
     elif provider == "deepseek" and key:
         from tokenmizer.providers.providers import DeepSeekProvider
         _cheap_provider = DeepSeekProvider(key, model=override or "deepseek-chat")
+    elif provider == "ollama":
+        # Local model server, no key. An 8B open-weight instruction model
+        # is enough for the structured extraction prompt, and it is the
+        # only path to LLM extraction without a hosted-model budget.
+        # ponytail: base_url stays the class default; add a setting only
+        # when someone runs the model server off-host.
+        from tokenmizer.providers.providers import OllamaProvider
+        _cheap_provider = OllamaProvider(model=override or "qwen3:8b")
+    elif provider == "openrouter" and key:
+        # The router's free-tier model ids rotate, so there is no id worth
+        # hardcoding as a default; the operator has to name one.
+        if override:
+            from tokenmizer.providers.providers import OpenRouterProvider
+            _cheap_provider = OpenRouterProvider(key, model=override)
+        else:
+            logger.warning(
+                "use_llm_extraction is on with provider=openrouter but "
+                "graph_checkpoint.extraction_model is empty. That provider's "
+                "free-tier model ids change over time, so none is assumed — "
+                "set extraction_model to a model id (append ':free' for the "
+                "free tier). Falling back to heuristic extraction."
+            )
+            _cheap_provider = None
     else:
         # No cheap model available — will fall back to heuristic
         _cheap_provider = None
