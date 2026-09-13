@@ -439,7 +439,7 @@ Current heuristic extractor achieves roughly:
 - File recall: 60–80% (files are easiest — regex catches paths well)
 - Resume overhead: 150–300 tokens
 
-With `use_llm_extraction: true` (uses cheap haiku model, ~$0.001/turn):
+With `use_llm_extraction: true`:
 - Task recall: ~75–85%
 - Decision recall: ~80–90%
 - Information loss: ~15–25%
@@ -454,36 +454,26 @@ graph_checkpoint:
   use_llm_extraction: true
 ```
 
-This uses the smallest model of your configured provider to extract graph
-nodes from each conversation turn, in the background. Dramatically more
-accurate than the heuristic regex approach, which only fires on explicit
-phrasing ("decided to use X", "fixed Y in `path/file.py`").
+Extraction then runs in the background on **the same provider and model
+you configured for chat** — the model whose answers you already trust —
+using the key you already set. Dramatically more accurate than the
+heuristic regex approach, which only fires on explicit phrasing
+("decided to use X", "fixed Y in `path/file.py`"). Extraction is where a
+hallucinated fact would enter memory, so it deliberately does not
+downgrade to a smaller model on its own.
 
-**Hosted provider** (Anthropic, OpenAI, DeepSeek — about $0.001 per turn):
-```bash
-export TOKENMIZER_ANTHROPIC_API_KEY=sk-ant-...
-tokenmizer serve
-```
-
-**Local model, no key, no cost** — a local model server with an 8B
-open-weight instruction model is enough for this task:
+To run extraction on a cheaper model of the same provider, pin it:
 ```yaml
-provider: ollama
-default_model: qwen3:8b
 graph_checkpoint:
   use_llm_extraction: true
-  extraction_model: qwen3:8b     # any pulled model; leave empty for this default
+  extraction_model: claude-haiku-4-5   # any model of the configured provider
 ```
 
-**Router free tier** — free-tier model ids change over time, so one must be
-named explicitly; with `extraction_model` empty the proxy logs a warning and
-stays on heuristic extraction:
-```yaml
-provider: openrouter
-graph_checkpoint:
-  use_llm_extraction: true
-  extraction_model: <org>/<model>:free
-```
+**No budget.** Any provider with a free tier works the same way — set
+`provider`, `default_model` and that provider's key, and extraction uses
+it. A local model server needs no key at all (`provider: ollama`,
+`default_model: <a model you have pulled>`); how good the extraction is
+then depends entirely on the model you choose to run.
 
 ---
 

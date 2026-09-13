@@ -753,11 +753,13 @@ def _warn_on_model_provider_mismatch(provider: str, model: str) -> None:
             return
 
 
-def build_provider(settings) -> BaseProvider:
-    """Build the correct provider from settings."""
+def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
+    """Build the correct provider from settings. `model` overrides
+    settings.default_model on the same provider (used by the extraction
+    pass when graph_checkpoint.extraction_model pins one)."""
     provider = settings.provider.lower()
     key = settings.get_api_key_for_provider(provider)
-    model = settings.default_model
+    model = model or settings.default_model
     _warn_on_model_provider_mismatch(provider, model)
 
     mapping = {
