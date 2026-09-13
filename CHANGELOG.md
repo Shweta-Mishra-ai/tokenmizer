@@ -142,6 +142,40 @@ test scans every shipped surface.
 about five times per request and older turns are identical across turns;
 repeated counts drop from ~7ms to microseconds.
 
+### Added — cross-session recall, scoped to a principal
+`graph_checkpoint.cross_session_recall` (default off). Retrieval — both
+`Memory.search()` and the proxy's context-injection step — can now rank a
+principal's OTHER sessions' nodes alongside the current session's, each
+result tagged with the session_id it came from. "Principal" reuses the
+identity `security/ownership.py` already binds sessions to, so this never
+crosses between two different API keys; `Memory` claims `DEV_PRINCIPAL`
+for its own sessions since it has no credential to derive one from. Off
+by default for the same reason `semantic_retrieval` is: mixing in another
+session's nodes changes what `benchmarks.eval`'s fixtures see, and it
+stays off until measured on a real multi-session corpus. Bounded to 5
+other sessions per query (`graph_memory/cross_session.MAX_OTHER_SESSIONS`).
+
+### Added — transform-rejected fallback on the streaming path
+Matches the non-streaming fallback from the prior audit: if the
+transformed request fails before any content has reached the client,
+retry once with the client's own raw messages. Once real content has
+streamed, a failure can never retry (it would duplicate or interleave
+output), so that case is unchanged. This was the one deliberately-left
+gap from that audit.
+
+### Added — framework adapters under `examples/`
+`agent_loop.py` (no framework — the pattern the other two build on),
+`langchain_memory.py` (`BaseChatMessageHistory`, LangChain's own
+verbatim-buffer contract, with `tokenmizer.agents.Memory` attached as a
+long-horizon side channel), `langgraph_checkpointer.py` (subclasses
+LangGraph's `InMemorySaver` rather than reimplementing the checkpoint
+protocol, extracting graph memory per `thread_id` as a side effect of
+`put()`/`aput()`). LangChain/LangGraph are not runtime dependencies —
+see the new `adapters` extra — and their tests `pytest.importorskip`
+when absent.
+
+Suite is now 984 tests.
+
 ## [0.5.4] — 2026-08-13 — decision and error extraction, targeted at an external benchmark
 
 An independent 100-session, 8-method benchmark
