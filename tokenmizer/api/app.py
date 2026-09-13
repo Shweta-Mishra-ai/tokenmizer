@@ -695,6 +695,39 @@ def _last_substantive_query(raw_messages: list[dict], min_words: int = 4) -> str
     return ""
 
 
+async def _cross_session_query(
+    session_id: str, graph, principal: str, retrieval_query: str, top_k: int,
+) -> list[tuple]:
+    """Rank `retrieval_query` against `graph` plus this principal's other
+    sessions. Other sessions are loaded through _get_graph_async, so they
+    share the same LRU cache and eviction/lock behaviour as any other
+    session the proxy touches — a cross-session read is not a special
+    code path, just another cache hit or miss.
+    """
+    from tokenmizer.graph_memory.cross_session import (
+        MAX_OTHER_SESSIONS,
+        query_across_sessions,
+    )
+
+    try:
+        other_ids = [sid for sid in _ownership.sessions_for(principal) if sid != session_id]
+    except OwnershipUnavailable:
+        other_ids = []
+    other_ids = other_ids[:MAX_OTHER_SESSIONS]
+
+    other_graphs: dict[str, GraphMemory] = {}
+    for sid in other_ids:
+        try:
+            other_graphs[sid] = await _get_graph_async(sid)
+        except Exception as e:
+            logger.warning(f"Cross-session recall: could not load session {sid!r}: {e}")
+
+    return query_across_sessions(
+        graph, list(other_graphs), retrieval_query, top_k,
+        load_graph=lambda sid: other_graphs[sid],
+    )
+
+
 async def _update_graph(
     session_id: str,
     graph,
@@ -703,6 +736,7 @@ async def _update_graph(
     model: str,
     savings: dict,
     user_query: str,
+    principal: str = DEV_PRINCIPAL,
 ) -> tuple[list[dict], dict]:
     """
     Layer 4: Graph extraction, smart windowing, context injection, checkpoint.
@@ -796,12 +830,22 @@ async def _update_graph(
         retrieval_query = _last_substantive_query(raw_messages) or user_query
 
     if len(graph._nodes) >= 3 and retrieval_query.strip():
-        relevant = graph.query(retrieval_query, top_k=8)
-        if relevant:
+        if settings.graph_checkpoint.cross_session_recall:
+            relevant_pairs = await _cross_session_query(
+                session_id, graph, principal, retrieval_query, top_k=8
+            )
+        else:
+            relevant_pairs = [(n, session_id) for n in graph.query(retrieval_query, top_k=8)]
+        if relevant_pairs:
             ctx_parts = [
                 f"  {n.type.value}: {n.label}"
                 + (f" ({n.summary[:50]})" if n.summary else "")
-                for n in relevant[:6]
+                # Tag only nodes recalled from a DIFFERENT session — the
+                # common case (feature off, or this session's own nodes
+                # won the ranking) keeps the exact wording the model has
+                # always seen.
+                + (f" [from session {sid}]" if sid != session_id else "")
+                for n, sid in relevant_pairs[:6]
             ]
             ctx_block = "\n".join(ctx_parts)
             sys_idx = next(
@@ -1216,7 +1260,8 @@ async def chat_completions(req: ChatRequest, request: Request):
         async with _get_session_lock(session_id):
             with _session_in_use(session_id):
                 messages, checkpoint_status = await _update_graph(
-                    session_id, graph, raw_messages, messages, model, savings, user_query
+                    session_id, graph, raw_messages, messages, model, savings,
+                    user_query, principal,
                 )
 
     # Measured AFTER _update_graph(), so it reflects both the reduction
