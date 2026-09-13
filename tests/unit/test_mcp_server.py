@@ -218,6 +218,22 @@ class TestSessionIdIsUrlEncoded:
         assert "my project & auth" not in captured["path"]
         assert "%26" in captured["path"] or "+" in captured["path"] or "%20" in captured["path"]
 
+    def test_checkpoint_session_forwards_a_transcript(self, monkeypatch):
+        """Without a transcript the proxy checkpoints an empty graph; the
+        tool must pass the messages it was given through to the body."""
+        captured = {}
+        monkeypatch.setattr(
+            mcp, "_post",
+            lambda path, body: (captured.update(path=path, body=body), {"ok": True})[1],
+        )
+        messages = [{"role": "user", "content": "Decided: use PostgreSQL for orders"}]
+        mcp.handle_checkpoint_session({"session_id": "s", "messages": messages})
+        assert captured["body"] == {"messages": messages}
+
+    def test_checkpoint_session_tool_schema_declares_messages(self):
+        tool = next(t for t in mcp.TOOLS if t["name"] == "checkpoint_session")
+        assert "messages" in tool["inputSchema"]["properties"]
+
     def test_resume_session_encodes_session_id(self, monkeypatch):
         captured = self._capture_get_url(monkeypatch)
         mcp.handle_resume_session({"session_id": "session/with/slashes"})

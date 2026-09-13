@@ -31,12 +31,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tokenmizer.api import app as app_module
 from tokenmizer.core.tokenizer import count_tokens
 from tokenmizer.security.auth import verify_api_key
 from tokenmizer.security.ownership import OwnershipUnavailable, SessionAccessDenied
+from tokenmizer.security.redaction import redact_messages
 
 logger = logging.getLogger(__name__)
 
@@ -315,12 +316,26 @@ async def get_transitions(session_id: str):
     }
 
 
+class CheckpointBody(BaseModel):
+    """Optional transcript to fold into the graph before snapshotting.
+
+    A checkpoint made without one only snapshots what earlier chat turns
+    already put in the graph. The MCP tool and the CLI have no such turns
+    — they run beside the conversation, not through the proxy — so their
+    checkpoints claimed the session, listed it on the dashboard, and left
+    it at zero nodes. Passing the transcript here is how they populate it.
+    Same message shape as the chat endpoint, capped so one call cannot
+    ask the extractor to chew through an unbounded history.
+    """
+    messages: list[app_module.ChatMessage] = Field(default_factory=list, max_length=500)
+
+
 @router.post("/api/checkpoint", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
-async def create_manual_checkpoint(session_id: str):
+async def create_manual_checkpoint(session_id: str, body: CheckpointBody | None = None):
     """
     Create a manual checkpoint for a session, snapshotting current graph
-    state. Used by `tokenmizer checkpoint <session-id>` (CLI) and the
-    `/tokenmizer:checkpoint` Claude Code skill.
+    state. Used by `tokenmizer checkpoint <session-id>` (CLI), the MCP
+    `checkpoint_session` tool, and the `/tokenmizer:checkpoint` skill.
 
     FOUND DURING A FINAL ACCURACY PASS: this endpoint was referenced by
     the README's API Reference table, cli.py's `checkpoint` command, AND
@@ -332,24 +347,28 @@ async def create_manual_checkpoint(session_id: str):
     three independent consumers that nothing caught because none of them
     were exercised end-to-end during the original audit.
 
-    Design note: unlike the auto-checkpoint path in chat_completions(),
-    this has no live message history to extract from (a standalone HTTP
-    call has no conversation attached) — `CheckpointManager.create()` is
-    called with `messages=[]`, which is safe: extract_from_messages()
-    early-returns on an empty new-messages diff, and the checkpoint still
-    correctly snapshots whatever's ALREADY in the graph from prior chat
-    turns. Verified with a direct test before writing this (see
-    tests/unit/test_graph_persistence.py for the equivalent pattern).
+    With a `messages` body the transcript goes through the same steps the
+    chat path applies before anything touches a graph — redaction at
+    ingestion, then the per-session lock so this cannot interleave with
+    a background extraction for the same session — and
+    `CheckpointManager.create()` extracts from it. Without a body the
+    call still snapshots whatever earlier chat turns already stored,
+    which is what the pre-existing callers relied on.
     """
     try:
         graph = await app_module._get_graph_async(session_id)
-        ckpt = app_module._checkpoint_mgr.create(
-            session_id=session_id,
-            messages=[],
-            graph=graph,
-            context_pct=0.0,
-            trigger="manual",
-        )
+        raw_messages = [
+            {"role": m.role, "content": m.text()} for m in (body.messages if body else [])
+        ]
+        raw_messages = redact_messages(raw_messages)
+        async with app_module._get_session_lock(session_id):
+            ckpt = app_module._checkpoint_mgr.create(
+                session_id=session_id,
+                messages=raw_messages,
+                graph=graph,
+                context_pct=0.0,
+                trigger="manual",
+            )
         return {
             "checkpoint_id": ckpt.checkpoint_id,
             "session_id": session_id,

@@ -67,15 +67,26 @@ TOOLS = [
                     "type": "string",
                     "description": "Unique identifier for this session (e.g. 'my-project-auth')",
                 },
-                # No "notes" field is declared here
-                # ("Optional notes about what was accomplished") but was
-                # never read by handle_checkpoint_session, and
-                # POST /api/checkpoint has no parameter to carry it to
-                # even if it were read — a model calling this tool would
-                # reasonably fill in notes and have them silently
-                # discarded. Removed rather than half-wired; add back
-                # only once /api/checkpoint actually accepts and stores
-                # a notes/reason field.
+                # The conversation so far. This tool runs beside the
+                # conversation rather than through the proxy, so without
+                # it the checkpoint has nothing to extract from and the
+                # session is recorded with zero nodes.
+                "messages": {
+                    "type": "array",
+                    "description": (
+                        "The conversation to save, as {role, content} objects "
+                        "(user/assistant). Decisions, tasks, files and errors "
+                        "are extracted from it into the session's graph memory."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "role": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["role", "content"],
+                    },
+                },
             },
             "required": ["session_id"],
         },
@@ -294,7 +305,13 @@ def handle_checkpoint_session(args: dict) -> tuple[str, bool]:
     # reserved URL characters would produce a malformed or misdirected
     # request. quote() is used consistently across every handler below,
     # matching the one handler (why_decision) that already did this.
-    result = _post(f"/api/checkpoint?session_id={quote(session_id, safe='')}", {})
+    messages = args.get("messages")
+    if messages is not None and not isinstance(messages, list):
+        return "Invalid 'messages': expected an array of {role, content} objects.", True
+    result = _post(
+        f"/api/checkpoint?session_id={quote(session_id, safe='')}",
+        {"messages": messages or []},
+    )
     if "error" in result:
         return f"Checkpoint failed: {result['error']}", True
     return (
