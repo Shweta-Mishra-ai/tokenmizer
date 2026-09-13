@@ -212,18 +212,24 @@ export. Still zero external dependencies. `to_vis_json` gains
 cover every `NodeType`/`EdgeType` (five node types were previously drawn
 grey and dropped from `meta.by_type`).
 
-### Added — LLM extraction with a local model server or a router free tier
-`_get_cheap_provider()` knew three hosted providers, all needing a paid
-key. `provider: ollama` now runs extraction with no key
-(`extraction_model` or `qwen3:8b`); `provider: openrouter` with a key and
-an explicit `extraction_model` (free-tier ids rotate, so none is
-hardcoded; an empty value logs what to set). The `use_llm_extraction`
-default is unchanged — it flips only after a measured before/after.
+### Changed — LLM extraction uses the model you configured for chat
+Extraction picked a "cheap" model from a hardcoded per-vendor list: three
+providers had an entry and the rest — gemini, mistral, cohere, grok,
+ollama, openrouter — silently fell back to heuristic extraction with a key
+configured and `use_llm_extraction` on. The list also encoded a vendor
+opinion: a smaller model than the one the operator had already judged
+good enough for their answers, at the one point where a hallucinated fact
+would enter memory. Extraction now reuses the chat provider and
+`default_model` (every adapter, same key); `extraction_model` pins a
+different model of that provider when a cheaper one is wanted. A missing
+key is logged once instead of failing silently per turn. The
+`use_llm_extraction` default is unchanged — it flips only after a
+measured before/after.
 
 Known, unchanged: `/api/sessions` instantiates every owned graph to count
 nodes, which is slow on a store with hundreds of sessions.
 
-Suite is now 1016 tests.
+Suite is now 1017 tests.
 
 ## [0.5.4] — 2026-08-13 — decision and error extraction, targeted at an external benchmark
 

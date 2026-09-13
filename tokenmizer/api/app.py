@@ -183,21 +183,47 @@ _smart_window = SmartMessageWindow(
     graph_context_budget=250,
 )
 _file_intelligence = FileIntelligence()
-_cheap_provider = None   # lazy — only built if use_llm_extraction=True
+_extraction_provider = None   # lazy — only built if use_llm_extraction=True
 
 
-def _get_cheap_provider():
+def _get_extraction_provider():
     """
-    Build the provider for LLM extraction: the smallest model of the
-    configured provider, since extraction is a background structured-
-    output task that a small model handles well. Hosted providers cost
-    on the order of $0.001 per extraction turn; a local model server
-    costs nothing and needs no key. Only instantiated when
-    use_llm_extraction=True; None means "heuristic extraction only".
+    The provider behind LLM extraction: the same provider and model the
+    operator configured for chat, unless `graph_checkpoint.extraction_model`
+    pins a different model on that provider.
+
+    This used to pick a "cheap" model from a hardcoded per-vendor list.
+    Three providers had an entry; the rest silently fell back to heuristic
+    extraction with a key configured and use_llm_extraction on. The list
+    also encoded a vendor opinion — a smaller model than the one the
+    operator had already judged good enough for their answers — and
+    extraction is where hallucinated facts would enter memory, so it is
+    the last place to quietly trade quality for cost. Reusing the chat
+    provider means every adapter works, the key is already there, and
+    the operator who wants a cheaper model says so explicitly.
+
+    Only instantiated when use_llm_extraction=True; None means
+    "heuristic extraction only", logged once with the reason.
     """
-    global _cheap_provider
-    if _cheap_provider is not None:
-        return _cheap_provider
+    global _extraction_provider
+    if _extraction_provider is not None:
+        return _extraction_provider
+
+    provider = settings.provider.lower()
+    override = (settings.graph_checkpoint.extraction_model or "").strip()
+    if provider != "ollama" and not settings.get_api_key_for_provider(provider):
+        logger.warning(
+            "use_llm_extraction is on but provider=%r has no API key configured; "
+            "falling back to heuristic extraction.", provider,
+        )
+        return None
+    try:
+        _extraction_provider = build_provider(settings, model=override or None)
+    except ValueError as e:
+        logger.warning("use_llm_extraction is on but no provider could be built (%s); "
+                       "falling back to heuristic extraction.", e)
+        return None
+    return _extraction_provider
 
     from tokenmizer.providers.providers import AnthropicProvider, OpenAIProvider
 
@@ -774,7 +800,7 @@ async def _update_graph(
 
     # Extraction: heuristic sync now, LLM async in background
     if settings.graph_checkpoint.use_llm_extraction:
-        cheap = _get_cheap_provider()
+        cheap = _get_extraction_provider()
         if cheap is not None:
             recent = raw_messages[-4:] if len(raw_messages) >= 4 else raw_messages
             new_msgs = [m for m in recent

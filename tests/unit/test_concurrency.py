@@ -76,7 +76,7 @@ class TestBackgroundTaskReferenceRetention:
                            '"endpoints": [], "schemas": [], "superseded": []}'
                 return R()
 
-        monkeypatch.setattr(app_module, "_get_cheap_provider", lambda: _SlowFakeProvider())
+        monkeypatch.setattr(app_module, "_get_extraction_provider", lambda: _SlowFakeProvider())
 
         graph = GraphMemory("bg-task-test", storage_dir=str(tmp_path))
         raw = [{"role": "user", "content": "Use PostgreSQL for the primary datastore please"}]
