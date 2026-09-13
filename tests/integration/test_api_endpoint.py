@@ -262,6 +262,8 @@ class TestHealthAndDocs:
         # Filtering / export controls present
         assert "Active only" in r.text
         assert "exportPng" in r.text
+        # Community grouping is embedded with the data
+        assert '"communities"' in r.text
 
 
 class TestInvalidateDecisionScope:
