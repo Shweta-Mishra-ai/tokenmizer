@@ -10,7 +10,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 |---|---|---|
 | `/v1/chat/completions` | POST | OpenAI-compatible proxy |
 | `/api/resume/{id}` | GET | Get resume context |
-| `/api/checkpoint` | POST | Manual checkpoint |
+| `/api/checkpoint` | POST | Manual checkpoint. Optional JSON body `{"messages": [{role, content}, ...]}` is extracted into the graph first, so a checkpoint made outside the proxy (MCP tool, CLI) populates the session |
 | `/api/analyze` | POST | File → token-budgeted digest (CSV/JSON/PDF/Excel/logs/code) |
 | `/api/checkpoints/{id}` | GET | List a session's checkpoints |
 | `/api/graph/{id}/viz` | GET | Graph as D3-compatible JSON |
@@ -21,7 +21,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
 | `/api/sessions` | GET | The caller's sessions with node counts, last activity and a link to each graph page. Scoped by ownership: one API key never sees another's sessions |
 | `/api/graph/{id}` | GET | Session graph stats |
-| `/api/graph/{id}/html` | GET | **Interactive graph page** — decision-history timeline, supersession arcs, type/status filters, search, zoom/pan, PNG export. Zero external dependencies (works offline) |
+| `/api/graph/{id}/html` | GET | **Interactive graph page** — nodes grouped and colored by detected community with a toggleable community panel, click-to-inspect node detail, decision-history timeline, supersession arcs, search, fit/zoom/pan, PNG export; an empty graph explains why. Zero external dependencies (works offline) |
 | `/api/graph/{id}/why?q=` | GET | **Reasoning:** causal chain behind a decision (old → new with trigger/reason/evidence) |
 | `/api/graph/{id}/reasoning` | GET | **Reasoning view:** active decisions by topic, recent changes, consistency audit |
 | `/api/ontology` | GET | Machine-readable graph ontology (types, relations, status state machine) |
