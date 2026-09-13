@@ -64,6 +64,12 @@ redis = ["redis>=5.0.0"]
 # Observability
 observability = ["prometheus-client>=0.20.0", "opentelemetry-sdk>=1.25.0", "opentelemetry-api>=1.25.0"]
 
+# Framework adapters under examples/ (langchain_memory.py,
+# langgraph_checkpointer.py). Not a runtime dependency of the proxy or of
+# tokenmizer.agents.Memory itself — only install this to run those two
+# example files or their tests.
+adapters = ["langchain-core>=0.3.0", "langgraph>=0.2.0"]
+
 # Development
 dev = [
     "pytest>=8.0.0",
