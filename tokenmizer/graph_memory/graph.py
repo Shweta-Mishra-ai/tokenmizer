@@ -490,18 +490,48 @@ class GraphMemory:
         text = _content_to_text(content)
         return hashlib.sha1(text[:500].encode()).hexdigest()[:16]
 
+    @staticmethod
+    def _extracted_to_dict(extracted) -> dict:
+        """The dict shape _apply_extracted reads, from an ExtractedData.
+
+        Both extraction paths end here: the heuristic pass builds an
+        ExtractedData, and so does HybridExtractor.extract() — the LLM
+        path. The LLM path used to hand its ExtractedData straight to
+        _apply_extracted, which reads dicts; the AttributeError was
+        swallowed by the background task's broad except and counted as
+        an llm_extraction silent failure, so every LLM extraction paid
+        for the model call and then discarded the result.
+        """
+        return {
+            "goals":        extracted.goals,
+            "tasks":        (
+                [{"label": t, "status": "completed"}   for t in extracted.tasks_done] +
+                [{"label": t, "status": "in_progress"} for t in extracted.tasks_wip]  +
+                [{"label": t, "status": "pending"}     for t in extracted.tasks_todo]
+            ),
+            "decisions":    extracted.decisions,
+            "files":        extracted.files,
+            "errors":       extracted.errors,
+            "dependencies": extracted.dependencies,
+            "environments": extracted.environments,
+            "endpoints":    extracted.endpoints,
+            "schemas":      extracted.schemas,
+            "superseded":   extracted.superseded,
+        }
+
     def extract_from_messages(
         self,
         messages: list[dict],
         incremental: bool = True,
-        extracted_data: dict | None = None,
+        extracted_data=None,
     ) -> None:
         """
         Update graph from messages.
 
         Pipeline:
-          1. If extracted_data is provided (from LLM/HybridExtractor) — use it directly.
-          2. Otherwise run _heuristic_extract() as fallback.
+          1. If extracted_data is provided (an ExtractedData from
+             HybridExtractor.extract(), or the equivalent dict) — use it.
+          2. Otherwise run the heuristic pass over the new messages.
         """
         if incremental:
             new_messages = [m for m in messages
@@ -515,29 +545,12 @@ class GraphMemory:
         # For sessions > 30 messages: only extract WIP/errors from last 20
         window_size = 20 if len(messages) > 30 else 0
 
-        # Use provided data (from LLM pipeline) or run HybridExtractor heuristic pass
-        if extracted_data is not None:
-            data = extracted_data
-        else:
+        if extracted_data is None:
             from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
             _he = get_hybrid_extractor()
-            _extracted = _he.heuristic_extract(new_messages, window_size=window_size)
-            data = {
-                "goals":        _extracted.goals,
-                "tasks":        (
-                    [{"label": t, "status": "completed"}   for t in _extracted.tasks_done] +
-                    [{"label": t, "status": "in_progress"} for t in _extracted.tasks_wip]  +
-                    [{"label": t, "status": "pending"}     for t in _extracted.tasks_todo]
-                ),
-                "decisions":    _extracted.decisions,
-                "files":        _extracted.files,
-                "errors":       _extracted.errors,
-                "dependencies": _extracted.dependencies,
-                "environments": _extracted.environments,
-                "endpoints":    _extracted.endpoints,
-                "schemas":      _extracted.schemas,
-                "superseded":   _extracted.superseded,
-            }
+            extracted_data = _he.heuristic_extract(new_messages, window_size=window_size)
+        data = extracted_data if isinstance(extracted_data, dict) \
+            else self._extracted_to_dict(extracted_data)
         self._apply_extracted(data, new_messages)
 
         for m in new_messages:
