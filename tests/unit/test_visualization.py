@@ -159,3 +159,35 @@ class TestToShareHtmlEscaping:
         assert "Use PostgreSQL for storage" in html
         assert '"nodes"' in html
         assert "t-viz" in html
+
+
+class TestShareHtmlPage:
+    """What the page must carry for the community explorer and the
+    empty state. The empty state is the important one: an empty graph
+    used to render a blank canvas with "0 nodes" and no explanation."""
+
+    PRESERVED = ["Decision history", '"transitions"', "Active only",
+                 "exportPng", "DATA.session_id", '"nodes"']
+
+    def test_populated_page_has_communities_and_detail_panel(self, tmp_path):
+        html = to_share_html(_graph(tmp_path))
+        for literal in self.PRESERVED:
+            assert literal in html, literal
+        assert '"communities"' in html
+        assert "Communities" in html
+        assert "Select all" in html
+        assert 'id="detail"' in html
+        assert "<script src=" not in html and "https://cdn" not in html
+
+    def test_empty_page_explains_itself(self, tmp_path):
+        g = GraphMemory(session_id="t-empty-page", storage_dir=str(tmp_path))
+        html = to_share_html(g)
+        assert "No nodes yet" in html
+        assert '"processed_messages"' in html
+        assert '"load_failed"' in html
+        for literal in self.PRESERVED:
+            assert literal in html, literal
+
+    def test_no_entity_emoji_in_the_template(self, tmp_path):
+        html = to_share_html(_graph(tmp_path))
+        assert "&#129504;" not in html

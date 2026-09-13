@@ -12,6 +12,7 @@ characters (used by the /why decision trail to render a tree, the same way
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,22 @@ def _is_emoji(ch: str) -> bool:
     )
 
 
+_NUMERIC_ENTITY = re.compile(r"&#(x[0-9a-fA-F]{1,6}|[0-9]{1,7});")
+
+
+def _entity_emoji(text: str) -> list[str]:
+    """HTML numeric character references that decode to emoji. An inline
+    HTML template can spell a glyph as `&#129504;` and never contain the
+    code point itself, which is how one got past the scan below."""
+    found = []
+    for m in _NUMERIC_ENTITY.finditer(text):
+        ref = m.group(1)
+        code = int(ref[1:], 16) if ref[0] in "xX" else int(ref)
+        if code <= 0x10FFFF and _is_emoji(chr(code)):
+            found.append(m.group(0))
+    return sorted(set(found))
+
+
 @pytest.mark.parametrize("path", SURFACES, ids=lambda p: str(p.relative_to(ROOT)))
 def test_surface_has_no_emoji(path):
     try:
@@ -51,5 +68,10 @@ def test_surface_has_no_emoji(path):
     found = sorted({ch for ch in text if _is_emoji(ch)})
     assert not found, (
         f"{path.relative_to(ROOT)} contains {[hex(ord(c)) for c in found]}; "
+        "use words"
+    )
+    entities = _entity_emoji(text)
+    assert not entities, (
+        f"{path.relative_to(ROOT)} contains emoji as HTML entities {entities}; "
         "use words"
     )
