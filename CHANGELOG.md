@@ -174,7 +174,56 @@ protocol, extracting graph memory per `thread_id` as a side effect of
 see the new `adapters` extra — and their tests `pytest.importorskip`
 when absent.
 
-Suite is now 984 tests.
+### Fixed — LLM extraction discarded every result it paid for
+The proxy's background LLM pass handed `HybridExtractor.extract()`'s
+`ExtractedData` to `GraphMemory.extract_from_messages(extracted_data=...)`,
+which only read the dict shape the heuristic branch built for itself. The
+`AttributeError` was caught by the task's broad except, logged, and counted
+as an `llm_extraction` silent failure — so with `use_llm_extraction: true`
+the graph stayed heuristic-only after every model call. No test asserted a
+node came out of that path. Both paths now share one conversion; a test
+drives an `ExtractedData` through to nodes.
+
+### Fixed — the graph page rendered empty, with nothing to say why
+Three causes, none of them the renderer. `POST /api/checkpoint` — what the
+MCP tool and the CLI call — claimed the session with `messages=[]`, so it
+appeared on the dashboard with zero nodes; it now accepts an optional
+`{"messages": [...]}` body, redacted and extracted under the session lock,
+and the MCP `checkpoint_session` tool forwards the conversation. The
+heuristic extractor produces nothing for free-form chat, and the page said
+nothing about it; it now explains an empty graph from new `meta` health
+fields — never seen a message, N messages processed but nothing extracted
+(with the phrasing the extractor keys on and the setting to enable LLM
+extraction), stored graph unreadable (`load_failed`, newly surfaced in
+`stats()` — an instance whose SQLite read failed reported a healthy 0),
+persistence broken, data lost. And the dashboard linked to the page with a
+plain anchor that could not carry the Bearer key, so with `api_key` set it
+answered 401; the link now opens through the stored key.
+
+### Added — the graph page as a community explorer
+Nodes are grouped by detected community (`graph_memory/communities.py`,
+deterministic label propagation — same graph, same grouping, on every
+platform) and filled by community color with a ring in the node-type
+color; a side panel lists communities with counts and checkboxes; a click
+opens a node's detail and its neighbors; fit-to-view and drag-to-pin join
+search, active-only, zoom/pan, the decision-history timeline and PNG
+export. Still zero external dependencies. `to_vis_json` gains
+`node.community` and `meta.communities`; `_TYPE_COLOR`/`_EDGE_COLOR` now
+cover every `NodeType`/`EdgeType` (five node types were previously drawn
+grey and dropped from `meta.by_type`).
+
+### Added — LLM extraction with a local model server or a router free tier
+`_get_cheap_provider()` knew three hosted providers, all needing a paid
+key. `provider: ollama` now runs extraction with no key
+(`extraction_model` or `qwen3:8b`); `provider: openrouter` with a key and
+an explicit `extraction_model` (free-tier ids rotate, so none is
+hardcoded; an empty value logs what to set). The `use_llm_extraction`
+default is unchanged — it flips only after a measured before/after.
+
+Known, unchanged: `/api/sessions` instantiates every owned graph to count
+nodes, which is slow on a store with hundreds of sessions.
+
+Suite is now 1016 tests.
 
 ## [0.5.4] — 2026-08-13 — decision and error extraction, targeted at an external benchmark
 
