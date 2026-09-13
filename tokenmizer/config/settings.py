@@ -54,6 +54,20 @@ class GraphCheckpointSettings(BaseModel):
     # adds no new dependency and no second model in memory.
     # Without it this silently stays off rather than failing.
     semantic_retrieval: bool = False
+    # Rank a principal's OTHER sessions' nodes alongside the current
+    # session's when building retrieval results (Memory.search() and the
+    # proxy's context-injection step) — see graph_memory/cross_session.py.
+    # A principal is the same identity security/ownership.py already binds
+    # sessions to, so this reuses that boundary rather than adding a new
+    # one: retrieval never crosses between two different API keys.
+    #
+    # Default off, same reasoning as semantic_retrieval above: mixing in
+    # another session's nodes changes what the recall/decision/error
+    # fixtures in benchmarks.eval see, so it stays off until measured on a
+    # real multi-session corpus rather than assumed safe because the logic
+    # looks right. Enabling it costs one extra SQLite read per other
+    # session pulled in (bounded — see cross_session.MAX_OTHER_SESSIONS).
+    cross_session_recall: bool = False
 
 
 class RoutingSettings(BaseModel):
