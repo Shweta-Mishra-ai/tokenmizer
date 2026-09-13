@@ -454,14 +454,35 @@ graph_checkpoint:
   use_llm_extraction: true
 ```
 
-This uses Claude Haiku (or gpt-4o-mini) to extract graph nodes from each
-conversation turn. Costs ~$0.001 per turn. Dramatically more accurate than
-the heuristic regex approach.
+This uses the smallest model of your configured provider to extract graph
+nodes from each conversation turn, in the background. Dramatically more
+accurate than the heuristic regex approach, which only fires on explicit
+phrasing ("decided to use X", "fixed Y in `path/file.py`").
 
-You need a key for this. Once you get your Anthropic key:
+**Hosted provider** (Anthropic, OpenAI, DeepSeek — about $0.001 per turn):
 ```bash
 export TOKENMIZER_ANTHROPIC_API_KEY=sk-ant-...
 tokenmizer serve
+```
+
+**Local model, no key, no cost** — a local model server with an 8B
+open-weight instruction model is enough for this task:
+```yaml
+provider: ollama
+default_model: qwen3:8b
+graph_checkpoint:
+  use_llm_extraction: true
+  extraction_model: qwen3:8b     # any pulled model; leave empty for this default
+```
+
+**Router free tier** — free-tier model ids change over time, so one must be
+named explicitly; with `extraction_model` empty the proxy logs a warning and
+stays on heuristic extraction:
+```yaml
+provider: openrouter
+graph_checkpoint:
+  use_llm_extraction: true
+  extraction_model: <org>/<model>:free
 ```
 
 ---

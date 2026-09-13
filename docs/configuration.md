@@ -14,9 +14,12 @@ default_model: claude-sonnet-4-6
 graph_checkpoint:
   enabled: true
   trigger_at_percent: 0.85
-  use_llm_extraction: false     # true = hybrid LLM+heuristic extraction
-                                # (needs a provider key, ~$0.001/turn;
-                                # requires v0.3.2+ — see CHANGELOG)
+  use_llm_extraction: false     # true = hybrid LLM+heuristic extraction using
+                                # the provider's smallest model (~$0.001/turn
+                                # hosted; free with provider: ollama)
+  extraction_model: ""          # pin the extraction model; empty = auto-pick
+                                # (required for provider: openrouter, whose
+                                # free-tier ids change over time)
 
 compression:
   enabled: true
