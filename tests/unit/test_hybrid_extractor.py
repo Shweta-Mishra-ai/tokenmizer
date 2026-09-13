@@ -262,3 +262,38 @@ class TestPassiveTaskPrefixStrip:
             f"expected the leading article stripped from a passive-completion "
             f"task, got: {result.tasks_done}"
         )
+
+
+class TestExtractedDataReachesTheGraph:
+    """The proxy's background LLM pass hands HybridExtractor.extract()'s
+    ExtractedData straight to GraphMemory.extract_from_messages(
+    extracted_data=...), which only knew the dict shape the heuristic
+    branch builds for itself. `.get` on the dataclass raised, the
+    background task's broad except logged a warning and counted an
+    llm_extraction silent failure, and every LLM extraction ever run
+    through the proxy paid for the model call and then discarded the
+    result. Nothing asserted a node came out of that path."""
+
+    def test_extract_from_messages_accepts_extracted_data(self, tmp_path):
+        from tokenmizer.graph_memory.graph import GraphMemory
+
+        g = GraphMemory("llm-shape", storage_dir=str(tmp_path))
+        data = ExtractedData(
+            goals=["ship the checkout service"],
+            tasks_done=["wired the payment webhook"],
+            tasks_wip=["invoice PDF export"],
+            decisions=[{"label": "Use PostgreSQL for order storage",
+                        "reason": "concurrent writes"}],
+            files=["internal/store/postgres.go"],
+            errors=["payment webhook timed out"],
+        )
+        messages = [{"role": "user", "content": "what should we store orders in?"}]
+
+        g.extract_from_messages(messages, incremental=False, extracted_data=data)
+
+        labels = {n.label for n in g._nodes.values()}
+        assert any("PostgreSQL" in lab for lab in labels), labels
+        assert any("postgres.go" in lab for lab in labels), labels
+        assert any("payment webhook" in lab for lab in labels), labels
+        by_type = {n.type.value for n in g._nodes.values()}
+        assert {"goal", "decision", "file", "error", "task"} <= by_type, by_type
