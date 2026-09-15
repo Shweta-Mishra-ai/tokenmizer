@@ -9,6 +9,15 @@ on Windows: the conditions of a Claude Code user with a session worth
 remembering. Suite is now 769 tests; every published number below was
 re-derived from a run.
 
+### Fixed — `minimal` terse-output style exceeded its own token budget
+`terse_system_prompt(style="minimal")` is injected on every request, so its
+own size works against the tokens it is meant to save. It had grown to 151
+tokens against `test_minimal_prompt_is_paid_for_every_turn_so_it_stays_short`'s
+140-token ceiling, failing on `main`. Reworded to keep the same rules
+(reuse before writing, shortest diff, fix the root cause once, "Preserve
+code, paths and URLs exactly") in fewer words — no behavior change, ~114
+tokens by the same estimate.
+
 ### Fixed — every turn of a long session failed on Anthropic and Gemini
 `SmartMessageWindow` kept `conv_msgs[-protect_recent:]`. A chat request
 always ends on a user turn, so an even `protect_recent` (the default is 10)
