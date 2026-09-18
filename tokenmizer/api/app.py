@@ -184,6 +184,11 @@ _smart_window = SmartMessageWindow(
 )
 _file_intelligence = FileIntelligence()
 _extraction_provider = None   # lazy — only built if use_llm_extraction=True
+# Reason LLM extraction is unavailable, logged ONCE. The check re-runs on
+# every request (a key can be configured later without a restart), but the
+# warning must not: with use_llm_extraction on and no key it was emitted
+# for every chat turn of every session, which buried every other log line.
+_extraction_unavailable_reason: Optional[str] = None
 
 
 def _get_extraction_provider():
@@ -205,24 +210,29 @@ def _get_extraction_provider():
     Only instantiated when use_llm_extraction=True; None means
     "heuristic extraction only", logged once with the reason.
     """
-    global _extraction_provider
+    global _extraction_provider, _extraction_unavailable_reason
     if _extraction_provider is not None:
         return _extraction_provider
 
     provider = settings.provider.lower()
     override = (settings.graph_checkpoint.extraction_model or "").strip()
     if provider != "ollama" and not settings.get_api_key_for_provider(provider):
-        logger.warning(
-            "use_llm_extraction is on but provider=%r has no API key configured; "
-            "falling back to heuristic extraction.", provider,
-        )
+        reason = (f"use_llm_extraction is on but provider={provider!r} has no API "
+                  f"key configured; falling back to heuristic extraction.")
+        if reason != _extraction_unavailable_reason:
+            logger.warning(reason)
+            _extraction_unavailable_reason = reason
         return None
     try:
         _extraction_provider = build_provider(settings, model=override or None)
     except ValueError as e:
-        logger.warning("use_llm_extraction is on but no provider could be built (%s); "
-                       "falling back to heuristic extraction.", e)
+        reason = (f"use_llm_extraction is on but no provider could be built ({e}); "
+                  f"falling back to heuristic extraction.")
+        if reason != _extraction_unavailable_reason:
+            logger.warning(reason)
+            _extraction_unavailable_reason = reason
         return None
+    _extraction_unavailable_reason = None
     return _extraction_provider
 
 
@@ -380,14 +390,32 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
 
 # ── Context window sizes ──────────────────────────────────────────────────────
 
-# Newest Claude models (fable-5, opus-4-8, sonnet-5, haiku-4-5) all match the
-# "claude" prefix entry. Add a specific entry ONLY if a model's window differs.
+# Context window per model family, in tokens. Only feeds the auto-checkpoint
+# trigger (context_pct = tokens sent / window), so an entry that is too
+# SMALL checkpoints early (harmless) and one that is too LARGE never
+# checkpoints (the failure this table exists to prevent) — when unsure,
+# prefer the smaller published figure. Longest matching key wins, so a
+# specific entry beats its family's catch-all. Newest Claude models
+# (fable-5, opus-4-8, sonnet-5, haiku-4-5) all match the "claude" entry;
+# add a specific entry ONLY if a model's window differs.
 _CONTEXT_WINDOWS = {
     "claude-fable-5": 200_000, "claude-opus-4-8": 200_000,
     "claude-sonnet": 200_000, "claude-opus": 200_000, "claude-haiku": 200_000,
     "claude": 200_000,
-    "gpt-4o": 128_000, "gpt-4": 128_000, "gpt-3.5": 16_000,
-    "gemini": 1_000_000, "deepseek": 64_000,
+    # OpenAI: the 4.1 family and the 5 series are far larger than 4o; the
+    # reasoning models sit at 200k. Longest-key matching keeps "gpt-4o"
+    # from being shadowed by "gpt-4", and "gpt-4.1" from matching "gpt-4".
+    "gpt-4.1": 1_000_000, "gpt-4o": 128_000, "gpt-4": 128_000, "gpt-3.5": 16_000,
+    "gpt-5": 400_000,
+    "o1": 200_000, "o3": 200_000, "o4": 200_000,
+    "gemini": 1_000_000,
+    "deepseek": 128_000,
+    "mistral": 128_000, "codestral": 256_000,
+    "grok": 128_000,
+    "command-r": 128_000,
+    # Local models vary by build; 32k is the common default `num_ctx`
+    # ceiling, and a too-small figure only checkpoints early.
+    "llama": 32_000, "qwen": 32_000, "mixtral": 32_000, "phi": 16_000,
 }
 
 
@@ -565,11 +593,22 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     messages: list[ChatMessage]
     max_tokens: Optional[int] = 4096
+    # OpenAI's current name for the same limit; newer SDK defaults and the
+    # o-series reject `max_tokens` and send this instead. Without it the
+    # client's limit was silently replaced by the 4096 default above.
+    max_completion_tokens: Optional[int] = None
     stream: Optional[bool] = False
     session_id: Optional[str] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     stop: Optional[str | list[str]] = None
+
+
+def _max_tokens(req: "ChatRequest") -> int:
+    """The completion limit the client asked for, under either name."""
+    if req.max_completion_tokens is not None:
+        return req.max_completion_tokens
+    return req.max_tokens or 4096
 
 
 def _sampling_kwargs(req: "ChatRequest") -> dict:
@@ -946,9 +985,11 @@ async def _call_provider(
     `input_tokens == 0`, which would misclassify any real provider
     response that happens to report zero input tokens.
     """
-    # Cache lookup
+    # Cache lookup. Keyed on the prompt AND the conversation it was asked
+    # in — see SemanticCache.conversation_fingerprint.
+    cache_ctx = _cache.conversation_fingerprint(raw_messages or [])
     if settings.cache.enabled and user_content:
-        cached = _cache.get(user_content, session_id=session_id)
+        cached = _cache.get(user_content, session_id=session_id, context=cache_ctx)
         if cached:
             savings["cache"] = count_tokens(user_content, model)
             output_tokens = count_tokens(cached.response, model)
@@ -959,7 +1000,7 @@ async def _call_provider(
     # shares one safe copy. Deliberately NOT re-redacted here: doing so
     # would mask a regression if ingestion ever stopped redacting.
     provider = _get_provider()
-    kwargs = dict(model=model, max_tokens=req.max_tokens or 4096, stream=False,
+    kwargs = dict(model=model, max_tokens=_max_tokens(req), stream=False,
                   **_sampling_kwargs(req))
     try:
         resp = await provider.chat(messages=messages, **kwargs)
@@ -1037,7 +1078,7 @@ async def _call_provider(
     if settings.cache.enabled and user_content:
         _cache.set(user_content, response_text,
                    input_tokens=input_tokens, output_tokens=output_tokens,
-                   session_id=session_id)
+                   session_id=session_id, context=cache_ctx)
 
     return response_text, input_tokens, output_tokens, latency_ms, False
 
@@ -1084,6 +1125,8 @@ def _stream_response(req, messages, model, user_content, session_id,
             payload.update(extra)
         return "data: " + _json.dumps(payload) + "\n\n"
 
+    cache_ctx = _cache.conversation_fingerprint(raw_messages or [])
+
     async def _gen():
         full_text = ""
         t0 = time.monotonic()
@@ -1093,7 +1136,7 @@ def _stream_response(req, messages, model, user_content, session_id,
         yield _chunk({"role": "assistant"})
         try:
             cached = (
-                _cache.get(user_content, session_id=session_id)
+                _cache.get(user_content, session_id=session_id, context=cache_ctx)
                 if settings.cache.enabled and user_content
                 else None
             )
@@ -1116,7 +1159,7 @@ def _stream_response(req, messages, model, user_content, session_id,
                         async for piece in provider.chat_stream(
                             messages=candidate,
                             model=model,
-                            max_tokens=req.max_tokens or 4096,
+                            max_tokens=_max_tokens(req),
                             **_sampling_kwargs(req),
                         ):
                             full_text += piece
@@ -1200,7 +1243,8 @@ def _stream_response(req, messages, model, user_content, session_id,
         if (settings.cache.enabled and user_content and full_text
                 and not stream_failed and not cache_hit):
             _cache.set(user_content, full_text, input_tokens=input_tokens,
-                       output_tokens=output_tokens, session_id=session_id)
+                       output_tokens=output_tokens, session_id=session_id,
+                       context=cache_ctx)
         _analytics.record(
             session_id=session_id, provider=settings.provider, model=model,
             input_tokens_original=orig_input_tokens,

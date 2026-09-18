@@ -363,7 +363,10 @@ def resume(
         headers, timeout=10,
     )
     if r.status_code == 404:
-        console.print(f"[yellow]No checkpoint found for session: {session_id}[/yellow]")
+        console.print(
+            f"[yellow]No checkpoint found for session: {session_id}, and its "
+            f"graph memory is empty. Chat through the proxy with this "
+            f"session_id first, or run `tokenmizer checkpoint`.[/yellow]")
         raise typer.Exit(1)
     if r.status_code != 200:
         # Every status needs handling, not just 404: any OTHER
@@ -378,9 +381,11 @@ def resume(
     if not _require_fields(data, "resume_context", "token_count"):
         raise typer.Exit(1)
 
+    source = "live graph" if data.get("source") == "live_graph" else "checkpoint"
     console.print(Panel(
         data["resume_context"],
-        title=f"[green]Resume — {session_id[:16]}... ({data['token_count']} tokens)[/green]",
+        title=f"[green]Resume — {session_id[:16]}... "
+              f"({data['token_count']} tokens, from {source})[/green]",
         border_style="green",
     ))
 

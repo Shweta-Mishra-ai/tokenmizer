@@ -116,8 +116,37 @@ def _count_with_anthropic_sdk(text: str) -> int | None:
 # holds references to text the request already owns.
 # 4096 entries bounds memory to a few MB of retained strings; move
 # to a per-message content hash if very large single messages ever matter.
-@functools.lru_cache(maxsize=4096)
+# Texts above this size are counted without being memoised. The cache
+# bounds entry COUNT, not bytes: 4096 entries of a multi-megabyte pasted
+# file would retain gigabytes. Such texts are rare and the cost of
+# re-encoding one is small next to the request that carried it.
+_MEMO_MAX_CHARS = 32_000
+
+
 def count_tokens(text: str, model: str = "gpt-4o") -> int:
+    """
+    Accurate token count for the given model.
+
+    Memoised on (text, model) for texts up to _MEMO_MAX_CHARS — see
+    _count_tokens_memo for why, and the constant for why not beyond.
+    """
+    if text and len(text) > _MEMO_MAX_CHARS:
+        return _count_tokens_uncached(text, model)
+    return _count_tokens_memo(text, model)
+
+
+@functools.lru_cache(maxsize=4096)
+def _count_tokens_memo(text: str, model: str = "gpt-4o") -> int:
+    return _count_tokens_uncached(text, model)
+
+
+# The memo's stats/clear are exposed on the public name so callers (and
+# tests) that inspect `count_tokens.cache_info()` keep working.
+count_tokens.cache_info = _count_tokens_memo.cache_info    # type: ignore[attr-defined]
+count_tokens.cache_clear = _count_tokens_memo.cache_clear  # type: ignore[attr-defined]
+
+
+def _count_tokens_uncached(text: str, model: str = "gpt-4o") -> int:
     """
     Accurate token count for the given model.
 

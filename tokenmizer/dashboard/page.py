@@ -161,8 +161,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="layer-badge badge-terse">Active</span>
       </div>
       <div class="layer-row">
-        <span class="layer-name">Context Router</span>
-        <span class="layer-badge badge-routing">Beta</span>
+        <span class="layer-name">Model Routing</span>
+        <span class="layer-badge badge-routing" title="routing.* is accepted by the config but nothing implements it yet — see the README">Not implemented</span>
       </div>
     </div>
 

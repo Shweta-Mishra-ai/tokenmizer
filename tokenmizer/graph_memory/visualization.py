@@ -47,6 +47,9 @@ _STATUS_OPACITY = {
     "completed": 1.0, "in_progress": 0.9, "pending": 0.7,
     "failed": 0.6, "superseded": 0.35, "archived": 0.25,
     "modified": 0.5, "invalidated": 0.2,
+    # Both sides of an unresolved conflict are live information (see
+    # NodeStatus.CONTESTED), so they render at full weight.
+    "contested": 1.0,
 }
 
 # One entry per EdgeType (same test). The previous map carried

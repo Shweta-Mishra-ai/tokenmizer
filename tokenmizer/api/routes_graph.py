@@ -536,24 +536,75 @@ async def invalidate_decision(
         raise _internal_error("Invalidate decision failed", e)
 
 
+def _live_resume(graph, level: str, next_action: str = "") -> str:
+    """A resume block built from the graph as it is NOW, at the same three
+    tiers a checkpoint stores. Same builders, so the two sources read
+    identically to the client."""
+    mgr = app_module._checkpoint_mgr
+    if level == "critical":
+        return mgr._build_critical(graph, next_action)
+    if level == "full":
+        return mgr._build_full(graph, [], next_action)
+    return mgr._build_standard(graph, next_action)
+
+
 @router.get("/api/resume/{session_id}", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_resume(session_id: str, level: str = "standard"):
-    """Get resume context for a session. level: critical | standard | full"""
+    """Get resume context for a session. level: critical | standard | full
+
+    Source of truth is the graph, not the checkpoint table. A checkpoint is
+    a snapshot taken at one moment; the graph is persisted on every turn.
+    Two cases used to return the wrong thing here:
+
+    - No checkpoint at all -> 404, even when the session had a full graph.
+      The auto-checkpoint trigger measures the request AFTER windowing
+      (see api/app.py), and windowing keeps the request small, so on a
+      default config a long proxy session often never crosses the
+      threshold and never gets a checkpoint. "No checkpoint found" was
+      then the answer to a session with hours of memory in it.
+    - A checkpoint older than the graph -> the stale snapshot, with every
+      decision made since silently missing.
+
+    Now: if the graph has been updated since the latest checkpoint (or
+    there is none), the block is built live from the graph and the
+    response says `source: "live_graph"`. The checkpoint's own
+    "Continue from" hint is kept when one exists, since the graph does
+    not record the last request. 404 only when there is neither a
+    checkpoint nor a single node.
+    """
     try:
         if level not in ("critical", "standard", "full"):
             level = "standard"
         ckpt = app_module._checkpoint_mgr.get_latest(session_id)
-        if not ckpt:
-            raise HTTPException(status_code=404, detail="No checkpoint found for session")
-        resume_map = {
-            "critical": ckpt.resume_critical,
-            "standard": ckpt.resume_standard,
-            "full": ckpt.resume_full,
-        }
-        text = resume_map.get(level, ckpt.resume_standard)
+        graph = await app_module._get_graph_async(session_id)
+        live_nodes = [n for n in graph._nodes.values() if not n._evicted]
+        graph_updated_at = max((n.updated_at for n in live_nodes), default=0.0)
+
+        if not ckpt and not live_nodes:
+            raise HTTPException(
+                status_code=404,
+                detail="No checkpoint found for session, and its graph memory is "
+                       "empty — nothing has been recorded under this session_id yet.",
+            )
+
+        # Prefer the graph whenever it is newer than the snapshot. A one
+        # second grace absorbs the extraction the checkpoint itself ran.
+        use_live = live_nodes and (ckpt is None or graph_updated_at > ckpt.created_at + 1.0)
+        if use_live:
+            text = _live_resume(graph, level, ckpt.next_action if ckpt else "")
+            source = "live_graph"
+        else:
+            resume_map = {
+                "critical": ckpt.resume_critical,
+                "standard": ckpt.resume_standard,
+                "full": ckpt.resume_full,
+            }
+            text = resume_map.get(level, ckpt.resume_standard)
+            source = "checkpoint"
         return {
             "session_id": session_id,
-            "checkpoint_id": ckpt.checkpoint_id,
+            "checkpoint_id": ckpt.checkpoint_id if ckpt else None,
+            "source": source,
             "level": level,
             "resume_context": text,
             "token_count": count_tokens(text),
