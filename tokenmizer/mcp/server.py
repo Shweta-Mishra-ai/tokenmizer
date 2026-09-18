@@ -47,6 +47,39 @@ logger = logging.getLogger(__name__)
 
 TOKENMIZER_URL = os.environ.get("TOKENMIZER_URL", "http://localhost:8000")
 TOKENMIZER_API_KEY = os.environ.get("TOKENMIZER_API_KEY", "")
+# Where the graph lives when these tools read it directly. Matches the
+# proxy's own default (graph_checkpoint.storage_dir), so a local read sees
+# exactly what a running proxy would have written.
+TOKENMIZER_STORAGE_DIR = os.environ.get("TOKENMIZER_STORAGE_DIR", "./checkpoints")
+
+# The MCP server is installed by a plugin; the proxy is a separate process
+# nobody started. So the single most likely state on a fresh install is
+# "tokenmizer serve is not running", and five of the six tools answered
+# nothing but an explanation of that. They now fall back to reading and
+# writing the SQLite store directly — the same store the proxy uses, under
+# the same cross-process lock — and say which path answered.
+#
+# Only a TRANSPORT failure falls back. A 401, a 403 or a 404 means the
+# proxy is there and said no, and quietly answering from local storage
+# would bypass the session-ownership boundary it was enforcing.
+OFFLINE = "offline"
+
+
+def _local_note(detail: str = "") -> str:
+    return ("\n\n[Answered from local graph memory at "
+            f"{TOKENMIZER_STORAGE_DIR} — TokenMizer is not running at "
+            f"{TOKENMIZER_URL}. Start it with `tokenmizer serve` for the "
+            f"proxy's analytics and cross-session features.{detail}]")
+
+
+def _is_offline(result: dict) -> bool:
+    return isinstance(result, dict) and result.get(OFFLINE) is True
+
+
+def _memory(session_id: str):
+    from tokenmizer.agents import Memory
+
+    return Memory(session_id, storage_dir=TOKENMIZER_STORAGE_DIR)
 
 
 # ── MCP Tool definitions ──────────────────────────────────────────────────────
@@ -216,7 +249,21 @@ def _get(path: str) -> dict:
         return {"error": "pip install httpx  — required for MCP server"}
     except Exception as e:
         logger.warning(f"GET {path} against the proxy failed: {e}")
-        return {"error": _explain(e)}
+        return {"error": _explain(e), OFFLINE: _is_transport_error(e)}
+
+
+def _is_transport_error(exc: Exception) -> bool:
+    """True if the proxy could not be reached at all.
+
+    A connect failure or a timeout means nothing answered. An HTTP status
+    means something did, and its answer stands — see the OFFLINE note.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return False
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
+                           httpx.ReadTimeout, httpx.TimeoutException))
 
 
 def _explain(exc: Exception) -> str:
@@ -274,7 +321,7 @@ def _post(path: str, body: dict) -> dict:
         return {"error": "pip install httpx  — required for MCP server"}
     except Exception as e:
         logger.warning(f"POST {path} against the proxy failed: {e}")
-        return {"error": _explain(e)}
+        return {"error": _explain(e), OFFLINE: _is_transport_error(e)}
 
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
@@ -312,6 +359,8 @@ def handle_checkpoint_session(args: dict) -> tuple[str, bool]:
         f"/api/checkpoint?session_id={quote(session_id, safe='')}",
         {"messages": messages or []},
     )
+    if _is_offline(result):
+        return _local_checkpoint(session_id, messages or [])
     if "error" in result:
         return f"Checkpoint failed: {result['error']}", True
     return (
@@ -323,6 +372,28 @@ def handle_checkpoint_session(args: dict) -> tuple[str, bool]:
     ), False
 
 
+def _local_checkpoint(session_id: str, messages: list) -> tuple[str, bool]:
+    """Write the transcript into the graph without the proxy."""
+    try:
+        memory = _memory(session_id)
+        gained = memory.add([
+            {"role": str(m.get("role", "user")), "content": str(m.get("content", ""))}
+            for m in messages if isinstance(m, dict)
+        ]) if messages else 0
+        memory.save()
+        stats = memory.stats()
+        context = memory.context(token_budget=400)
+    except Exception as e:
+        logger.exception("Local checkpoint failed")
+        return (f"Checkpoint failed, and TokenMizer is not running at "
+                f"{TOKENMIZER_URL} to fall back on: {type(e).__name__}: {e}"), True
+    return (
+        f"Session '{session_id}' saved to graph memory\n"
+        f"Nodes in graph: {stats.get('node_count', 0)} (+{gained} from this call)\n\n"
+        f"Resume context:\n{context}" + _local_note()
+    ), False
+
+
 def handle_resume_session(args: dict) -> tuple[str, bool]:
     session_id = _require_str(args, "session_id")
     level = args.get("level", "standard")
@@ -331,6 +402,8 @@ def handle_resume_session(args: dict) -> tuple[str, bool]:
             f"Invalid 'level': {level!r} (expected critical|standard|full)"
         )
     result = _get(f"/api/resume/{quote(session_id, safe='')}?level={level}")
+    if _is_offline(result):
+        return _local_resume(session_id, level)
     if "error" in result:
         return f"Resume failed: {result['error']}", True
     ctx = result.get("resume_context", "")
@@ -356,9 +429,48 @@ def handle_resume_session(args: dict) -> tuple[str, bool]:
     ), False
 
 
+# Budgets match the proxy's three resume tiers so the local answer is the
+# same size as the remote one.
+_LEVEL_BUDGET = {"critical": 120, "standard": 400, "full": 700}
+
+
+def _local_resume(session_id: str, level: str) -> tuple[str, bool]:
+    try:
+        memory = _memory(session_id)
+        context = memory.context(token_budget=_LEVEL_BUDGET.get(level, 400))
+        nodes = memory.stats().get("node_count", 0)
+    except Exception as e:
+        logger.exception("Local resume failed")
+        return (f"Resume failed, and TokenMizer is not running at "
+                f"{TOKENMIZER_URL} to fall back on: {type(e).__name__}: {e}"), True
+    if not context:
+        return (
+            f"Nothing to resume for '{session_id}': its graph memory holds "
+            f"{nodes} node(s) at {TOKENMIZER_STORAGE_DIR}. Chat through the "
+            f"proxy with this session_id, or pass the conversation to "
+            f"checkpoint_session as `messages`."
+        ), False
+    return (
+        f"[TokenMizer Resume — session: {session_id} — from local graph memory]\n\n"
+        f"{context}\n\n"
+        f"[Paste the above into your system prompt to resume this session]"
+        + _local_note()
+    ), False
+
+
 def handle_get_graph_stats(args: dict) -> tuple[str, bool]:
     session_id = _require_str(args, "session_id")
     result = _get(f"/api/graph/{quote(session_id, safe='')}")
+    if _is_offline(result):
+        try:
+            result = _memory(session_id).stats()
+            offline = True
+        except Exception as e:
+            logger.exception("Local graph stats failed")
+            return (f"Graph stats failed, and TokenMizer is not running at "
+                    f"{TOKENMIZER_URL}: {type(e).__name__}: {e}"), True
+    else:
+        offline = False
     if "error" in result:
         return f"Graph stats failed: {result['error']}", True
     by_type = result.get("by_type", {})
@@ -376,7 +488,7 @@ def handle_get_graph_stats(args: dict) -> tuple[str, bool]:
     lines.append("\nNode statuses:")
     for s, count in sorted(by_status.items()):
         lines.append(f"  {s}: {count}")
-    return "\n".join(lines), False
+    return "\n".join(lines) + (_local_note() if offline else ""), False
 
 
 def handle_analyze_file(args: dict) -> tuple[str, bool]:
@@ -418,6 +530,14 @@ def handle_why_decision(args: dict) -> tuple[str, bool]:
     session_id = _require_str(args, "session_id")
     query = _require_str(args, "query")
     result = _get(f"/api/graph/{quote(session_id, safe='')}/why?q={quote(query)}")
+    offline = _is_offline(result)
+    if offline:
+        try:
+            result = _memory(session_id).why(query)
+        except Exception as e:
+            logger.exception("Local reasoning query failed")
+            return (f"Reasoning query failed, and TokenMizer is not running "
+                    f"at {TOKENMIZER_URL}: {type(e).__name__}: {e}"), True
     if "error" in result:
         return f"Reasoning query failed: {result['error']}", True
 
@@ -429,7 +549,7 @@ def handle_why_decision(args: dict) -> tuple[str, bool]:
         return (
             f"No decision matching '{query}' found in session '{session_id}'. "
             f"Try a shorter substring, or use get_graph_stats to see what "
-            f"the graph contains."
+            f"the graph contains." + (_local_note() if offline else "")
         ), False
 
     lines = [f"Decision trail for '{query}' — session: {session_id}", ""]
@@ -451,11 +571,24 @@ def handle_why_decision(args: dict) -> tuple[str, bool]:
     else:
         lines.append("  Note: no active decision on this topic (superseded or "
                      "invalidated without replacement).")
-    return "\n".join(lines), False
+    return "\n".join(lines) + (_local_note() if offline else ""), False
 
 
 def handle_get_savings_stats(args: dict) -> tuple[str, bool]:
     result = _get("/api/stats")
+    if _is_offline(result):
+        # Analytics are recorded by the proxy as requests pass through it.
+        # There is nothing local to read: a session checkpointed straight
+        # into the graph never went through a pipeline that could save
+        # anything. Say that rather than reporting zeros as a result.
+        return (
+            f"No savings to report: TokenMizer is not running at "
+            f"{TOKENMIZER_URL}, and savings are measured on requests that "
+            f"pass through the proxy. Graph memory still works without it "
+            f"(checkpoint, resume, graph stats and why all read "
+            f"{TOKENMIZER_STORAGE_DIR} directly). Start `tokenmizer serve` "
+            f"and route your client at it to see savings."
+        ), False
     if "error" in result:
         return f"Stats failed: {result['error']}", True
     d = result.get("daily", {})
