@@ -118,3 +118,77 @@ class TestClipParentheses:
     def test_balanced_parenthetical_is_kept(self):
         assert _clip("bcrypt for password hashing (industry standard)") \
             == "bcrypt for password hashing (industry standard)"
+
+
+class TestSupersession:
+    """A transition needs evidence the state CHANGED over time.
+
+    The old pattern listed "instead of" beside "switched from" and then
+    required a trailing "to/with/for", so "Next.js instead of React for
+    better SEO" parsed as old="React", new="better SEO" — a decision to
+    use "better SEO", superseding the real one. It also could not match
+    "date-fns instead of moment.js" at all. And even when a supersession
+    WAS parsed, `_apply_extracted` never read it: the pair only became a
+    transition if the topic classifier happened to bucket both sides
+    together, which on the corpus session that exists to demonstrate the
+    feature it did not.
+    """
+
+    def test_forward_form_records_the_change(self, tmp_path):
+        g = _graph(tmp_path, [
+            {"role": "assistant", "content":
+             "Switching from cenkalti/backoff to a hand-rolled retry loop. Removed the dep."},
+        ])
+        assert len(g._transitions) == 1, [(t.from_label, t.to_label) for t in g._transitions]
+        t = g._transitions[0]
+        assert "backoff" in t.from_label and "retry loop" in t.to_label
+        old = next(n for n in g._nodes.values() if n.id == t.from_decision_id)
+        assert old.status == NodeStatus.SUPERSEDED
+        assert _edges(g, EdgeType.SUPERSEDES)
+
+    def test_replace_form_records_the_change(self, tmp_path):
+        g = _graph(tmp_path, [
+            {"role": "assistant", "content": "Replaced moment.js with date-fns."},
+        ])
+        assert len(g._transitions) == 1
+        assert "moment" in g._transitions[0].from_label
+
+    def test_instead_of_is_one_decision_not_a_change(self, tmp_path):
+        """One sentence naming a choice and its rejected alternative is a
+        single decision; the corpus labels it with the whole phrase."""
+        g = _graph(tmp_path, [
+            {"role": "assistant", "content": "Decided: Next.js instead of React for better SEO"},
+        ])
+        assert g._transitions == []
+        labels = [n.label for n in g._nodes.values() if n.type == NodeType.DECISION]
+        # One decision, stated as the phrase. The defect was a SECOND node
+        # labelled "Use better SEO" — the rationale recorded as the thing
+        # chosen — which then superseded the real decision.
+        assert len(labels) == 1, labels
+        assert not any(x.lower().startswith("use better") for x in labels), labels
+
+    def test_common_noun_operand_is_not_a_supersession(self, tmp_path):
+        """'Replaced the pattern with X' names no technology."""
+        g = _graph(tmp_path, [
+            {"role": "assistant", "content":
+             "Replaced the pattern with typed-exception matching in hybrid_extractor.py."},
+        ])
+        assert g._transitions == []
+
+    def test_a_supersession_is_recorded_once(self, tmp_path):
+        """Re-extracting the same transcript must not stack duplicates."""
+        msgs = [{"role": "assistant", "content": "Switched from moment.js to date-fns."}]
+        g = _graph(tmp_path, msgs)
+        g.extract_from_messages(msgs, incremental=False)
+        assert len(g._transitions) == 1
+
+    def test_why_walks_the_chain(self, tmp_path):
+        from tokenmizer.graph_memory.reasoning import why
+
+        g = _graph(tmp_path, [
+            {"role": "assistant", "content":
+             "Switched from moment.js to date-fns because it is tree-shakeable."},
+        ])
+        answer = why(g, "date-fns")
+        assert answer["chain"], answer
+        assert answer["current"] and "date-fns" in answer["current"]["label"]

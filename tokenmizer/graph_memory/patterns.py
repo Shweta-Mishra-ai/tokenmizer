@@ -312,27 +312,120 @@ _DECISION_CONFIG = re.compile(
     re.IGNORECASE,
 )
 
+# ── Supersession ──────────────────────────────────────────────────────────────
+#
+# Two phrasings state the same fact with the operands in OPPOSITE orders,
+# and reading both with one pattern produced a false decision rather than
+# merely missing one:
+#
+#   forward — "switched FROM moment.js TO date-fns"   (old, then new)
+#   reverse — "date-fns INSTEAD OF moment.js"         (new, then old)
+#
+# A single pattern listing "instead of" alongside "switched from" and then
+# requiring a trailing "to/with/for" read "Next.js instead of React for
+# better SEO" as old="React", new="better SEO" — recording a decision to
+# use "better SEO" and superseding the real one with it. The same pattern
+# could not match "date-fns instead of moment.js" at all, because nothing
+# follows the old side. Hence three patterns and one operand cleaner.
+#
+# `/` and `@` belong in an operand: real dependency names carry them
+# (`cenkalti/backoff`, `@scope/pkg`, `psf/black`).
+_OPERAND = r'[\w][\w\s\./@\-]{2,40}'
+
+# "switched from X to Y", "moved from X to Y", "migrating away from X to Y"
 _SUPERSEDED = re.compile(
-    r'(?:'
-    r'switched?\s+(?:from|away\s+from)|'
-    r'switching?\s+from|'
-    r'replacing|'
-    r'instead\s+of|'
-    r'moved?\s+from|'
-    r'migrat\w+\s+(?:from|away\s+from)|'
-    r'dropping|'
-    r'no\s+longer\s+using|'
-    r'replaced?\s+\w+\s+with|'
-    r'moving\s+(?:away\s+from|from)'
-    r')'
-    # `/` and `@` belong in both sides: real dependency names carry them
-    # (`cenkalti/backoff`, `@scope/pkg`, `psf/black`). Without `/`, the old
-    # side could only match up to the slash and the whole supersession
-    # failed to parse — "Switching from cenkalti/backoff to a hand-rolled
-    # retry loop" recorded no transition and lost the new decision with it.
-    r'\s+(\w[\w\s\./@\-]{2,30}?)\s+(?:to|with|for)\s+(\w[\w\s\./@\-]{2,30})',
+    r'(?:switch(?:ed|ing)?|mov(?:ed|ing)|migrat(?:ed|ing))\s+'
+    r'(?:away\s+)?from\s+(' + _OPERAND + r')\s+(?:to|over\s+to|onto)\s+(' + _OPERAND + r')',
     re.IGNORECASE,
 )
+
+# "replaced X with Y", "replacing X by Y"
+_SUPERSEDED_REPLACE = re.compile(
+    r'replac(?:ed|ing|es)?\s+(' + _OPERAND + r')\s+(?:with|by)\s+(' + _OPERAND + r')',
+    re.IGNORECASE,
+)
+
+# "Y instead of X" is deliberately NOT a supersession.
+#
+# It states ONE decision and the alternative it was chosen over, in one
+# sentence, at one moment — "quarantine by rename instead of unlink" is a
+# single choice, and the labelled corpus records it as one decision with
+# that whole phrase as its label. Reading it as a change over time
+# produced three decisions per sentence (the phrase plus a node for each
+# side), a chain that ran in a circle, and — because the old pattern
+# listed "instead of" alongside "switched from" and then demanded a
+# trailing "to/with/for" — labels like "better SEO" recorded as the
+# technology chosen. "instead of", "rather than" and "in place of" appear
+# constantly in ordinary technical prose ("quoting only the macro rather
+# than the file"), so matching them here cost 28 points of decision
+# precision on the corpus for no transition anyone could trust.
+#
+# A transition needs evidence that the state actually CHANGED: something
+# was in use, and then it was not. That is what the two patterns above say
+# and what this one cannot.
+
+# An operand runs on into the clause that explains it — "React for better
+# SEO", "moment.js because it ships every locale". Everything from the
+# first connective on is rationale, not the name of the thing chosen.
+_OPERAND_TAIL = re.compile(
+    r'\s+(?:for|because|since|so|as|which|that|and|but|due|given|after|'
+    r'when|while|to)\b.*$',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+# A sentence boundary inside an operand: the same lookahead the clause
+# patterns use, so `moment.js` and `3.12` keep their dots while
+# "pglogical. Created infra/dms_task.tf" stops at the full stop.
+_OPERAND_SENTENCE = re.compile(r"[.!?;](?=\s|$)|\s[\u2014\u2013]\s")
+
+
+# "Replaced THE PATTERN with ..." — an article followed by one ordinary
+# word is a common noun, not the name of a thing that can be adopted or
+# dropped. "Replaced the hand-rolled retry loop with cenkalti/backoff" is
+# the same shape with three words and IS a real change, so the test is
+# the word count, not the article alone.
+_COMMON_NOUN_OPERAND = re.compile(r"^(?:a|an|the)\s+[\w\-]+$", re.IGNORECASE)
+
+
+def _supersede_operand(text: str) -> str:
+    """One side of a supersession, trimmed to the thing being named.
+
+    Returns "" when the span is a common noun phrase rather than a name.
+    """
+    s = " ".join((text or "").split())
+    cut = _OPERAND_SENTENCE.search(s)
+    if cut:
+        s = s[:cut.start()]
+    s = _OPERAND_TAIL.sub("", s).strip(" ,;:.\u2014-")
+    if _COMMON_NOUN_OPERAND.match(s):
+        return ""
+    s = re.sub(r"^(?:a|an|the)\s+", "", s, flags=re.IGNORECASE)
+    return s.strip(" ,;:.\u2014-")
+
+
+def find_supersessions(content: str) -> list[tuple[str, str, int, int]]:
+    """Every "X was replaced by Y" the text states, as
+    (old, new, match_start, match_end).
+
+    Deduplicated on (old, new) so two phrasings of one change in the same
+    message do not produce two transitions.
+    """
+    found: list[tuple[str, str, int, int]] = []
+    seen: set[tuple[str, str]] = set()
+    for pattern in (_SUPERSEDED, _SUPERSEDED_REPLACE):
+        for m in pattern.finditer(content or ""):
+            old = _supersede_operand(m.group(1))
+            new = _supersede_operand(m.group(2))
+            if len(old) < 2 or len(new) < 2 or old.lower() == new.lower():
+                continue
+            key = (old.lower(), new.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((old, new, m.start(), m.end()))
+    return found
+
 
 # ── Evidence extraction patterns ──────────────────────────────────────────────
 
