@@ -351,9 +351,16 @@ class GraphValidator:
         # Package names with versions are strong
         if re.search(r'[>=<]+\s*[\d.]+', label):
             base += 0.20
-        # Known package ecosystems
-        if re.match(r'^[a-z][a-z0-9\-_]+$', label, re.IGNORECASE):
-            base += 0.10  # looks like a package name
+        # A bare package name is what an install command names, and the
+        # extractor only emits dependencies from install commands ("pip
+        # install redis", "npm add zod"), so the shape alone is strong
+        # evidence. The generic length/word-count penalties above took
+        # "redis" to 0.35 — under the 0.65 floor — so a bare package name
+        # was never accepted and DEPENDENCY nodes only existed when a
+        # version pin happened to be quoted. Floor, not bonus: it must
+        # clear the threshold regardless of how short the name is.
+        if re.match(r'^[a-z@][a-z0-9\-_./@]{2,}$', label, re.IGNORECASE):
+            base = max(base + 0.10, 0.70)
         return base
 
     # ── Type mismatch detection ───────────────────────────────────────────────
