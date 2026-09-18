@@ -17,11 +17,11 @@ benchmark, the suite is right and this file is a bug.
 |---|---|---|
 | Extraction, macro F1 on the labelled corpus | 97% overall; **91% on real transcripts**, 98% synthetic | `python -m benchmarks.eval` |
 | Label quality | 0% truncated mid-word; 0 near-duplicate pairs over 170 labels | same run |
-| Retrieval, recall@6 on paraphrased questions | 85% keyword; 92% with `semantic_retrieval` (n=13) | `benchmarks.graph_retrieval.query_eval` |
+| Retrieval, recall@6 on paraphrased questions | **82% keyword, n=40** (was 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
 | Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
 | Resume block size | ~160-180 tokens standard tier | `benchmarks/resume_quality` |
-| Suite | 1321 tests, ruff clean | `pytest tests/` |
+| Suite | 1332 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
 several items below exist.
@@ -108,12 +108,26 @@ Ollama sends finished calls on its last message, which become one delta
 each; its streaming payload also carried no `tools` at all, so a client
 that asked for tools *and* a stream got a model that could not see them.
 
-**4. Semantic retrieval on by default when the model is present.**
-recall@6 85% to 92% (n=13 — small, so enlarge the eval first: 40 cases
-across the corpus). Bundle the weight download into the Docker build
-(already done for the cache) and turn the flag on when
-`EmbeddingEngine.available`. The keyword-gate measurement above is the
-reason this is the path and not a cheaper one.
+**4. Semantic retrieval on by default when the model is present.**  *(the
+default is done; the embedding number is not re-measured)*
+`semantic_retrieval: auto` is the default and resolves once at startup by
+trying to load the model, because sentence-transformers ships no weights
+and "installed" is not "loadable" on an air-gapped host. `true`/`false`
+still pin it. `Memory` follows the same setting, so an in-process caller
+no longer gets quietly worse ranking than the same deployment's proxy.
+
+The eval is enlarged from 13 cases to **40**, across every corpus session
+including the six captured transcripts, with a grounding check that
+refuses a question its own transcript cannot answer. Keyword ranking
+scores **recall@6 82%** on it — and the misses are exactly the paraphrases
+embeddings exist for ("what is slow about the dashboard" against a node
+that says "re-render").
+
+**The 92%-with-embeddings figure is not re-measured and should not be
+quoted.** It came from the 13-case eval, and this branch was written in a
+sandbox with no egress, so the model never loaded here. Running
+`--semantic` on a host that can fetch the weights is the remaining work,
+and the number it produces replaces the old one.
 
 **5. The CLI's `stats` should show the durability counters too.**  *(done)*
 It prints failed writes, sessions with an unreadable graph, sessions with

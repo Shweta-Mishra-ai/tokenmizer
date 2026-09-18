@@ -11,7 +11,7 @@ python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 1321 tests
+pytest tests/ -q                                     # 1332 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -86,6 +86,26 @@ tokens** (180 / 168 / 136 across the three sessions) versus ~1,500+
 tokens of raw history. The advantage is concentrated in decision recall
 (92% vs a baseline that drops as low as 50%); on tasks it ties the
 baseline (76% both).
+
+## Retrieval — what `query()` returns for a paraphrase
+
+`python -m benchmarks.graph_retrieval.query_eval`, **40 questions** across
+every corpus session, each phrased the way a person asks rather than in
+the node's own words ("what is slow about the dashboard", not "WebSocket
+re-render"). If the question quoted the answer, the person would not have
+needed to ask — and those are exactly the cases token-overlap ranking
+cannot serve.
+
+**recall@6 82%** with keyword ranking. Every case is checked to be
+answerable from its own transcript before scoring: an ungrounded question
+measures extraction, not retrieval, and reads as a retrieval failure
+forever.
+
+This was 13 cases until recently, where one case flipping moved the
+headline by 8 points. The 92% figure once quoted for
+`semantic_retrieval` came from that smaller set and has **not** been
+re-measured against these 40 — `--semantic` needs the embedding weights,
+and they could not be fetched where this was run.
 
 ## Domains other than coding
 

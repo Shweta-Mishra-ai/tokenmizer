@@ -37,7 +37,7 @@ from tokenmizer.checkpoints.manager import CheckpointManager
 from tokenmizer.compression.engine import CompressionPipeline
 from tokenmizer.compression.output_trimmer import OutputTrimmer
 from tokenmizer.compression.window import SmartMessageWindow, needs_windowing
-from tokenmizer.config.settings import get_settings
+from tokenmizer.config.settings import get_settings, resolve_semantic_retrieval
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.filters.file_intelligence import FileIntelligence
 from tokenmizer.graph_memory.graph import GraphMemory
@@ -122,6 +122,15 @@ _ownership = OwnershipStore(storage_dir=settings.graph_checkpoint.storage_dir)
 _analytics = AnalyticsEngine(storage_dir=settings.graph_checkpoint.storage_dir)
 # Built only when asked for: the store creates a database file, and a
 # feature that is off should leave no trace on disk.
+# Resolved once, at import: "auto" asks whether the embedding model
+# actually loads, which is a question worth asking at startup and not on
+# every request. See resolve_semantic_retrieval.
+_SEMANTIC_RETRIEVAL = resolve_semantic_retrieval(
+    settings.graph_checkpoint.semantic_retrieval)
+if _SEMANTIC_RETRIEVAL and settings.graph_checkpoint.semantic_retrieval == "auto":
+    logger.info("Semantic retrieval is ON — the embedding model loaded. "
+                "Set graph_checkpoint.semantic_retrieval: false to pin it off.")
+
 _preferences = None
 if settings.preferences.enabled:
     from tokenmizer.preferences import PreferenceStore
@@ -413,7 +422,7 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
             _graph_cache[session_id] = GraphMemory(
                 session_id,
                 storage_dir=settings.graph_checkpoint.storage_dir,
-                semantic_retrieval=settings.graph_checkpoint.semantic_retrieval,
+                semantic_retrieval=_SEMANTIC_RETRIEVAL,
             )
         _graph_cache_touch(session_id)
         return _graph_cache[session_id]

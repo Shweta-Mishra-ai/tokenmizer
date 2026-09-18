@@ -91,6 +91,39 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Changed — `semantic_retrieval: auto`, and a retrieval eval worth quoting
+The setting defaulted to `false`, so a deployment with the embedding model
+sitting in its image ranked context by token overlap anyway unless somebody
+found the flag. It defaults to `auto` now: on when the model actually
+loads, off otherwise, resolved once at startup rather than per request.
+`true`/`false` still pin it. sentence-transformers ships no weights, so
+"auto" asks by trying — the package being installed says nothing about
+whether the model is present on an air-gapped host, behind an egress proxy,
+or during a Hub outage. A failure to even ask resolves to off, never on.
+
+`Memory` (the in-process API) follows the same setting instead of
+hard-defaulting to `False`, so an agent using the library no longer gets
+quietly worse ranking than the same deployment's proxy.
+
+The eval behind the change went from **13 cases to 40**, across every
+corpus session including the six captured transcripts, with a grounding
+check that refuses a question its own transcript cannot answer — the
+module's docstring had warned about that trap in prose, which does not
+scale to 40 cases. Keyword ranking scores **recall@6 82%** on the larger
+set, against 85% on the smaller one, and the misses are exactly the
+paraphrases embeddings exist for.
+
+**The 92%-with-embeddings figure is withdrawn until re-measured.** It came
+from the 13-case eval, and this branch was written where the weights could
+not be fetched. The docs now say 82% keyword and say why the other number
+is missing, rather than quoting a figure from a superseded sample.
+
+The shipped `tokenmizer.yaml` was also stale in four places — it described
+`state_backend` as "NOT WIRED UP" against an issue number, carried the
+dead `routing:` block, pinned `semantic_retrieval: false` with the old
+n=13 numbers, and knew nothing of `domain` or `preferences`. It is COPY'd
+into the Docker image, so it is what a deployment actually runs.
+
 ### Removed — more code that did nothing, and one duplicated rule
 - **`ConfigError` and `GraphPersistError`** — neither was ever raised.
   `GraphPersistError`'s docstring promised a data-loss contract that does

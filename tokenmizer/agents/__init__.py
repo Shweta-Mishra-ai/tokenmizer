@@ -41,7 +41,7 @@ class Memory:
         self,
         session_id: Optional[str] = None,
         storage_dir: str = "./checkpoints",
-        semantic_retrieval: bool = False,
+        semantic_retrieval: Optional[bool] = None,
         cross_session_recall: Optional[bool] = None,
         principal: Optional[str] = None,
     ):
@@ -55,6 +55,17 @@ class Memory:
                 )
         self.session_id = session_id
         self._storage_dir = storage_dir
+        if semantic_retrieval is None:
+            # None means "whatever this deployment is configured for",
+            # which is "auto" by default: on when the embedding model
+            # actually loads. An in-process caller gets the same ranking
+            # the proxy gets, rather than a quietly worse one.
+            from tokenmizer.config.settings import (
+                get_settings,
+                resolve_semantic_retrieval,
+            )
+            semantic_retrieval = resolve_semantic_retrieval(
+                get_settings().graph_checkpoint.semantic_retrieval)
         self._graph = GraphMemory(
             session_id, storage_dir=storage_dir,
             semantic_retrieval=semantic_retrieval,
