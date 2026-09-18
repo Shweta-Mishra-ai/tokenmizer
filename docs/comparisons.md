@@ -34,13 +34,11 @@ one nothing else in the category does.
 
 ## Roadmap
 
-| Version | Focus |
-|---|---|
-| **v0.3** | SSE streaming passthrough (checkpoint on stream close) |
-| **v0.4** | Graph ontology · deterministic reasoning API (`why`, `impact`, consistency checks) |
-| **v0.5** | Per-row storage schema · cross-process write safety · session ownership · durability guarantees · embedding-based semantic recall and conflict/dedup matching · measured extraction quality *(this release)* |
-| v0.6 | Cross-session memory · LLM-assisted extraction for the defects regexes cannot reach |
-| Research | 100-session, 8-method benchmark → paper ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research)) — TokenMizer 0.5.4 ties for first at 60% macro F1, level with Mem0-style and Graphiti-style |
+Moved to [docs/roadmap.md](roadmap.md), which pairs every planned item
+with the measurement that motivates it. Shipped so far: v0.3 SSE
+passthrough; v0.4 ontology and reasoning API; v0.5 per-row storage,
+cross-process safety, ownership, semantic recall; v0.6 (unreleased)
+cross-session recall, LLM extraction on the chat provider, tool calling.
 
 Have a use case that doesn't fit? [Open an issue](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/new/choose) — extraction misses have their own issue template.
 

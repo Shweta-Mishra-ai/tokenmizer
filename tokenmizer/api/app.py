@@ -936,9 +936,16 @@ async def _update_graph(
                 (i for i, m in enumerate(messages) if m.get("role") == "system"), None
             )
             if sys_idx is not None:
+                # APPENDED, not prepended. Provider prompt caching (layer
+                # 5) caches the longest unchanged prefix of the system
+                # prompt; this block changes every turn, and at the front
+                # it invalidated the cache on every request behind any
+                # agent with a long stable system prompt — the one place
+                # the cache pays. At the end, the terse prompt and the
+                # client's own system prompt stay cacheable.
                 messages[sys_idx]["content"] = (
-                    f"[Relevant session context]\n{ctx_block}\n\n"
-                    f"{messages[sys_idx]['content']}"
+                    f"{messages[sys_idx]['content']}\n\n"
+                    f"[Relevant session context]\n{ctx_block}"
                 )
             else:
                 # A system message is not guaranteed to exist: layer 2
