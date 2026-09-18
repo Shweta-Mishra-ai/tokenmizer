@@ -18,13 +18,23 @@ benchmark, the suite is right and this file is a bug.
 | Extraction, macro F1 on the labelled corpus | 97% overall; **91% on real transcripts**, 98% synthetic | `python -m benchmarks.eval` |
 | Label quality | 0% truncated mid-word; 0 near-duplicate pairs over 170 labels | same run |
 | Retrieval, recall@6 on paraphrased questions | **82% keyword, n=40** (was 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
+| Extraction outside coding | **96%** macro F1 with a domain pack, **11%** without | `benchmarks.eval --corpus benchmarks/eval/corpus_domains` |
+| Out-of-ontology facts surviving windowing | **17% to 100%**, at +22 tokens of resume per session | `benchmarks.resume_quality.runner` |
+| Checkpoint accuracy | 80% task / 100% decision / 100% file recall, 195-token resume | `benchmarks.checkpoint_accuracy.runner` |
 | Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
-| Resume block size | ~160-180 tokens standard tier | `benchmarks/resume_quality` |
 | Suite | 1332 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
 several items below exist.
+
+**P0 and P1 are done.** What follows keeps each item's entry so the
+reasoning that motivated it stays readable next to what was actually
+built — and so the ones that are *not* finished say which part is
+missing rather than being quietly dropped. Two are partial and say so:
+the semantic-retrieval number was not re-measured (no egress where this
+was written), and the domain packs ship with hand-written corpora rather
+than captured transcripts. P2 is untouched.
 
 ---
 
