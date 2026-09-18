@@ -92,6 +92,7 @@ from tokenmizer.graph_memory.patterns import (
     _sentence_index,
     _tech_mention_is_a_decision,
     find_supersessions,
+    restore_verb,
 )
 
 logger = logging.getLogger(__name__)
@@ -293,7 +294,8 @@ class HybridExtractor:
                             result.tasks_done.append(label)
                             seen_tasks.add(norm)
                     continue
-            task = _clip(raw_task)
+            verb = re.match(r"\w+", m.group(0))
+            task = restore_verb(verb.group(0) if verb else "", _clip(raw_task))
             if len(task) < 5 or _is_only_paths(task) or _LEADING_CONNECTIVE.match(task):
                 continue
             norm = self._normalize(task)

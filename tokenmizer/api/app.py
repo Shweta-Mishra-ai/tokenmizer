@@ -1566,7 +1566,47 @@ async def chat_completions(req: ChatRequest, request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "timestamp": time.time()}
+    """Liveness AND the failure counters that were only visible in logs.
+
+    `status` was the literal string "ok" whatever had happened, so a
+    deployment whose checkpoints had been failing for a day, or whose
+    graph database had been quarantined after corruption, reported
+    healthy to every uptime monitor pointed at it. For a tool whose whole
+    claim is "your context is safe", that is the one check that must not
+    lie.
+
+    "degraded" means the proxy is serving requests but something it was
+    trusted to keep has failed: a write that did not land, a session
+    whose stored graph could not be read, storage that is not durable, or
+    memory displaced by corruption recovery. The detail says which, and
+    every counter here is also available in /api/stats.
+    """
+    failures = _analytics.persist_failures
+    sessions_load_failed = sorted(
+        sid for sid, g in _graph_cache.items() if g._load_failed)
+    sessions_no_durability = sorted(
+        sid for sid, g in _graph_cache.items() if g._persistence_broken)
+    sessions_data_loss = sorted(
+        sid for sid, g in _graph_cache.items() if g._data_loss_detected)
+    checkpoints_broken = bool(getattr(_checkpoint_mgr, "persistence_broken", False))
+    checkpoints_data_loss = bool(getattr(_checkpoint_mgr, "data_loss_detected", False))
+
+    degraded = bool(failures or sessions_load_failed or sessions_no_durability
+                    or sessions_data_loss or checkpoints_broken or checkpoints_data_loss)
+    return {
+        "status": "degraded" if degraded else "ok",
+        "timestamp": time.time(),
+        "version": __version__,
+        "sessions_in_memory": len(_graph_cache),
+        # Non-zero means something was lost or not written. Each key names
+        # the path that failed; see AnalyticsEngine.record_silent_failure.
+        "persist_failures": failures,
+        "sessions_with_unreadable_graph": sessions_load_failed,
+        "sessions_without_durable_storage": sessions_no_durability,
+        "sessions_with_data_loss": sessions_data_loss,
+        "checkpoint_storage_broken": checkpoints_broken,
+        "checkpoint_data_loss": checkpoints_data_loss,
+    }
 
 
 @app.get("/")
