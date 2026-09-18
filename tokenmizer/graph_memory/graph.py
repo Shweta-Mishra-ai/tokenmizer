@@ -923,11 +923,28 @@ class GraphMemory:
     # `label`, so none of that text was reachable by any query. A node whose
     # label is "Use PostgreSQL" could not be found by "connection pooling"
     # even with the phrase sitting in its own summary field.
+    @staticmethod
+    def _query_tokens(text: str) -> frozenset:
+        """Words a query or a node is matched on. Plurals are folded onto
+        their singular ("orders" -> "order", "retries" -> "retry") so a
+        question phrased in the plural still overlaps a node phrased in
+        the singular; before this, "which datastore for orders" shared no
+        word with "PostgreSQL for order storage"."""
+        out = set()
+        for w in text.split():
+            w = w.strip(".,!?:;()[]\"'").lower()
+            if len(w) <= 2:
+                continue
+            out.add(w)
+            if len(w) > 4 and w.endswith("ies"):
+                out.add(w[:-3] + "y")
+            elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+                out.add(w[:-1])
+        return frozenset(out)
+
     def _search_words(self, node: MemoryNode) -> frozenset:
         text = node.label if not node.summary else f"{node.label} {node.summary}"
-        return frozenset(
-            w.strip(".,!?:;()[]").lower() for w in text.split() if len(w) > 2
-        )
+        return self._query_tokens(text)
 
     def _score_nodes(self, task: str) -> list[tuple[float, MemoryNode]]:
         """Score every live node against `task`. Unsorted, unsliced —
@@ -941,10 +958,19 @@ class GraphMemory:
         'PostgreSQL'. Type boost: DECISION/GOAL nodes score 20% higher when
         relevant. When `semantic_retrieval` is on, embedding similarity is
         blended in — see _blend_semantic.
+
+        On the 0.05 floor below: it is cleared by importance alone, so every
+        live node scores for every query and top_k is the real bound. That
+        is deliberate, and measured: gating admission on keyword overlap
+        (a node must share a word with the question) took recall@6 on
+        benchmarks/graph_retrieval/query_eval from 85% to 46%, because a
+        paraphrased question ("which database are we on") shares no word
+        with the node that answers it ("Use PostgreSQL"), and it was the
+        importance/type ranking that surfaced it. Do not add such a gate
+        without the semantic pass on; that pass is what turns "related"
+        into something the ranker can measure.
         """
-        query_words = self._expand_with_aliases(
-            frozenset(w.strip(".,!?:;()[]").lower() for w in task.split() if len(w) > 2)
-        )
+        query_words = self._expand_with_aliases(self._query_tokens(task))
         # Nodes the keyword pass rejected. Kept because they are exactly the
         # ones a semantic pass exists to rescue: a node sharing no vocabulary
         # with the question is the case token overlap cannot serve.
@@ -984,7 +1010,7 @@ class GraphMemory:
             # Score: overlap is primary signal; importance and recency are tiebreakers
             score = (overlap * 0.6 + node.importance * 0.3 + recency * 0.1) * type_boost
 
-            if score > 0.05:  # minimum threshold — don't return completely unrelated nodes
+            if score > 0.05:  # cleared by importance alone — see the docstring
                 scored.append((score, node))
                 candidates.append(node)
             else:
