@@ -21,7 +21,7 @@ benchmark, the suite is right and this file is a bug.
 | Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
 | Resume block size | ~160-180 tokens standard tier | `benchmarks/resume_quality` |
-| Suite | 1249 tests, ruff clean | `pytest tests/` |
+| Suite | 1264 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
 several items below exist.
@@ -38,7 +38,7 @@ the seams between layers, where no layer's own tests look.
 |---|---|---|
 | Semantic cache keyed on the last user message only; the second "continue" of a session got the first one's answer | A cache hit looks like success; nothing compares the answer to the question | Cache keys must include conversation state. Done: a fingerprint of every prior message |
 | `/api/resume/{id}` 404'd on sessions with hours of memory | Auto-checkpoint measures the request *after* windowing, so with windowing on it rarely fires; nothing else wrote a checkpoint | The checkpoint table is a snapshot, the graph is the truth. Done: resume answers from the graph when it is newer |
-| `tools` / `tool_choice` accepted and dropped | `extra="allow"` swallowed them; a warning in a log nobody tails | Every agent framework was broken behind the proxy. Done: forwarded for 7 of 9 providers, 501 for the rest |
+| `tools` / `tool_choice` accepted and dropped | `extra="allow"` swallowed them; a warning in a log nobody tails | Every agent framework was broken behind the proxy. Done: forwarded for all 9 providers, streamed or not |
 | Injected context prepended to the system prompt | Token counts looked fine; the loss was in the provider's cache-hit rate | Layer 4 was defeating layer 5 on every turn. Done: appended |
 | LLM extraction discarded prose-wrapped JSON | Counted as a "silent failure" and nothing more | Local and small models do this constantly; the cheap-extraction story depended on it not happening |
 | Keyword gate on context injection (attempted) | Would have *saved* tokens and looked like a win | Measured first: recall 85% to 46%. Reverted. The importance ranking is doing real work; do not gate without the semantic pass |
@@ -96,14 +96,17 @@ retention cap is unchanged. Resume already reads the live graph, so
 nothing was being lost by the late trigger; the checkpoint diff and the
 "Continue from" hint were, and a resume cannot rebuild those.
 
-**3. Streamed tool-call deltas on Anthropic.**  *(partially done: tools
-are forwarded and answered in one piece; only the incremental stream is
-missing)*
-The answer is currently built in one piece and emitted as chunks. The SDK
-event stream carries `content_block_start` (tool_use) and
-`input_json_delta`; map them to the same dict events the OpenAI adapter
-already yields. Then Ollama, which streams `message.tool_calls` at the
-end.
+**3. Streamed tool-call deltas.**  *(done)*
+Anthropic and Ollama built the answer in one piece and emitted it as
+chunks; the client waited for the whole thing. Anthropic's raw event
+stream is read now (`content_block_start` for the id and name, then
+`input_json_delta` for the arguments) instead of `text_stream`, which
+carries text only — and its CONTENT-BLOCK index is mapped to a tool-call
+ordinal, or a call that follows a text block is announced at index 1 with
+nothing at index 0 and every client SDK that assembles by index breaks.
+Ollama sends finished calls on its last message, which become one delta
+each; its streaming payload also carried no `tools` at all, so a client
+that asked for tools *and* a stream got a model that could not see them.
 
 **4. Semantic retrieval on by default when the model is present.**
 recall@6 85% to 92% (n=13 — small, so enlarge the eval first: 40 cases
@@ -112,10 +115,12 @@ across the corpus). Bundle the weight download into the Docker build
 `EmbeddingEngine.available`. The keyword-gate measurement above is the
 reason this is the path and not a cheaper one.
 
-**5. The CLI's `stats` should show the durability counters too.**
-`/health` reports `degraded` with the counters behind it, and the
-dashboard renders them; `tokenmizer stats` still does not. Same three
-lines, same source.
+**5. The CLI's `stats` should show the durability counters too.**  *(done)*
+It prints failed writes, sessions with an unreadable graph, sessions with
+no durable storage, sessions that lost stored memory, and broken
+checkpoint storage. A `/health` call that itself fails is reported as
+"could not read", never as healthy: unknown and fine are different
+answers, and savings were the only number the CLI used to show.
 
 ### P1 — more sessions, more domains, more of the pipeline real
 
@@ -173,10 +178,23 @@ rate limiter and analytics are per worker. Either wire the existing
 shared-SQLite counter table is the cheaper option and matches everything
 else in the project.
 
-**10. Gemini and Cohere: tools and streaming.**
-Both refuse tool requests with a 501 today and stream with a 501. The
-google-genai SDK exposes function declarations and a streaming call;
-Cohere v2 has both. Same test shape as the three adapters that have them.
+**10. Gemini and Cohere: tools and streaming.**  *(done)*
+Both refused tool requests with a 501 and streamed with a 501, though
+both SDKs have had each throughout. Gemini needed the most work: the
+adapter used `chats.create` with a history and a plain-text last turn,
+which cannot express an assistant turn that asked for a tool or the
+client's results coming back — both are content parts — so it moved to
+`generate_content` over the whole conversation, with
+`function_declarations` and `function_response` parts. Gemini also mints
+no call id and matches a result to a call by NAME, so the id is minted
+here and the name looked up from the request. Cohere v2 already speaks
+the OpenAI tool shape; only its streamed event names and its
+document-shaped tool results needed translating, and it has no
+`tool_choice` to enforce.
+
+All nine providers now carry tools, streamed or not. Coded against each
+SDK's documented objects and tested with fakes shaped like them, not
+against live keys — the tests say so.
 
 ### P2 — the graph as a product
 

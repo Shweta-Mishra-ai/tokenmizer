@@ -307,9 +307,11 @@ call = resp.choices[0].message.tool_calls[0]     # finish_reason == "tool_calls"
 ```
 
 Native for OpenAI, DeepSeek, Mistral, OpenRouter and Grok; translated for
-Anthropic and Ollama; a clear 501 for Gemini and Cohere rather than
-silently sending the model a conversation it cannot see the tools for.
-Tool traffic is never compressed, and a tool-call turn is never cached.
+Anthropic, Ollama, Gemini and Cohere. **All nine providers**, streamed or
+not — each one's tool calls arrive on the stream as OpenAI-shaped deltas,
+whether the provider fragments them (Anthropic, Cohere) or sends them
+whole (Ollama, Gemini). Tool traffic is never compressed, and a tool-call
+turn is never cached.
 
 To [**API & CLI reference**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) — every endpoint, every command,
 every MCP tool.
@@ -403,8 +405,6 @@ Listed here rather than left to be discovered:
 | `routing.*` | **Deprecated, removed next release.** Never implemented. Use `model_map` (below) to send one model name to another — that is what it was reached for. A config carrying a `routing:` block still loads and logs a deprecation warning. |
 | `state_backend: redis` | Accepted and unused. `tokenmizer/state/backend.py` has no callers; all durable state is SQLite. |
 | `functions` / `function_call` (the deprecated OpenAI shape) | Accepted and ignored, with a server-side warning. Use `tools` / `tool_choice`, which are forwarded. |
-| Tool calling on Gemini and Cohere | Refused with a 501. The other seven providers forward it. |
-| Streamed tool-call deltas on Anthropic and Ollama | The answer is produced in one piece and emitted as chunks; the stream is valid but not incremental. |
 
 The prioritised plan for these and everything else is in
 [**docs/roadmap.md**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/roadmap.md), which pairs every planned item
@@ -431,7 +431,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1249 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1264 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

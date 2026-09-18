@@ -91,6 +91,48 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Added — tools on all nine providers, streamed or not
+`stream: true` plus `tools` used to mean one of two things depending on
+who was behind the proxy. Anthropic and Ollama fell back to a buffered
+non-streaming call and re-chunked the finished answer — valid SSE, but the
+client waited for the whole thing. Gemini and Cohere returned a 501 and
+refused both tools and streaming outright, though both SDKs have had each
+throughout.
+
+All four carry tool calls on the stream now, mapped to the OpenAI delta
+shape, so a client assembles them the same way whatever is behind the
+proxy:
+
+- **Anthropic** — the raw event stream instead of `text_stream`, which is
+  text only: `content_block_start` carries the id and name,
+  `input_json_delta` the argument fragments. Anthropic indexes CONTENT
+  BLOCKS, where text and tool_use share one sequence, so a call that
+  follows a text block would be announced at index 1 with nothing at index
+  0 — and every client SDK that assembles by index breaks on that. The
+  mapping to a tool-call ordinal is ours.
+- **Ollama** — sends finished calls on its last message rather than
+  fragments; each becomes one delta. Its streaming payload also carried no
+  `tools` at all, so a client that asked for tools *and* a stream got a
+  model that could not see them — the same silent drop the non-streaming
+  path had before this branch.
+- **Gemini** — the adapter used `chats.create` with a history and a
+  plain-text last turn, which cannot express an assistant turn that asked
+  for a tool or the client's results coming back: both are content parts.
+  It now uses `generate_content` over the whole conversation with
+  `function_declarations` and `function_response` parts. Gemini mints no
+  call id and matches a result to a call by NAME rather than by id, so the
+  id is minted here and the name is looked up from the request that asked
+  for it.
+- **Cohere** — v2 already speaks the OpenAI tool shape; its streamed event
+  names and its document-shaped tool results are translated. It has no
+  `tool_choice`, so "none" and "required" cannot be enforced, and
+  pretending otherwise would be worse than the model deciding.
+
+Coded against each SDK's documented objects and tested with fakes shaped
+like them, not against live keys. The tests say so in their own docstring:
+they pin the translation and would not catch an SDK whose real objects
+differ from its documentation.
+
 ### Added — what windowing dropped is no longer simply gone
 Once a session crosses `memory.max_tokens_before_summary`, every turn
 older than the protected tail is replaced by the graph's context block.
