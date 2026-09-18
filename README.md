@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/logo.svg" width="140" alt="TokenMizer"/>
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/logo.svg" width="150" alt="TokenMizer"/>
 
   <h1>TokenMizer</h1>
 
@@ -13,7 +13,7 @@
   </p>
 
   <p>
-    <sub>One line to adopt · works with Claude, GPT, Gemini, Grok, DeepSeek, Mistral, Cohere, Ollama · MIT</sub>
+    <sub>One line to adopt &middot; works with Claude, GPT, Gemini, Grok, DeepSeek, Mistral, Cohere, Ollama &middot; MIT</sub>
   </p>
 
   <p>
@@ -28,16 +28,15 @@
   </p>
 
   <p>
-    <a href="#quick-start"><b>Quick start</b></a> ·
-    <a href="#use-it-from-your-tools"><b>Claude Code &amp; MCP</b></a> ·
-    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/architecture.md"><b>Architecture</b></a> ·
-    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md"><b>Benchmarks</b></a> ·
-    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/configuration.md"><b>Configuration</b></a> ·
-    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md"><b>API &amp; CLI</b></a> ·
-    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md"><b>Contributing</b></a>
+    <a href="#quick-start"><b>Quick start</b></a> &middot;
+    <a href="#see-it"><b>See it</b></a> &middot;
+    <a href="#use-it-from-your-tools"><b>Claude Code &amp; MCP</b></a> &middot;
+    <a href="#measured"><b>Benchmarks</b></a> &middot;
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/architecture.md"><b>Architecture</b></a> &middot;
+    <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/roadmap.md"><b>Roadmap</b></a>
   </p>
 
-  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/demo.gif" width="860" alt="TokenMizer demo: 40-turn session checkpointed at 87% context, resumed next day in 233 tokens"/>
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/demo.gif" width="860" alt="TokenMizer demo: a 40-turn session checkpointed at 87% context, resumed next day in 233 tokens"/>
   <br/>
   <sub>Real run: 25-node graph, checkpoint <code>ckpt_21a0959c3ddf</code>, 233-token resume. Regenerate with <code>python scripts/gen_demo_gif.py</code>.</sub>
 </div>
@@ -55,44 +54,6 @@ Summarising the history does not fix this. A summary tells you *what*
 was decided; it loses *why*, and it loses what was rejected — so the
 model happily re-proposes the thing you moved off three sessions ago.
 
-## How it works
-
-TokenMizer is a local proxy between your app and any LLM. Every request
-passes through a pipeline that builds a live knowledge graph, compresses
-inputs, caches responses, and checkpoints before the context runs out.
-
-```mermaid
-flowchart LR
-    App["Your app<br/><sub>OpenAI-compatible client</sub>"]
-    subgraph TM["TokenMizer :8000"]
-        direction TB
-        L0["<b>L0</b> File intelligence"]
-        L1["<b>L1</b> Prompt compression"]
-        L2["<b>L2</b> Terse-output injection"]
-        L4["<b>L4</b> Graph memory<br/><sub>extract → window → inject</sub>"]
-        L3["<b>L3</b> Semantic cache"]
-        L5["<b>L5</b> Provider prompt cache"]
-        L0 --> L1 --> L2 --> L4 --> L3 --> L5
-    end
-    LLM["Claude · GPT · Gemini<br/>Grok · DeepSeek · Ollama"]
-    DB[("SQLite<br/><sub>graph · checkpoints · ownership</sub>")]
-
-    App -->|"POST /v1/chat/completions"| TM
-    TM --> LLM
-    LLM -.->|response| TM
-    TM -.->|"response + savings"| App
-    L4 <-->|"per-row, locked"| DB
-```
-
-The graph is not a summary. It is typed nodes and edges — decisions,
-tasks, files, errors, goals — with a lifecycle, so a decision that gets
-replaced is marked superseded rather than deleted. The resume block is a
-filtered projection of it: active decisions, open work, unresolved
-errors, in a few hundred tokens.
-
-→ [**Architecture**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/architecture.md) — the request sequence, the
-data model, and the decision lifecycle.
-
 ## Quick start
 
 ```bash
@@ -108,18 +69,19 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="your-key",
-    base_url="http://localhost:8000/v1",   # ← only this changes
+    base_url="http://localhost:8000/v1",   # only this changes
 )
 
 resp = client.chat.completions.create(
     model="claude-sonnet-4-6",
     messages=[{"role": "user", "content": "Continue where we left off"}],
-    extra_body={"session_id": "my-project"},   # ← optional, enables memory
+    extra_body={"session_id": "my-project"},   # optional, enables memory
 )
 ```
 
 Everything else is unchanged: same request shape, same response shape,
-plus a `tokenmizer` block reporting what was saved.
+plus a `tokenmizer` block reporting what was saved. Open
+<http://localhost:8000> and the session is already there.
 
 <details>
 <summary><b>Windows, Ollama, Docker, and the full step-by-step</b></summary>
@@ -151,9 +113,110 @@ configuration reference are in
 [**docs/deployment.md**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/deployment.md).
 </details>
 
+## See it
+
+Nothing here is a mockup. Every screenshot is the shipped UI rendering a
+session from the labelled corpus in `benchmarks/eval/corpus`.
+
+### The dashboard tells you what it actually knows
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/dashboard.png" width="900" alt="TokenMizer dashboard: savings, sessions, the live resume block and an embedded session graph"/>
+</div>
+
+Your sessions, the live resume block each one would inject right now, and
+its graph — not an example of one. The health pill reads `/health`, which
+reports `degraded` with the counters behind it when a write has failed,
+rather than saying `ok` whatever happened.
+
+### The session graph, grouped the way you would group it
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/graph-explorer.png" width="900" alt="The interactive session graph: nodes filled by detected community and ringed by type, with hulls, a type legend and filters"/>
+</div>
+
+Nodes are filled by detected community and ringed by type, so the shape
+of the work is visible before you read a single label. Filter by type or
+community, search, click a node for its confidence, its dates and the
+supersession chain behind it. One self-contained HTML file with no
+external requests, so it opens offline and can be sent to someone.
+
+### The same session as a story
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/graph-timeline.png" width="900" alt="Timeline view: decisions, tasks, errors and files in their own lanes, with a supersession arc"/>
+</div>
+
+Timeline mode puts each node type in its own lane, ordered by when the
+fact entered the session, with supersessions drawn as arcs. When a whole
+transcript was checkpointed in one call every node shares a timestamp, so
+the axis says so and falls back to the order the session stated things
+rather than inventing dates.
+
+## How it works
+
+TokenMizer is a local proxy between your app and any LLM. Every request
+passes through a pipeline that builds a live knowledge graph, compresses
+inputs, caches responses, and checkpoints before the context runs out.
+
+```mermaid
+flowchart LR
+    App["Your app<br/><sub>OpenAI-compatible client</sub>"]
+    subgraph TM["TokenMizer :8000"]
+        direction TB
+        L0["<b>L0</b> File intelligence"]
+        L1["<b>L1</b> Prompt compression"]
+        L2["<b>L2</b> Terse-output injection"]
+        L4["<b>L4</b> Graph memory<br/><sub>extract to window to inject</sub>"]
+        L3["<b>L3</b> Semantic cache"]
+        L5["<b>L5</b> Provider prompt cache"]
+        L0 --> L1 --> L2 --> L4 --> L3 --> L5
+    end
+    LLM["Claude · GPT · Gemini<br/>Grok · DeepSeek · Ollama"]
+    DB[("SQLite<br/><sub>graph · checkpoints · ownership</sub>")]
+
+    App -->|"POST /v1/chat/completions"| TM
+    TM --> LLM
+    LLM -.->|response| TM
+    TM -.->|"response + savings"| App
+    L4 <-->|"per-row, locked"| DB
+```
+
+The graph is not a summary. It is typed nodes and edges — decisions,
+tasks, files, errors, goals — with a lifecycle, so a decision that gets
+replaced is marked superseded rather than deleted, and the transition
+records what triggered it. The resume block is a filtered projection of
+it: active decisions, open work, unresolved errors, in a few hundred
+tokens.
+
+Edges carry the relations a session actually has. A task that fixed a bug
+`FIXES` the error node and closes it. An open error `BLOCKS` the task
+about it. A decision `DEPENDS_ON` the package it named. That is what the
+communities above are detected from, and what `/why` walks.
+
+To [**Architecture**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/architecture.md) — the request sequence, the
+data model, and the decision lifecycle.
+
+## What a resume looks like
+
+```
+Goal: FastAPI authentication service with JWT and PostgreSQL
+Working on: refresh token rotation in api/auth.py | rate limiting using slowapi
+Done: Implemented POST /api/auth/login | Fixed the 422 in LoginRequest | User model in api/models.py
+Decided: Use JWT and PostgreSQL | bcrypt for password hashing | Redis for refresh token storage
+Changes: 'Use moment.js' -> 'Use date-fns' - tree-shakeable, saves 230KB
+Files: api/auth.py, api/models.py, config.py, tests/test_auth.py
+Continue from: Add rate limiting to auth endpoints
+```
+
+A few hundred tokens in place of the whole conversation. The `Changes:`
+line is the part a summary loses — and
+`GET /api/graph/{session_id}/why?q=date-fns` replays the full chain with
+the trigger, the reason and the evidence for each hop.
+
 ## Use it from your tools
 
-Three ways in, depending on where you work. All three talk to the same
+Four ways in, depending on where you work. All of them talk to the same
 graph, so a session checkpointed from Claude Code resumes in the CLI.
 
 ### Claude Code — plugin
@@ -192,13 +255,16 @@ Then, in any session:
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Claude Code | `.mcp.json` in the project, or `~/.claude/settings.json` |
-| Cursor | Settings → MCP → Add server, same JSON |
+| Cursor | Settings, MCP, Add server, same JSON |
 | VS Code / Zed | their MCP settings, same `command` and `env` |
 | Codex CLI | `~/.codex/config.toml` — TOML, see [docs/api.md](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) |
 
-Restart the client afterwards. Keep `tokenmizer serve` running for the
-checkpoint, resume, stats and reasoning tools; file analysis works
-without it. If `tokenmizer-mcp` is not on your PATH, use
+Restart the client afterwards. **You do not need to start anything else:**
+`checkpoint_session`, `resume_session`, `get_graph_stats`, `why_decision`
+and `analyze_file` all read and write the graph directly when
+`tokenmizer serve` is not running, and say which path answered. Only
+savings need the proxy, since savings are measured on requests that pass
+through it. If `tokenmizer-mcp` is not on your PATH, use
 `"command": "python", "args": ["-m", "tokenmizer.mcp.server"]`.
 
 **Six tools:** `checkpoint_session`, `resume_session`, `get_graph_stats`,
@@ -213,14 +279,28 @@ Any OpenAI-compatible client works by pointing `base_url` at
 Continue.dev, Aider, LangChain, LlamaIndex, the OpenAI SDKs in every
 language, and `curl`.
 
-Tool calling goes through too: send `tools` / `tool_choice` in the OpenAI
-shape and get `message.tool_calls` back, plain or streamed, with `role:
-"tool"` results round-tripping to the model. Native for OpenAI, DeepSeek,
-Mistral, OpenRouter and Grok; translated for Anthropic and Ollama; a 501
-for Gemini and Cohere rather than a silent drop. A tool-call turn is never
-cached or trimmed, and tool traffic is never compressed.
+**Tool calling goes through too.** Send `tools` / `tool_choice` in the
+OpenAI shape and get `message.tool_calls` back, streamed or not, with
+`role: "tool"` results round-tripping to the model:
 
-→ [**API & CLI reference**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) — every endpoint, every command,
+```python
+resp = client.chat.completions.create(
+    model="claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "weather in Pune?"}],
+    tools=[{"type": "function", "function": {
+        "name": "get_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}],
+    extra_body={"session_id": "my-project"},
+)
+call = resp.choices[0].message.tool_calls[0]     # finish_reason == "tool_calls"
+```
+
+Native for OpenAI, DeepSeek, Mistral, OpenRouter and Grok; translated for
+Anthropic and Ollama; a clear 501 for Gemini and Cohere rather than
+silently sending the model a conversation it cannot see the tools for.
+Tool traffic is never compressed, and a tool-call turn is never cached.
+
+To [**API & CLI reference**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) — every endpoint, every command,
 every MCP tool.
 
 ### Inside an agent — in-process, no server
@@ -244,24 +324,6 @@ memory.why("postgres")                    # the decision trail
 LangGraph, CrewAI, AutoGen or a hand-written loop the same way: call `add`
 with the conversation so far, put `context()` in the system prompt.
 
-
-## What a resume looks like
-
-```
-Goal: Build FastAPI auth service with JWT + PostgreSQL
-Done: Project setup | User model | Login endpoint | Fix 422 | 18 tests passing
-In progress: Refresh token rotation
-Decided: PostgreSQL (concurrent writes) | bcrypt | Redis for refresh tokens
-Changed: ~~React~~ → Next.js (better SEO)
-Files: api/auth.py, api/models.py, config.py
-Continue: Implement token refresh endpoint
-```
-
-A few hundred tokens in place of the whole conversation. The `Changed:`
-line is the part a summary loses — and asking
-`GET /api/graph/{session}/why?q=react` replays the full chain with the
-trigger, the reason and the evidence for each hop.
-
 ## Measured
 
 `python -m benchmarks.eval` scores extraction against a labelled corpus
@@ -271,9 +333,9 @@ of 14 sessions, 6 of them real transcripts:
 |---|---|---|---|
 | Files | 98% | 100% | **99%** |
 | Pending tasks | 100% | 90% | **95%** |
-| Errors | 96% | 96% | **96%** |
-| Decisions | 95% | 100% | **98%** |
-| Completed tasks | 92% | 90% | **91%** |
+| Decisions | 95% | 100% | **97%** |
+| Errors | 93% | 96% | **94%** |
+| Completed tasks | 91% | 98% | **94%** |
 | | | **macro F1** | **96%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
@@ -282,45 +344,48 @@ recall-only extraction numbers should be distrusted — including our own
 earlier ones.
 
 Scored separately by origin, because hand-written fixtures are easier
-than real transcripts and a single headline hides that: **synthetic 97%,
-real 90%.** Treat 90% as the number that describes real sessions. n=14
+than real transcripts and a single headline hides that: **synthetic 98%,
+real 89%.** Treat 89% as the number that describes real sessions. n=14
 is a small sample and the same person wrote every label.
+
+**Retrieval is measured separately.** `python -m
+benchmarks.graph_retrieval.query_eval` scores what `query()` returns for
+questions phrased the way a person asks them, not in the node's own
+words: **recall@6 85%**, or 92% with `semantic_retrieval` on (n=13).
 
 **Independently verified against 7 other methods.** A separate
 100-session benchmark ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research),
 a different corpus and scorer than the numbers above) ties TokenMizer
 0.5.4 for first place at **60% macro F1** — level with Mem0-style (60%)
 and Graphiti-style (59%), ahead of GraphRAG-style (44%), MemGPT-style
-(35%), and every naive baseline (≤20%). Decisions and errors are still
-its weakest categories relative to the two methods it ties overall —
-59%/44% F1 against 65%/66% for Graphiti/Mem0-style, up from 50%/36% in
-0.5.3 after a fix (see [CHANGELOG](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CHANGELOG.md))
-targeted at the specific gaps that benchmark found.
+(35%), and every naive baseline (under 20%).
 
-→ [**Benchmarks**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) — memory quality against a
+To [**Benchmarks**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) — memory quality against a
 plain-summary baseline, storage, and how to score your own sessions.
 
 ## Why TokenMizer and not X?
 
 **Why not just use Git history?**
-Git stores *what changed*, not *why you decided to change it*. You can't ask Git "what did we decide about auth?" or "why did we switch from MySQL to PostgreSQL?" TokenMizer stores decisions with trigger, reason, and evidence — not diffs.
+Git stores *what changed*, not *why you decided to change it*. You cannot ask Git "what did we decide about auth?" or "why did we switch from MySQL to PostgreSQL?" TokenMizer stores decisions with trigger, reason, and evidence — not diffs.
 
 **Why not RAG (retrieval-augmented generation)?**
-RAG retrieves *relevant chunks* — it doesn't model *decision state*. If you switched from bcrypt to Argon2 mid-session, RAG might retrieve both and confuse the model about which is current. TokenMizer tracks decision supersession explicitly: the old decision is marked `SUPERSEDED`, the new one `ACTIVE`, and the resume context only includes current state.
+RAG retrieves *relevant chunks* — it does not model *decision state*. If you switched from bcrypt to Argon2 mid-session, RAG might retrieve both and confuse the model about which is current. TokenMizer tracks decision supersession explicitly: the old decision is marked `SUPERSEDED`, the new one `ACTIVE`, and the resume context only includes current state.
 
 **Why not a plain summary at the start of each session?**
-Summaries lose structure. You can't query "all superseded decisions" or "what triggered the auth change" from a blob of text. Our benchmark shows graph memory preserves **89%** of labelled information against **79%** for a summary baseline — +10 points — and unlike a summary, the graph is queryable, editable, and grows incrementally instead of being re-summarized every turn. See [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md#memory-quality--graph-vs-a-plain-summary).
+Summaries lose structure. You cannot query "all superseded decisions" or "what triggered the auth change" from a blob of text. Our benchmark shows graph memory preserves **89%** of labelled information against **79%** for a summary baseline — and unlike a summary, the graph is queryable, editable, and grows incrementally instead of being re-summarized every turn. See [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md#memory-quality--graph-vs-a-plain-summary).
 
 **Why not Mem0 or Zep?**
-Mem0 and Zep store *facts* ("user prefers Python"). TokenMizer stores *decisions with rationale* — the full causal chain: what was decided, what replaced it, why, what evidence triggered the change. If you need "remember my name across sessions," use Mem0. If you need "remember that we switched from PostgreSQL to SQLite because of cost, and here's the evidence," use TokenMizer.
+Mem0 and Zep store *facts* ("user prefers Python"). TokenMizer stores *decisions with rationale* — the full causal chain: what was decided, what replaced it, why, what evidence triggered the change. If you need "remember my name across sessions," use Mem0. If you need "remember that we switched from PostgreSQL to SQLite because of cost, and here is the evidence," use TokenMizer.
+
+**Why not Graphiti?**
+Both build a temporal knowledge graph, and on the independent benchmark above they score within a point of each other. The differences are operational: TokenMizer runs on SQLite with no database to deploy, ships the graph as a self-contained HTML page you can open offline or send to someone, and is an OpenAI-compatible proxy — so adopting it is a base URL change rather than an integration. Graphiti is the better fit if you are already running Neo4j and want to query the graph in Cypher.
 
 **Why not just a longer context window?**
 Longer context means higher cost, slower inference, and attention dilution on long histories. TokenMizer compresses a session into a resume block averaging **161 tokens** (measured, n=3 — see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md)) by extracting what actually matters, not by summarizing.
 
 ## What is not implemented
 
-Two settings are accepted by the config and do nothing. They are listed
-here rather than left to be discovered:
+Listed here rather than left to be discovered:
 
 | Setting | Status |
 |---|---|
@@ -331,7 +396,8 @@ here rather than left to be discovered:
 | Streamed tool-call deltas on Anthropic and Ollama | The answer is produced in one piece and emitted as chunks; the stream is valid but not incremental. |
 
 The prioritised plan for these and everything else is in
-[**docs/roadmap.md**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/roadmap.md).
+[**docs/roadmap.md**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/roadmap.md), which pairs every planned item
+with the measurement that motivates it.
 
 ## Documentation
 
@@ -339,14 +405,14 @@ The prioritised plan for these and everything else is in
 |---|---|
 | [**Architecture**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/architecture.md) | Request pipeline, graph data model, decision lifecycle, file intelligence |
 | [**Configuration**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/configuration.md) | Every setting, environment variables, precedence, providers |
-| [**API & CLI**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) | Endpoints, commands, MCP tools, Claude Code integration |
+| [**API & CLI**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) | Endpoints, commands, MCP tools, tool calling, Claude Code integration |
 | [**Deployment**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/deployment.md) | Docker, multiple workers, durability, session isolation, security |
 | [**Benchmarks**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) | Extraction quality, memory quality, storage, running your own |
-| [**Comparisons**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/comparisons.md) | Mem0, Zep, longer context windows, running alongside other token tools |
-| [**Roadmap**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/roadmap.md) | Measured state of every layer, the defects fixed on the way, and the prioritised plan |
+| [**Roadmap**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/roadmap.md) | Measured state of every layer, and the prioritised plan |
+| [**Comparisons**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/comparisons.md) | Running alongside other token tools |
 | [**Contributing**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md) | Setup, layer rules, and how to improve extraction |
-| [**Testing**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/TESTING.md) | How to run the suite, the coverage floor, and known limits of the local audit scripts |
-| [**Changelog**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CHANGELOG.md) · [**Security**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/SECURITY.md) | Release history and how to report a vulnerability |
+| [**Testing**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/TESTING.md) | How to run the suite, the coverage floor, and known limits |
+| [**Changelog**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CHANGELOG.md) &middot; [**Security**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/SECURITY.md) | Release history and how to report a vulnerability |
 
 ## Contributing
 
@@ -354,7 +420,7 @@ The prioritised plan for these and everything else is in
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1142 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1185 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it
@@ -389,4 +455,4 @@ if you would like to support the work. Entirely optional.
 
 ## License
 
-MIT © [Shweta Mishra](https://github.com/Shweta-Mishra-ai)
+MIT &copy; [Shweta Mishra](https://github.com/Shweta-Mishra-ai)
