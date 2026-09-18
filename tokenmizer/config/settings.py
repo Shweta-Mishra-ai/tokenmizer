@@ -166,6 +166,14 @@ class Settings(BaseSettings):
     # to the substitution rather than to the model.
     model_map: dict[str, str] = Field(default_factory=dict)
 
+    # Which domain pack the extractor runs. "coding" (the default) adds
+    # nothing to the patterns that have always run, so changing this can
+    # only add recall on sessions the coding phrasings do not cover — a
+    # research log, an incident review, a product discussion. See
+    # graph_memory/domains.py, and docs/benchmarks.md for each pack's
+    # own measured numbers.
+    domain: Literal["coding", "research", "ops", "product"] = "coding"
+
     # API keys (prefer env vars over config file)
     anthropic_api_key: str = ""
     openai_api_key: str = ""

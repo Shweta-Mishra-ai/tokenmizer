@@ -21,7 +21,7 @@ benchmark, the suite is right and this file is a bug.
 | Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
 | Resume block size | ~160-180 tokens standard tier | `benchmarks/resume_quality` |
-| Suite | 1264 tests, ruff clean | `pytest tests/` |
+| Suite | 1285 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
 several items below exist.
@@ -124,18 +124,40 @@ answers, and savings were the only number the CLI used to show.
 
 ### P1 — more sessions, more domains, more of the pipeline real
 
-**6. Domain packs for the ontology.**
-Goal / task / decision / file / error / endpoint / schema is a coding
-ontology, and the regex families in `patterns.py` are coding phrasings.
-A research, incident-response, product, data-science or writing session
-extracts almost nothing today (the graph page already says so). Add a
-`domain` setting with packs: *research* (hypothesis, finding, source,
-open question), *ops* (alert, runbook step, root cause, mitigation),
-*product* (requirement, feedback, decision, owner), *data* (dataset,
-metric, experiment, result). Each pack is pattern families plus an LLM
-extraction schema plus a labelled eval corpus; a pack ships only with its
-corpus, because the coding numbers above are only trustworthy because
-that corpus exists.
+**6. Domain packs for the ontology.**  *(done — four packs, one corpus)*
+Goal / task / decision / file / error is a *coding* ontology and every
+regex family in `patterns.py` is a coding phrasing, so a research log, an
+incident review or a product discussion extracted almost nothing.
+Measured, it was worse than "almost": **macro F1 11%** on three labelled
+sessions of that kind, with decisions and errors at **0%**.
+
+Packs ship for **research**, **ops** and **product** (coding is the
+default and adds nothing). Same ontology, different vocabulary: the
+shapes a session has are already the five this ontology holds — something
+you are trying to establish, the steps you took, the calls you made, what
+went wrong, the artifacts you referenced — so a pack adds the phrasings
+that name those shapes in one domain, and the words the resume block uses
+for them. The alternative, a node type per domain, would grow the
+ontology to thirty types of which a session uses five, each needing a
+colour slot, a lane and a section.
+
+**11% to 96%** on `benchmarks/eval/corpus_domains`, and the coding corpus
+is bit-for-bit unchanged at 97%, because a pack's families run *after*
+the coding ones and can only add. Reproduce the before number with
+`python -m benchmarks.eval --corpus benchmarks/eval/corpus_domains
+--ignore-packs`.
+
+Fixing this exposed the same bias one layer down: the validator's goal
+scorer only rewarded "build / create / develop / implement / design", so
+a research question, an incident and a quarterly outcome were extracted
+correctly and then rejected for not being about building software.
+
+Still open: a **data** pack (dataset, metric, experiment, result), real
+captured transcripts for each pack rather than the synthetic sessions
+committed here, and per-pack LLM extraction schemas. The three corpora
+are hand-written, which the eval reports as `synthetic` — the caveat that
+applies to the coding fixtures applies here with more force, because
+there are three sessions rather than fourteen.
 
 **7. Label quality.**  *(done — and the measurement was most of it)*
 Both targets are met: 0% truncated mid-word, 0 near-duplicate pairs,

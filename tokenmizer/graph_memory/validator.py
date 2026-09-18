@@ -338,12 +338,29 @@ class GraphValidator:
             base += 0.15
         return base
 
+    # A goal names an outcome someone is working toward. The first list is
+    # what that looks like when the outcome is software; the second is what
+    # it looks like in every other kind of session, and its absence is why
+    # a research question, an incident or a quarterly outcome scored 0.50
+    # to 0.60 and was rejected — the domain packs extracted them correctly
+    # and this rejected them one layer down, for not being about building
+    # something. See graph_memory/domains.py.
+    _GOAL_BUILD = ("build", "create", "develop", "implement", "design")
+    _GOAL_OUTCOME = (
+        "whether", "question", "hypothesis",      # research
+        "incident", "outage", "degraded", "failing", "down",   # ops
+        "outcome", "objective", "want users", "want customers",  # product
+        "establish", "understand", "determine", "measure",
+        "restore", "recover", "migrate", "reduce", "improve", "launch",
+    )
+
     def _score_goal(self, label: str, base: float) -> float:
-        # Goals need to describe a system/product/outcome
         if len(label) < 15:
             base -= 0.20  # "fix bug" is not a goal
-        build_verbs = ["build", "create", "develop", "implement", "design"]
-        if any(v in label.lower() for v in build_verbs):
+        lowered = label.lower()
+        if any(v in lowered for v in self._GOAL_BUILD):
+            base += 0.15
+        elif any(v in lowered for v in self._GOAL_OUTCOME):
             base += 0.15
         return base
 

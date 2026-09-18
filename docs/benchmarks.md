@@ -11,7 +11,7 @@ python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 1264 tests
+pytest tests/ -q                                     # 1285 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -86,6 +86,30 @@ tokens** (180 / 168 / 136 across the three sessions) versus ~1,500+
 tokens of raw history. The advantage is concentrated in decision recall
 (92% vs a baseline that drops as low as 50%); on tasks it ties the
 baseline (76% both).
+
+## Domains other than coding
+
+`python -m benchmarks.eval --corpus benchmarks/eval/corpus_domains`, three
+labelled sessions — a research evaluation, a live incident, a product
+planning session:
+
+| | coding patterns only | with the pack |
+|---|---|---|
+| Completed tasks | 15% | **100%** |
+| Pending tasks | 29% | **100%** |
+| Decisions | 0% | **100%** |
+| Errors | 0% | **82%** |
+| **macro F1** | **11%** | **96%** |
+
+Add `--ignore-packs` to reproduce the left column. The coding corpus is
+unchanged at 97%, because a pack's pattern families run *after* the
+coding ones and can only add recall.
+
+These three sessions are hand-written, which the harness reports as
+`synthetic`. The caveat that applies to the coding fixtures applies here
+with more force: three sessions, one author, and the same person wrote
+the patterns. Treat 96% as "the mechanism works on sessions of this
+shape", not as a generalisation claim.
 
 ## Resume quality — what survives windowing
 

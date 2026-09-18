@@ -97,6 +97,10 @@ class Session:
     messages: list[dict]
     ground_truth: dict
     notes: str = ""
+    # Which domain pack the extractor should run for this session. None
+    # means the coding default. Distinct from `domain`, which is free text
+    # describing the subject ("backend/python") and is only reported.
+    pack: str | None = None
     path: Path | None = field(default=None, repr=False)
 
     @property
@@ -143,6 +147,7 @@ def _validate(raw: dict, path: Path) -> Session:
         messages=msgs,
         ground_truth=gt,
         notes=raw.get("notes", ""),
+        pack=raw.get("pack"),
         path=path,
     )
 

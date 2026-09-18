@@ -21,6 +21,26 @@ if TYPE_CHECKING:
     from tokenmizer.graph_memory.graph import GraphMemory
 
 
+_DEFAULT_WORDS = {
+    "goal": "Goal", "wip": "Working on", "done": "Done",
+    "decided": "Decided", "files": "Files", "errors": "Open issues",
+}
+
+
+def _vocabulary(graph: "GraphMemory") -> dict:
+    """The section headers for this graph's domain pack."""
+    from tokenmizer.graph_memory.domains import get_pack
+
+    domain = getattr(graph, "_domain", None)
+    if domain is None:
+        try:
+            from tokenmizer.config.settings import get_settings
+            domain = get_settings().domain
+        except Exception:
+            domain = None
+    return {**_DEFAULT_WORDS, **get_pack(domain).vocabulary}
+
+
 def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
     """
     Build tiered resume context block for LLM injection.
@@ -45,6 +65,11 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
     - Transitions: shown as compact lines, not repeated decision labels
     """
     sections: list[str] = []
+    # The pack renames the sections without changing what goes in them:
+    # a research session's finished work is "Found", an incident's is
+    # still "Done". Unknown keys fall back to the coding word, so a pack
+    # that names nothing reads exactly as before.
+    words = _vocabulary(graph)
 
     # ── 1. Goal ──────────────────────────────────────────────────────────
     goals = sorted(
@@ -53,7 +78,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
         key=lambda x: x.importance, reverse=True
     )
     if goals:
-        sections.append("Goal: " + " | ".join(g.label for g in goals[:2]))
+        sections.append(words["goal"] + ": " + " | ".join(g.label for g in goals[:2]))
 
     # ── 2. In-progress tasks ──────────────────────────────────────────────
     open_tasks = sorted(
@@ -73,7 +98,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
     )
     current_work = open_tasks[:4] + pending_tasks[:2]
     if current_work:
-        sections.append("Working on: " + " | ".join(t.label for t in current_work))
+        sections.append(words["wip"] + ": " + " | ".join(t.label for t in current_work))
 
     # ── 4. Recent completed tasks — top 5 by recency+importance ───────────
     done = sorted(
@@ -95,7 +120,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
         if len(done_deduped) >= 6:
             break
     if done_deduped:
-        sections.append("Done: " + " | ".join(t.label for t in done_deduped))
+        sections.append(words["done"] + ": " + " | ".join(t.label for t in done_deduped))
 
     # ── 5. Active decisions — top 6 by importance ─────────────────────────
     decisions = sorted(
@@ -113,7 +138,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
             if d.summary and "Superseded by" not in d.summary:
                 entry += f" ({d.summary[:50]})"
             parts.append(entry)
-        sections.append("Decided: " + " | ".join(parts))
+        sections.append(words["decided"] + ": " + " | ".join(parts))
 
     # ── 5b. Contested decisions — same topic, ambiguous whether one replaces
     # the other (see NodeStatus.CONTESTED). Surfaced explicitly
@@ -206,7 +231,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
         key=lambda x: x.importance, reverse=True
     )
     if files:
-        sections.append("Files: " + ", ".join(f.label for f in files[:10]))
+        sections.append(words["files"] + ": " + ", ".join(f.label for f in files[:10]))
 
     # ── 9. Environment ────────────────────────────────────────────────────
     env_nodes = [
@@ -225,7 +250,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
         key=lambda x: x.importance, reverse=True
     )
     if errors:
-        sections.append("Open issues: " + " | ".join(e.label for e in errors[:3]))
+        sections.append(words["errors"] + ": " + " | ".join(e.label for e in errors[:3]))
 
     block = "\n".join(sections)
 
