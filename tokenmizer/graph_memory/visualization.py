@@ -67,6 +67,7 @@ _TYPE_COLOR = {
     # not an arbitrary series identity.
     "error":       "#e66767",
     "environment": _NEUTRAL,
+    "summary":     _NEUTRAL,
     "concept":     _NEUTRAL,
     "api":         _NEUTRAL,
     "project":     _NEUTRAL,
@@ -88,6 +89,7 @@ _TYPE_COLOR_LIGHT = {
     "decision":    "#4a3aa7",
     "error":       "#e34948",
     "environment": "#6b7180",
+    "summary":     "#6b7180",
     "concept":     "#6b7180",
     "api":         "#6b7180",
     "project":     "#6b7180",
@@ -101,7 +103,7 @@ _TYPE_SIZE = {
     "goal": 22, "decision": 18, "project": 16, "task": 14,
     "error": 14, "endpoint": 12, "schema": 12, "api": 12,
     "concept": 11, "agent": 11, "test": 10,
-    "file": 10, "dependency": 9, "environment": 9,
+    "file": 10, "dependency": 9, "environment": 9, "summary": 11,
 }
 
 # The order types are laid out in, around the circle and down the lanes:
@@ -109,7 +111,7 @@ _TYPE_SIZE = {
 # session are skipped, so the arcs stay adjacent.
 _TYPE_ORDER = (
     "goal", "decision", "task", "error", "endpoint",
-    "schema", "file", "dependency", "environment",
+    "schema", "file", "dependency", "environment", "summary",
     "test", "concept", "api", "project", "agent",
 )
 
@@ -153,6 +155,7 @@ _TYPE_COLOR_OBS = {
     "file": "5", "error": "1", "endpoint": "4",
     "schema": "2", "dependency": "3", "environment": "4",
     "concept": "3", "api": "4", "project": "6", "agent": "1", "test": "2",
+    "summary": "4",
 }
 
 _EDGE_LABEL = {

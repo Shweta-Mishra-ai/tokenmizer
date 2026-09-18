@@ -957,14 +957,31 @@ async def _update_graph(
                     "content": f"[Relevant session context]\n{ctx_block}",
                 })
 
-    # Context occupancy is measured from what will actually be sent this
-    # turn (post file-intelligence/compression/windowing/injection), NOT
-    # accumulated across turns. Each `messages` list already carries the
-    # full running conversation, so a running total would double-count
-    # every earlier turn, and it could never fall again after windowing
-    # shrank the payload. This is a pure function of `messages`: no
-    # shared mutable state, and it reflects the windowing just applied.
-    context_pct = count_messages_tokens(messages, model) / context_window
+    # Context occupancy, measured per turn rather than accumulated: each
+    # `messages` list already carries the full running conversation, so a
+    # running total would double-count every earlier turn and could never
+    # fall again after windowing shrank the payload. A pure function of
+    # its inputs — no shared mutable state.
+    #
+    # Measured against BOTH sides, and the fuller one wins:
+    #
+    #   sent — what leaves here this turn, after file intelligence,
+    #          compression, windowing and injection. This is what the
+    #          provider's window has to hold.
+    #   raw  — the conversation the CLIENT is holding, which is what is
+    #          actually running out of room and what a resume has to
+    #          replace.
+    #
+    # Comparing only `sent` made the trigger almost inert exactly where it
+    # matters: windowing keeps the sent payload near-constant, so a session
+    # 40 turns deep sent the same 30% it sent at turn 5 and never
+    # checkpointed, while the client's own history was the thing about to
+    # be truncated. Now that resume reads the live graph, nothing is lost
+    # when the trigger is late — but the checkpoint diff and the "Continue
+    # from" hint are, and those are the parts a resume cannot rebuild.
+    sent_pct = count_messages_tokens(messages, model) / context_window
+    raw_pct = count_messages_tokens(raw_messages, model) / context_window
+    context_pct = max(sent_pct, raw_pct)
 
     # Auto-checkpoint.
     #

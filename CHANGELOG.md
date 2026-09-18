@@ -91,6 +91,62 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Added — what windowing dropped is no longer simply gone
+Once a session crosses `memory.max_tokens_before_summary`, every turn
+older than the protected tail is replaced by the graph's context block.
+Everything the ontology captured survives that, because it is a node.
+Everything else left the session permanently: a budget, a deadline, a
+licence restriction, a latency target. Each is one sentence, said once,
+and none of them is a task, a decision, a file or an error — so none of
+them was ever in the 91% the extractor is measured at, or in the 9% it
+misses. They were outside the number entirely.
+
+A `SUMMARY` node now holds them. The selector in
+`graph_memory/summary.py` keeps a clause only if it carries a quantity
+with a unit or a constraint verb, AND is not already covered by a node
+the graph holds — restating a node spends the resume budget on nothing,
+and the budget is the scarce thing. A compound sentence is weighed clause
+by clause, because "this must be done by the 14th — and nothing ships
+without the on-call engineer approving it" states two rules and clipping
+to one clause silently keeps the first. There is one node per session,
+rewritten as the dropped span grows rather than accumulated, and a
+failure in any of it is logged and stepped over: the caller came for an
+answer.
+
+It reaches the reader as a `Noted:` line in the resume block, placed
+above `Files:` deliberately — a file list is re-derivable from the
+repository and "keep the bundle under 500KB" is not re-derivable from
+anything. `Noted:` rather than `Constraints:` because the selector keeps
+hard figures as well as rules, and a header that overpromises is how a
+reader learns to distrust one.
+
+Shipped on the numbers, per the roadmap's own rule. New benchmark
+`benchmarks/resume_quality/runner.py` (the package existed and was
+empty): out-of-ontology retention **17% to 100%** on its fixtures, **+23
+tokens** of resume block per session, **no section lost** on the captured
+transcripts in the eval corpus, and checkpoint accuracy unchanged at
+80/100/100. The runner states its own limitation in its docstring: the
+fixtures were written by the same person as the selector, so they
+demonstrate the mechanism rather than generalisation — which is why the
+real transcripts are scored beside them.
+
+A `SUMMARY` node skips the extraction validator, and that is deliberate:
+the validator scores a claim the extractor inferred from a phrasing, and
+this is a verbatim record of sentences the ontology deliberately has no
+node for. Scored as an extraction it was rejected for being what it is —
+prose, several clauses, no decision verb. Redaction still applies, which
+is the check that matters for text copied out of a transcript.
+
+### Fixed — the auto-checkpoint almost never fired in long sessions
+Occupancy was compared only against what TokenMizer sends, and windowing
+keeps that near-constant: a session forty turns deep sent the same
+fraction it sent at turn five, so the trigger stayed quiet in exactly the
+sessions it exists for, while the conversation the client was holding was
+the thing about to run out of room. It now takes the fuller of the two
+sides. Resume already reads the live graph, so nothing was being lost by
+the late trigger — the checkpoint diff and the "Continue from" hint were,
+and a resume cannot rebuild those.
+
 ### Fixed — the label-quality numbers were mostly measuring themselves
 Two of the three figures in `benchmarks.eval`'s label-quality block were
 counting their own false positives, which meant a roadmap item was
@@ -179,6 +235,18 @@ graph, sessions with no durable storage, sessions that lost stored memory,
 and broken checkpoint storage. A `/health` call that itself fails is
 reported as "could not read", never as healthy: unknown and fine are
 different answers.
+
+### Fixed — three failures that returned an empty answer instead of an error
+All three are the same shape: something the operator would want to know
+about produced a result indistinguishable from "there was nothing to
+find".
+
+- **Cross-session recall skipped a session whose graph would not load**
+  and said nothing, so a question that should have been answered from
+  another session simply came back thinner.
+- **`Memory.other_sessions()` returned `[]` when the ownership store was
+  unreadable**, which reads as "this principal owns no other sessions".
+- Both now log a warning naming what is missing from the answer.
 
 ### Fixed — `scripts/mcp_e2e_check.py` failed when port 8765 was busy
 It hard-coded the port a developer running the proxy by hand reaches for,

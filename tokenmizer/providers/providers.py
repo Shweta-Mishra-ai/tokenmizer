@@ -129,6 +129,9 @@ def _ollama_error_is_retryable(exc: Exception) -> bool:
         if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
             return True
     except Exception:
+        # httpx missing or shaped differently — fall through to matching
+        # the message text, which is what this returns anyway for every
+        # provider SDK that wraps its own errors.
         pass
     return bool(_RETRYABLE_TEXT.search(str(exc)))
 

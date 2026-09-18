@@ -228,6 +228,25 @@ does not re-propose a choice you already moved off — while
 `why_decision` can still replay how you got here. Invalidated ones are
 surfaced explicitly, as "do not revisit".
 
+### The turns windowing drops
+
+Windowing replaces every turn older than the protected tail with the
+block above. Anything the ontology captured survives that, because it is
+a node — but a budget, a deadline, a licence restriction or a latency
+target is none of the seven types, so all of them used to leave the
+session at that moment, permanently.
+
+A `SUMMARY` node holds them now, and they reach the next turn as a
+`Noted:` line. The selector (`graph_memory/summary.py`) keeps a clause
+only if it carries a quantity with a unit or a constraint verb, and only
+if no node already covers it — restating a node spends resume budget on
+nothing. One node per session, rewritten as the dropped span grows.
+
+Measured in [benchmarks](benchmarks.md): out-of-ontology retention 17% to
+100% on the fixtures in `benchmarks/resume_quality`, at +23 tokens of
+resume block per session, with no section lost on the captured
+transcripts in the eval corpus.
+
 ---
 
 ## File Intelligence

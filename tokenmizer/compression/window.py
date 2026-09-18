@@ -93,6 +93,21 @@ class SmartMessageWindow:
             # empty one; the provider guard would otherwise reject it.
             return messages, 0
 
+        # Before the old turns are replaced, keep what the ontology has no
+        # node for — a stated constraint, a budget, a deadline. Those are
+        # the facts that leave the session permanently at this point, and
+        # nothing else in the pipeline is looking for them. Best-effort by
+        # design: a failure here must not cost the caller their answer, and
+        # the windowing below is correct without it.
+        try:
+            graph.record_span_summary(old)
+        except Exception as e:                      # pragma: no cover - defensive
+            logger.warning(
+                "Span summary failed for %s (windowing continues, but the "
+                "constraints stated in the dropped turns are now lost): %s",
+                getattr(graph, "session_id", "?"), e,
+            )
+
         # Build graph context to replace old turns
         graph_ctx = graph.to_context_block(token_budget=self.graph_context_budget)
 
