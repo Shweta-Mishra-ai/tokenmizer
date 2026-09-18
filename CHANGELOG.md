@@ -91,6 +91,57 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Removed — more code that did nothing, and one duplicated rule
+- **`ConfigError` and `GraphPersistError`** — neither was ever raised.
+  `GraphPersistError`'s docstring promised a data-loss contract that does
+  not exist: a graph write that fails deliberately does NOT raise, it sets
+  `_persistence_broken` and surfaces it through `/health`. An exception
+  class nothing raises reads as a contract, so the comment that replaced
+  it says what actually happens.
+- **`chars_to_tokens_estimate`** — no callers.
+- **`MemoryNode.is_valid_at` was dead beside a copy of itself.**
+  `query_at_time` restated "was this true then" inline. It calls the
+  method now, so the rule has one definition.
+
+### Added — preferences: the habits that outlive a session
+A session graph remembers what you decided *about this project*. It does
+not, and should not, remember that you want short answers — that is true
+of you, not of the repository, and it has to survive starting a session in
+a different directory.
+
+`PreferenceStore` had been sitting in `semantic_cache/cache.py` for a long
+time with the detector patterns, a store and a context formatter all
+written, and **no callers**: `save()` was never invoked from anywhere, so
+`/api/cache/stats` carried a preference field that was permanently the
+empty string while implying a working cross-session memory. The reason it
+could not simply be wired up was in the route's own comment — the store
+was process-global, so one caller's habits would have reached another
+caller's prompt.
+
+It is now `tokenmizer/preferences.py`: per principal, SQLite-backed in
+`storage_dir`, shared across workers and sessions, and actually called.
+`GET /api/preferences` shows what is remembered and the exact text
+injected; `DELETE /api/preferences` (optionally `?key=...`) forgets it,
+because a memory with no way to say "stop remembering that" is a
+liability. Restating a preference updates it rather than adding a second
+line that says nearly the same thing — matched on the topic word or heavy
+overlap, since neither rule alone gets both "I prefer TypeScript for
+everything" / "...with strict mode" and "dark mode" / "strict mode" right.
+
+**Off by default, deliberately.** The failure mode of a preference memory
+is not forgetting: it is remembering something that was never a preference
+and repeating it in every prompt you send for the rest of the year. The
+detector is a set of regexes and it will have false positives. Secrets,
+env vars, project-specific asides and complaints ("I hate this bug") are
+excluded by construction and the exclusions are tested, but that is not a
+guarantee, which is why the endpoint above exists and why an operator
+turns this on deliberately.
+
+While wiring it, two of the detector's own patterns turned out never to
+have matched their most natural phrasing: `keep it brief` and `my
+convention is X` both required two or more characters where the English
+has one space.
+
 ### Fixed — the rate limit was enforced once per worker
 `RateLimiter` keeps its token buckets in a process dict. That is correct
 for one process and wrong for the deployment the Dockerfile ships: with

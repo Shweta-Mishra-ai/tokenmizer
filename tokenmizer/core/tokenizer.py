@@ -202,8 +202,3 @@ def count_messages_tokens(messages: list[dict], model: str = "gpt-4o") -> int:
             total += count_tokens(str(fn.get("arguments", "")), model)
     total += 2  # reply priming
     return total
-
-
-def chars_to_tokens_estimate(chars: int) -> int:
-    """Fast estimate when we only have char count (e.g. for size checks)."""
-    return max(1, chars // _FALLBACK_RATIO)

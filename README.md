@@ -225,6 +225,29 @@ line is the part a summary loses — and
 `GET /api/graph/{session_id}/why?q=date-fns` replays the full chain with
 the trigger, the reason and the evidence for each hop.
 
+### Habits, not just projects
+
+A session graph remembers what you decided *about this project*. It does
+not remember that you want short answers — that is true of you, not of
+the repository, and it has to survive starting a session somewhere else.
+
+```yaml
+preferences:
+  enabled: true      # off by default; read the note before turning it on
+```
+
+With it on, a turn like "I prefer TypeScript, and keep answers brief" is
+remembered per principal and injected as a few lines of system prompt.
+`/api/preferences` (GET) shows exactly what was remembered and the exact
+text it injects; the same path with DELETE and `?key=...` forgets one,
+without a key forgets all of them.
+
+**Off by default on purpose.** The failure mode of a preference memory is
+not forgetting — it is remembering something that was never a preference
+and repeating it in every prompt you send for the rest of the year. The
+detector is a set of regexes and it will have false positives, which is
+why the endpoint above exists and why you turn this on deliberately.
+
 ### Not only coding sessions
 
 Set `domain` and the same five shapes are read in another vocabulary.
@@ -456,7 +479,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1291 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1321 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

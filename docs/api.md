@@ -18,6 +18,8 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 | `/api/graph/{id}/transitions` | GET | Decision transitions, newest first |
 | `/api/graph/{id}/obsidian` | GET | Obsidian Canvas export |
 | `/api/cache/stats` | GET | Semantic cache hit rate and utilisation |
+| `/api/preferences` | GET | What this principal's habits are remembered as, and the exact text injected into the system prompt. `{"enabled": false}` when `preferences.enabled` is off |
+| `/api/preferences` | DELETE | Forget one (`?key=...`) or all of this principal's preferences |
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
 | `/api/sessions` | GET | The caller's sessions with node counts, last activity and a link to each graph page. Scoped by ownership: one API key never sees another's sessions |
 | `/api/graph/{id}` | GET | Session graph stats |

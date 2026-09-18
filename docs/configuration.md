@@ -91,6 +91,30 @@ untrusted network lets any caller reset their own limit.
 > configs load, and now logs a warning naming `sqlite` as the option that
 > covers the same deployment.
 
+## Preferences — habits that outlive a session
+
+```yaml
+preferences:
+  enabled: false     # OFF by default; read the note
+  max_items: 4       # lines injected into the system prompt
+  max_chars: 400     # and their total size
+```
+
+The session graph remembers what you decided about a project. This
+remembers what is true of *you* — "keep it brief", "always TypeScript" —
+per principal, in `storage_dir`, and injects a few lines into the system
+prompt.
+
+> **Off by default on purpose.** The failure mode of a preference memory
+> is not forgetting; it is remembering something that was never a
+> preference and repeating it in every prompt you send for the rest of
+> the year. The detector is a set of regexes and it will have false
+> positives. `GET /api/preferences` shows exactly what is remembered and
+> the exact text injected; `DELETE /api/preferences` (optionally
+> `?key=...`) forgets it. Secrets, env vars and complaints ("I hate this
+> bug") are excluded by construction, but do not mistake that for a
+> guarantee.
+
 ## Not implemented, despite being configurable
 
 | Setting | Status |

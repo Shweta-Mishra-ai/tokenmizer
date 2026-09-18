@@ -16,10 +16,6 @@ class ProviderError(TokenMizerError):
         super().__init__(f"[{provider}] {error_type}: {message}")
 
 
-class ConfigError(TokenMizerError):
-    """Invalid configuration."""
-
-
 class StorageError(TokenMizerError):
     """Persistence failure."""
 
@@ -30,6 +26,9 @@ class CheckpointPersistError(StorageError):
     path, so a swallowed instance of this error means data loss."""
 
 
-class GraphPersistError(StorageError):
-    """Graph (node/edge) write failed. Same data-loss caveat as
-    CheckpointPersistError — see that class's docstring."""
+# There is deliberately no GraphPersistError. A graph write that fails
+# does NOT raise: persistence.py sets _persistence_broken, surfaces it
+# through /health and /api/stats, and the turn continues — the caller came
+# for an answer, and a lost node must be visible rather than fatal. An
+# exception class nothing raises reads as a contract that does not exist,
+# which is how the deleted one was read.
