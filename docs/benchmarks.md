@@ -11,7 +11,7 @@ python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 1199 tests
+pytest tests/ -q                                     # 1228 tests
 ```
 
 ## Extraction quality — precision, recall and F1

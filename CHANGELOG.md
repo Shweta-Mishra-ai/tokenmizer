@@ -91,6 +91,101 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Fixed — the label-quality numbers were mostly measuring themselves
+Two of the three figures in `benchmarks.eval`'s label-quality block were
+counting their own false positives, which meant a roadmap item was
+chasing a target that was never real.
+
+- **"Truncated mid-word" was a guess from the label's shape** — any label
+  of 60 characters or more that ended on a letter. 22 of the 26 it
+  counted were complete labels that simply ended in a word
+  ("...in scripts/backfill.py", "...zero lost"). It is now checked
+  against the transcript the label came from: a label is cut mid-word if
+  the source continues with a word character where the label stops, which
+  is exact rather than a heuristic.
+- **The five that really were cut** came from the patterns' fixed
+  80-character capture, which had no reason to stop on a word boundary —
+  hence "...confusion matri" and "...destroyed memory is queryab".
+  `_CLAUSE_SPAN` now ends on one, with a fallback branch so a span with no
+  boundary inside the budget (one long URL) is still captured rather than
+  dropped. 15% to **0%**.
+- **"Near-duplicate pairs" pooled every session's labels into one bucket**
+  and compared across node types, so `persistence.py` appearing in three
+  different sessions counted as pairs, and a task naming the file it
+  touched ("User model in api/models.py") counted as a duplicate of the
+  file node `api/models.py` — which is the TOUCHES relation working. It
+  now compares within one session, and exempts the pairs the graph itself
+  says are a fix and the error it fixed, because a resume block is meant
+  to show both. 38 to **0**, with a test that fails if the grouping is
+  ever dropped, so the metric cannot quietly become one that never fires.
+
+### Fixed — two ways a completion verb was not a completion
+Both found by fixing the measurement above, and both were among the
+largest sources of spurious completed tasks on real transcripts.
+
+- **"vanished from completed tasks and appeared as a spurious file"** was
+  recorded as finished work: `completed` was read as the verb, when it is
+  an adjective on one of the ontology's own category nouns. A session
+  reviewing its own extraction talks this way constantly.
+- **"Working on a CI step that runs the image with the network removed to
+  prove the bake worked"** produced the completed task "to prove the bake
+  worked" from `removed`. The clause had already said the work was not
+  done; this is the mirror of the `_COMPLETION_LEAD` guard that stops
+  finished work being read as a to-do.
+- **"Decided: code splitting with React.lazy"** also produced a bare "Use
+  React" beside the real decision, because `\b` is satisfied by the dot in
+  `React.lazy`. A tech name followed by a dot and more word characters is
+  part of a longer identifier. Only the dot is guarded: `postgres-15` and
+  `bert-base-uncased` are how versions are written, and those are the
+  choice.
+
+Completed-task precision 91% to **98%**, decisions 95% to **97%**, macro
+F1 96% to **97%**, real transcripts 89% to **91%**.
+
+### Added — `model_map`, and the routing block that never did anything is deprecated
+`routing.*` was accepted by the config and implemented by nothing:
+`savings["routing"]` was a hardcoded `0` on every response since the first
+release, and no request was ever routed. What people reach for that block
+for is a rename — a client hard-codes `gpt-4`, or an agent framework pins
+a model you do not run — so that is what ships: `model_map`, an exact-match
+substitution applied once (so a map cannot loop), reported back as
+`tokenmizer.model_mapped_from` so an answer from a model the client never
+named is traceable to the config rather than looking like a provider bug.
+
+`savings.routing` is gone. The `routing:` block still loads, and now warns
+that it is deprecated whenever it is *present* rather than only when
+enabled — an operator who wrote three model names under it believes they
+mean something either way. It is removed one release from now.
+Complexity-based routing stays unbuilt: scoring a prompt well enough to
+pick someone's model is a research problem, and a switch that silently
+does nothing is worse than no switch.
+
+### Removed — twelve DTOs no layer imported
+`tokenmizer/core/dto.py` opened with "Rule: no raw dict crosses a layer
+boundary" and defined thirteen objects to enforce it. Twelve were never
+imported by anything, and the code they described passes dicts — so the
+rule was intent the codebase had quietly stopped following, and the file
+read as an architecture nobody could find. `GraphStatsDTO` stays, because
+`get_stats()` is read by the CLI, the MCP server and `/api/stats`, which
+is exactly where an un-named dict goes stale. The rest are a change to
+make with the callers that need them, not before.
+
+### Added — `tokenmizer stats` shows durability, not just savings
+`/health` reports `degraded` with the counters behind it and the dashboard
+renders them; the CLI printed a cheerful token count and nothing else, so
+a deployment whose checkpoints had been failing all day looked fine from
+the terminal. It now prints failed writes, sessions with an unreadable
+graph, sessions with no durable storage, sessions that lost stored memory,
+and broken checkpoint storage. A `/health` call that itself fails is
+reported as "could not read", never as healthy: unknown and fine are
+different answers.
+
+### Fixed — `scripts/mcp_e2e_check.py` failed when port 8765 was busy
+It hard-coded the port a developer running the proxy by hand reaches for,
+and the collision surfaced as "proxy did not start within 5s" — which
+reads like a broken app rather than a busy port. It asks the OS for a free
+one now.
+
 ### Changed — the graph opens as a radial map, and the colours are validated
 The default view is no longer a force-directed hairball. Each node type
 takes its own arc of a circle, the type is named on a ring drawn outside

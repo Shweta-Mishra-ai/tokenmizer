@@ -343,11 +343,11 @@ of 14 sessions, 6 of them real transcripts:
 | Category | Precision | Recall | F1 |
 |---|---|---|---|
 | Files | 98% | 100% | **99%** |
+| Decisions | 97% | 100% | **99%** |
+| Completed tasks | 98% | 98% | **98%** |
 | Pending tasks | 100% | 90% | **95%** |
-| Decisions | 95% | 100% | **97%** |
 | Errors | 93% | 96% | **94%** |
-| Completed tasks | 91% | 98% | **94%** |
-| | | **macro F1** | **96%** |
+| | | **macro F1** | **97%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
 whole transcript as one node scores 100% recall, which is why
@@ -356,7 +356,7 @@ earlier ones.
 
 Scored separately by origin, because hand-written fixtures are easier
 than real transcripts and a single headline hides that: **synthetic 98%,
-real 89%.** Treat 89% as the number that describes real sessions. n=14
+real 91%.** Treat 91% as the number that describes real sessions. n=14
 is a small sample and the same person wrote every label.
 
 **Retrieval is measured separately.** `python -m
@@ -400,7 +400,7 @@ Listed here rather than left to be discovered:
 
 | Setting | Status |
 |---|---|
-| `routing.*` | No implementation. `savings.routing` is always `0`. Enabling it logs a warning and changes nothing. The dashboard labels the layer "Not implemented". |
+| `routing.*` | **Deprecated, removed next release.** Never implemented. Use `model_map` (below) to send one model name to another — that is what it was reached for. A config carrying a `routing:` block still loads and logs a deprecation warning. |
 | `state_backend: redis` | Accepted and unused. `tokenmizer/state/backend.py` has no callers; all durable state is SQLite. |
 | `functions` / `function_call` (the deprecated OpenAI shape) | Accepted and ignored, with a server-side warning. Use `tools` / `tool_choice`, which are forwarded. |
 | Tool calling on Gemini and Cohere | Refused with a 501. The other seven providers forward it. |
@@ -431,7 +431,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1199 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1228 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

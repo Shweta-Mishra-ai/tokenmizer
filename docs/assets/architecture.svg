@@ -95,7 +95,7 @@
   <text class="s" x="286" y="508">Anthropic cache_control on prefixes over 1024 tokens</text>
 
   <text class="s" x="236" y="548">Layer numbers match the API response fields.</text>
-  <text class="s" x="236" y="564">savings.routing is always 0 — model routing is not implemented.</text>
+  <text class="s" x="236" y="564">No routing layer: the routing block is deprecated, model_map replaces it.</text>
 
   <path class="flow" d="M451 212 L 451 218"/>
   <path class="flow" d="M451 272 L 451 278"/>

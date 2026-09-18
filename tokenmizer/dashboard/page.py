@@ -198,8 +198,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="layer-badge badge-terse">Active</span>
       </div>
       <div class="layer-row">
-        <span class="layer-name">Model routing</span>
-        <span class="layer-badge badge-routing" title="routing.* is accepted by the config but nothing implements it yet">Not implemented</span>
+        <span class="layer-name">Model map</span>
+        <span class="layer-badge badge-routing" title="model_map rewrites a client's model name before dispatch; empty by default. The old routing.* block is deprecated and does nothing.">Config only</span>
       </div>
       <div class="faint" style="margin-top:0.9rem">
         Savings per layer are in <code>/api/stats</code> and on every chat response

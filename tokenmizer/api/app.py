@@ -1357,6 +1357,14 @@ async def chat_completions(req: ChatRequest, request: Request):
     """
     session_id = req.session_id or str(uuid.uuid4())
     model      = req.model or settings.default_model
+    # One exact-match substitution, never re-applied, so a map that points
+    # at another of its own keys cannot loop. The original name is echoed
+    # back below: a client that asked for one model and reads an answer
+    # shaped like another should be able to see why from the response.
+    mapped_from = None
+    if model in settings.model_map:
+        mapped_from, model = model, settings.model_map[model]
+        logger.debug("model_map: %r -> %r (session %r)", mapped_from, model, session_id)
     savings: dict[str, int] = {}
 
     # Tool calling. `tools`/`tool_choice` are forwarded (see
@@ -1445,7 +1453,6 @@ async def chat_completions(req: ChatRequest, request: Request):
     messages = _apply_compression_layers(messages, settings, savings)
 
     orig_input_tokens = count_messages_tokens(raw_messages, model)
-    savings["routing"] = 0
 
     # Layer 4: graph update + context injection (mutates messages)
     checkpoint_status: dict = {"attempted": False, "succeeded": False, "checkpoint_id": None}
@@ -1559,6 +1566,10 @@ async def chat_completions(req: ChatRequest, request: Request):
             # rejected and the turn went through untransformed. Zero
             # savings this turn, and a bug to report with `ref`.
             **({"fallback": fallback} if fallback else {}),
+            # Present only when `model_map` substituted the model, so an
+            # answer from a model the client never named is traceable to
+            # the config rather than looking like a provider bug.
+            **({"model_mapped_from": mapped_from} if mapped_from else {}),
         },
     }
 

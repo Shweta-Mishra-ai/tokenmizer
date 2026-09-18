@@ -166,10 +166,15 @@ class TestTokenCountMemoBound:
 class TestHonestSurfaces:
 
     def test_dashboard_does_not_advertise_a_beta_router(self):
+        """The layer list once showed a "Context Router (Beta)" that did
+        not exist. It must never claim a layer the proxy does not run:
+        `model_map` is config-only until someone fills it in, and the
+        routing block it replaced is gone from the panel entirely."""
         from tokenmizer.dashboard.page import DASHBOARD_HTML
         assert "Context Router" not in DASHBOARD_HTML
         assert ">Beta<" not in DASHBOARD_HTML
-        assert "Not implemented" in DASHBOARD_HTML
+        assert "Model routing" not in DASHBOARD_HTML
+        assert "Config only" in DASHBOARD_HTML
 
     def test_every_status_has_an_opacity(self):
         from tokenmizer.graph_memory.types import NodeStatus

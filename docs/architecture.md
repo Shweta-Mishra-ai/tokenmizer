@@ -34,9 +34,10 @@ flowchart LR
     L4 <-->|"per-row, locked"| DB
 ```
 
-> **On the layer numbering:** `savings.routing` appears in API responses
-> and is always `0`. Complexity-based model routing is **not
-> implemented** — see [What is not implemented](../README.md#what-is-not-implemented).
+> **On the layer numbering:** there is no routing layer. `savings.routing`
+> used to appear in every API response as a hardcoded `0`; it has been
+> removed, along with the `routing:` config block it reported for.
+> `model_map` replaces it — see [What is not implemented](../README.md#what-is-not-implemented).
 
 ---
 

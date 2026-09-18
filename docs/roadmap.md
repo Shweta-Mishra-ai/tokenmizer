@@ -15,15 +15,15 @@ benchmark, the suite is right and this file is a bug.
 
 | Surface | Number | Source |
 |---|---|---|
-| Extraction, macro F1 on the labelled corpus | 96% overall; **89% on real transcripts**, 98% synthetic | `python -m benchmarks.eval` |
-| Label quality | 15% of labels truncated mid-word; 38 near-duplicate pairs over 174 labels | same run |
+| Extraction, macro F1 on the labelled corpus | 97% overall; **91% on real transcripts**, 98% synthetic | `python -m benchmarks.eval` |
+| Label quality | 0% truncated mid-word; 0 near-duplicate pairs over 170 labels | same run |
 | Retrieval, recall@6 on paraphrased questions | 85% keyword; 92% with `semantic_retrieval` (n=13) | `benchmarks.graph_retrieval.query_eval` |
 | Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
 | Resume block size | ~160-180 tokens standard tier | `benchmarks/resume_quality` |
-| Suite | 1199 tests, ruff clean | `pytest tests/` |
+| Suite | 1228 tests, ruff clean | `pytest tests/` |
 
-Read the 89% real-transcript figure as the honest one. It is the reason
+Read the 91% real-transcript figure as the honest one. It is the reason
 several items below exist.
 
 ---
@@ -114,21 +114,39 @@ extraction schema plus a labelled eval corpus; a pack ships only with its
 corpus, because the coding numbers above are only trustworthy because
 that corpus exists.
 
-**7. Label quality.**
-Labels spanning more than one sentence are down to 0% and the decision
-near-duplicate merge now folds technology spellings and scaffold words,
-but 15% of labels are still cut mid-word and the near-duplicate count is
-39 across all categories. Run the same merge for tasks and files, and
-clip at a word boundary with an ellipsis rather than mid-token. Both are
-visible in `benchmarks.eval`'s label-quality block, so the target is
-numeric: under 5% truncation, under 15 near-duplicate pairs.
+**7. Label quality.**  *(done — and the measurement was most of it)*
+Both targets are met: 0% truncated mid-word, 0 near-duplicate pairs,
+pinned by `tests/unit/test_label_quality.py` so a regression fails a test
+instead of moving a number nobody re-reads.
 
-**8. Model routing: implement it or delete it.**
-`routing.*` and `savings.routing` have never done anything. Complexity
-scoring is a research problem; what users ask for is a `model_map`
-(client model alias to provider model, per session or per key). Ship the
-map, drop the routing block and the always-zero savings field, with a
-one-release deprecation warning for configs that still carry it.
+The larger finding was that the block was measuring itself. "Truncated"
+was guessed from a label's shape — 60+ characters ending on a letter —
+and 22 of the 26 it counted were complete labels that simply ended in a
+word; it is now checked against the transcript, which is exact. The five
+that really were cut came from the patterns' fixed 80-character capture,
+which now ends on a word boundary. "Near-duplicate" pooled every
+session's labels into one bucket and compared across node types, so
+`persistence.py` in three sessions counted as pairs and a task naming the
+file it touched counted as a duplicate of that file; it now compares
+within a session, and exempts the pairs the graph itself says are a fix
+and the error it fixed.
+
+Fixing the measurement exposed two real extraction defects behind it:
+`completed` read as a verb in "vanished from completed tasks", and a
+completion verb inside a clause that had already said the work was not
+done. Completed-task precision 91% to 98%, decisions 95% to 97%, real
+transcripts 89% to 91%.
+
+**8. Model routing: implement it or delete it.**  *(done)*
+`model_map` ships: an exact-match substitution from the client's model
+name to the model actually called, reported back as
+`tokenmizer.model_mapped_from` so a substituted answer is traceable.
+`savings.routing` — a hardcoded `0` on every response since the first
+release — is gone, and a config carrying a `routing:` block now warns
+that it is deprecated whatever it is set to, because the fields were a
+belief about behaviour either way. Complexity scoring stays unbuilt: it
+is a research problem, and a switch that silently does nothing is worse
+than no switch.
 
 **9. Multi-process state.**
 Graph and checkpoint writes are cross-process safe; the semantic cache,
