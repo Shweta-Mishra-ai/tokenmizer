@@ -186,12 +186,20 @@ def _encode_len(enc, text: str) -> int:
 
 
 def count_messages_tokens(messages: list[dict], model: str = "gpt-4o") -> int:
-    """Count tokens across all messages including OpenAI/Anthropic role overhead."""
+    """Count tokens across all messages including OpenAI/Anthropic role
+    overhead. An assistant turn's tool calls are counted too — the function
+    name and its JSON arguments are sent to the model like any other text,
+    and an agent's context is often mostly that."""
     total = 0
     for msg in messages:
         total += 4  # per-message framing tokens
-        total += count_tokens(msg.get("content", ""), model)
+        content = msg.get("content", "")
+        total += count_tokens(content if isinstance(content, str) else str(content or ""), model)
         total += count_tokens(msg.get("role", ""), model)
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+            total += count_tokens(str(fn.get("name", "")), model)
+            total += count_tokens(str(fn.get("arguments", "")), model)
     total += 2  # reply priming
     return total
 

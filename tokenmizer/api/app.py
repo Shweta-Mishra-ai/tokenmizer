@@ -574,13 +574,38 @@ class ChatMessage(BaseModel):
     """OpenAI-style message. `content` accepts a plain string OR a list of
     content blocks (multimodal format). Blocks are normalized to text —
     TokenMizer is a text proxy; non-text blocks (images) are dropped with
-    their text parts preserved."""
+    their text parts preserved.
+
+    Tool calling carries three more fields, all optional: an assistant
+    turn's `tool_calls`, and a `role: "tool"` turn's `tool_call_id` (and
+    OpenAI's optional `name`). They ride through the pipeline untouched
+    and reach the provider adapter, which speaks them natively or
+    translates them (see providers/tools.py)."""
+    model_config = {"extra": "allow"}
+
     role: str
     content: str | list | None = ""
+    tool_calls: Optional[list] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
 
     def text(self) -> str:
         from tokenmizer.graph_memory.helpers import _content_to_text
         return _content_to_text(self.content)
+
+    def to_dict(self) -> dict:
+        """The pipeline's message shape: role + text content, plus the
+        tool fields only when set, so an ordinary message is exactly the
+        two-key dict every layer has always seen."""
+        d: dict = {"role": self.role, "content": self.text()}
+        if self.tool_calls:
+            from tokenmizer.providers.tools import normalize_tool_calls
+            d["tool_calls"] = normalize_tool_calls(self.tool_calls)
+        if self.tool_call_id:
+            d["tool_call_id"] = self.tool_call_id
+        if self.name:
+            d["name"] = self.name
+        return d
 
 
 class ChatRequest(BaseModel):
@@ -602,6 +627,11 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     stop: Optional[str | list[str]] = None
+    # Tool/function calling, OpenAI shape. Forwarded to providers that
+    # support it (see BaseProvider.supports_tools); a 501 otherwise.
+    tools: Optional[list[dict]] = None
+    tool_choice: Optional[str | dict] = None
+    parallel_tool_calls: Optional[bool] = None
 
 
 def _max_tokens(req: "ChatRequest") -> int:
@@ -620,6 +650,18 @@ def _sampling_kwargs(req: "ChatRequest") -> dict:
         kw["top_p"] = req.top_p
     if req.stop is not None:
         kw["stop"] = req.stop
+    return kw
+
+
+def _tool_kwargs(req: "ChatRequest") -> dict:
+    """Tool-calling params to forward (only when the request declares tools)."""
+    if not req.tools:
+        return {}
+    kw: dict = {"tools": req.tools}
+    if req.tool_choice is not None:
+        kw["tool_choice"] = req.tool_choice
+    if req.parallel_tool_calls is not None:
+        kw["parallel_tool_calls"] = req.parallel_tool_calls
     return kw
 
 
@@ -1001,7 +1043,7 @@ async def _call_provider(
     # would mask a regression if ingestion ever stopped redacting.
     provider = _get_provider()
     kwargs = dict(model=model, max_tokens=_max_tokens(req), stream=False,
-                  **_sampling_kwargs(req))
+                  **_sampling_kwargs(req), **_tool_kwargs(req))
     try:
         resp = await provider.chat(messages=messages, **kwargs)
     except Exception as e:
@@ -1065,6 +1107,15 @@ async def _call_provider(
     output_tokens  = resp.output_tokens
     input_tokens   = resp.input_tokens
     latency_ms     = resp.latency_ms
+    if outcome is not None:
+        outcome["tool_calls"] = list(resp.tool_calls or [])
+        outcome["finish_reason"] = resp.finish_reason
+
+    # A turn the model answered with a tool call is neither trimmed (the
+    # text, if any, is the model's note to the caller) nor cached (the
+    # cached answer would replay a tool request against a different world).
+    if resp.tool_calls:
+        return response_text, input_tokens, output_tokens, latency_ms, False
 
     # Output trim
     if settings.terse_output.enabled:
@@ -1127,8 +1178,25 @@ def _stream_response(req, messages, model, user_content, session_id,
 
     cache_ctx = _cache.conversation_fingerprint(raw_messages or [])
 
+    tool_kw = _tool_kwargs(req)
+    # An adapter that supports tools but cannot stream tool-call deltas
+    # answers the request from chat() and the answer is emitted as chunks:
+    # the client still gets a valid SSE stream, just not an incremental one.
+    buffered_tools = bool(tool_kw) and not getattr(provider, "supports_tool_stream", False)
+
+    async def _buffered_tool_stream(candidate):
+        resp = await provider.chat(
+            messages=candidate, model=model, max_tokens=_max_tokens(req),
+            **_sampling_kwargs(req), **tool_kw,
+        )
+        if resp.text:
+            yield resp.text
+        if resp.tool_calls:
+            yield {"tool_calls": [{**tc, "index": i} for i, tc in enumerate(resp.tool_calls)]}
+
     async def _gen():
         full_text = ""
+        saw_tool_calls = False
         t0 = time.monotonic()
         cache_hit = False
         stream_failed = False
@@ -1137,7 +1205,7 @@ def _stream_response(req, messages, model, user_content, session_id,
         try:
             cached = (
                 _cache.get(user_content, session_id=session_id, context=cache_ctx)
-                if settings.cache.enabled and user_content
+                if settings.cache.enabled and user_content and not tool_kw
                 else None
             )
 
@@ -1156,12 +1224,23 @@ def _stream_response(req, messages, model, user_content, session_id,
                 for attempt, candidate in enumerate(candidates):
                     last_error = None
                     try:
-                        async for piece in provider.chat_stream(
-                            messages=candidate,
-                            model=model,
-                            max_tokens=_max_tokens(req),
-                            **_sampling_kwargs(req),
-                        ):
+                        pieces = (
+                            _buffered_tool_stream(candidate) if buffered_tools
+                            else provider.chat_stream(
+                                messages=candidate,
+                                model=model,
+                                max_tokens=_max_tokens(req),
+                                **_sampling_kwargs(req), **tool_kw,
+                            )
+                        )
+                        async for piece in pieces:
+                            if isinstance(piece, dict):
+                                # A tool-call delta (see OpenAIProvider.
+                                # chat_stream): re-emitted in the same
+                                # OpenAI chunk shape.
+                                saw_tool_calls = True
+                                yield _chunk({"tool_calls": piece["tool_calls"]})
+                                continue
                             full_text += piece
                             yield _chunk({"content": piece})
                         succeeded = True
@@ -1174,7 +1253,7 @@ def _stream_response(req, messages, model, user_content, session_id,
                         # retrying now would duplicate or interleave
                         # output. This failure is final regardless of
                         # attempts left.
-                        if full_text:
+                        if full_text or saw_tool_calls:
                             break
                         if attempt == 0 and len(candidates) > 1:
                             correlation_id = uuid.uuid4().hex[:12]
@@ -1220,7 +1299,7 @@ def _stream_response(req, messages, model, user_content, session_id,
                            "type": "internal_error"}}
             ) + "\n\n"
         yield _chunk(
-            {}, finish="stop",
+            {}, finish="tool_calls" if saw_tool_calls else "stop",
             extra={"tokenmizer": {"fallback": {"transform_rejected": True}}}
             if transform_rejected else None,
         )
@@ -1241,7 +1320,7 @@ def _stream_response(req, messages, model, user_content, session_id,
         # truncated answer to every future matching prompt, long after the
         # provider recovered. Re-writing a cache HIT is equally pointless.
         if (settings.cache.enabled and user_content and full_text
-                and not stream_failed and not cache_hit):
+                and not stream_failed and not cache_hit and not saw_tool_calls):
             _cache.set(user_content, full_text, input_tokens=input_tokens,
                        output_tokens=output_tokens, session_id=session_id,
                        context=cache_ctx)
@@ -1273,24 +1352,32 @@ async def chat_completions(req: ChatRequest, request: Request):
     model      = req.model or settings.default_model
     savings: dict[str, int] = {}
 
-    # ChatRequest uses extra="allow" precisely so a standard OpenAI client
-    # sending its full request shape never gets a 422 — but that means
-    # tool/function-calling fields are accepted with a 200 and silently
-    # have NO effect: no provider path here forwards them. A caller
-    # relying on tool use gets a response that quietly ignored what it
-    # asked for, with nothing in the API response pointing at why. This
-    # can't become a hard error without breaking the extra="allow"
-    # contract for every OTHER unrecognized field, so at minimum it must
-    # not be silent to whoever operates the proxy.
-    _unsupported = (req.model_extra or {}).keys() & {"tools", "tool_choice", "functions", "function_call"}
-    if _unsupported:
+    # Tool calling. `tools`/`tool_choice` are forwarded (see
+    # providers/tools.py); the legacy `functions`/`function_call` pair is
+    # not translated and, since ChatRequest uses extra="allow" so no
+    # standard client ever gets a 422, its presence must at least not be
+    # silent to whoever operates the proxy.
+    _legacy = (req.model_extra or {}).keys() & {"functions", "function_call"}
+    if _legacy:
         logger.warning(
-            "Request for session %r included %s — tool/function-calling "
-            "is not implemented by any provider adapter and these fields "
-            "are ignored. The model will respond with no knowledge of "
-            "the tools it was given.",
-            session_id, sorted(_unsupported),
+            "Request for session %r used the deprecated %s fields — these "
+            "are ignored. Send `tools`/`tool_choice` instead; the model "
+            "will respond with no knowledge of the functions it was given.",
+            session_id, sorted(_legacy),
         )
+    if req.tools:
+        try:
+            provider_for_tools = _get_provider()
+        except ValueError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        if not getattr(provider_for_tools, "supports_tools", False):
+            raise HTTPException(
+                status_code=501,
+                detail=(f"Tool calling is not implemented for provider "
+                        f"'{settings.provider}' (supported: anthropic, openai, "
+                        f"deepseek, mistral, openrouter, grok, ollama). The "
+                        f"request was refused rather than sent without its tools."),
+            )
 
     await _check_rate_limit(request)
 
@@ -1325,7 +1412,7 @@ async def chat_completions(req: ChatRequest, request: Request):
     #   - checkpoint storage (SQLite) and the graph DB itself
     # Redacting once here means every downstream path is safe by construction
     # instead of relying on each call site to remember to redact.
-    raw_messages = [{"role": m.role, "content": m.text()} for m in req.messages]
+    raw_messages = [m.to_dict() for m in req.messages]
     raw_messages = redact_messages(raw_messages)
     # Per-dict copy, not raw_messages[:]. A shallow list copy shares every
     # dict, so Layer 2's terse-prompt injection — which prepends onto the
@@ -1340,7 +1427,12 @@ async def chat_completions(req: ChatRequest, request: Request):
     user_query   = next(
         (m["content"] for m in reversed(raw_messages) if m.get("role") == "user"), ""
     )
-    user_content = user_query
+    # The cache key is the final user turn. A request that ends on a tool
+    # result (the agent loop's second half) or that declares tools is not
+    # cacheable: the answer is a step in a plan, not a reply to a
+    # question, and user_content="" disables both lookup and write.
+    ends_on_user = bool(raw_messages) and raw_messages[-1].get("role") == "user"
+    user_content = user_query if (ends_on_user and not req.tools) else ""
 
     # Layer 0-2: file intelligence, compression, terse injection
     messages = _apply_compression_layers(messages, settings, savings)
@@ -1389,11 +1481,17 @@ async def chat_completions(req: ChatRequest, request: Request):
                                 raw_messages=raw_messages)
 
     # Layer 5: call provider (or return cache hit)
-    fallback: dict = {}
+    outcome: dict = {}
     response_text, input_tokens_actual, output_tokens, latency_ms, cache_hit = await _call_provider(
         req, messages, model, user_content, session_id, savings,
-        raw_messages=raw_messages, outcome=fallback,
+        raw_messages=raw_messages, outcome=outcome,
     )
+    # What the provider answered with, and — separately — whether the
+    # transformed request was rejected on the way. Only the latter is
+    # reported as `fallback`.
+    tool_calls = outcome.pop("tool_calls", None) or []
+    finish_reason = outcome.pop("finish_reason", None) or "stop"
+    fallback = outcome
     if fallback:
         # The transformed request was rejected and the client's own
         # messages went through instead: what was sent is what they sent.
@@ -1414,6 +1512,16 @@ async def chat_completions(req: ChatRequest, request: Request):
         layer_savings=savings,
     )
 
+    message: dict = {"role": "assistant", "content": response_text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+        # OpenAI sends null content for a pure tool-call turn; clients
+        # (and their SDKs' pydantic models) accept "" but expect the key.
+        message["content"] = response_text or None
+        finish_reason = "tool_calls"
+    elif finish_reason == "tool_calls":
+        finish_reason = "stop"
+
     return {
         "id":      f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object":  "chat.completion",
@@ -1422,8 +1530,8 @@ async def chat_completions(req: ChatRequest, request: Request):
         "session_id": session_id,
         "choices": [{
             "index":         0,
-            "message":       {"role": "assistant", "content": response_text},
-            "finish_reason": "stop",
+            "message":       message,
+            "finish_reason": finish_reason,
         }],
         "usage": {
             "prompt_tokens":          input_tokens_actual,

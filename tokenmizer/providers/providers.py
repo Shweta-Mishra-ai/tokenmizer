@@ -14,11 +14,22 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from tokenmizer.core.errors import ProviderError
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
+from tokenmizer.providers.tools import (
+    anthropic_messages,
+    anthropic_response,
+    anthropic_tool_choice,
+    anthropic_tools,
+    finish_reason,
+    normalize_tool_calls,
+    ollama_messages,
+    ollama_tool_calls,
+    tool_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +145,9 @@ class LLMResponse:
     latency_ms: float = 0.0
     finish_reason: str = "stop"
     cached: bool = False
+    # OpenAI-shaped tool calls the model asked for, empty for a plain
+    # answer. See providers/tools.py for the shape and the translations.
+    tool_calls: list = field(default_factory=list)
 
     @property
     def total_tokens(self) -> int:
@@ -143,6 +157,17 @@ class LLMResponse:
 # ── Base ─────────────────────────────────────────────────────────────────────
 
 class BaseProvider(ABC):
+
+    # Tool/function calling. `supports_tools` — the adapter forwards
+    # `tools`/`tool_choice` and returns `tool_calls` (see providers/
+    # tools.py). `supports_tool_stream` — chat_stream() can carry tool-call
+    # deltas as dict events alongside text chunks; without it the proxy
+    # answers a streamed tool request from chat() in one piece. The
+    # proxy refuses a tool request up front (501) for an adapter without
+    # `supports_tools`, rather than sending the model a conversation it
+    # cannot see the tools for.
+    supports_tools: bool = False
+    supports_tool_stream: bool = False
 
     def __init__(self, api_key: str = "", model: str = ""):
         self.api_key = api_key
@@ -241,8 +266,25 @@ def _anthropic_system_param(system_text: str, model: str):
 
 class AnthropicProvider(BaseProvider):
 
+    supports_tools = True
+    # Tool-use deltas are not carried over text_stream; a streamed tool
+    # request is answered from chat() in one piece by the proxy.
+    supports_tool_stream = False
+
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-6"):
         super().__init__(api_key, model)
+
+    @staticmethod
+    def _tool_params(kwargs: dict) -> dict:
+        """`tools` / `tool_choice` in Anthropic's shape, or nothing."""
+        tk = tool_kwargs(kwargs)
+        if not tk.get("tools"):
+            return {}
+        params: dict = {"tools": anthropic_tools(tk["tools"])}
+        choice = anthropic_tool_choice(tk.get("tool_choice"), tk.get("parallel_tool_calls"))
+        if choice is not None:
+            params["tool_choice"] = choice
+        return params
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
@@ -256,7 +298,7 @@ class AnthropicProvider(BaseProvider):
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
             sys_parts.insert(0, system)
-        conv = conversation_messages(messages)
+        conv = anthropic_messages(conversation_messages(messages))
         system_text = "\n\n".join(sys_parts) if sys_parts else None
 
         try:
@@ -266,6 +308,7 @@ class AnthropicProvider(BaseProvider):
                 kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
             if system_text:
                 kwargs_clean["system"] = _anthropic_system_param(system_text, model)
+            kwargs_clean.update(self._tool_params(kwargs))
 
             if stream:
                 full_text = ""
@@ -283,23 +326,30 @@ class AnthropicProvider(BaseProvider):
                     # prompt. The non-streaming branch below already uses
                     # resp.usage for the same reason.
                     final = await s.get_final_message()
+                # text_stream carries text blocks only; tool_use blocks
+                # are read off the final message.
+                _, calls = anthropic_response(getattr(final, "content", None))
                 return LLMResponse(text=full_text,
                                    input_tokens=final.usage.input_tokens,
                                    output_tokens=final.usage.output_tokens,
                                    model=model, provider="anthropic",
-                                   finish_reason=final.stop_reason or "stop")
+                                   finish_reason=(finish_reason(final.stop_reason, calls)
+                                                  if calls else final.stop_reason or "stop"),
+                                   tool_calls=calls)
 
             resp = await client.messages.create(
                 model=model, messages=conv, max_tokens=max_tokens, **kwargs_clean
             )
-            text = resp.content[0].text if resp.content else ""
+            text, calls = anthropic_response(resp.content)
             return LLMResponse(
                 text=text,
                 input_tokens=resp.usage.input_tokens,
                 output_tokens=resp.usage.output_tokens,
                 model=model,
                 provider="anthropic",
-                finish_reason=resp.stop_reason or "stop",
+                finish_reason=(finish_reason(resp.stop_reason, calls)
+                               if calls else resp.stop_reason or "stop"),
+                tool_calls=calls,
             )
         except anthropic.RateLimitError as e:
             raise ProviderError("anthropic", "rate_limit", str(e), retryable=True, retry_after=60.0)
@@ -320,10 +370,11 @@ class AnthropicProvider(BaseProvider):
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
             sys_parts.insert(0, system)
-        conv = conversation_messages(messages)
+        conv = anthropic_messages(conversation_messages(messages))
         kwargs_clean = _sampling(kwargs)
         if "stop" in kwargs_clean:
             kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
+        kwargs_clean.update(self._tool_params(kwargs))
         if sys_parts:
             # Same cacheability rule as the non-streaming path — this used
             # to pass a bare string, so streaming requests never got prompt
@@ -346,7 +397,34 @@ class AnthropicProvider(BaseProvider):
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 
+def _stream_tool_call_delta(tc) -> dict:
+    """One streamed tool-call fragment in the OpenAI chunk shape. Unlike a
+    whole call, every field is optional here: later fragments carry only
+    `index` and a slice of `arguments`."""
+    def g(obj, key):
+        return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+    fn = g(tc, "function")
+    out: dict = {"index": g(tc, "index") or 0}
+    if g(tc, "id"):
+        out["id"] = g(tc, "id")
+        out["type"] = "function"
+    if fn is not None:
+        f: dict = {}
+        if g(fn, "name"):
+            f["name"] = g(fn, "name")
+        if g(fn, "arguments") is not None:
+            f["arguments"] = g(fn, "arguments")
+        out["function"] = f
+    return out
+
+
 class OpenAIProvider(BaseProvider):
+
+    # The proxy's wire shape IS this API's shape, so tools pass straight
+    # through, streamed or not.
+    supports_tools = True
+    supports_tool_stream = True
 
     def __init__(self, api_key: str, model: str = "gpt-4o",
                  base_url: Optional[str] = None):
@@ -370,6 +448,7 @@ class OpenAIProvider(BaseProvider):
 
         try:
             sampling = _sampling(kwargs)  # OpenAI SDK accepts temperature/top_p/stop natively
+            sampling.update(tool_kwargs(kwargs))  # tools/tool_choice pass through as-is
             if stream:
                 full_text = ""
                 input_tokens = count_messages_tokens(all_messages, model)
@@ -388,13 +467,15 @@ class OpenAIProvider(BaseProvider):
                 model=model, messages=all_messages, max_tokens=max_tokens, **sampling
             )
             choice = resp.choices[0]
+            calls = normalize_tool_calls(getattr(choice.message, "tool_calls", None))
             return LLMResponse(
                 text=choice.message.content or "",
                 input_tokens=resp.usage.prompt_tokens,
                 output_tokens=resp.usage.completion_tokens,
                 model=model,
                 provider="openai",
-                finish_reason=choice.finish_reason or "stop",
+                finish_reason=finish_reason(choice.finish_reason, calls),
+                tool_calls=calls,
             )
         except Exception as e:
             raise ProviderError("openai", "api_error", str(e),
@@ -419,12 +500,22 @@ class OpenAIProvider(BaseProvider):
         try:
             stream = await client.chat.completions.create(
                 model=model, messages=all_messages, max_tokens=max_tokens,
-                stream=True, **_sampling(kwargs),
+                stream=True, **_sampling(kwargs), **tool_kwargs(kwargs),
             )
             async for chunk in stream:
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if delta:
-                    yield delta
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                text = getattr(delta, "content", None)
+                if text:
+                    yield text
+                # Tool-call deltas arrive as partial objects keyed by
+                # `index` (the id and name first, then argument fragments).
+                # Forwarded as one dict event per chunk so the proxy can
+                # re-emit them in the same OpenAI chunk shape.
+                calls = getattr(delta, "tool_calls", None)
+                if calls:
+                    yield {"tool_calls": [_stream_tool_call_delta(tc) for tc in calls]}
         except Exception as e:
             raise ProviderError(self.__class__.__name__.lower().replace("provider", ""),
                                 "api_error", str(e),
@@ -639,6 +730,9 @@ class GeminiProvider(BaseProvider):
 
 class OllamaProvider(BaseProvider):
 
+    supports_tools = True
+    supports_tool_stream = False
+
     def __init__(self, model: str = "llama3", base_url: str = "http://localhost:11434"):
         super().__init__(api_key="", model=model)
         self._base_url = base_url.rstrip("/")
@@ -661,21 +755,30 @@ class OllamaProvider(BaseProvider):
             options["top_p"] = s["top_p"]
         if "stop" in s:
             options["stop"] = _as_stop_list(s["stop"])
-        payload = {"model": model, "messages": all_messages, "stream": False,
-                   "options": options}
+        payload = {"model": model, "messages": ollama_messages(all_messages),
+                   "stream": False, "options": options}
+        tk = tool_kwargs(kwargs)
+        if tk.get("tools"):
+            # Ollama takes OpenAI-shaped declarations; it has no
+            # tool_choice, so "none"/"required" cannot be enforced here.
+            payload["tools"] = tk["tools"]
 
         async with httpx.AsyncClient(timeout=120) as client:
             try:
                 r = await client.post(f"{self._base_url}/api/chat", json=payload)
                 r.raise_for_status()
                 data = r.json()
-                text = data.get("message", {}).get("content", "")
+                message = data.get("message", {})
+                text = message.get("content", "") or ""
+                calls = ollama_tool_calls(message.get("tool_calls"))
                 return LLMResponse(
                     text=text,
                     input_tokens=data.get("prompt_eval_count", count_messages_tokens(all_messages)),
                     output_tokens=data.get("eval_count", count_tokens(text)),
                     model=model,
                     provider="ollama",
+                    finish_reason=finish_reason(data.get("done_reason"), calls),
+                    tool_calls=calls,
                 )
             except Exception as e:
                 raise ProviderError("ollama", "api_error", str(e),

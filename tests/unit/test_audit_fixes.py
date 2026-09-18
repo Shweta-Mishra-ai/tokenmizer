@@ -441,14 +441,13 @@ class TestStreamDoesNotCacheTruncatedResponses:
         app_module._cache.clear()
 
 
-class TestToolCallingFieldsAreNotSilentlyIgnored:
-    """ChatRequest uses extra="allow" so a standard OpenAI client sending
-    `tools`/`tool_choice` never gets a 422 — but no provider adapter
-    forwards them, so a caller relying on tool use got a 200 response
-    that quietly ignored what it asked for, with nothing pointing at
-    why. Can't become a hard error without breaking extra="allow" for
-    every other unrecognized field, so this only checks it stopped being
-    silent to the operator."""
+class TestToolCallingFieldsAreForwarded:
+    """`tools`/`tool_choice` used to be accepted (extra="allow") and dropped
+    on the floor with only a server-side warning; every agent framework
+    that relies on function calling silently broke through the proxy.
+    They are now forwarded to the provider (tests/unit/test_tool_calling.py
+    covers the shapes). The deprecated `functions`/`function_call` pair is
+    still not translated, and its presence must not be silent."""
 
     def _client(self, monkeypatch, tmp_path):
         import tokenmizer.api.app as app_module
@@ -460,39 +459,61 @@ class TestToolCallingFieldsAreNotSilentlyIgnored:
         monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
         monkeypatch.setattr(app_module.settings.cache, "enabled", False)
 
+        seen = {}
+
         class FakeProvider:
+            supports_tools = True
+
             async def chat(self, messages, model="", max_tokens=0, stream=False, **kw):
+                seen.update(kw)
                 return LLMResponse(text="hi", input_tokens=1, output_tokens=1,
                                    model=model, provider="fake")
 
         monkeypatch.setattr(app_module, "_get_provider", lambda: FakeProvider())
-        return app_module
+        return app_module, seen
 
-    def test_tools_field_logs_a_warning(self, monkeypatch, tmp_path, caplog):
+    def test_tools_reach_the_provider(self, monkeypatch, tmp_path, caplog):
         import logging
 
         from fastapi.testclient import TestClient
 
-        app_module = self._client(monkeypatch, tmp_path)
+        app_module, seen = self._client(monkeypatch, tmp_path)
+        tools = [{"type": "function", "function": {"name": "get_weather"}}]
 
         with caplog.at_level(logging.WARNING), TestClient(app_module.app) as c:
             r = c.post("/v1/chat/completions", json={
                 "messages": [{"role": "user", "content": "what's the weather?"}],
-                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+                "tools": tools, "tool_choice": "auto",
                 "session_id": "s-tools",
             })
+        assert r.status_code == 200, r.text
+        assert seen["tools"] == tools and seen["tool_choice"] == "auto"
+        assert not any("ignored" in rec.message.lower() for rec in caplog.records)
+
+    def test_legacy_functions_field_logs_a_warning(self, monkeypatch, tmp_path, caplog):
+        import logging
+
+        from fastapi.testclient import TestClient
+
+        app_module, seen = self._client(monkeypatch, tmp_path)
+
+        with caplog.at_level(logging.WARNING), TestClient(app_module.app) as c:
+            r = c.post("/v1/chat/completions", json={
+                "messages": [{"role": "user", "content": "what's the weather?"}],
+                "functions": [{"name": "get_weather"}],
+                "session_id": "s-legacy",
+            })
         assert r.status_code == 200, "extra='allow' must still accept the request, not 422"
-        assert any("tool" in rec.message.lower() and "ignored" in rec.message.lower()
-                  for rec in caplog.records), (
-            "a request with unsupported tool-calling fields must warn, not silently drop them"
-        )
+        assert "tools" not in seen
+        assert any("functions" in rec.message and "ignored" in rec.message.lower()
+                   for rec in caplog.records)
 
     def test_request_without_tools_does_not_warn(self, monkeypatch, tmp_path, caplog):
         import logging
 
         from fastapi.testclient import TestClient
 
-        app_module = self._client(monkeypatch, tmp_path)
+        app_module, _ = self._client(monkeypatch, tmp_path)
 
         with caplog.at_level(logging.WARNING), TestClient(app_module.app) as c:
             r = c.post("/v1/chat/completions", json={
