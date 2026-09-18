@@ -428,7 +428,7 @@ Listed here rather than left to be discovered:
 | Setting | Status |
 |---|---|
 | `routing.*` | **Deprecated, removed next release.** Never implemented. Use `model_map` (below) to send one model name to another — that is what it was reached for. A config carrying a `routing:` block still loads and logs a deprecation warning. |
-| `state_backend: redis` | Accepted and unused. `tokenmizer/state/backend.py` has no callers; all durable state is SQLite. |
+| `state_backend: redis` | Accepted, never implemented; behaves as `memory` and warns at startup. Use `state_backend: sqlite`, which shares the rate limiter across workers on one host. |
 | `functions` / `function_call` (the deprecated OpenAI shape) | Accepted and ignored, with a server-side warning. Use `tools` / `tool_choice`, which are forwarded. |
 
 The prioritised plan for these and everything else is in
@@ -456,7 +456,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1285 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1291 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it
