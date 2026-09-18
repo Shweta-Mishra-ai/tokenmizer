@@ -75,7 +75,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     padding: 1rem 1.25rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8rem; line-height: 1.7; color: var(--accent2);
     white-space: pre-wrap; word-break: break-word; min-height: 3rem; }
-  .preview { width: 100%; height: 420px; border: 1px solid var(--border);
+  .preview { width: 100%; height: 560px; border: 1px solid var(--border);
              border-radius: 10px; background: var(--bg); display: block; }
   .muted { color: var(--muted); font-size: 0.82rem; line-height: 1.6; }
   .faint { color: var(--faint); font-size: 0.78rem; }

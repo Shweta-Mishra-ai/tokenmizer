@@ -91,6 +91,40 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Changed — the graph opens as a radial map, and the colours are validated
+The default view is no longer a force-directed hairball. Each node type
+takes its own arc of a circle, the type is named on a ring drawn outside
+every label, and relations are chords bowed through the middle in
+proportion to how far apart their ends are — so neighbours keep a shallow
+curve and opposite sides pass near the centre. A type with a single node
+still gets an arc wide enough to hang its name on, and zoom-to-fit
+measures where the labels end rather than where the dots are, which is
+what used to clip every name on the bottom of the circle. Force and
+timeline remain one click away.
+
+This is also what makes the palette legal. A node-link graph is an
+all-pairs form and no ordering of eight hues clears the colour-blind
+separation floor for every pair, so colour stopped being the primary
+channel: type is read off *which arc a node sits on*, with the name of
+the arc beside it. The hues were then re-picked with
+`scripts/validate_palette.js` rather than by eye — every adjacent pair in
+the reading order clears ΔE ≥ 8 under the three dichromacies, and the
+four types that carry no meaning of their own (environment, concept, api,
+project, agent) fold into one neutral grey instead of inventing hues that
+no one can separate. Dark and light are stepped and validated
+independently against their own surface.
+
+The panel beside the picture now reports what the session knows and what
+is missing — nodes, relations, decisions, decisions changed, open issues,
+history gaps, unconnected nodes — then the communities, the hotspots
+everything hangs off, and which kinds of node point at which. Those
+numbers are derived in `visualization._analytics` and covered by tests,
+not recomputed in the page's JavaScript.
+
+Dropped into a small frame (the dashboard's preview) the page now sheds
+the panel and the node names and shows the shape alone, because
+zoom-to-fit would otherwise shrink every label to four illegible pixels.
+
 ### Changed — the graph page is an explorer, not a picture
 Community hulls, a node-type legend that filters, relation names on the
 focused node's edges, the supersession chain and first-seen /

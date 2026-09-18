@@ -16,32 +16,102 @@ if TYPE_CHECKING:
     from tokenmizer.graph_memory.graph import GraphMemory
 
 
+# ── Colour system ────────────────────────────────────────────────────────────
+#
+# VALIDATED, NOT CHOSEN BY EYE. The previous palette failed on the two node
+# types that matter most: goal (#e879f9) and decision (#a78bfa) sat 0.4
+# apart under protanopia and 10.9 apart for a full-colour reader, so a
+# large share of people could not tell the product's headline type from
+# its anchor. Re-run before changing any hex:
+#
+#   node scripts/validate_palette.js \
+#     "#3987e5,#d95926,#199e70,#c98500,#d55181,#008300,#9085e9,#e66767" \
+#     --mode dark --surface "#12141c"
+#
+# Results on record (OKLab ΔE ×100):
+#   dark, adjacent pairs  — ALL PASS, worst CVD 8.4, worst normal 19.3
+#   light, adjacent pairs — ALL PASS, worst CVD 9.1, worst normal 19.6
+#   dark, ALL pairs       — worst CVD 1.6, worst normal 7.1  (FAILS)
+#
+# A node-link graph is an all-pairs form: any two types can end up side by
+# side, and no ordering of eight hues clears the all-pairs floor. So colour
+# is NOT the primary channel here, by design — this is the composite
+# encoding the method allows:
+#
+#   1. POSITION. The default radial view gives every type its own labelled
+#      arc, so type is read off where a node sits before any colour is.
+#   2. A TEXT LABEL on every node, always, at every zoom.
+#   3. A LEGEND naming each type with its swatch and count.
+#
+# Do not remove the arc labels or the per-node labels "to reduce clutter":
+# they are what makes the palette legal.
+#
 # One entry per NodeType, enforced by tests/unit/test_visualization.py:
-# to_vis_json's meta.by_type iterates this map, so a type missing here
-# was not only drawn grey but dropped from the counts as well.
+# to_vis_json's meta.by_type iterates this map, so a type missing here is
+# not only drawn grey but dropped from the counts as well.
+#
+# Slot order below is the validated order. Types beyond the eight slots
+# share a neutral: the method folds a ninth series into "other" rather
+# than generating a hue, and these are the types a session rarely carries.
+_NEUTRAL = "#8a8f9e"
+
 _TYPE_COLOR = {
-    "goal":        "#e879f9",
-    "task":        "#4ade80",
-    "decision":    "#a78bfa",
-    "file":        "#60a5fa",
-    "error":       "#f87171",
-    "dependency":  "#fbbf24",
-    "environment": "#5ee7c8",
-    "endpoint":    "#38bdf8",
-    "schema":      "#fb923c",
-    "concept":     "#c084fc",
-    "api":         "#22d3ee",
-    "project":     "#f472b6",
-    "agent":       "#a3e635",
-    "test":        "#facc15",
+    "file":        "#3987e5",   # slot 1 blue
+    "endpoint":    "#d95926",   # slot 2 orange
+    "task":        "#199e70",   # slot 3 aqua
+    "dependency":  "#c98500",   # slot 4 yellow
+    "goal":        "#d55181",   # slot 5 magenta
+    "schema":      "#008300",   # slot 6 green
+    "decision":    "#9085e9",   # slot 7 violet
+    # Slot 8 red, and semantically right: an ERROR node carries a status,
+    # not an arbitrary series identity.
+    "error":       "#e66767",
+    "environment": _NEUTRAL,
+    "concept":     _NEUTRAL,
+    "api":         _NEUTRAL,
+    "project":     _NEUTRAL,
+    "agent":       _NEUTRAL,
+    "test":        _NEUTRAL,
 }
 
+# The same eight hues stepped for a light surface, per the method: dark is
+# a selected set, never an automatic flip. Three of them sit under 3:1 on
+# the light surface, which the relief rule covers — every node carries a
+# visible label and the legend names every type.
+_TYPE_COLOR_LIGHT = {
+    "file":        "#2a78d6",
+    "endpoint":    "#eb6834",
+    "task":        "#1baf7a",
+    "dependency":  "#eda100",
+    "goal":        "#e87ba4",
+    "schema":      "#008300",
+    "decision":    "#4a3aa7",
+    "error":       "#e34948",
+    "environment": "#6b7180",
+    "concept":     "#6b7180",
+    "api":         "#6b7180",
+    "project":     "#6b7180",
+    "agent":       "#6b7180",
+    "test":        "#6b7180",
+}
+
+# Drawn radius in the radial view, before the importance term. A goal is
+# the anchor of a session and a dependency is a name in a manifest.
 _TYPE_SIZE = {
     "goal": 22, "decision": 18, "project": 16, "task": 14,
     "error": 14, "endpoint": 12, "schema": 12, "api": 12,
     "concept": 11, "agent": 11, "test": 10,
     "file": 10, "dependency": 9, "environment": 9,
 }
+
+# The order types are laid out in, around the circle and down the lanes:
+# the order a session is read in, not alphabetical. Types absent from a
+# session are skipped, so the arcs stay adjacent.
+_TYPE_ORDER = (
+    "goal", "decision", "task", "error", "endpoint",
+    "schema", "file", "dependency", "environment",
+    "test", "concept", "api", "project", "agent",
+)
 
 _STATUS_OPACITY = {
     "completed": 1.0, "in_progress": 0.9, "pending": 0.7,
@@ -139,6 +209,86 @@ def _communities(vis_nodes: list[dict], vis_edges: list[dict]) -> list[dict]:
     return communities
 
 
+def _analytics(vis_nodes: list[dict], vis_edges: list[dict],
+               transitions: list[dict]) -> dict:
+    """The numbers the page's panel reports, derived here rather than in
+    the browser so they are testable and identical for every consumer.
+
+    Nothing here is a restatement of the node list. Each one answers a
+    question a reader of a session graph actually has:
+
+      hotspots   what does the rest of the session hang off? Ranked by
+                 how many other nodes point AT a node, because that is
+                 what makes it expensive to be wrong about.
+      flows      which kinds of thing connect to which, counted. The
+                 shape of the session in one table.
+      dangling   transitions whose endpoints are no longer in the graph
+                 (pruning can outrun history), and decisions marked
+                 superseded with no transition explaining it. Both mean
+                 `why` has a hole in it, and both were only visible by
+                 calling the reasoning endpoint and reading a list.
+    """
+    by_id = {n["id"]: n for n in vis_nodes}
+    in_degree: dict[str, int] = {n["id"]: 0 for n in vis_nodes}
+    out_degree: dict[str, int] = {n["id"]: 0 for n in vis_nodes}
+    flows: dict[tuple[str, str], int] = {}
+
+    for e in vis_edges:
+        source, target = by_id.get(e["source"]), by_id.get(e["target"])
+        if source is None or target is None:
+            continue
+        out_degree[e["source"]] += 1
+        in_degree[e["target"]] += 1
+        key = (source["type"], target["type"])
+        flows[key] = flows.get(key, 0) + 1
+
+    # Ranked by what depends on a node, then by its own weight, then by
+    # label so the order is stable for identical inputs.
+    hotspots = sorted(
+        (n for n in vis_nodes if in_degree[n["id"]]),
+        key=lambda n: (-in_degree[n["id"]], -n["importance"], n["full_label"]),
+    )[:8]
+
+    node_ids = set(by_id)
+    dangling = sum(
+        1 for t in transitions
+        if t["from_id"] not in node_ids or t["to_id"] not in node_ids
+    )
+    superseded_with_history = {t["from_id"] for t in transitions}
+    unexplained = sum(
+        1 for n in vis_nodes
+        if n["type"] == "decision" and n["status"] in ("superseded", "modified")
+        and n["id"] not in superseded_with_history
+    )
+
+    return {
+        "counts": {
+            "nodes": len(vis_nodes),
+            "relations": len(vis_edges),
+            "decisions": sum(1 for n in vis_nodes if n["type"] == "decision"),
+            "changes": len(transitions),
+            "open_issues": sum(1 for n in vis_nodes
+                               if n["type"] == "error" and n["status"] == "failed"),
+            "resolved_issues": sum(1 for n in vis_nodes
+                                   if n["type"] == "error" and n["status"] == "completed"),
+            "unlinked": sum(1 for n in vis_nodes
+                            if not in_degree[n["id"]] and not out_degree[n["id"]]),
+            "dangling_history": dangling,
+            "unexplained_supersessions": unexplained,
+        },
+        "hotspots": [
+            {"label": n["full_label"], "type": n["type"],
+             "depends_on_it": in_degree[n["id"]], "importance": n["importance"]}
+            for n in hotspots
+        ],
+        "flows": [
+            {"source": source, "target": target, "count": count}
+            for (source, target), count in sorted(
+                flows.items(), key=lambda kv: (-kv[1], kv[0]))
+        ][:8],
+    }
+
+
 def to_vis_json(graph: "GraphMemory") -> dict:
     """
     Export graph as D3-compatible JSON: {nodes, edges, transitions, meta}.
@@ -190,6 +340,12 @@ def to_vis_json(graph: "GraphMemory") -> dict:
             "color":  _EDGE_COLOR.get(e.type.value, "#4a4d5e"),
         })
 
+    # Layout order for the radial view: types in reading order, and
+    # within a type the heaviest first so an arc opens on what matters.
+    order = {t: i for i, t in enumerate(_TYPE_ORDER)}
+    vis_nodes.sort(key=lambda n: (order.get(n["type"], len(order)),
+                                  -n["importance"], n["full_label"]))
+
     communities = _communities(vis_nodes, vis_edges)
 
     vis_transitions = [
@@ -208,12 +364,15 @@ def to_vis_json(graph: "GraphMemory") -> dict:
         for t in graph._transitions
     ]
 
+    analytics = _analytics(vis_nodes, vis_edges, vis_transitions)
+
     return {
         "session_id":  graph.session_id,
         "nodes":       vis_nodes,
         "edges":       vis_edges,
         "transitions": vis_transitions,
         "meta": {
+            **analytics,
             "node_count":       len(vis_nodes),
             "edge_count":       len(vis_edges),
             "transition_count": len(vis_transitions),
@@ -223,6 +382,8 @@ def to_vis_json(graph: "GraphMemory") -> dict:
                 if any(n["type"] == t for n in vis_nodes)
             },
             "communities":        communities,
+            "type_order":         [t for t in _TYPE_ORDER
+                                   if any(n["type"] == t for n in vis_nodes)],
             # Why the graph may be empty — the page's only data path.
             "processed_messages": len(graph._processed_hashes),
             "load_failed":        graph._load_failed,
@@ -330,97 +491,123 @@ _SHARE_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en" data-theme="dark"><head><meta charset="utf-8">
 <title>TokenMizer — __SESSION__</title>
 <style>
- :root{--bg:#0f1117;--surface:#1a1d27;--surface2:#151822;--border:#2a2d3e;--accent:#7c6af7;
-       --accent2:#5ee7c8;--text:#e8eaf6;--muted:#8b8fa8;--faint:#5b6078;--red:#f87171;
-       --shadow:0 8px 28px #0009;--side:350px;--stroke:#0f1117}
- html[data-theme="light"]{--bg:#f7f8fc;--surface:#ffffff;--surface2:#f0f2f8;--border:#dfe3ef;
-       --text:#1a1d27;--muted:#646a85;--faint:#9aa0b8;--shadow:0 8px 28px #1a1d2718;--stroke:#ffffff}
+ :root{--bg:#0b0d14;--surface:#12141c;--surface2:#171a24;--border:#242838;--line:#1c2030;
+       --accent:#9085e9;--accent2:#5ee7c8;--text:#e9ecf5;--muted:#868da3;--faint:#5b6176;
+       --good:#199e70;--bad:#e66767;--stroke:#0b0d14;--side:380px;
+       --shadow:0 10px 34px #0009}
+ html[data-theme="light"]{--bg:#f7f8fc;--surface:#ffffff;--surface2:#f1f3f9;--border:#dde1ed;
+       --line:#e6e9f2;--accent:#4a3aa7;--accent2:#1baf7a;--text:#12141c;--muted:#5d6478;
+       --faint:#8c93a8;--stroke:#ffffff;--shadow:0 10px 34px #12141c18}
  *{box-sizing:border-box}
  body{margin:0;background:var(--bg);color:var(--text);overflow:hidden;
       font:14px/1.45 'Inter',system-ui,-apple-system,sans-serif;
-      transition:background .2s,color .2s}
- #hdr{position:fixed;top:0;left:0;right:var(--side);padding:12px 20px;display:flex;gap:10px;
+      transition:background .18s,color .18s}
+ #hdr{position:fixed;top:0;left:0;right:var(--side);padding:14px 22px;display:flex;gap:9px;
       align-items:center;flex-wrap:wrap;z-index:3;pointer-events:none}
  #hdr>*{pointer-events:auto}
- #hdr b{font-size:17px;font-weight:650;margin-right:2px;letter-spacing:-.01em}
+ #hdr b{font-size:17px;font-weight:650;letter-spacing:-.015em;margin-right:4px}
  .stat{color:var(--muted);font-size:12px;white-space:nowrap}
  .stat i{color:var(--accent2);font-style:normal;font-weight:650}
  #search{background:var(--surface);border:1px solid var(--border);color:var(--text);
-      border-radius:8px;padding:6px 10px;font:inherit;font-size:12px;width:170px;outline:none;margin-left:auto}
+      border-radius:9px;padding:6px 11px;font:inherit;font-size:12px;width:165px;
+      outline:none;margin-left:auto}
  #search:focus{border-color:var(--accent)}
- .btn{background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:8px;
-      padding:6px 11px;font-size:12px;cursor:pointer;user-select:none;white-space:nowrap;
-      transition:border-color .15s,color .15s}
+ .btn{background:var(--surface);border:1px solid var(--border);color:var(--text);
+      border-radius:9px;padding:6px 11px;font-size:12px;cursor:pointer;user-select:none;
+      white-space:nowrap;transition:border-color .15s,color .15s,background .15s}
  .btn:hover{border-color:var(--accent)}
  .btn.on{border-color:var(--accent2);color:var(--accent2)}
- .seg{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface)}
- .seg .btn{border:0;border-radius:0;padding:6px 12px}
+ .seg{display:flex;border:1px solid var(--border);border-radius:9px;overflow:hidden;
+      background:var(--surface)}
+ .seg .btn{border:0;border-radius:0;padding:6px 13px}
  .seg .btn.on{background:var(--accent);color:#fff}
+
+ html.nopanel{--side:0px} html.nopanel #side{display:none}
  #side{position:fixed;top:0;right:0;bottom:0;width:var(--side);background:var(--surface);
-      border-left:1px solid var(--border);z-index:4;overflow-y:auto;padding:14px 18px 28px}
- #side h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
-      margin:20px 0 8px;display:flex;justify-content:space-between;align-items:center}
- #side h2:first-child{margin-top:2px}
- #side h2 span{text-transform:none;letter-spacing:0;font-size:11px;color:var(--faint)}
- .row{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;cursor:pointer;
-      font-size:13px;user-select:none}
+      border-left:1px solid var(--border);z-index:4;overflow-y:auto;padding:22px 22px 30px}
+ #side h1{font-size:19px;font-weight:650;letter-spacing:-.015em;margin:0 0 4px}
+ #side .sub{color:var(--muted);font-size:12.5px;margin-bottom:20px;line-height:1.5}
+ #side h2{font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);
+      margin:22px 0 9px;display:flex;justify-content:space-between;align-items:baseline}
+ #side h2 em{font-style:normal;text-transform:none;letter-spacing:0;color:var(--faint)}
+ .kpi{display:flex;justify-content:space-between;align-items:baseline;
+      padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}
+ .kpi:last-child{border-bottom:none}
+ .kpi span{color:var(--muted)}
+ .kpi b{font-weight:650;font-variant-numeric:tabular-nums;font-size:15px}
+ .kpi b.good{color:var(--good)}.kpi b.bad{color:var(--bad)}
+ .row{display:flex;align-items:center;gap:9px;padding:5px 5px;border-radius:7px;
+      cursor:pointer;font-size:13px;user-select:none}
  .row:hover{background:var(--surface2)}
- .row .dot{width:10px;height:10px;border-radius:50%;flex:none}
- .row .sq{width:10px;height:10px;border-radius:3px;flex:none;border:2px solid}
+ .row .dot{width:9px;height:9px;border-radius:50%;flex:none}
  .row .name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
  .row .n{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
- .row.off .name,.row.off .dot,.row.off .sq,.row.off .n{opacity:.32}
+ .row.off .name,.row.off .dot,.row.off .n{opacity:.3}
  .row input{accent-color:var(--accent);margin:0;flex:none}
+ .hot{display:flex;justify-content:space-between;gap:10px;align-items:baseline;
+      padding:6px 0;border-bottom:1px solid var(--line);font-size:12.5px;cursor:pointer}
+ .hot:last-child{border-bottom:none}
+ .hot:hover .hl{color:var(--accent2)}
+ .hot .hl{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .hot .hn{color:var(--muted);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+ .flow{display:grid;grid-template-columns:auto 1fr 2.4em;gap:9px;align-items:center;
+       padding:4px 0;font-size:12.5px}
+ .flow .fl{color:var(--muted);white-space:nowrap}
+ .flow .ft{height:8px;border-radius:0 4px 4px 0;min-width:2px}
+ .flow .fn{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums;font-size:12px}
  #detail{display:none}
  #detail .lbl{font-size:14px;font-weight:600;margin-bottom:8px;word-break:break-word;line-height:1.35}
- .pill{display:inline-block;font-size:11px;padding:1px 8px;border-radius:10px;border:1px solid;margin:0 6px 6px 0}
+ .pill{display:inline-block;font-size:11px;padding:1px 9px;border-radius:10px;
+       border:1px solid;margin:0 6px 6px 0}
  .kv{color:var(--muted);font-size:12px;margin:3px 0}.kv b{color:var(--text);font-weight:500}
- .bar{height:4px;border-radius:2px;background:var(--border);margin:2px 0 7px;overflow:hidden}
- .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+ .bar{height:4px;border-radius:2px;background:var(--line);margin:2px 0 8px;overflow:hidden}
+ .bar i{display:block;height:100%;border-radius:2px}
  .neighbors{list-style:none;margin:6px 0 0;padding:0}
- .neighbors li{padding:4px 6px;border-radius:6px;cursor:pointer;font-size:12px;display:flex;gap:7px;align-items:center}
+ .neighbors li{padding:4px 5px;border-radius:6px;cursor:pointer;font-size:12px;
+      display:flex;gap:7px;align-items:center}
  .neighbors li:hover{background:var(--surface2)}
  .neighbors li .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
- .neighbors li .rel{color:var(--faint);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;flex:none}
- .chain{border-left:2px solid var(--red);margin:8px 0 0 4px;padding:2px 0 2px 10px}
+ .neighbors li .rel{color:var(--faint);font-size:10px;text-transform:uppercase;
+      letter-spacing:.05em;flex:none}
+ .chain{border-left:2px solid var(--bad);margin:8px 0 0 3px;padding:2px 0 2px 10px}
  .chain .hop{font-size:12px;margin-bottom:7px}
  .chain .hop .old{color:var(--muted);text-decoration:line-through}
  .chain .hop .new{font-weight:600}
  .chain .hop .why{color:var(--muted);font-size:11.5px;margin-top:2px}
- .tr-item{border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;
+ .tr-item{border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-bottom:9px;
       cursor:pointer;transition:border-color .15s}
- .tr-item:hover,.tr-item.sel{border-color:var(--red)}
+ .tr-item:hover,.tr-item.sel{border-color:var(--bad)}
  .tr-item .old{color:var(--muted);text-decoration:line-through;font-size:12px}
- .tr-item .arrow{color:var(--red);margin:0 4px}
+ .tr-item .arrow{color:var(--bad);margin:0 4px}
  .tr-item .new{font-size:13px;font-weight:600}
  .tr-item .why{color:var(--muted);font-size:12px;margin-top:5px}
  .tr-item .meta{color:var(--faint);font-size:11px;margin-top:4px}
- .empty{color:var(--muted);font-size:13px;border:1px dashed var(--border);border-radius:8px;
-      padding:16px;text-align:center;line-height:1.5}
+ .empty{color:var(--muted);font-size:12.5px;border:1px dashed var(--border);border-radius:9px;
+      padding:15px;text-align:center;line-height:1.5}
  #emptyCard{position:fixed;top:50%;left:calc((100vw - var(--side)) / 2);transform:translate(-50%,-50%);
-      width:min(560px,80vw);background:var(--surface);border:1px solid var(--border);border-radius:14px;
-      padding:24px 26px;z-index:3;display:none;box-shadow:var(--shadow)}
+      width:min(560px,80vw);background:var(--surface);border:1px solid var(--border);
+      border-radius:14px;padding:24px 26px;z-index:3;display:none;box-shadow:var(--shadow)}
  #emptyCard h3{margin:0 0 10px;font-size:17px}
  #emptyCard p{color:var(--muted);font-size:13px;margin:9px 0;line-height:1.6}
  #emptyCard code{background:var(--surface2);padding:1px 6px;border-radius:4px;font-size:12px;color:var(--text)}
  #tip{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--border);
-      border-radius:9px;padding:9px 12px;font-size:12px;max-width:320px;z-index:9;display:none;
+      border-radius:10px;padding:10px 12px;font-size:12px;max-width:330px;z-index:9;display:none;
       box-shadow:var(--shadow);line-height:1.45}
  #tip b{color:var(--text)}#tip .st{color:var(--accent2)}
- #ftr{position:fixed;bottom:12px;left:20px;color:var(--faint);font-size:12px;z-index:3}
+ #ftr{position:fixed;bottom:14px;left:22px;color:var(--faint);font-size:12px;z-index:3}
  #ftr a{color:var(--accent);text-decoration:none}
  svg{cursor:grab;display:block}svg:active{cursor:grabbing}
- .lane{fill:var(--faint);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase}
+ .lane{fill:var(--faint);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase}
  .axis{stroke:var(--border);stroke-width:1}
  .axtx{fill:var(--faint);font-size:10.5px}
 </style></head><body>
 <div id="hdr"><b>__SESSION__</b>
  <span class="stat"><i>__NODES__</i> nodes</span>
- <span class="stat"><i>__EDGES__</i> edges</span>
+ <span class="stat"><i>__EDGES__</i> relations</span>
  <span class="stat"><i>__DECISIONS__</i> decisions</span>
  <span class="stat"><i>__TRANSITIONS__</i> changed</span>
  <input id="search" type="search" placeholder="Search nodes"/>
- <span class="seg"><span class="btn on" id="viewGraph">Graph</span><span class="btn" id="viewTime">Timeline</span></span>
+ <span class="seg"><span class="btn on" id="viewRadial">Radial</span><span class="btn" id="viewGraph">Force</span><span class="btn" id="viewTime">Timeline</span></span>
  <span class="btn" id="activeOnly">Active only</span>
  <span class="btn" id="fit">Fit</span>
  <span class="btn" id="theme">Light</span>
@@ -428,41 +615,66 @@ _SHARE_HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 <div id="emptyCard"><h3>No nodes yet</h3><div id="emptyBody"></div></div>
 <div id="side">
- <h2>Node types <span id="typeTotal"></span></h2>
+ <h1>Session memory</h1>
+ <div class="sub">Extracted from the transcript on every turn &mdash; not hand-drawn.</div>
+ <div id="kpis"></div>
+ <h2>Node types <em id="typeTotal"></em></h2>
  <div id="typeList"></div>
- <h2>Communities <span id="comTotal"></span></h2>
+ <h2>Communities <em id="comTotal"></em></h2>
  <label class="row" id="selectAllRow"><input type="checkbox" id="selectAll" checked/>
   <span class="name">Select all</span></label>
  <div id="comList"></div>
+ <h2>Hotspots <em>what the session hangs off</em></h2>
+ <div id="hotList"></div>
+ <h2>Relations <em>what connects to what</em></h2>
+ <div id="flowList"></div>
  <div id="detail"><h2>Node</h2><div id="detailBody"></div></div>
  <h2>Decision history</h2>
  <div id="trList"></div>
- <h2>Legend</h2>
+ <h2>Reading the picture</h2>
  <div id="statusLegend"></div>
 </div>
 <div id="ftr">session memory graph &middot; <a href="https://github.com/Shweta-Mishra-ai/tokenmizer">TokenMizer</a> &middot; pip install tokenmizer</div>
 <div id="tip"></div>
 <script>
 "use strict";
-const DATA=__DATA__, COLOR=__COLORS__;
+const DATA=__DATA__, COLOR_DARK=__COLORS__, COLOR_LIGHT=__COLORS_LIGHT__;
 const META=DATA.meta||{};
+let COLOR=COLOR_DARK;
 const INACTIVE=new Set(["superseded","archived","invalidated","modified"]);
-const SIDE=350;
-let W=Math.max(640,(innerWidth||1280)-SIDE), H=Math.max(480,innerHeight||800);
+// Embedded small — the dashboard drops this page into an iframe — the panel
+// would take more room than the picture it explains, so a narrow page is
+// the graph alone. A preview frame gets less benefit of the doubt than a
+// real window, because it is a picture first and a reading surface second.
+const EMBEDDED=(()=>{try{return window.top!==window.self}catch(e){return true}})();
+// A small frame cannot carry node names: zoom-to-fit would shrink them to a
+// few illegible pixels. It shows the shape of the session instead — arcs,
+// chords and type names — and the full page carries the reading.
+function previewSize(){return EMBEDDED&&((innerWidth||1280)<1280||(innerHeight||800)<700)}
+let PREVIEW=previewSize();
+function sideW(){return PREVIEW||(innerWidth||1280)<900?0:380}
+let SIDE=sideW();
+function applySide(){document.documentElement.classList.toggle("nopanel",!SIDE)}
+applySide();
+let W=Math.max(360,(innerWidth||1280)-SIDE), H=Math.max(300,innerHeight||800);
 const NS="http://www.w3.org/2000/svg";
 function el(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 function $(id){return document.getElementById(id)}
 function when(ts){return ts?new Date(ts*1000).toLocaleString():""}
+function colorOf(t){return COLOR[t]||"#8a8f9e"}
 
 const svg=el("svg",{width:W,height:H,"font-family":"Inter,system-ui,sans-serif"},document.body);
-addEventListener("resize",()=>{W=Math.max(640,innerWidth-SIDE);H=Math.max(480,innerHeight);
-  svg.setAttribute("width",W);svg.setAttribute("height",H)});
+addEventListener("resize",()=>{PREVIEW=previewSize();SIDE=sideW();applySide();W=Math.max(360,innerWidth-SIDE);H=Math.max(300,innerHeight);
+  svg.setAttribute("width",W);svg.setAttribute("height",H);
+  // A layout computed for one canvas is not framed for another, and a
+  // resize is the one moment the reader is looking at the whole picture.
+  // A filter toggle deliberately does not refit: it would move everything
+  // the reader was comparing.
+  relayout();fit()});
 const defs=el("defs",{},svg);
-for(const [id,col] of [["arr","#f87171"],["arrDim","#8b8fa8"]]){
-  const mk=el("marker",{id:id,viewBox:"0 -5 10 10",refX:18,refY:0,markerWidth:7,markerHeight:7,orient:"auto"},defs);
-  el("path",{d:"M0,-5L10,0L0,5",fill:col},mk);
-}
+const mk=el("marker",{id:"arr",viewBox:"0 -5 10 10",refX:16,refY:0,markerWidth:6,markerHeight:6,orient:"auto"},defs);
+el("path",{d:"M0,-5L10,0L0,5",fill:"#e66767"},mk);
 const vp=el("g",{},svg);
 const gH=el("g",{},vp), gAx=el("g",{},vp), gE=el("g",{},vp),
       gT=el("g",{},vp), gL=el("g",{},vp), gN=el("g",{},vp);
@@ -471,8 +683,8 @@ const gH=el("g",{},vp), gAx=el("g",{},vp), gE=el("g",{},vp),
 const nodes=DATA.nodes, edges=DATA.edges, trans=DATA.transitions||[];
 const byId={}; nodes.forEach(n=>byId[n.id]=n);
 const COMS={}; (META.communities||[]).forEach(c=>COMS[c.id]=c);
-function comOf(n){return COMS[n.community]||{id:-1,name:"Unclustered",color:"#8b8fa8"}}
-const links=edges.map(e=>({s:byId[e.source],t:byId[e.target],color:e.color,type:e.type}))
+function comOf(n){return COMS[n.community]||{id:-1,name:"Unclustered",color:"#8a8f9e"}}
+const links=edges.map(e=>({s:byId[e.source],t:byId[e.target],type:e.type}))
                  .filter(l=>l.s&&l.t);
 const tlinks=trans.map(t=>({s:byId[t.from_id],t:byId[t.to_id],tr:t}))
                   .filter(l=>l.s&&l.t);
@@ -481,12 +693,8 @@ links.forEach(l=>{nbrs[l.s.id].push({n:l.t,rel:l.type,dir:"out"});
                   nbrs[l.t.id].push({n:l.s,rel:l.type,dir:"in"})});
 const trByNode={}; trans.forEach(t=>{(trByNode[t.from_id]=trByNode[t.from_id]||[]).push(t);
                                      (trByNode[t.to_id]=trByNode[t.to_id]||[]).push(t)});
-
-// Lane order for timeline mode: the order a person reads a session in.
-const LANES=["goal","decision","task","error","endpoint","schema","file","dependency",
-             "environment","test","concept","api","project","agent"];
-const typesPresent=LANES.filter(t=>nodes.some(n=>n.type===t))
-      .concat([...new Set(nodes.map(n=>n.type))].filter(t=>!LANES.includes(t)));
+// Server-side order: types in reading order, heaviest first inside a type.
+const typesPresent=(META.type_order||[]).filter(t=>nodes.some(n=>n.type===t));
 
 let seed=1;
 function rand(){seed=(seed*1103515245+12345)%2147483648;return seed/2147483648}
@@ -498,13 +706,115 @@ nodes.forEach(n=>{
   n.y=H/2+Math.sin(a)*r+(rand()-0.5)*140;
   n.vx=0;n.vy=0;n.fx=null;n.fy=null;
   n._lw=Math.min(n.label.length,34)*6.2+(n.size||10)+10;
+  // Drawn radius: type weight, nudged by the node's own importance, so a
+  // pivotal decision reads larger than a passing one of the same type.
+  n._r=Math.max(3.2,(n.size||10)*0.42+(n.importance||0.5)*4.5);
 });
 
+// ---- radial layout ---------------------------------------------------------
+// The default view, and the reason the colour palette is legal: a node's
+// type is read off WHICH ARC it sits on, with the type named beside the
+// arc, before colour is consulted at all. See the palette note in
+// visualization.py before changing any of this.
+const GROUP_GAP=0.055;           // radians of blank between two type arcs
+// A type with one node would otherwise get a zero-length arc and nowhere
+// to hang its name, which is the label the whole encoding rests on.
+const MIN_ARC=0.10;
+// How far a node's label reaches outward from its dot. Both the type ring
+// and the zoom-to-fit depend on this, so there is one estimate, not two.
+function labelExtent(n){return PREVIEW?n._r+6:n._r+14+Math.min(n.label.length,26)*5.9}
+function layoutRadial(){
+  const vis=nodes.filter(visible);
+  gAx.innerHTML="";
+  if(!vis.length)return;
+  const groups=typesPresent.map(t=>({type:t,items:vis.filter(n=>n.type===t)}))
+                           .filter(g=>g.items.length);
+  if(!groups.length)return;
+  const cx=W/2, cy=H/2+8;
+  // Zoom-to-fit rescales everything afterwards, so what R decides is not the
+  // size of the circle but how much of it the labels eat: keep the dot ring
+  // comfortably wider than the longest label so the type ring hugs the text.
+  const maxExt=vis.reduce((m,n)=>Math.max(m,labelExtent(n)),0);
+  const R=Math.max(220,maxExt*2.6,Math.min(W,H)*0.30);
+  const total=vis.length;
+  // Share the circle by node count, then lift every group to MIN_ARC and
+  // take the difference back off the groups big enough to spare it.
+  const free=2*Math.PI-GROUP_GAP*groups.length;
+  const raw=groups.map(g=>free*(g.items.length/total));
+  const lifted=raw.map(a=>Math.max(a,MIN_ARC));
+  const over=lifted.reduce((s,a)=>s+a,0)-free;
+  if(over>0){
+    const slack=lifted.reduce((s,a)=>s+Math.max(0,a-MIN_ARC),0);
+    if(slack>0)for(let i=0;i<lifted.length;i++)
+      lifted[i]-=Math.max(0,lifted[i]-MIN_ARC)/slack*over;
+  }
+  let angle=-Math.PI/2+GROUP_GAP/2;   // start at 12 o'clock
+  const bands=[];
+  groups.forEach((g,gi)=>{
+    const arc=lifted[gi];
+    // One item would sit on the arc's leading edge; centre it instead.
+    const step=g.items.length>1?arc/(g.items.length-1):0;
+    const start=g.items.length>1?angle:angle+arc/2;
+    g.items.forEach((n,i)=>{
+      const a=start+i*step;
+      n._a=a; n.fx=cx+Math.cos(a)*R; n.fy=cy+Math.sin(a)*R;
+      n.x=n.fx; n.y=n.fy;
+    });
+    bands.push({type:g.type,a0:angle-GROUP_GAP*0.30,a1:angle+arc+GROUP_GAP*0.30});
+    angle+=arc+GROUP_GAP;
+  });
+  // The ring of type names sits OUTSIDE every node label, so the picture
+  // reads dot, then the thing's own name, then the name of its layer. Put
+  // the ring any closer and the two kinds of text collide.
+  const ar=R+maxExt+20;
+  bands.forEach((b,gi)=>{
+    // Text on a path follows the path's direction, so an arc on the bottom
+    // half is drawn backwards or its name comes out upside down.
+    const down=Math.sin((b.a0+b.a1)/2)>0, span=Math.abs(b.a1-b.a0);
+    const p0=down?b.a1:b.a0, p1=down?b.a0:b.a1;
+    const id="arc"+gi;
+    el("path",{id:id,d:"M"+(cx+Math.cos(p0)*ar)+","+(cy+Math.sin(p0)*ar)+
+        " A"+ar+","+ar+" 0 "+(span>Math.PI?1:0)+" "+(down?0:1)+" "+
+        (cx+Math.cos(p1)*ar)+","+(cy+Math.sin(p1)*ar),
+      fill:"none",stroke:colorOf(b.type),"stroke-opacity":.5,"stroke-width":2.5,
+      "stroke-linecap":"round"},gAx);
+    // A name wider than its own arc would run over the neighbouring type,
+    // so a short arc keeps the colour band and leaves the name to the legend.
+    if(ar*span<b.type.length*7.6+14)return;
+    const t=el("text",{class:"lane",fill:colorOf(b.type),dy:down?15:-8},gAx);
+    const tp=document.createElementNS(NS,"textPath");
+    tp.setAttribute("href","#"+id);
+    tp.setAttributeNS("http://www.w3.org/1999/xlink","xlink:href","#"+id);
+    tp.setAttribute("startOffset","50%");
+    tp.setAttribute("text-anchor","middle");
+    tp.textContent=b.type;
+    t.appendChild(tp);
+  });
+  radialCentre={cx:cx,cy:cy,R:R,band:ar};
+}
+let radialCentre={cx:0,cy:0,R:1,band:0};
+
+// A chord between two points on the circle, bowed toward the centre by how
+// far apart they are: neighbours on the same arc keep a shallow curve,
+// opposite sides pass near the middle. This is what turns a hairball into
+// a readable pattern.
+function chord(a,b){
+  if(mode!=="radial"||a._a===undefined||b._a===undefined)
+    return "M"+a.x+","+a.y+" L"+b.x+","+b.y;
+  const {cx,cy,R}=radialCentre;
+  let d=Math.abs(a._a-b._a); if(d>Math.PI)d=2*Math.PI-d;
+  const pull=0.08+0.62*(1-d/Math.PI);
+  let m=(a._a+b._a)/2;
+  if(Math.abs(a._a-b._a)>Math.PI)m+=Math.PI;
+  const kr=R*pull;
+  return "M"+a.x+","+a.y+" Q"+(cx+Math.cos(m)*kr)+","+(cy+Math.sin(m)*kr)+" "+b.x+","+b.y;
+}
+
 // ---- force simulation ------------------------------------------------------
-let alpha=1, mode="graph";
+let alpha=1, mode="radial";
 const centroids={};
 function step(){
-  if(mode==="timeline")return;
+  if(mode!=="graph")return;
   for(const k in centroids)delete centroids[k];
   nodes.forEach(n=>{const c=centroids[n.community]||(centroids[n.community]={x:0,y:0,k:0});
                     c.x+=n.x;c.y+=n.y;c.k++});
@@ -541,39 +851,31 @@ function tick(){step();render();if(mode==="graph"&&alpha>0.003)requestAnimationF
 function reheat(a){if(mode!=="graph")return;alpha=Math.max(alpha,a);requestAnimationFrame(tick)}
 
 // ---- timeline layout -------------------------------------------------------
-// A session read as a story: time on x, node type in its own lane on y.
-// Nothing else shows WHEN a decision was taken relative to the error that
-// caused it, which is the question the graph exists to answer.
 function layoutTimeline(){
   const vis=nodes.filter(visible);
+  gAx.innerHTML="";
+  if(!vis.length)return;
   const times=vis.map(n=>n.created_at||n.valid_from||0).filter(t=>t>0);
   let t0=times.length?Math.min.apply(null,times):0;
   let t1=times.length?Math.max.apply(null,times):0;
   // A whole transcript checkpointed in one call gives every node the same
-  // created_at, and a time axis over a span of zero is a lie drawn to
-  // four decimal places. The order nodes entered the graph IS the order
-  // the transcript stated them, so fall back to that and say so on the
-  // axis rather than inventing dates. The bar is a minute, not a second:
-  // below that every tick renders the same clock time and the axis looks
-  // broken rather than degenerate.
+  // created_at, and a time axis over a span of zero is a lie drawn to four
+  // decimal places. The order nodes entered the graph IS the order the
+  // transcript stated them, so fall back to that and say so. The bar is a
+  // minute: below that every tick renders the same clock time.
   const byTime=(t1-t0)>=60;
   if(!byTime){t0=0;t1=Math.max(1,vis.length-1)}
   const ordinal={}; nodes.forEach((n,i)=>ordinal[n.id]=i);
   const posOf=n=>byTime?(n.created_at||n.valid_from||t0):ordinal[n.id];
   const lanes=typesPresent.filter(t=>vis.some(n=>n.type===t));
-  // Lanes need to be tall enough for the rows the spreading below adds,
-  // which is driven by how many nodes crowd the busiest lane.
   const busiest=Math.max.apply(null,
     lanes.map(t=>vis.filter(n=>n.type===t).length).concat([1]));
   const laneH=Math.max(64,Math.min(150,(H-170)/Math.max(lanes.length,1),
                                    28+Math.min(busiest,6)*17));
-  // Room on the right for a label to run without sliding under the panel.
   const x0=150, x1=Math.max(x0+320,W-230);
-  // Nodes from one turn share a position, and a label is ~34 characters
-  // wide, so placing them on one row stacks the text into an unreadable
-  // smear. Each lane keeps a set of rows; a node takes the first row
-  // whose last label ended before this one starts.
-  const LABEL_W=210, ROW_H=17;
+  // Lanes start below the axis caption and its tick labels; any higher and
+  // the first lane's dots sit on top of the "earliest" tick.
+  const LABEL_W=210, ROW_H=17, LANE_Y0=130;
   const rows={};
   vis.slice().sort((a,b)=>posOf(a)-posOf(b)).forEach(n=>{
     const li=lanes.indexOf(n.type);
@@ -583,20 +885,20 @@ function layoutTimeline(){
     let row=lane.findIndex(lastRight=>x>=lastRight);
     if(row===-1){row=lane.length;lane.push(0)}
     lane[row]=x+LABEL_W;
-    n.fx=x; n.fy=100+li*laneH+row*ROW_H-(laneH/2-14);
+    n._a=undefined;
+    n.fx=x; n.fy=LANE_Y0+li*laneH+row*ROW_H-(laneH/2-14);
     n.x=n.fx;n.y=n.fy;
   });
-  gAx.innerHTML="";
   lanes.forEach((t,i)=>{
-    const y=100+i*laneH;
+    const y=LANE_Y0+i*laneH;
     el("line",{x1:x0-38,y1:y,x2:x1+40,y2:y,class:"axis","stroke-opacity":.45},gAx);
-    const lab=el("text",{x:x0-46,y:y+4,"text-anchor":"end",class:"lane",fill:COLOR[t]||"#8b8fa8"},gAx);
+    const lab=el("text",{x:x0-46,y:y+4,"text-anchor":"end",class:"lane",fill:colorOf(t)},gAx);
     lab.textContent=t;
   });
   if(t1>t0){
     for(let i=0;i<=4;i++){
       const x=x0+(x1-x0)*i/4, v=t0+(t1-t0)*i/4;
-      el("line",{x1:x,y1:72,x2:x,y2:100+lanes.length*laneH-laneH+40,class:"axis","stroke-opacity":.18},gAx);
+      el("line",{x1:x,y1:72,x2:x,y2:LANE_Y0+lanes.length*laneH-laneH+40,class:"axis","stroke-opacity":.16},gAx);
       const tx=el("text",{x:x,y:64,"text-anchor":"middle",class:"axtx"},gAx);
       tx.textContent=byTime
         ? new Date(v*1000).toLocaleString(undefined,
@@ -608,22 +910,35 @@ function layoutTimeline(){
                           :"the order the session stated each fact (all checkpointed together)";
   }
 }
+
+function relayout(){
+  if(mode==="radial")layoutRadial();
+  else if(mode==="timeline")layoutTimeline();
+  render();
+}
 function setMode(m){
   mode=m;
+  $("viewRadial").classList.toggle("on",m==="radial");
   $("viewGraph").classList.toggle("on",m==="graph");
   $("viewTime").classList.toggle("on",m==="timeline");
   gH.style.display=m==="graph"?"":"none";
-  if(m==="timeline"){layoutTimeline();render();fit()}
-  else{gAx.innerHTML="";nodes.forEach(n=>{n.fx=null;n.fy=null});alpha=0.55;requestAnimationFrame(tick);
-       setTimeout(fit,260)}
+  if(m==="graph"){
+    gAx.innerHTML="";
+    nodes.forEach(n=>{n.fx=null;n.fy=null;n._a=undefined});
+    alpha=0.6;requestAnimationFrame(tick);setTimeout(fit,260);
+  }else{relayout();fit()}
 }
 
 // ---- render ----------------------------------------------------------------
-const eEls=links.map(l=>el("line",{stroke:l.color||"#2a2d3e","stroke-opacity":0.32,"stroke-width":1.2},gE));
-const eLabels=links.map(()=>{const t=el("text",{class:"axtx","text-anchor":"middle"},gL);t.style.display="none";return t});
+// Edges are paths, not lines: in radial mode they are chords bowed through
+// the centre, and a path degrades to a straight segment everywhere else.
+const eEls=links.map(l=>el("path",{fill:"none",stroke:colorOf(l.s.type),
+  "stroke-opacity":0.34,"stroke-width":1.25,"stroke-linecap":"round"},gE));
+const eLabels=links.map(()=>{const t=el("text",{class:"axtx","text-anchor":"middle"},gL);
+  t.style.display="none";return t});
 const tEls=tlinks.map(l=>{
-  const p=el("path",{fill:"none",stroke:"#f87171","stroke-width":1.6,
-    "stroke-dasharray":"6 4","stroke-opacity":0.85,"marker-end":"url(#arr)"},gT);
+  const p=el("path",{fill:"none",stroke:"#e66767","stroke-width":1.7,
+    "stroke-dasharray":"6 4","stroke-opacity":0.9,"marker-end":"url(#arr)"},gT);
   p.dataset.trid=l.tr.id; return p;
 });
 const hullEls={};
@@ -632,42 +947,40 @@ comIds.forEach(id=>{hullEls[id]=el("path",{fill:COMS[id].color,"fill-opacity":0.
 
 const nEls=nodes.map(n=>{
   const g=el("g",{cursor:"pointer"},gN);
-  const r=n.size||10, inactive=INACTIVE.has(n.status), com=comOf(n);
-  if(n.type==="decision"&&!inactive)
-    el("circle",{r:r+6,fill:com.color,"fill-opacity":0.18},g);
-  el("circle",{r:r,fill:com.color,"fill-opacity":inactive?0.22:(n.opacity??0.95)},g);
-  el("circle",{r:r+1.5,fill:"none",stroke:COLOR[n.type]||"#8b8fa8","stroke-width":1.5,
-    "stroke-opacity":inactive?0.4:0.9},g);
+  const inactive=INACTIVE.has(n.status);
+  const halo=el("circle",{r:n._r+5,"fill-opacity":0.16},g);
+  const disc=el("circle",{r:n._r,"fill-opacity":inactive?0.3:1},g);
+  const ring=el("circle",{r:n._r+2.4,fill:"none","stroke-width":1.4},g);
   if(inactive)
-    el("circle",{r:r+4,fill:"none",stroke:"#8b8fa8","stroke-dasharray":"3 3","stroke-opacity":0.55,"stroke-width":1},g);
+    el("circle",{r:n._r+5.5,fill:"none",stroke:"#8a8f9e","stroke-dasharray":"2.5 2.5",
+      "stroke-opacity":0.6,"stroke-width":1},g);
   if(n.status==="invalidated")
-    el("circle",{r:r+4,fill:"none",stroke:"#f87171","stroke-dasharray":"2 2","stroke-width":1.4},g);
-  if(n.status==="failed")
-    el("circle",{r:r+4,fill:"none",stroke:"#f87171","stroke-opacity":.7,"stroke-width":1.2},g);
+    el("circle",{r:n._r+5.5,fill:"none",stroke:"#e66767","stroke-dasharray":"2 2","stroke-width":1.3},g);
   if(n.status==="contested")
-    el("circle",{r:r+4,fill:"none",stroke:"#fb923c","stroke-dasharray":"1 3","stroke-width":1.6},g);
-  const lbl=el("text",{dx:r+6,dy:4,"font-size":11,"paint-order":"stroke",
-    "stroke-width":3.5,"stroke-linejoin":"round"},g);
-  lbl.textContent=n.label.length>34?n.label.slice(0,32)+"…":n.label;
+    el("circle",{r:n._r+5.5,fill:"none",stroke:"#c98500","stroke-dasharray":"1 3","stroke-width":1.5},g);
+  const lbl=el("text",{"font-size":10.5,"paint-order":"stroke",
+    "stroke-width":3.2,"stroke-linejoin":"round","dominant-baseline":"middle"},g);
+  lbl.textContent=n.label.length>26?n.label.slice(0,25)+"…":n.label;
+  if(PREVIEW)lbl.setAttribute("display","none");
   if(inactive)lbl.setAttribute("text-decoration","line-through");
-  n._lbl=lbl;
+  n._halo=halo;n._disc=disc;n._ring=ring;n._lbl=lbl;
   g._n=n; n._el=g;
   let drag=false, moved=false;
   g.addEventListener("pointerdown",ev=>{drag=true;moved=false;g.setPointerCapture(ev.pointerId);ev.stopPropagation()});
-  g.addEventListener("pointermove",ev=>{if(!drag)return;
-    const m=pt(ev);n.fx=m.x;n.fy=m.y;n.x=m.x;n.y=m.y;moved=true;
-    if(mode==="graph")reheat(0.3);else render()});
+  g.addEventListener("pointermove",ev=>{if(!drag||mode!=="graph")return;
+    const m=pt(ev);n.fx=m.x;n.fy=m.y;n.x=m.x;n.y=m.y;moved=true;reheat(0.3)});
   g.addEventListener("pointerup",()=>{drag=false;if(!moved)select(n)});
   g.addEventListener("dblclick",ev=>{ev.stopPropagation();
     if(mode==="graph"){n.fx=null;n.fy=null;reheat(0.3)}});
   g.addEventListener("pointerenter",ev=>{
     hover=n;applyEmphasis();
     tip.style.display="block";moveTip(ev);
-    const changed=(trByNode[n.id]||[]).length;
+    const changed=(trByNode[n.id]||[]).length, deg=nbrs[n.id].length;
     tip.innerHTML="<b>"+esc(n.full_label||n.label)+"</b><br><span class='st'>"+esc(n.type)+
       " &middot; "+esc(n.status)+"</span>"+(n.summary?"<br>"+esc(n.summary):"")+
-      "<br><span style='color:var(--faint)'>"+esc(com.name)+" &middot; importance "+n.importance+
-      " &middot; confidence "+n.confidence+(changed?" &middot; "+changed+" change"+(changed>1?"s":""):"")+"</span>";
+      "<br><span style='color:var(--faint)'>"+esc(comOf(n).name)+
+      " &middot; "+deg+" relation"+(deg===1?"":"s")+
+      (changed?" &middot; "+changed+" change"+(changed>1?"":""):"")+"</span>";
   });
   g.addEventListener("pointermove",moveTip);
   g.addEventListener("pointerleave",()=>{hover=null;applyEmphasis();tip.style.display="none"});
@@ -675,13 +988,11 @@ const nEls=nodes.map(n=>{
 });
 const tip=$("tip");
 function moveTip(ev){
-  const w=330, x=Math.min(ev.clientX+14, innerWidth-SIDE-w);
+  const w=340, x=Math.min(ev.clientX+14, innerWidth-SIDE-w);
   tip.style.left=Math.max(8,x)+"px";
-  tip.style.top=Math.min(ev.clientY+10, innerHeight-140)+"px";
+  tip.style.top=Math.min(ev.clientY+10, innerHeight-150)+"px";
 }
 
-// Convex hull (monotone chain) + padding, so a community reads as one
-// region instead of a colour the eye has to collect dot by dot.
 function hull(pts,pad){
   if(pts.length<3)return null;
   const p=pts.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
@@ -704,7 +1015,7 @@ function hull(pts,pad){
   return d+"Z";
 }
 function renderHulls(){
-  if(mode!=="graph")return;
+  if(mode!=="graph"){comIds.forEach(id=>hullEls[id].style.display="none");return}
   comIds.forEach(id=>{
     const c=COMS[id], path=hullEls[id];
     const pts=nodes.filter(n=>n.community===id&&visible(n)&&nbrs[n.id].length)
@@ -714,18 +1025,33 @@ function renderHulls(){
   });
 }
 function render(){
-  links.forEach((l,i)=>{const e=eEls[i];
-    e.setAttribute("x1",l.s.x);e.setAttribute("y1",l.s.y);
-    e.setAttribute("x2",l.t.x);e.setAttribute("y2",l.t.y);
+  links.forEach((l,i)=>{
+    eEls[i].setAttribute("d",chord(l.s,l.t));
     const lab=eLabels[i];
     if(lab.style.display!=="none"){
-      lab.setAttribute("x",(l.s.x+l.t.x)/2);lab.setAttribute("y",(l.s.y+l.t.y)/2-4);
+      lab.setAttribute("x",(l.s.x+l.t.x)/2);lab.setAttribute("y",(l.s.y+l.t.y)/2-5);
     }});
   tlinks.forEach((l,i)=>{
+    if(mode==="radial"){tEls[i].setAttribute("d",chord(l.s,l.t));return}
     const mx=(l.s.x+l.t.x)/2, my=(l.s.y+l.t.y)/2;
     const dx=l.t.x-l.s.x, dy=l.t.y-l.s.y, d=Math.sqrt(dx*dx+dy*dy)||1;
     tEls[i].setAttribute("d","M"+l.s.x+","+l.s.y+" Q"+(mx-dy/d*40)+","+(my+dx/d*40)+" "+l.t.x+","+l.t.y)});
-  nodes.forEach(n=>n._el.setAttribute("transform","translate("+n.x+","+n.y+")"));
+  nodes.forEach(n=>{
+    n._el.setAttribute("transform","translate("+n.x+","+n.y+")");
+    // In radial mode a label reads outward along its own spoke; elsewhere
+    // it sits to the right of the dot.
+    if(mode==="radial"&&n._a!==undefined){
+      const flip=Math.cos(n._a)<0, off=n._r+7;
+      n._lbl.setAttribute("text-anchor",flip?"end":"start");
+      n._lbl.setAttribute("x",flip?-off:off);
+      n._lbl.setAttribute("y",0);
+      n._lbl.setAttribute("transform","rotate("+(n._a*180/Math.PI+(flip?180:0))+")");
+    }else{
+      n._lbl.setAttribute("text-anchor","start");
+      n._lbl.setAttribute("x",n._r+6);n._lbl.setAttribute("y",0);
+      n._lbl.removeAttribute("transform");
+    }
+  });
   renderHulls();
 }
 
@@ -748,14 +1074,30 @@ addEventListener("pointerup",()=>panning=false);
 function fit(){
   const vis=nodes.filter(visible); if(!vis.length)return;
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
-  vis.forEach(n=>{x0=Math.min(x0,n.x);y0=Math.min(y0,n.y);x1=Math.max(x1,n.x);y1=Math.max(y1,n.y)});
-  const padL=mode==="timeline"?150:130, pad=120;
-  const bw=Math.max(1,x1-x0+padL+pad), bh=Math.max(1,y1-y0+pad*2);
-  z.k=Math.min(2.2,Math.max(0.15,Math.min(W/bw,(H-70)/bh)));
-  z.x=(W-(x0+x1)*z.k)/2+(mode==="timeline"?30:0); z.y=70+((H-70)-(y0+y1)*z.k)/2; applyZ();
+  const grow=(x,y)=>{x0=Math.min(x0,x);y0=Math.min(y0,y);x1=Math.max(x1,x);y1=Math.max(y1,y)};
+  vis.forEach(n=>{
+    grow(n.x,n.y);
+    // A radial label runs OUTWARD from its dot, so the bounding box has to
+    // include where the text ends, not where the dot is. Fitting to the
+    // dots alone clipped every label on the bottom of the circle.
+    if(mode==="radial"&&n._a!==undefined){
+      const len=labelExtent(n);
+      grow(n.x+Math.cos(n._a)*len, n.y+Math.sin(n._a)*len);
+    }
+  });
+  // ...and the type ring lives outside even those.
+  if(mode==="radial"&&radialCentre.band){
+    const c=radialCentre, b=c.band+18;
+    grow(c.cx-b,c.cy-b); grow(c.cx+b,c.cy+b);
+  }
+  const pad=mode==="radial"?26:(mode==="timeline"?130:120);
+  const bw=Math.max(1,x1-x0+pad*2), bh=Math.max(1,y1-y0+pad*2);
+  z.k=Math.min(2.2,Math.max(0.15,Math.min(W/bw,(H-60)/bh)));
+  z.x=(W-(x0+x1)*z.k)/2; z.y=60+((H-60)-(y0+y1)*z.k)/2; applyZ();
 }
 function centerOn(n){z.x=W/2-n.x*z.k;z.y=H/2-n.y*z.k;applyZ()}
 $("fit").onclick=fit;
+$("viewRadial").onclick=()=>setMode("radial");
 $("viewGraph").onclick=()=>setMode("graph");
 $("viewTime").onclick=()=>setMode("timeline");
 
@@ -772,8 +1114,20 @@ function applyFilters(){
   nodes.forEach(n=>{n._el.style.display=visible(n)?"":"none"});
   links.forEach((l,i)=>eEls[i].style.display=(visible(l.s)&&visible(l.t))?"":"none");
   tlinks.forEach((l,i)=>tEls[i].style.display=(visible(l.s)&&visible(l.t))?"":"none");
-  if(mode==="timeline")layoutTimeline();
-  applyEmphasis(); renderCounts(); render();
+  relayout(); applyEmphasis(); renderCounts();
+}
+function paint(){
+  nodes.forEach(n=>{
+    const c=colorOf(n.type), com=comOf(n);
+    n._disc.setAttribute("fill",c);
+    n._ring.setAttribute("stroke",com.color);
+    n._ring.setAttribute("stroke-opacity",INACTIVE.has(n.status)?0.3:0.75);
+    n._halo.setAttribute("fill",c);
+    n._halo.style.display=(n.type==="decision"&&!INACTIVE.has(n.status))?"":"none";
+    n._lbl.setAttribute("fill",INACTIVE.has(n.status)?"var(--faint)":"var(--text)");
+    n._lbl.setAttribute("stroke","var(--stroke)");
+  });
+  links.forEach((l,i)=>eEls[i].setAttribute("stroke",colorOf(l.s.type)));
 }
 function applyEmphasis(){
   const focus=hover||selected;
@@ -781,43 +1135,57 @@ function applyEmphasis(){
   nodes.forEach(n=>{
     const match=!q||n.label.toLowerCase().includes(q)||(n.summary||"").toLowerCase().includes(q);
     const dim=(focus&&!keep.has(n))||!match;
-    n._el.style.opacity=dim?0.1:1;
-    n._lbl.setAttribute("fill",INACTIVE.has(n.status)?"var(--faint)":"var(--text)");
-    n._lbl.setAttribute("stroke","var(--stroke)");
+    n._el.style.opacity=dim?0.12:1;
   });
   links.forEach((l,i)=>{
     const on=focus&&(l.s===focus||l.t===focus);
-    eEls[i].setAttribute("stroke-opacity",focus?(on?0.95:0.05):0.32);
-    eEls[i].setAttribute("stroke-width",on?2.2:1.2);
-    // Relation names only where they can be read: on the focused node's
-    // own edges. Drawn for every edge they are noise at any zoom.
+    eEls[i].setAttribute("stroke-opacity",focus?(on?0.95:0.04):0.34);
+    eEls[i].setAttribute("stroke-width",on?2.4:1.25);
     const lab=eLabels[i];
     if(on&&visible(l.s)&&visible(l.t)){
       lab.style.display="";lab.textContent=l.type.replace(/_/g," ");
-      lab.setAttribute("fill",l.color||"var(--muted)");
+      lab.setAttribute("fill",colorOf(l.s.type));
     }else lab.style.display="none";
   });
-  tlinks.forEach((l,i)=>{
-    const on=!focus||l.s===focus||l.t===focus;
-    tEls[i].setAttribute("stroke-opacity",on?0.85:0.12);
-  });
-  if(mode==="graph")renderHulls();
+  tlinks.forEach((l,i)=>tEls[i].setAttribute("stroke-opacity",
+    (!focus||l.s===focus||l.t===focus)?0.9:0.1));
+  renderHulls();
 }
 $("activeOnly").onclick=function(){activeOnly=!activeOnly;this.classList.toggle("on",activeOnly);applyFilters()};
 $("search").addEventListener("input",function(){q=this.value.trim().toLowerCase();applyEmphasis()});
+
+// ---- panel: headline numbers -----------------------------------------------
+const C=META.counts||{};
+function kpi(label,value,tone){
+  return "<div class='kpi'><span>"+esc(label)+"</span><b"+
+    (tone?" class='"+tone+"'":"")+">"+esc(value)+"</b></div>";
+}
+$("kpis").innerHTML=
+  kpi("Nodes",(C.nodes||0).toLocaleString())+
+  kpi("Relations",(C.relations||0).toLocaleString())+
+  kpi("Decisions",(C.decisions||0).toLocaleString())+
+  kpi("Decisions changed",(C.changes||0).toLocaleString())+
+  kpi("Open issues",C.open_issues||0,C.open_issues?"bad":"good")+
+  // These two are the graph's own integrity, and they were previously
+  // reachable only by calling /reasoning and reading a list of anomalies.
+  kpi("History gaps",(C.dangling_history||0)+(C.unexplained_supersessions||0),
+      ((C.dangling_history||0)+(C.unexplained_supersessions||0))?"bad":"good")+
+  kpi("Unconnected nodes",C.unlinked||0,(C.unlinked||0)?"":"good");
 
 // ---- type legend -----------------------------------------------------------
 const typeList=$("typeList"), typeRows={};
 typesPresent.forEach(t=>{
   const row=document.createElement("label");row.className="row";
-  row.innerHTML="<input type='checkbox' checked/><span class='sq' style='border-color:"+
-    (COLOR[t]||"#8b8fa8")+";background:"+(COLOR[t]||"#8b8fa8")+"33'></span>"+
+  row.innerHTML="<input type='checkbox' checked/><span class='dot'></span>"+
     "<span class='name'>"+esc(t)+"</span><span class='n'></span>";
   const cb=row.querySelector("input");
   cb.onchange=()=>{cb.checked?hiddenTypes.delete(t):hiddenTypes.add(t);
     row.classList.toggle("off",!cb.checked);applyFilters()};
-  typeList.appendChild(row); typeRows[t]={row,cb};
+  typeList.appendChild(row); typeRows[t]={row,cb,dot:row.querySelector(".dot")};
 });
+function paintLegend(){
+  typesPresent.forEach(t=>{typeRows[t].dot.style.background=colorOf(t)});
+}
 
 // ---- communities panel -----------------------------------------------------
 const comList=$("comList"), comRows={};
@@ -854,17 +1222,43 @@ $("selectAll").onchange=function(){
   syncSelectAll();applyFilters();
 };
 
-// ---- status legend ---------------------------------------------------------
-$("statusLegend").innerHTML=[
-  ["completed / active","solid fill, full weight"],
-  ["in_progress / pending","solid fill, lighter"],
-  ["failed","red ring — an open bug"],
-  ["contested","dotted orange ring — two live decisions conflict"],
-  ["superseded / archived","dashed grey ring, struck-through label"],
-  ["invalidated","red dashed ring — do not revisit"],
-  ["fill colour","detected community"],
-  ["ring colour","node type"],
-].map(([k,v])=>"<div class='kv'><b>"+esc(k)+"</b> &middot; "+esc(v)+"</div>").join("");
+// ---- hotspots and relation flows -------------------------------------------
+const hots=META.hotspots||[];
+$("hotList").innerHTML=hots.length
+  ? hots.map(h=>"<div class='hot' data-label=\""+esc(h.label)+"\">"+
+      "<span class='hl'>"+esc(h.label)+"</span>"+
+      "<span class='hn'>"+h.depends_on_it+" in</span></div>").join("")
+  : "<div class='empty'>Nothing points at anything yet.</div>";
+$("hotList").addEventListener("click",ev=>{
+  const row=ev.target.closest(".hot"); if(!row)return;
+  const n=nodes.find(x=>(x.full_label||x.label)===row.dataset.label);
+  if(n){select(n);centerOn(n)}
+});
+const flows=META.flows||[];
+function paintFlows(){
+  const max=Math.max.apply(null,flows.map(f=>f.count).concat([1]));
+  $("flowList").innerHTML=flows.length
+    ? flows.map(f=>"<div class='flow'><span class='fl'>"+esc(f.source)+" &rarr; "+
+        esc(f.target)+"</span><span class='ft' style='width:"+
+        Math.round(f.count/max*100)+"%;background:"+colorOf(f.source)+
+        "'></span><span class='fn'>"+f.count+"</span></div>").join("")
+    : "<div class='empty'>No relations extracted yet.</div>";
+}
+
+// ---- reading the picture ---------------------------------------------------
+function paintStatusLegend(){
+  $("statusLegend").innerHTML=[
+    ["position","which arc a node sits on IS its type"],
+    ["fill","node type, named on the arc and in the legend"],
+    ["ring","detected community"],
+    ["size","how much weight the session gives it"],
+    ["chord","a relation, coloured by where it starts"],
+    ["dashed red arc","a decision that replaced another"],
+    ["red ring","an open bug"],
+    ["dotted amber","two live decisions conflict"],
+    ["struck through","superseded or archived"],
+  ].map(([k,v])=>"<div class='kv'><b>"+esc(k)+"</b> &middot; "+esc(v)+"</div>").join("");
+}
 
 // ---- node detail -----------------------------------------------------------
 const detail=$("detail"), detailBody=$("detailBody");
@@ -881,20 +1275,20 @@ function chainFor(n){
 function select(n){
   selected=n; applyEmphasis();
   if(!n){detail.style.display="none";return}
-  const com=comOf(n), tcol=COLOR[n.type]||"#8b8fa8";
+  const com=comOf(n), tcol=colorOf(n.type);
   const seen={}, neigh=nbrs[n.id].filter(m=>{if(seen[m.n.id+m.rel])return false;
     return (seen[m.n.id+m.rel]=1)}).map(m=>
     "<li data-id='"+esc(m.n.id)+"'><span class='dot' style='width:8px;height:8px;border-radius:50%;"+
-    "flex:none;background:"+comOf(m.n).color+"'></span><span class='name'>"+esc(m.n.label)+
+    "flex:none;background:"+colorOf(m.n.type)+"'></span><span class='name'>"+esc(m.n.label)+
     "</span><span class='rel'>"+esc(m.rel.replace(/_/g," "))+"</span></li>").join("");
   detailBody.innerHTML="<div class='lbl'>"+esc(n.full_label||n.label)+"</div>"+
     "<span class='pill' style='color:"+tcol+";border-color:"+tcol+"'>"+esc(n.type)+"</span>"+
     "<span class='pill' style='color:var(--muted);border-color:var(--border)'>"+esc(n.status)+"</span>"+
     "<div class='kv'>community <b>"+esc(com.name)+"</b></div>"+
     "<div class='kv'>importance <b>"+n.importance+"</b></div><div class='bar'><i style='width:"+
-      Math.round(n.importance*100)+"%'></i></div>"+
+      Math.round(n.importance*100)+"%;background:"+tcol+"'></i></div>"+
     "<div class='kv'>confidence <b>"+n.confidence+"</b></div><div class='bar'><i style='width:"+
-      Math.round(n.confidence*100)+"%'></i></div>"+
+      Math.round(n.confidence*100)+"%;background:"+tcol+"'></i></div>"+
     (n.created_at?"<div class='kv'>first seen <b>"+esc(when(n.created_at))+"</b></div>":"")+
     (n.valid_until?"<div class='kv'>no longer current since <b>"+esc(when(n.valid_until))+"</b></div>":"")+
     (n.summary?"<div class='kv' style='margin-top:7px;color:var(--text)'>"+esc(n.summary)+"</div>":"")+
@@ -933,11 +1327,14 @@ document.addEventListener("keydown",e=>{
 });
 
 // ---- theme -----------------------------------------------------------------
+// Dark is not flipped to light: each is its own validated set of steps for
+// its own surface. See the palette note in visualization.py.
 $("theme").onclick=function(){
   const light=document.documentElement.getAttribute("data-theme")==="light";
   document.documentElement.setAttribute("data-theme",light?"dark":"light");
   this.textContent=light?"Light":"Dark";
-  applyEmphasis();
+  COLOR=light?COLOR_DARK:COLOR_LIGHT;
+  paint();paintLegend();paintFlows();relayout();applyEmphasis();
 };
 
 // ---- empty state -----------------------------------------------------------
@@ -966,17 +1363,17 @@ $("exportPng").onclick=()=>{
   // Computed theme variables do not survive serialization; bake them.
   clone.querySelectorAll("text").forEach(t=>{
     const f=t.getAttribute("fill")||"";
-    if(f.indexOf("var(")===0)t.setAttribute("fill",light?"#1a1d27":"#e8eaf6");
+    if(f.indexOf("var(")===0)t.setAttribute("fill",light?"#12141c":"#e9ecf5");
     const s=t.getAttribute("stroke")||"";
-    if(s.indexOf("var(")===0)t.setAttribute("stroke",light?"#ffffff":"#0f1117");
+    if(s.indexOf("var(")===0)t.setAttribute("stroke",light?"#ffffff":"#0b0d14");
   });
-  clone.querySelectorAll("line,path").forEach(p=>{
+  clone.querySelectorAll("line,path,circle").forEach(p=>{
     const s=p.getAttribute("stroke")||"";
-    if(s.indexOf("var(")===0)p.setAttribute("stroke",light?"#dfe3ef":"#2a2d3e");
+    if(s.indexOf("var(")===0)p.setAttribute("stroke",light?"#dde1ed":"#242838");
   });
   const bg=document.createElementNS(NS,"rect");
   bg.setAttribute("width","100%");bg.setAttribute("height","100%");
-  bg.setAttribute("fill",light?"#f7f8fc":"#0f1117");
+  bg.setAttribute("fill",light?"#f7f8fc":"#0b0d14");
   clone.insertBefore(bg,clone.firstChild);
   const blob=new Blob([new XMLSerializer().serializeToString(clone)],{type:"image/svg+xml"});
   const url=URL.createObjectURL(blob), img=new Image();
@@ -991,8 +1388,8 @@ $("exportPng").onclick=()=>{
   img.src=url;
 };
 
-for(let i=0;i<150;i++)step();
-render();applyFilters();fit();requestAnimationFrame(tick);
+paint();paintLegend();paintFlows();paintStatusLegend();
+layoutRadial();render();applyFilters();fit();
 </script></body></html>
 """
 
@@ -1060,5 +1457,6 @@ def to_share_html(graph: "GraphMemory") -> str:
                 "nodes": nodes, "edges": edges, "transitions": transitions,
                 "session_id": graph.session_id, "meta": vis.get("meta", {}),
             }))
-            .replace("__COLORS__", _script_json(_TYPE_COLOR)))
+            .replace("__COLORS__", _script_json(_TYPE_COLOR))
+            .replace("__COLORS_LIGHT__", _script_json(_TYPE_COLOR_LIGHT)))
     return html

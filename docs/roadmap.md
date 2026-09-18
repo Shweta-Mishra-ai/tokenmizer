@@ -15,15 +15,15 @@ benchmark, the suite is right and this file is a bug.
 
 | Surface | Number | Source |
 |---|---|---|
-| Extraction, macro F1 on the labelled corpus | 96% overall; **90% on real transcripts**, 97% synthetic | `python -m benchmarks.eval` |
-| Label quality | 15% of labels truncated mid-word; 40 near-duplicate pairs over 171 labels | same run |
+| Extraction, macro F1 on the labelled corpus | 96% overall; **89% on real transcripts**, 98% synthetic | `python -m benchmarks.eval` |
+| Label quality | 15% of labels truncated mid-word; 38 near-duplicate pairs over 174 labels | same run |
 | Retrieval, recall@6 on paraphrased questions | 85% keyword; 92% with `semantic_retrieval` (n=13) | `benchmarks.graph_retrieval.query_eval` |
 | Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
 | Resume block size | ~160-180 tokens standard tier | `benchmarks/resume_quality` |
-| Suite | 1185 tests, ruff clean | `pytest tests/` |
+| Suite | 1199 tests, ruff clean | `pytest tests/` |
 
-Read the 90% real-transcript figure as the honest one. It is the reason
+Read the 89% real-transcript figure as the honest one. It is the reason
 several items below exist.
 
 ---
@@ -145,9 +145,12 @@ Cohere v2 has both. Same test shape as the three adapters that have them.
 ### P2 — the graph as a product
 
 **11. Graph page.**
-The page now has community hulls, a type legend that filters, a timeline
-mode, the supersession chain in the node detail, a light theme and
-keyboard shortcuts. Still missing: a checkpoint-to-checkpoint diff view
+The page opens as a radial map — one arc per node type, named on a ring
+outside the labels, relations as chords through the middle — with force
+and timeline a click away, community hulls, a type legend that filters,
+the supersession chain in the node detail, a validated palette in both
+themes, and a panel of derived counts, communities, hotspots and
+type-to-type flows. Still missing: a checkpoint-to-checkpoint diff view
 (the `graph_diff` each checkpoint already stores), a path highlight that
 walks a whole `/why` chain on the canvas, and a canvas renderer for
 graphs past the 200-node prune cap. Keep the zero-external-dependency
