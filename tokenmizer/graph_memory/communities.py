@@ -22,10 +22,58 @@ from typing import Iterable
 DEFAULT_MAX_ITER = 20
 
 
+# A group below this size is not a community, it is two nodes that happened
+# to agree. Label propagation on a session graph — a goal hub with task
+# spokes, each spoke touching a file or two — settles into a dozen pairs,
+# which colours the page like confetti and tells the reader nothing. Pairs
+# are folded into the neighbouring group they are most attached to; only a
+# group that has no attachment at all stays on its own.
+MIN_COMMUNITY_SIZE = 3
+
+
+def _merge_small(label: dict[str, int], adjacency: dict[str, dict[str, float]],
+                 min_size: int) -> None:
+    """Fold under-sized groups into the neighbouring group they share the
+    most edge weight with. Mutates `label`. Deterministic: groups are
+    considered smallest-then-lowest-id first, and weight ties resolve to
+    the lowest neighbouring label."""
+    for _ in range(max(1, min_size)):
+        members: dict[int, list[str]] = defaultdict(list)
+        for node, lab in label.items():
+            members[lab].append(node)
+        small = sorted(
+            (lab for lab, group in members.items() if len(group) < min_size),
+            key=lambda lab: (len(members[lab]), sorted(members[lab])[0]),
+        )
+        changed = False
+        for lab in small:
+            group = members.get(lab)
+            if not group or len(group) >= min_size:
+                continue
+            weight_by_label: dict[int, float] = defaultdict(float)
+            for node in group:
+                for neighbor, weight in adjacency.get(node, {}).items():
+                    other = label[neighbor]
+                    if other != lab:
+                        weight_by_label[other] += weight
+            if not weight_by_label:
+                continue   # nothing to attach to — a genuine island
+            top = max(weight_by_label.values())
+            target = min(lab2 for lab2, w in weight_by_label.items() if w == top)
+            for node in group:
+                label[node] = target
+            members[target].extend(group)
+            members.pop(lab, None)
+            changed = True
+        if not changed:
+            break
+
+
 def detect_communities(
     node_ids: Iterable[str],
     edges: Iterable[tuple[str, str, float]],
     max_iter: int = DEFAULT_MAX_ITER,
+    min_size: int = MIN_COMMUNITY_SIZE,
 ) -> dict[str, int]:
     """Map every node id to a community index.
 
@@ -79,6 +127,8 @@ def detect_communities(
                 changed = True
         if not changed:
             break
+
+    _merge_small(label, adjacency, min_size)
 
     members: dict[int, list[str]] = defaultdict(list)
     for node in ordered:

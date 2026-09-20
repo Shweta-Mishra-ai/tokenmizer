@@ -381,48 +381,9 @@ class GraphMemory:
                 )
                 for old_id in to_supersede:
                     if old_id != node_id and old_id in self._nodes:
-                        old_node = self._nodes[old_id]
-                        old_confidence = old_node.confidence
-
-                        # Mark old decision superseded
-                        old_node.status = NodeStatus.SUPERSEDED
-                        old_node.valid_until = time.time()
-
-                        # Build full transition object
-                        # Evidence: prefer explicit "|" separator, else extract from summary
-                        parts = (summary or "").split("|", 1)
-                        reason_text = parts[0].strip()
-                        evidence_text = parts[1].strip() if len(parts) > 1 else ""
-
-                        # Auto-extract evidence from summary if not explicit
-                        if not evidence_text and summary:
-                            evidence_text = _extract_evidence_from_text(summary)
-
-                        trigger = _infer_trigger(old_node.label, label, summary)
-
-                        transition = DecisionTransition(
-                            id=f"tr_{old_id[:8]}_{node_id[:8]}",
-                            session_id=self.session_id,
-                            from_decision_id=old_id,
-                            to_decision_id=node_id,
-                            from_label=old_node.label,
-                            to_label=label,
-                            trigger=trigger,
-                            reason=reason_text,
-                            evidence=evidence_text,
-                            confidence_delta=round(confidence - old_confidence, 3),
-                        )
-                        self._transitions.append(transition)
-                        self._persist_transition(transition)
-
-                        old_node.summary = (
-                            f"Superseded by: {label[:60]}"
-                            + (f" — {reason_text[:40]}" if reason_text else "")
-                        )
-                        self.add_edge(node_id, old_id, EdgeType.SUPERSEDES, weight=1.0)
-                        logger.info(
-                            f"Decision transition: {old_node.label!r} → {label!r}"
-                            f" | trigger: {trigger[:40]}"
+                        self.record_supersession(
+                            old_id, node_id, summary=summary,
+                            new_confidence=confidence,
                         )
 
                 # CONTESTED: decisions sharing a topic bucket with the
@@ -469,6 +430,84 @@ class GraphMemory:
                 self._decision_tracking_failures += 1
 
         return node_id
+
+    def record_supersession(
+        self,
+        old_id: str,
+        new_id: str,
+        summary: str = "",
+        new_confidence: float | None = None,
+        trigger: str = "",
+    ) -> bool:
+        """Mark `old_id` superseded by `new_id` and record the transition.
+
+        The one place a supersession is written, reached two ways:
+
+        - add_node(), when the contradiction tracker infers that a new
+          decision occupies an existing topic slot; and
+        - _apply_extracted(), when the transcript SAYS so outright
+          ("switched from moment.js to date-fns"). That second path did
+          not exist: the extractor parsed the supersession into
+          ExtractedData.superseded, _extracted_to_dict passed it through,
+          and nothing ever read it — so the change was only recorded when
+          the topic classifier happened to bucket both sides together.
+          On the corpus session that exists to demonstrate the feature,
+          it did not, and `/why` had nothing to say.
+
+        Returns True if a transition was recorded, False if the pair was
+        not eligible (unknown ids, same node, or already superseded).
+        """
+        if old_id == new_id or old_id not in self._nodes or new_id not in self._nodes:
+            return False
+        old_node, new_node = self._nodes[old_id], self._nodes[new_id]
+        if old_node.status in (NodeStatus.SUPERSEDED, NodeStatus.MODIFIED,
+                               NodeStatus.ARCHIVED):
+            return False
+        if any(t.from_decision_id == old_id and t.to_decision_id == new_id
+               for t in self._transitions):
+            return False
+
+        old_confidence = old_node.confidence
+        old_node.status = NodeStatus.SUPERSEDED
+        old_node.valid_until = time.time()
+
+        # Evidence: prefer an explicit "|" separator, else pull the
+        # strongest signal out of the rationale.
+        parts = (summary or "").split("|", 1)
+        reason_text = parts[0].strip()
+        evidence_text = parts[1].strip() if len(parts) > 1 else ""
+        if not evidence_text and summary:
+            evidence_text = _extract_evidence_from_text(summary)
+
+        trigger = trigger or _infer_trigger(old_node.label, new_node.label, summary)
+        confidence = new_node.confidence if new_confidence is None else new_confidence
+
+        transition = DecisionTransition(
+            id=f"tr_{old_id[:8]}_{new_id[:8]}",
+            session_id=self.session_id,
+            from_decision_id=old_id,
+            to_decision_id=new_id,
+            from_label=old_node.label,
+            to_label=new_node.label,
+            trigger=trigger,
+            reason=reason_text,
+            evidence=evidence_text,
+            confidence_delta=round(confidence - old_confidence, 3),
+        )
+        self._transitions.append(transition)
+        self._persist_transition(transition)
+
+        old_node.summary = (
+            f"Superseded by: {new_node.label[:60]}"
+            + (f" — {reason_text[:40]}" if reason_text else "")
+        )
+        self.add_edge(new_id, old_id, EdgeType.SUPERSEDES, weight=1.0)
+        self._dirty = True
+        logger.info(
+            f"Decision transition: {old_node.label!r} -> {new_node.label!r}"
+            f" | trigger: {trigger[:40]}"
+        )
+        return True
 
     def add_edge(
         self, source_id: str, target_id: str, edge_type: EdgeType, weight: float = 1.0
@@ -689,6 +728,25 @@ class GraphMemory:
                 # this one genuinely replaced, alongside the
                 # DecisionTransition that justifies it.
 
+        # Supersessions the transcript states outright. The decisions loop
+        # above has already created a node for each side (the extractor
+        # emits "Use <old>" and "Use <new>"), so this only has to connect
+        # them — and it is the authoritative path: the text said so, the
+        # topic classifier only guesses.
+        for sup in data.get("superseded", []):
+            if not isinstance(sup, dict):
+                continue
+            old_label, new_label = sup.get("old", ""), sup.get("new", "")
+            if not old_label or not new_label:
+                continue
+            old_id = self._find_decision(old_label)
+            new_id = self._find_decision(new_label)
+            if old_id and new_id:
+                self.record_supersession(
+                    old_id, new_id, summary=sup.get("reason", ""),
+                    trigger=sup.get("trigger", ""),
+                )
+
         # Files — linked to tasks and decisions that name them
         for f in data.get("files", []):
             if not f or len(f) < 3:
@@ -836,6 +894,31 @@ class GraphMemory:
         "typescript":   frozenset({"ts", "typescript"}),
         "js":           frozenset({"js", "javascript", "node", "nodejs"}),
     }
+
+    def _find_decision(self, text: str) -> str:
+        """Id of the decision node naming `text`, or "".
+
+        The extractor emits a supersession's sides as bare names
+        ("moment.js") and its decision nodes as "Use moment.js", so an
+        exact id lookup finds neither. Exact normalized match first, then
+        the shortest decision whose label contains the name as a whole
+        word — shortest because "Use date-fns" identifies the choice and
+        "Use date-fns for formatting in the chart routes" is a sentence
+        that happens to mention it.
+        """
+        name = self._normalize_label(text)
+        if not name:
+            return ""
+        exact = self._node_id(NodeType.DECISION.value, name)
+        if exact in self._nodes:
+            return exact
+        pattern = re.compile(r"\b" + re.escape(name) + r"\b")
+        matches = [
+            (len(n.label), nid) for nid, n in self._nodes.items()
+            if n.type == NodeType.DECISION and not n._evicted
+            and pattern.search(self._normalize_label(n.label))
+        ]
+        return min(matches)[1] if matches else ""
 
     def _expand_with_aliases(self, words: frozenset) -> frozenset:
         """Expand a word set with known tech aliases for fuzzy matching."""

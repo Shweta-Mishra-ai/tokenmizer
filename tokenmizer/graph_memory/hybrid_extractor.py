@@ -77,7 +77,6 @@ from tokenmizer.graph_memory.patterns import (
     _SCHEMA_STOP_WORDS,
     _SCHEMA_TABLE,
     _SOLUTION_VERB,
-    _SUPERSEDED,
     _TASK_DONE,
     _TASK_DONE_PASSIVE,
     _TASK_TODO,
@@ -92,6 +91,7 @@ from tokenmizer.graph_memory.patterns import (
     _is_question_context,
     _sentence_index,
     _tech_mention_is_a_decision,
+    find_supersessions,
 )
 
 logger = logging.getLogger(__name__)
@@ -424,13 +424,14 @@ class HybridExtractor:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
-        # Superseded + both sides as decisions
-        for m in _SUPERSEDED.finditer(content):
-            old_label = m.group(1).strip()
-            new_label = m.group(2).strip()
+        # Superseded + both sides as decisions. See find_supersessions:
+        # "switched from A to B" and "B instead of A" state the same change
+        # with the operands in opposite orders, and reading both with one
+        # pattern recorded the rationale as the replacement decision.
+        for old_label, new_label, m_start, m_end in find_supersessions(content):
             result.superseded.append({"old": old_label, "new": new_label})
-            start = max(0, m.start() - 60)
-            surrounding = content[start:m.end() + 80].replace("\n", " ").strip()
+            start = max(0, m_start - 60)
+            surrounding = content[start:m_end + 80].replace("\n", " ").strip()
             for label in (f"Use {old_label}", f"Use {new_label}"):
                 norm = self._normalize(label)
                 if norm not in seen_decisions and len(norm) > 6:
