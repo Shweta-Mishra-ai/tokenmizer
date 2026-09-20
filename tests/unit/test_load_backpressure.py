@@ -28,6 +28,8 @@ import asyncio
 import pytest
 
 from tokenmizer.analytics.engine import AnalyticsEngine
+from tokenmizer.graph_memory.graph import GraphMemory
+from tokenmizer.providers.providers import OllamaProvider
 
 
 class TestTheExtractionSlotBoundsConcurrency:
@@ -85,6 +87,61 @@ class TestTheExtractionSlotBoundsConcurrency:
         assert m._extraction_inflight == 0, "every slot returned"
 
 
+class TestTheTaskIsNotEvenBuiltWhenFull:
+    """The first version of this cap checked capacity INSIDE the task.
+
+    The ceiling on concurrency was real, and the bound on memory — the
+    reason the cap exists — was not: a burst of N requests still created
+    N coroutine objects, each closing over that turn's whole transcript,
+    and each shed itself only once the loop got round to running it. The
+    spike the cap was written to prevent happened anyway, one layer down.
+    """
+
+    def test_capacity_counts_queued_tasks_as_well_as_running_ones(self):
+        from tokenmizer.api import app as m
+
+        assert m._extraction_has_capacity() is True
+
+        m._extraction_pending = m._EXTRACTION_MAX_CONCURRENT
+        try:
+            assert m._extraction_has_capacity() is False, (
+                "a task that has been created but not yet started still "
+                "holds its transcript; it is not free"
+            )
+        finally:
+            m._extraction_pending = 0
+
+    def test_running_and_queued_are_counted_together(self):
+        from tokenmizer.api import app as m
+
+        half = m._EXTRACTION_MAX_CONCURRENT // 2
+        m._extraction_pending = half
+        held = [m._extraction_slot() for _ in range(m._EXTRACTION_MAX_CONCURRENT - half)]
+        for cm in held:
+            cm.__enter__()
+        try:
+            assert m._extraction_has_capacity() is False
+        finally:
+            for cm in held:
+                cm.__exit__(None, None, None)
+            m._extraction_pending = 0
+
+    def test_the_scheduler_checks_before_it_builds_the_coroutine(self):
+        """Pinned against the source, because the distinction is one line
+        and the difference is the whole point of the cap."""
+        import inspect
+
+        from tokenmizer.api import app as m
+
+        source = inspect.getsource(m._update_graph)
+        gate = source.index("_extraction_has_capacity()")
+        build = source.index("_track_background_task(_background_extract())")
+        assert gate < build, (
+            "capacity must be tested before the coroutine is created, not "
+            "inside it"
+        )
+
+
 class TestAShedIsNotAFailure:
 
     def test_the_two_counters_are_separate(self):
@@ -109,3 +166,51 @@ class TestAShedIsNotAFailure:
         degraded_line = next(ln for ln in source.splitlines()
                              if "degraded = bool(" in ln)
         assert "shed" not in degraded_line
+
+
+class TestTheCounterComesBackDown:
+    """A counter that only goes up is worse than no counter: extraction
+    would be shed for the life of the process, and every /api/stats shed
+    count would look like sustained load that is not there."""
+
+    async def test_a_completed_extraction_releases_its_reservation(
+            self, tmp_path, monkeypatch):
+        from tokenmizer.api import app as m
+
+        monkeypatch.setattr(m.settings, "provider", "ollama")
+        monkeypatch.setattr(m.settings, "default_model", "llama3.1:8b")
+        monkeypatch.setattr(m.settings.graph_checkpoint,
+                            "use_llm_extraction", True)
+        m._extraction_provider = None
+        m._graph_cache.clear()
+        m._session_locks.clear()
+        m._extraction_pending = 0
+
+        class _R:
+            text = ('{"goals": [], "tasks_done": [], "tasks_wip": [], '
+                    '"tasks_todo": [], "decisions": [], "files": [], '
+                    '"errors": [], "dependencies": [], "environments": [], '
+                    '"endpoints": [], "schemas": [], "superseded": []}')
+
+        async def chat(self, **kwargs):
+            return _R()
+
+        monkeypatch.setattr(OllamaProvider, "chat", chat)
+
+        for i in range(3):
+            graph = GraphMemory(f"pending-{i}", storage_dir=str(tmp_path))
+            raw = [{"role": "user", "content": f"question number {i} about orders"}]
+            await m._update_graph(f"pending-{i}", graph, raw,
+                                  [dict(x) for x in raw], "llama3.1:8b", {},
+                                  "orders")
+
+        for _ in range(200):
+            if not m._background_tasks:
+                break
+            await asyncio.sleep(0)
+
+        assert m._extraction_pending == 0, (
+            f"{m._extraction_pending} reservations never released — "
+            f"extraction would be shed for the life of the process"
+        )
+        assert m._extraction_inflight == 0

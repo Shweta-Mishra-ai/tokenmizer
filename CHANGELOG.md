@@ -91,6 +91,44 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Fixed — the load cap bounded concurrency but not the memory it existed to save
+
+Found by auditing the previous commit rather than by a test. The
+extraction cap checked capacity **inside** the background task, so a
+burst of N requests still created N coroutine objects, each closing over
+that turn's whole transcript, and each shed itself only once the event
+loop got round to running it. The ceiling on concurrency was real; the
+bound on memory — the entire reason the cap was written — was not. It
+happened one layer down instead.
+
+Capacity is now tested before the coroutine is built, counting queued
+tasks as well as running ones, because a task that has not started yet
+still holds its transcript. The in-task check stays as a second line: the
+loop can hand out a slot between the two. Three tests cover it, including
+one that pins the ordering against the source, since the difference is a
+single line and it is the whole point of the cap.
+
+Two smaller defects in the same batch of work:
+
+- `max_entry_bytes` above `max_bytes` was not a cap at all — the eviction
+  loop would empty the cache for one entry and then store it over budget
+  anyway. Clamped, with a warning naming both values.
+- A dead branch in the byte-eviction loop, testing for an eviction that
+  removed nothing, which `_evict_lru` cannot do while the cache is
+  non-empty.
+
+### Fixed — one failure path with no trace at all
+
+A static sweep of the package for defect classes the suite and ruff do
+not look for (mutable defaults, bare excepts, self-comparisons, `==
+None`, `datetime.utcnow`, `assert` in shipped code, leaked file handles,
+discarded `create_task` results) came back clean, and all sixteen
+`except: pass` sites turned out to be deliberate and commented — except
+one. `Memory.__init__`'s ownership claim failed silently, and its
+consequence is invisible by construction: the session never turns up in
+a cross-session search, which reads as "nothing was remembered" rather
+than as a failure. It logs now.
+
 ### Fixed — the cache was bounded by entries, which is not a bound on memory
 
 `max_size: 10000` caps cached **entries**, and an entry holds a whole LLM

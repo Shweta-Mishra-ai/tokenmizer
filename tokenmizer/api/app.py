@@ -203,6 +203,13 @@ _background_tasks: set[asyncio.Task] = set()
 # heuristic facts and the shed is counted in /api/stats.
 _EXTRACTION_MAX_CONCURRENT = 8
 _extraction_inflight = 0
+# Tasks created but not yet started. The slot counter alone is not enough:
+# a task that has not been scheduled yet holds its closure — including the
+# whole transcript it was given — so creating N of them and letting them
+# shed on entry still spends the memory the cap exists to save. Capacity
+# is therefore checked BEFORE the task is created, and again on entry,
+# because the loop can hand out slots between the two.
+_extraction_pending = 0
 
 
 def _track_background_task(coro) -> asyncio.Task:
@@ -213,6 +220,16 @@ def _track_background_task(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+def _extraction_has_capacity() -> bool:
+    """Is it worth CREATING an extraction task at all?
+
+    Counts the ones already queued as well as the ones running, because a
+    queued task is not free: it pins its slice of the transcript until the
+    loop gets to it.
+    """
+    return (_extraction_inflight + _extraction_pending) < _EXTRACTION_MAX_CONCURRENT
 
 
 @contextlib.contextmanager
@@ -914,6 +931,7 @@ async def _update_graph(
     Returns (updated_messages, checkpoint_status) — checkpoint_status surfaces
     auto-checkpoint success/failure to the caller instead of only logging it.
     """
+    global _extraction_pending
     context_window = _context_window(model)
 
     # Extraction: heuristic sync now, LLM async in background
@@ -931,6 +949,8 @@ async def _update_graph(
                     _g=graph, _msgs=new_msgs, _all=raw_messages,
                     _cheap=cheap, _lock=_lock_ref, _sid=session_id,
                 ):
+                    global _extraction_pending
+                    _extraction_pending -= 1
                     with _extraction_slot() as got_slot:
                         if not got_slot:
                             # At capacity. This turn keeps the heuristic
@@ -984,7 +1004,21 @@ async def _update_graph(
                             )
                             _analytics.record_silent_failure("llm_extraction")
 
-                _track_background_task(_background_extract())
+                if _extraction_has_capacity():
+                    _extraction_pending += 1
+                    _track_background_task(_background_extract())
+                else:
+                    # Do not even build the coroutine: its closure holds
+                    # this turn's transcript, and a queue of those is the
+                    # memory spike the cap exists to prevent.
+                    _analytics.record_shed("llm_extraction")
+                    logger.info(
+                        "Background LLM extraction not scheduled for session "
+                        "%s — %d running, %d queued (limit %d). The turn keeps "
+                        "its heuristic facts.",
+                        session_id, _extraction_inflight, _extraction_pending,
+                        _EXTRACTION_MAX_CONCURRENT,
+                    )
             else:
                 graph.extract_from_messages(raw_messages, incremental=True)
         else:

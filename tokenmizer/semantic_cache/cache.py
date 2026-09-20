@@ -205,6 +205,19 @@ class SemanticCache:
         # 100", which reads as a full cache rather than as a gigabyte.
         # Both bounds are enforced and both are reported.
         self.max_bytes = max_bytes
+        # A per-entry cap above the total cap is not a cap: the eviction
+        # loop would empty the cache for one entry and then store it over
+        # budget anyway. Clamp, and say so — an operator who set these two
+        # values inconsistently gets a working proxy and a log line, not a
+        # bound that silently is not one.
+        if max_entry_bytes > max_bytes:
+            logger.warning(
+                "cache.max_entry_bytes (%d) exceeds cache.max_bytes (%d) — "
+                "clamping the per-entry cap to the total, which is the most "
+                "one entry can occupy in any case.",
+                max_entry_bytes, max_bytes,
+            )
+            max_entry_bytes = max_bytes
         self.max_entry_bytes = max_entry_bytes
         self.max_semantic_scan = max_semantic_scan
         self._exact: OrderedDict[str, CacheEntry] = OrderedDict()
@@ -488,11 +501,8 @@ class SemanticCache:
         while len(self._exact) >= self.max_size:
             self._evict_lru()
         while self._exact and self._bytes + incoming > self.max_bytes:
-            before = len(self._exact)
             self._evict_lru()
             self._evicted_for_bytes += 1
-            if len(self._exact) == before:  # nothing was removed; stop
-                break
 
         entry = CacheEntry(
             key=key,

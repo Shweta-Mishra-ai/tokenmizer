@@ -97,8 +97,15 @@ class Memory:
         try:
             from tokenmizer.security.ownership import OwnershipStore
             OwnershipStore(storage_dir=storage_dir).claim(session_id, principal)
-        except Exception:
-            pass
+        except Exception as e:
+            # Best-effort, but not silent. This is the one path in the
+            # module that fails with NO trace at all, and its consequence
+            # is invisible by construction: the session simply never turns
+            # up in a cross-session search, which reads as "nothing was
+            # remembered" rather than as a failure.
+            logger.debug("Could not claim ownership of session %r for %r "
+                         "(%s) — it will not be discoverable from another "
+                         "session", session_id, principal, e)
 
     # ── Write ────────────────────────────────────────────────────────────────
 
