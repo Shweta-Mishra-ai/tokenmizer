@@ -58,6 +58,10 @@ class CacheEntry:
     # its keep.
     context: str = ""
 
+    # Bytes this entry costs, measured once at construction. The cache is
+    # bounded by this as well as by entry count; see SemanticCache.
+    nbytes: int = 0
+
     def is_expired(self, ttl_seconds: int) -> bool:
         return (time.time() - self.created_at) > ttl_seconds
 
@@ -176,6 +180,9 @@ class SemanticCache:
         ttl_seconds: int = 3600,
         max_size: int = 10_000,
         share_scope: str = "session",
+        max_bytes: int = 256 * 1024 * 1024,
+        max_entry_bytes: int = 1024 * 1024,
+        max_semantic_scan: int = 2_000,
     ):
         """
         share_scope:
@@ -192,10 +199,23 @@ class SemanticCache:
         self.ttl_seconds = ttl_seconds
         self.max_size = max_size
         self.share_scope = share_scope
+        # A cap on entries is not a cap on memory: an entry holds a whole
+        # LLM response. 10,000 entries at 60 KB is 600 MB resident, and
+        # the only thing `stats()` used to report was "utilization_pct:
+        # 100", which reads as a full cache rather than as a gigabyte.
+        # Both bounds are enforced and both are reported.
+        self.max_bytes = max_bytes
+        self.max_entry_bytes = max_entry_bytes
+        self.max_semantic_scan = max_semantic_scan
         self._exact: OrderedDict[str, CacheEntry] = OrderedDict()
         self._embeddings: dict[str, object] = {}  # key → embedding
         self._embedder = EmbeddingEngine.get()
+        self._bytes = 0
         self._eviction_count = 0
+        self._evicted_for_bytes = 0
+        self._rejected_too_large = 0
+        self._expired_swept = 0
+        self._sets_since_sweep = 0
         self._hit_exact = 0
         self._hit_semantic = 0
         self._miss = 0
@@ -231,13 +251,59 @@ class SemanticCache:
             h.update(b"\x1e")
         return h.hexdigest()[:24]
 
+    # Rough per-entry overhead that is not the response text: the key,
+    # the truncated prompt, the dataclass itself, and the embedding vector
+    # when there is one (384 float32s for the default model). Approximate
+    # on purpose — the point is a bound an operator can reason about, not
+    # an exact heap measurement, and sys.getsizeof on every set() would
+    # cost more than it tells anyone.
+    _ENTRY_OVERHEAD = 700
+    _EMBEDDING_BYTES = 384 * 4
+
+    def _measure(self, prompt: str, response: str) -> int:
+        return (len(response.encode("utf-8", "replace"))
+                + len(prompt[:500].encode("utf-8", "replace"))
+                + self._ENTRY_OVERHEAD)
+
+    def _drop(self, key: str) -> None:
+        """Remove one entry and give back its bytes. Every removal goes
+        through here, so `_bytes` cannot drift away from the contents."""
+        entry = self._exact.pop(key, None)
+        if entry is None:
+            return
+        self._bytes -= entry.nbytes
+        if self._embeddings.pop(key, None) is not None:
+            self._bytes -= self._EMBEDDING_BYTES
+        if self._bytes < 0:  # belt and braces: never report a negative size
+            self._bytes = 0
+
     def _evict_lru(self) -> None:
         """Remove the least-recently-used entry."""
         if not self._exact:
             return
-        lru_key, _ = self._exact.popitem(last=False)
-        self._embeddings.pop(lru_key, None)
+        lru_key = next(iter(self._exact))
+        self._drop(lru_key)
         self._eviction_count += 1
+
+    def _sweep_expired(self) -> int:
+        """Drop entries past their TTL.
+
+        Expiry used to be checked only on lookup, so an entry nobody asks
+        for again was never reclaimed — it sat until LRU pressure reached
+        it. On a low-traffic proxy with a large cache that is an hour of
+        dead responses held for nothing. A full scan is O(n) but runs once
+        every `_SWEEP_EVERY` sets, so the amortised cost is a handful of
+        timestamp comparisons per request.
+        """
+        now = time.time()
+        dead = [k for k, e in self._exact.items()
+                if (now - e.created_at) > self.ttl_seconds]
+        for k in dead:
+            self._drop(k)
+        self._expired_swept += len(dead)
+        return len(dead)
+
+    _SWEEP_EVERY = 256
 
     def get(self, prompt: str, session_id: str = "",
             context: str = "") -> Optional[CacheEntry]:
@@ -266,8 +332,7 @@ class SemanticCache:
         if key in self._exact:
             entry = self._exact[key]
             if entry.is_expired(self.ttl_seconds):
-                del self._exact[key]
-                self._embeddings.pop(key, None)
+                self._drop(key)
                 self._miss += 1
                 return None
             self._exact.move_to_end(key)  # mark as recently used
@@ -286,7 +351,20 @@ class SemanticCache:
             best_score = 0.0
             best_key = None
 
-            for k, entry in self._exact.items():
+            # Newest first, and bounded. This loop is O(n) Python on the
+            # MISS path — the path a request takes when the cache did not
+            # help it — so at max_size=10,000 it was ten thousand dict
+            # lookups and dot products added to the latency of every
+            # uncached request. Walking from the most-recently-used end
+            # and stopping after max_semantic_scan bounds that; what it
+            # skips is the coldest tail, which is also the least likely
+            # to match.
+            scanned = 0
+            for k in reversed(self._exact):
+                if scanned >= self.max_semantic_scan:
+                    break
+                scanned += 1
+                entry = self._exact[k]
                 if entry.is_expired(self.ttl_seconds):
                     continue
                 if entry.scope != "__shared__" and entry.scope != (session_id or "__private__"):
@@ -377,9 +455,44 @@ class SemanticCache:
         # shared ones keyed by content alone.
         key = self._key(prompt, scope, context)
 
-        # Evict if at capacity
+        nbytes = self._measure(prompt, response)
+        if nbytes > self.max_entry_bytes:
+            # Serve it, do not remember it. One 40 MB answer would
+            # otherwise evict the entire useful cache to store a single
+            # entry that is unlikely ever to be asked for again. Counted,
+            # not silent: a rising rejected_too_large in /api/cache/stats
+            # is how an operator learns the per-entry cap is wrong for
+            # their traffic rather than wondering why the hit rate fell.
+            self._rejected_too_large += 1
+            logger.debug(
+                "Response of %d bytes exceeds max_entry_bytes=%d — served "
+                "but not cached", nbytes, self.max_entry_bytes,
+            )
+            return
+
+        # Replacing an existing key must give its bytes back first, or the
+        # total drifts upward by the old entry's size on every overwrite.
+        if key in self._exact:
+            self._drop(key)
+
+        self._sets_since_sweep += 1
+        if self._sets_since_sweep >= self._SWEEP_EVERY:
+            self._sets_since_sweep = 0
+            self._sweep_expired()
+
+        # Evict if at capacity — on EITHER bound. Leave room for the
+        # embedding too, so a cache full of vectors still lands under the
+        # byte budget rather than a fraction over it.
+        incoming = nbytes + (self._EMBEDDING_BYTES
+                             if self._embedder.available else 0)
         while len(self._exact) >= self.max_size:
             self._evict_lru()
+        while self._exact and self._bytes + incoming > self.max_bytes:
+            before = len(self._exact)
+            self._evict_lru()
+            self._evicted_for_bytes += 1
+            if len(self._exact) == before:  # nothing was removed; stop
+                break
 
         entry = CacheEntry(
             key=key,
@@ -390,15 +503,18 @@ class SemanticCache:
             created_at=time.time(),
             scope=scope,
             context=context,
+            nbytes=nbytes,
         )
         self._exact[key] = entry
         self._exact.move_to_end(key)
+        self._bytes += nbytes
 
         # Store embedding for semantic lookup
         if self._embedder.available:
             emb = self._embedder.embed(prompt)
             if emb is not None:
                 self._embeddings[key] = emb
+                self._bytes += self._EMBEDDING_BYTES
 
     def invalidate(self, prompt: str, session_id: str = "") -> int:
         """Remove cached entries for `prompt`. Returns how many were removed.
@@ -425,14 +541,15 @@ class SemanticCache:
         else:
             candidates = [k for k, e in self._exact.items() if e.prompt == needle]
         for key in candidates:
-            if self._exact.pop(key, None) is not None:
+            if key in self._exact:
+                self._drop(key)
                 removed += 1
-            self._embeddings.pop(key, None)
         return removed
 
     def clear(self) -> None:
         self._exact.clear()
         self._embeddings.clear()
+        self._bytes = 0
 
     def stats(self) -> dict:
         total = self._hit_exact + self._hit_semantic + self._miss
@@ -441,7 +558,17 @@ class SemanticCache:
             "entries": len(self._exact),
             "max_size": self.max_size,
             "utilization_pct": round(len(self._exact) / self.max_size * 100, 1),
+            # What the entry count does not tell an operator: how much
+            # memory this is. A cache at 12% of its entry cap can be at
+            # 100% of its byte cap, and only one of those two numbers
+            # explains the resident size of the process.
+            "bytes": self._bytes,
+            "max_bytes": self.max_bytes,
+            "bytes_pct": round(self._bytes / max(1, self.max_bytes) * 100, 1),
             "evictions": self._eviction_count,
+            "evicted_for_bytes": self._evicted_for_bytes,
+            "rejected_too_large": self._rejected_too_large,
+            "expired_swept": self._expired_swept,
             "hit_rate": round(hit_rate, 3),
             "hit_exact": self._hit_exact,
             "hit_semantic": self._hit_semantic,

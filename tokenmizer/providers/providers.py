@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from abc import ABC, abstractmethod
@@ -165,6 +166,25 @@ class LLMResponse:
 
 # ── Base ─────────────────────────────────────────────────────────────────────
 
+def _env_timeout(default: float = 120.0) -> float:
+    """Read TOKENMIZER_REQUEST_TIMEOUT, falling back to `default`.
+
+    A bad value is a misconfiguration, not a reason to fail startup —
+    but it is also not a reason to silently use a number the operator
+    did not choose, so it is logged."""
+    raw = os.environ.get("TOKENMIZER_REQUEST_TIMEOUT", "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "TOKENMIZER_REQUEST_TIMEOUT=%r is not a number — using %ss",
+            raw, default,
+        )
+        return default
+
+
 class BaseProvider(ABC):
 
     # Tool/function calling. `supports_tools` — the adapter forwards
@@ -178,10 +198,31 @@ class BaseProvider(ABC):
     supports_tools: bool = False
     supports_tool_stream: bool = False
 
+    # How long an upstream call may hang before it is abandoned.
+    #
+    # Every vendor SDK here defaults to 600 seconds. On a proxy that is
+    # not a timeout, it is an outage: a hung upstream holds the request,
+    # the session lock, the extraction slot and the session's place in
+    # the graph cache for ten minutes, and a handful of them is the whole
+    # worker. 120s matches what the Ollama adapter already used, and is
+    # comfortably longer than a slow long-form completion.
+    #
+    # Override per deployment with TOKENMIZER_REQUEST_TIMEOUT; a value of
+    # 0 or less restores the SDK default, for anyone who really does want
+    # to wait.
+    request_timeout: float = _env_timeout()
+
     def __init__(self, api_key: str = "", model: str = ""):
         self.api_key = api_key
         self.default_model = model
         self._retry_delays = [1.0, 2.0, 4.0]
+
+    @property
+    def _timeout_kwargs(self) -> dict:
+        """`{"timeout": n}` for an SDK client, or `{}` to keep its own
+        default. One place, so an adapter cannot be the one that forgot."""
+        t = self.request_timeout
+        return {"timeout": t} if t and t > 0 else {}
 
     @abstractmethod
     async def _call(
@@ -302,7 +343,8 @@ class AnthropicProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install anthropic")
 
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
+        client = anthropic.AsyncAnthropic(api_key=self.api_key,
+                                          **self._timeout_kwargs)
 
         # Separate system messages from conversation
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
@@ -375,7 +417,8 @@ class AnthropicProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install anthropic")
         model = model or self.default_model
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
+        client = anthropic.AsyncAnthropic(api_key=self.api_key,
+                                          **self._timeout_kwargs)
 
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
@@ -491,6 +534,7 @@ class OpenAIProvider(BaseProvider):
         client = AsyncOpenAI(
             api_key=self.api_key,
             **({"base_url": self._base_url} if self._base_url else {}),
+            **self._timeout_kwargs,
         )
 
         all_messages = messages[:]
@@ -544,6 +588,7 @@ class OpenAIProvider(BaseProvider):
         client = AsyncOpenAI(
             api_key=self.api_key,
             **({"base_url": self._base_url} if self._base_url else {}),
+            **self._timeout_kwargs,
         )
         all_messages = messages[:]
         if system:
@@ -794,7 +839,11 @@ class GeminiProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install google-genai")
 
-        client = genai.Client(api_key=self.api_key)
+        client = genai.Client(
+            api_key=self.api_key,
+            **({"http_options": {"timeout": int(self.request_timeout * 1000)}}
+               if self.request_timeout and self.request_timeout > 0 else {}),
+        )
 
         # Extract system prompt
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
@@ -868,7 +917,11 @@ class GeminiProvider(BaseProvider):
             raise ImportError("pip install google-genai")
 
         model = model or self.default_model
-        client = genai.Client(api_key=self.api_key)
+        client = genai.Client(
+            api_key=self.api_key,
+            **({"http_options": {"timeout": int(self.request_timeout * 1000)}}
+               if self.request_timeout and self.request_timeout > 0 else {}),
+        )
 
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
@@ -949,7 +1002,7 @@ class OllamaProvider(BaseProvider):
             # tool_choice, so "none"/"required" cannot be enforced here.
             payload["tools"] = tk["tools"]
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=self.request_timeout or None) as client:
             try:
                 r = await client.post(f"{self._base_url}/api/chat", json=payload)
                 r.raise_for_status()
@@ -1000,7 +1053,7 @@ class OllamaProvider(BaseProvider):
             # see them — the same silent drop the non-streaming path had.
             payload["tools"] = tk["tools"]
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=self.request_timeout or None) as client:
                 async with client.stream("POST", f"{self._base_url}/api/chat",
                                          json=payload) as r:
                     r.raise_for_status()

@@ -134,6 +134,8 @@ class AnalyticsEngine:
         # stability even though it now covers a slightly broader category
         # than literal persistence (see record_silent_failure docstring).
         self._persist_failures: Dict[str, int] = defaultdict(int)
+        # Work dropped on purpose to stay inside a limit — see record_shed.
+        self._shed: Dict[str, int] = defaultdict(int)
 
         if self._db_path is not None:
             self._init_db()
@@ -272,6 +274,21 @@ class AnalyticsEngine:
     @property
     def persist_failures(self) -> Dict[str, int]:
         return dict(self._persist_failures)
+
+    def record_shed(self, source: str) -> None:
+        """Track work deliberately dropped to stay inside a limit.
+
+        Distinct from `record_silent_failure` on purpose: a shed is not a
+        fault, it is the system doing what it was configured to do, and an
+        operator reading /api/stats needs to tell "my cheap provider is
+        down" apart from "my proxy is at capacity". They lead to opposite
+        actions — fix a key, or raise a limit — and one dict of mixed
+        counts cannot say which."""
+        self._shed[source] += 1
+
+    @property
+    def shed(self) -> Dict[str, int]:
+        return dict(self._shed)
 
     def record(
         self,
@@ -413,4 +430,5 @@ class AnalyticsEngine:
             # silently failed) are now visible here instead of only in logs.
             # Non-zero values mean data was lost — investigate immediately.
             "persist_failures": self.persist_failures,
+            "shed": self.shed,
         }

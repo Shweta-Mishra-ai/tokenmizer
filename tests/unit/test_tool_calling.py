@@ -232,7 +232,7 @@ async def test_anthropic_sends_translated_tools_and_parses_tool_use(monkeypatch)
                       usage=NS(input_tokens=10, output_tokens=5), stop_reason="tool_use")
 
     class _Client:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kw):
             self.messages = _Messages()
 
     monkeypatch.setattr(anthropic, "AsyncAnthropic", _Client)

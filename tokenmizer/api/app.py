@@ -18,6 +18,7 @@ file actually handles a given request.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -112,6 +113,9 @@ _cache = SemanticCache(
     ttl_seconds=settings.cache.ttl_seconds,
     max_size=settings.cache.max_size,
     share_scope=settings.cache.share_scope,
+    max_bytes=settings.cache.max_bytes,
+    max_entry_bytes=settings.cache.max_entry_bytes,
+    max_semantic_scan=settings.cache.max_semantic_scan,
 )
 _checkpoint_mgr = CheckpointManager(
     storage_dir=settings.graph_checkpoint.storage_dir,
@@ -176,8 +180,29 @@ _session_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
 # was doing — for the background extraction task, that would mean the
 # graph quietly stops gaining nodes from this path with no error at all.
 # Each task removes itself via the done-callback, so this set never grows
-# unbounded.
+# unbounded *over time* — but nothing bounded how many could be in flight
+# AT ONCE. One burst of a few thousand requests meant a few thousand
+# concurrent extraction tasks, each holding its slice of the transcript
+# and each making an upstream call: a memory spike and a self-inflicted
+# rate limit on the cheap provider, at exactly the moment the proxy is
+# busiest. See _extraction_slot() below.
 _background_tasks: set[asyncio.Task] = set()
+
+# Backpressure on the background LLM extraction pass.
+#
+# Shedding this is safe in a way that shedding most work is not: the
+# HEURISTIC extraction already ran synchronously before the task was
+# scheduled, so the graph has this turn's facts either way. What is lost
+# is the accuracy of the LLM pass for that one turn — precisely the
+# degradation the existing exception handler already documents as "no
+# data lost, just less accurate extraction this turn".
+#
+# Concurrency, not a queue length, is the limit that matters: a queue
+# just moves the memory from tasks to a list and adds latency to work
+# that is already best-effort. Over the limit, the turn keeps its
+# heuristic facts and the shed is counted in /api/stats.
+_EXTRACTION_MAX_CONCURRENT = 8
+_extraction_inflight = 0
 
 
 def _track_background_task(coro) -> asyncio.Task:
@@ -188,6 +213,26 @@ def _track_background_task(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+@contextlib.contextmanager
+def _extraction_slot():
+    """Occupy one of the concurrent-extraction slots, or yield False.
+
+    A counter rather than an asyncio.Semaphore because the caller must be
+    able to DECLINE when the limit is reached. `Semaphore.acquire()`
+    waits, and waiting is the failure mode this exists to prevent: the
+    tasks pile up holding memory instead of being dropped cheaply.
+    """
+    global _extraction_inflight
+    if _extraction_inflight >= _EXTRACTION_MAX_CONCURRENT:
+        yield False
+        return
+    _extraction_inflight += 1
+    try:
+        yield True
+    finally:
+        _extraction_inflight -= 1
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
@@ -886,6 +931,26 @@ async def _update_graph(
                     _g=graph, _msgs=new_msgs, _all=raw_messages,
                     _cheap=cheap, _lock=_lock_ref, _sid=session_id,
                 ):
+                    with _extraction_slot() as got_slot:
+                        if not got_slot:
+                            # At capacity. This turn keeps the heuristic
+                            # facts extracted synchronously above; only
+                            # the LLM refinement is dropped. Counted as a
+                            # shed, not a failure: the operator's fix is
+                            # to raise the limit or add capacity, which is
+                            # a different action from fixing a broken key.
+                            _analytics.record_shed("llm_extraction")
+                            logger.info(
+                                "Background LLM extraction shed for session "
+                                "%s — %d already in flight (limit %d). The "
+                                "turn keeps its heuristic facts.",
+                                _sid, _extraction_inflight,
+                                _EXTRACTION_MAX_CONCURRENT,
+                            )
+                            return
+                        await _run_extraction(_g, _msgs, _all, _cheap, _lock, _sid)
+
+                async def _run_extraction(_g, _msgs, _all, _cheap, _lock, _sid):
                     async with _lock:
                         try:
                             from tokenmizer.graph_memory.hybrid_extractor import HybridExtractor
@@ -1699,6 +1764,11 @@ async def health():
         # Non-zero means something was lost or not written. Each key names
         # the path that failed; see AnalyticsEngine.record_silent_failure.
         "persist_failures": failures,
+        # Deliberate, bounded degradation — NOT part of `degraded`. A
+        # proxy shedding the optional LLM extraction pass under load is
+        # working as configured; calling that unhealthy would train an
+        # operator to ignore the field that means something was lost.
+        "shed": _analytics.shed,
         "sessions_with_unreadable_graph": sessions_load_failed,
         "sessions_without_durable_storage": sessions_no_durability,
         "sessions_with_data_loss": sessions_data_loss,

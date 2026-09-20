@@ -82,7 +82,7 @@ async def test_anthropic_streaming_uses_real_usage_for_input_tokens(monkeypatch)
             return _FakeMessageStream(["Hel", "lo"], fake_final)
 
     class _FakeClient:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, **kw):
             self.messages = _FakeMessages()
 
     monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeClient)

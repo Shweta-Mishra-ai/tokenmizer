@@ -119,6 +119,20 @@ class CacheSettings(BaseModel):
     similarity_threshold: float = 0.92
     ttl_seconds: int = 3600
     max_size: int = 10_000
+    # A cap on ENTRIES is not a cap on memory. An entry holds a full LLM
+    # response, and 10,000 of those at 60 KB each is 600 MB resident with
+    # nothing in the process to stop it — the operator sees
+    # "utilization_pct: 100" and no indication that it means a gigabyte.
+    # Both bounds are enforced; whichever binds first wins.
+    max_bytes: int = 256 * 1024 * 1024
+    # One pathological response must not be able to spend the whole
+    # budget. Above this an answer is served but not remembered.
+    max_entry_bytes: int = 1024 * 1024
+    # The semantic layer is an O(n) Python loop over the cache on every
+    # MISS, which is the request path. Scanning the most recent N is a
+    # bound on the worst case; the entries it skips are the coldest ones,
+    # which are also the least likely to match.
+    max_semantic_scan: int = 2_000
     # "session" (default): every cached prompt is scoped to its session_id,
     # never shared across sessions — safe by default for hosted/team use.
     # "shared": non-sensitive prompts are shared globally across sessions

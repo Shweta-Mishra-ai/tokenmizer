@@ -91,6 +91,68 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Fixed — the cache was bounded by entries, which is not a bound on memory
+
+`max_size: 10000` caps cached **entries**, and an entry holds a whole LLM
+response. Measured on this machine: ten thousand answers of 60 KB is
+**579 MiB** resident, reached by an ordinary week of code-generation
+traffic — and the only thing `stats()` reported was `utilization_pct:
+100`, which reads as "the cache is full" rather than as "the cache is
+half a gigabyte". Nothing in the process could tell an operator which of
+those two they had.
+
+- **A byte bound, enforced alongside the entry bound** (`max_bytes`,
+  256 MiB by default). Whichever binds first wins. The same fill now
+  holds 255 MiB. `bytes`, `max_bytes`, `bytes_pct` and
+  `evicted_for_bytes` are in `/api/cache/stats`.
+- **One pathological response cannot spend the whole budget.** Above
+  `max_entry_bytes` (1 MiB) an answer is served but not cached, counted
+  as `rejected_too_large` — silence there would show up only as an
+  unexplained drop in hit rate.
+- **Expired entries are reclaimed.** TTL was checked only on lookup, so
+  an entry nobody asks for again sat until LRU pressure reached it: on a
+  low-traffic proxy, an hour of dead responses held for nothing. Swept
+  every 256 sets, amortised to a few timestamp comparisons per request.
+- **The byte total cannot drift.** Every removal goes through one
+  `_drop()`, and overwriting a key gives back the old entry's bytes
+  first. An accounting bug that undercounts is an unbounded cache
+  wearing a bound, so a test recounts the contents after sets,
+  evictions, invalidations and overwrites.
+
+### Fixed — three ways load turned into an outage
+
+- **Nothing bounded concurrent background extraction.** The comment above
+  `_background_tasks` said the set "never grows unbounded" — true over
+  time, since each task removes itself, and irrelevant under load: a
+  burst of N requests produced N concurrent tasks, each holding its slice
+  of the transcript and each making an upstream call. Concurrency is now
+  capped at 8 and over the cap the LLM pass is **shed**, which is safe
+  here specifically because the heuristic extraction already ran
+  synchronously — the turn keeps its facts, it loses only the refinement.
+  A counter rather than a semaphore, because the caller has to be able to
+  decline: waiting is the failure mode, since a task that waits still
+  holds its memory.
+- **A shed is now distinct from a failure.** `/api/stats` and `/health`
+  carry `shed` beside `persist_failures`, and shedding does **not** mark
+  the proxy degraded. "My cheap provider key expired" and "my proxy is at
+  capacity" lead to opposite actions, and one dict of mixed counts cannot
+  say which you have. A load shed that turned `/health` red would teach
+  an operator to ignore the field that means something was lost.
+- **Upstream calls had no timeout of ours.** Every vendor SDK defaults to
+  600 seconds; on a proxy that is not a timeout but an outage — a hung
+  upstream holds the request, the session lock, the extraction slot and
+  the session's place in the graph cache for ten minutes. Now 120s
+  across every adapter (the value the Ollama adapter already used, which
+  is how the gap was visible), overridable with
+  `TOKENMIZER_REQUEST_TIMEOUT`; `0` restores the SDK default.
+- **The semantic cache lookup is bounded.** It was an O(n) Python loop
+  with a dot product per entry, running on the MISS path — the path a
+  request takes when the cache did not help it. At `max_size: 10000`
+  that was ten thousand comparisons added to the latency of every
+  uncached request. It now walks the most-recently-used end and stops at
+  `max_semantic_scan` (2,000); what it skips is the coldest tail, which
+  is also the least likely to match.
+
 ### Fixed — the force view was a clump, a border of exiles, and stacked labels
 
 The graph's force layout was the third thing in this product a reader saw

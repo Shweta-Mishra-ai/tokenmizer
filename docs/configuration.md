@@ -31,7 +31,9 @@ compression:
 
 cache:
   enabled: true
-  max_size: 10000
+  max_size: 10000               # entries
+  max_bytes: 268435456          # 256 MiB — the bound that is actually memory
+  max_entry_bytes: 1048576      # one answer bigger than this is not cached
 
 state_backend: memory           # memory | sqlite — see note below
 ```
@@ -68,6 +70,11 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_GRAPH_CHECKPOINT__USE_LLM_EXTRACTION` | `false` | Hybrid LLM + heuristic extraction (needs a key, ~$0.001/turn) |
 | `TOKENMIZER_CACHE__ENABLED` | `true` | Semantic cache |
 | `TOKENMIZER_CACHE__SIMILARITY_THRESHOLD` | `0.92` | How close a hit must be |
+| `TOKENMIZER_CACHE__MAX_SIZE` | `10000` | Cap on cached **entries** |
+| `TOKENMIZER_CACHE__MAX_BYTES` | `268435456` | Cap on cached **bytes** (256 MiB). An entry holds a whole response, so the entry cap alone is not a memory bound — 10,000 answers of 60 KB is 579 MiB measured. Whichever bound binds first wins |
+| `TOKENMIZER_CACHE__MAX_ENTRY_BYTES` | `1048576` | A single response larger than this is served but not cached, so one huge answer cannot evict the whole cache |
+| `TOKENMIZER_CACHE__MAX_SEMANTIC_SCAN` | `2000` | Most-recent entries compared on a cache miss. The semantic layer is an O(n) loop on the request path; this bounds its worst case |
+| `TOKENMIZER_REQUEST_TIMEOUT` | `120` | Seconds an upstream call may hang. Every vendor SDK defaults to 600, which on a proxy holds a request, its session lock and its extraction slot for ten minutes. `0` restores the SDK default |
 | `TOKENMIZER_COMPRESSION__ENABLED` | `true` | Prompt compression |
 | `TIKTOKEN_CACHE_DIR` | *(unset)* | Where tiktoken looks for its BPE vocabulary. Set it, and pre-download, to run without egress — the Docker image does this at build time |
 
