@@ -183,6 +183,22 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
             "Avoid: " + " | ".join(f"[DO NOT USE] {n.label[:40]}" for n in invalidated[:2])
         )
 
+    # ── 7b. Constraints from windowed-out turns ───────────────────────────
+    # Placed above Files deliberately: a file list is re-derivable from the
+    # repository, and "keep the bundle under 500KB" is not re-derivable
+    # from anything once the turn that said it has left the conversation.
+    # See summary.py for why these sentences exist as a node at all.
+    notes = sorted(
+        [n for n in graph._nodes.values()
+         if n.type == NodeType.SUMMARY and not n._evicted],
+        key=lambda x: x.updated_at, reverse=True
+    )
+    if notes:
+        # "Noted:" and not "Constraints:": the selector keeps hard figures
+        # as well as rules ("21 percent of the suite fails here"), and a
+        # header that overpromises is how a reader learns to distrust one.
+        sections.append("Noted: " + notes[0].label)
+
     # ── 8. Files ──────────────────────────────────────────────────────────
     files = sorted(
         [n for n in graph._nodes.values()

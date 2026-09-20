@@ -136,3 +136,78 @@ class TestAutoCheckpointTriggersOnRealSize:
             "checkpoint fired even though windowing should have reduced "
             "the payload to a small fraction of a 100,000-token window"
         )
+
+
+class TestTriggerFollowsTheClientsConversation:
+    """The window that is running out is the CLIENT's, not ours.
+
+    Occupancy was compared only against what TokenMizer sends, and
+    windowing keeps that near-constant: a session 40 turns deep sent the
+    same fraction it sent at turn 5, so the auto-checkpoint almost never
+    fired in exactly the sessions it exists for. It now takes the fuller
+    of the two sides — what we send, and what the client is holding.
+    """
+
+    async def test_long_client_history_checkpoints_though_the_sent_payload_is_small(
+        self, graph, monkeypatch
+    ):
+        monkeypatch.setattr(app_module, "_context_window", lambda model: 4_000)
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "trigger_at_percent", 0.85)
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", True)
+
+        # What the client holds: well past the threshold.
+        raw = _messages(60, words_per_turn=30)
+        # What windowing left us to send: a small fraction of it.
+        sent = _messages(2, words_per_turn=10)
+
+        _, status = await app_module._update_graph(
+            "ctx-test-session", graph, raw, sent, "claude-sonnet-4-6",
+            {}, "where did we get to with the auth work",
+        )
+
+        assert status["attempted"] is True, (
+            "the client's conversation is the one about to run out of "
+            "room; windowing our own payload does not make it smaller"
+        )
+
+    async def test_a_large_sent_payload_still_triggers_on_its_own(
+        self, graph, monkeypatch
+    ):
+        """Taking the max must not lose the original signal: a big sent
+        payload triggers even when the client's own history is short
+        (file intelligence and context injection can both grow it).
+
+        Windowing is held off here, because it runs inside _update_graph
+        and would otherwise shrink the payload before it is counted —
+        which is the very reason the sent side alone was not enough."""
+        monkeypatch.setattr(app_module, "_context_window", lambda model: 4_000)
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "trigger_at_percent", 0.85)
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", True)
+        monkeypatch.setattr(app_module.settings.memory, "max_tokens_before_summary", 10**7)
+
+        raw = _messages(1, words_per_turn=5)
+        sent = _messages(60, words_per_turn=30)
+
+        _, status = await app_module._update_graph(
+            "ctx-test-session", graph, raw, sent, "claude-sonnet-4-6",
+            {}, "and what about the rest of it",
+        )
+
+        assert status["attempted"] is True
+
+    async def test_both_sides_small_still_does_not_trigger(self, graph, monkeypatch):
+        """The guard against the other failure mode: checkpointing every
+        turn of a short session is its own kind of broken."""
+        monkeypatch.setattr(app_module, "_context_window", lambda model: 100_000)
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "trigger_at_percent", 0.85)
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", True)
+
+        raw = _messages(3, words_per_turn=20)
+        sent = _messages(3, words_per_turn=20)
+
+        _, status = await app_module._update_graph(
+            "ctx-test-session", graph, raw, sent, "claude-sonnet-4-6",
+            {}, "just a quick question about the login flow",
+        )
+
+        assert status["attempted"] is False

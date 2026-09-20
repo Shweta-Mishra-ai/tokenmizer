@@ -20,10 +20,13 @@ safe.
 """
 from __future__ import annotations
 
+import logging
 from typing import Callable, Iterable
 
 from tokenmizer.graph_memory.graph import GraphMemory
 from tokenmizer.graph_memory.types import MemoryNode
+
+logger = logging.getLogger(__name__)
 
 # ponytail: bounds how many of a principal's other sessions get pulled into
 # one query — a principal with hundreds of sessions would otherwise load
@@ -59,7 +62,15 @@ def query_across_sessions(
     for session_id in list(other_session_ids)[:MAX_OTHER_SESSIONS]:
         try:
             other = load_graph(session_id)
-        except Exception:
+        except Exception as e:
+            # One unreadable session must not sink the whole recall, but
+            # it must not be invisible either: silently returning fewer
+            # results looks exactly like "nothing relevant was found".
+            logger.warning(
+                "Cross-session recall skipped %s (its graph could not be "
+                "loaded, so anything it knows is missing from this "
+                "answer): %s", session_id, e,
+            )
             continue
         for score, node in other._score_nodes(task):
             pool.append((score, node, session_id))

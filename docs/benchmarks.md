@@ -11,7 +11,7 @@ python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 1228 tests
+pytest tests/ -q                                     # 1249 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -24,11 +24,11 @@ Measured on v0.5.4:
 | Category | Precision | Recall | F1 |
 |---|---|---|---|
 | Files | 98% | 100% | **99%** |
+| Decisions | 97% | 100% | **99%** |
+| Completed tasks | 98% | 98% | **98%** |
 | Pending tasks | 100% | 90% | **95%** |
-| Decisions | 95% | 100% | **98%** |
-| Completed tasks | 92% | 90% | **91%** |
-| Errors | 96% | 96% | **96%** |
-| | | **macro F1** | **96%** |
+| Errors | 93% | 96% | **94%** |
+| | | **macro F1** | **97%** |
 
 **Precision is reported, not just recall.** An extractor that emits the
 whole transcript as one node scores 100% recall; that is why recall-only
@@ -86,6 +86,29 @@ tokens** (180 / 168 / 136 across the three sessions) versus ~1,500+
 tokens of raw history. The advantage is concentrated in decision recall
 (92% vs a baseline that drops as low as 50%); on tasks it ties the
 baseline (76% both).
+
+## Resume quality — what survives windowing
+
+`python -m benchmarks.resume_quality.runner`. Windowing replaces every
+turn older than the protected tail with the resume block, so anything the
+ontology has no node for — a budget, a deadline, a licence restriction, a
+latency target — used to leave the session at that point permanently.
+
+| | before | after |
+|---|---|---|
+| Out-of-ontology facts still readable in the resume block | 17% | **100%** |
+| Resume block, per session | — | **+23 tokens** |
+| Sections lost on the corpus's six real transcripts | — | **0** |
+
+Checkpoint accuracy is unchanged by it (80% / 100% / 100% task /
+decision / file recall), which is the regression that mattered: the block
+is budgeted, so anything added can push out what was already there.
+
+**The fixtures were written by the same person as the selector**, so the
+100% shows the mechanism works end to end and not that it generalises to
+phrasings nobody had in mind — the same caveat the synthetic half of the
+extraction corpus carries. The runner prints the notes it produces for
+the six real transcripts beside it, which is the part worth reading.
 
 ## Storage — schema v2 (per-row)
 

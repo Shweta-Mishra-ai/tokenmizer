@@ -146,6 +146,13 @@ class GraphMemory:
         # Persistently non-zero means the supersede-tracking feature is
         # broken, even though node creation itself keeps working.
         self._decision_tracking_failures = 0
+        # The one SUMMARY node for this session's windowed-out turns, and
+        # how many turns it already covers. See record_span_summary. Both
+        # are in-memory: the node itself is persisted like any other, and
+        # on a reload the first windowed turn re-selects over the whole
+        # span, which is correct rather than merely cheap.
+        self._summary_node_id: str | None = None
+        self._summarised_turns = 0
         # True if the SQLite DB could not be reinitialized after corruption —
         # the graph is running in-memory-only with no durable persistence.
         self._persistence_broken = False
@@ -337,25 +344,36 @@ class GraphMemory:
         # supplied an explicit value; for extraction-sourced decisions that
         # is merge()'s corroboration tier, which the validator blends into
         # its own score (see validator.validate).
-        validator = _get_validator()
-        result = validator.validate(
-            label=label,
-            node_type=node_type.value,
-            summary=summary,
-            source_role=source_role,
-            extractor_confidence=confidence if confidence != 0.7 else None,
-        )
-        if not result.accepted:
-            logger.debug(f"Node rejected: {label!r} ({result.rejection_reason})")
-            return ""  # empty string = rejected, callers must check
+        #
+        # The validator scores a CLAIM the extractor inferred from a
+        # phrasing: is this really a decision, is this label noise, does
+        # the type match the text. A SUMMARY node is none of those — it is
+        # a verbatim record of sentences the ontology deliberately has no
+        # node for, written by one caller with a known provenance, and
+        # scoring it as an extraction rejects it for being what it is
+        # (prose, several sentences, no decision verb). It still goes
+        # through redaction above, which is the check that matters for
+        # text copied out of a transcript.
+        if node_type is not NodeType.SUMMARY:
+            validator = _get_validator()
+            result = validator.validate(
+                label=label,
+                node_type=node_type.value,
+                summary=summary,
+                source_role=source_role,
+                extractor_confidence=confidence if confidence != 0.7 else None,
+            )
+            if not result.accepted:
+                logger.debug(f"Node rejected: {label!r} ({result.rejection_reason})")
+                return ""  # empty string = rejected, callers must check
 
-        # Apply type correction if validator detected mismatch
-        if result.corrected_type:
-            try:
-                node_type = NodeType(result.corrected_type)
-                node_id = self._node_id(node_type.value, norm)
-            except ValueError:
-                pass  # keep original type if correction is unknown
+            # Apply type correction if validator detected mismatch
+            if result.corrected_type:
+                try:
+                    node_type = NodeType(result.corrected_type)
+                    node_id = self._node_id(node_type.value, norm)
+                except ValueError:
+                    pass  # keep original type if correction is unknown
 
         node = MemoryNode(
             id=node_id,
@@ -429,6 +447,57 @@ class GraphMemory:
                 )
                 self._decision_tracking_failures += 1
 
+        return node_id
+
+    def record_span_summary(self, dropped: list[dict]) -> str | None:
+        """Keep, as one node, what the turns in `dropped` said that the
+        ontology has no node for — see summary.py.
+
+        Called by the windowing layer with the turns it is about to
+        replace. Returns the node id, or None when there was nothing worth
+        keeping, which is the common case.
+
+        There is at most ONE of these per session, superseded in place each
+        time the span grows: the span is a prefix that only ever extends,
+        so a second node would repeat the first rather than add to it. The
+        node carries the count of turns it covers, which is how a reader
+        tells "nothing was dropped" from "nothing worth keeping was".
+        """
+        from tokenmizer.graph_memory.summary import summarise_span
+
+        if not dropped:
+            return None
+        # Re-selecting on every turn would re-scan a span that grows by two
+        # messages at a time, for a note that rarely changes. Wait until
+        # there is a turn's worth of new material.
+        if len(dropped) < self._summarised_turns + 2:
+            return self._summary_node_id
+        note = summarise_span(self, dropped)
+        self._summarised_turns = len(dropped)
+        if not note:
+            return self._summary_node_id
+
+        if self._summary_node_id and self._summary_node_id in self._nodes:
+            existing = self._nodes[self._summary_node_id]
+            existing.label = note[:120]
+            existing.summary = f"from {len(dropped)} windowed turns"
+            existing.touch()
+            self._dirty = True
+            return existing.id
+
+        node_id = self.add_node(
+            NodeType.SUMMARY,
+            note,
+            status=NodeStatus.COMPLETED,
+            summary=f"from {len(dropped)} windowed turns",
+            # Above a file, below a decision: it is there because it would
+            # otherwise be lost entirely, but it is unstructured text and
+            # the structured sections say their part better.
+            importance=0.55,
+            # Heuristic sentence selection, not an extracted fact.
+            confidence=0.5,
+        )
+        self._summary_node_id = node_id
         return node_id
 
     def record_supersession(

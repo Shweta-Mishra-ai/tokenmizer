@@ -23,10 +23,13 @@ proxy uses, so an agent and the proxy can share a session.
 """
 from __future__ import annotations
 
+import logging
 from typing import Iterable, Optional
 
 from tokenmizer.graph_memory.graph import GraphMemory
 from tokenmizer.graph_memory.types import NodeType
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["Memory"]
 
@@ -153,15 +156,26 @@ class Memory:
         from tokenmizer.security.ownership import OwnershipStore
 
         store = OwnershipStore(storage_dir=self._storage_dir)
+        # An unreadable ownership store means cross-session recall returns
+        # nothing, which is indistinguishable from "this principal owns no
+        # other sessions" unless it is said out loud.
         try:
             owner = store.claim(self.session_id, self._principal)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "Ownership store unreadable, so no other session of this "
+                "principal can be recalled: %s", e,
+            )
             return []
         if owner != self._principal:
             return []
         try:
             sessions = store.sessions_for(owner)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "Could not list this principal's sessions, so cross-session "
+                "recall has nothing to draw on: %s", e,
+            )
             return []
         return [sid for sid in sessions if sid != self.session_id]
 

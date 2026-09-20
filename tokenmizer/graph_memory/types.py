@@ -28,6 +28,10 @@ class NodeType(str, Enum):
     TEST = "test"                 # test file / test result
     ENDPOINT = "endpoint"         # HTTP endpoint definition
     SCHEMA = "schema"             # data model / DB schema
+    # A note for turns windowing dropped: the constraints and numbers the
+    # ontology has no node for, which would otherwise leave the session
+    # entirely once the turn that stated them is replaced. See summary.py.
+    SUMMARY = "summary"
 
 
 class NodeStatus(str, Enum):

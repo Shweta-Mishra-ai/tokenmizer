@@ -21,7 +21,7 @@ benchmark, the suite is right and this file is a bug.
 | Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
 | Resume block size | ~160-180 tokens standard tier | `benchmarks/resume_quality` |
-| Suite | 1228 tests, ruff clean | `pytest tests/` |
+| Suite | 1249 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
 several items below exist.
@@ -58,25 +58,43 @@ well. P0 is the next release.
 
 ### P0 — nothing breaks mid-session
 
-**1. Rolling summary for the turns windowing drops.**
-When a session crosses `memory.max_tokens_before_summary`, every turn
-older than the last ten is replaced by a 250-token graph block. Anything
-the extractor missed on those turns (10% of labels on real transcripts,
-and everything outside the ontology: a constraint the user stated once, a
-preference, a number) is gone for the rest of the session. Design: a
-`SUMMARY` node per windowed span, written by the heuristic extractor's
-sentence selector by default and by the chat model when
-`use_llm_extraction` is on, budget-capped, superseded when the span is
-re-summarised. Measure with `benchmarks/resume_quality` and the
-checkpoint-accuracy runner; ship only if retention rises.
+**1. Rolling summary for the turns windowing drops.**  *(done)*
+A `SUMMARY` node per session holds what the ontology has no node for from
+the turns windowing replaced — a budget, a deadline, a licence
+restriction, a latency target. Each is one sentence, said once, and none
+of them is a task, a decision, a file or an error, so all of them used to
+leave the session permanently at the moment windowing engaged.
 
-**2. Auto-checkpoint on the client's conversation size.**
-The trigger compares the *sent* request to the window. The conversation
-the client holds is what is actually running out of room. Trigger on
-either the raw size or the sent size crossing `trigger_at_percent`, keep
-the per-session retention cap. Now that resume reads the live graph this
-is about the checkpoint diff and the "Continue from" hint, not about
-losing memory.
+Selected by `graph_memory/summary.py`: a clause is kept only if it
+carries a quantity with a unit or a constraint verb, AND is not already
+covered by a node the graph holds — restating a node spends the resume
+budget on nothing. One node per session, rewritten as the dropped span
+grows rather than accumulated, and never allowed to fail a chat request.
+
+Measured by the new `benchmarks/resume_quality/runner.py`:
+out-of-ontology retention **17% to 100%** on its fixtures, **+23 tokens**
+of resume block per session, **no section lost** on the captured
+transcripts in the eval corpus, and checkpoint accuracy unchanged
+(80/100/100). Read the fixture number with the caveat the runner states
+itself: those sessions were written by the same person as the selector,
+so they show the mechanism works end to end, not that it generalises to
+phrasings nobody had in mind. The four notes it produces on the real
+transcripts are in the runner's output and are worth reading — they are
+facts the graph genuinely had no node for.
+
+With `use_llm_extraction` on, the chat model is a strictly better
+sentence selector and can replace `select_sentences` without changing
+anything else. That is the next step here, not a rewrite.
+
+**2. Auto-checkpoint on the client's conversation size.**  *(done)*
+Occupancy is now the fuller of the two sides — what leaves here after
+windowing, and what the client is holding — instead of the sent payload
+alone. Windowing keeps the sent side near-constant, so a session forty
+turns deep sent the same fraction it sent at turn five and never
+checkpointed, in exactly the sessions the trigger exists for. The
+retention cap is unchanged. Resume already reads the live graph, so
+nothing was being lost by the late trigger; the checkpoint diff and the
+"Continue from" hint were, and a resume cannot rebuild those.
 
 **3. Streamed tool-call deltas on Anthropic.**  *(partially done: tools
 are forwarded and answered in one piece; only the incremental stream is
