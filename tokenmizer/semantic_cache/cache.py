@@ -47,6 +47,16 @@ class CacheEntry:
     # query can return another session's private entry purely because
     # cosine similarity cleared the threshold, bypassing scope entirely.
     scope: str = "__shared__"
+    # Digest of the conversation the prompt was asked IN (every message
+    # before the final user turn). A cached answer is only a correct
+    # answer to the same question asked in the same state: "continue",
+    # "yes", "try again" and "run the tests" recur constantly inside one
+    # coding session and mean something different every time. Keyed on
+    # the prompt alone, the second "continue" of a session was served the
+    # first one's answer for the whole TTL. Empty string = single-turn
+    # prompt with no prior conversation, which is where the cache earns
+    # its keep.
+    context: str = ""
 
     def is_expired(self, ttl_seconds: int) -> bool:
         return (time.time() - self.created_at) > ttl_seconds
@@ -191,10 +201,36 @@ class SemanticCache:
         self._miss = 0
         self._preference_store = PreferenceStore()
 
-    def _key(self, prompt: str, scope: str = "__shared__") -> str:
-        """Include scope in key — session-specific entries don't collide across sessions."""
-        data = f"{scope}:{prompt}"
+    def _key(self, prompt: str, scope: str = "__shared__", context: str = "") -> str:
+        """Include scope and conversation context in the key — session-
+        specific entries don't collide across sessions, and the same
+        prompt asked in a different conversation state never collides
+        with an earlier answer (see CacheEntry.context)."""
+        data = f"{scope}:{context}:{prompt}"
         return hashlib.sha256(data.encode()).hexdigest()[:24]
+
+    @staticmethod
+    def conversation_fingerprint(messages: list[dict]) -> str:
+        """Digest of the conversation a prompt is asked in: every message
+        except the final user turn. Callers pass the result as `context`
+        to get()/set(). Pure function of role+content, so two clients
+        holding the same history produce the same fingerprint.
+
+        Returns "" for a conversation with no prior turns, so a single-
+        turn prompt keys exactly as it always has."""
+        prior = list(messages)
+        if prior and prior[-1].get("role") == "user":
+            prior = prior[:-1]
+        if not prior:
+            return ""
+        h = hashlib.sha256()
+        for m in prior:
+            h.update(str(m.get("role", "")).encode())
+            h.update(b"\x1f")
+            content = m.get("content", "")
+            h.update((content if isinstance(content, str) else str(content)).encode())
+            h.update(b"\x1e")
+        return h.hexdigest()[:24]
 
     def _evict_lru(self) -> None:
         """Remove the least-recently-used entry."""
@@ -204,7 +240,8 @@ class SemanticCache:
         self._embeddings.pop(lru_key, None)
         self._eviction_count += 1
 
-    def get(self, prompt: str, session_id: str = "") -> Optional[CacheEntry]:
+    def get(self, prompt: str, session_id: str = "",
+            context: str = "") -> Optional[CacheEntry]:
         """
         Look up cache.
         Checks session-scoped key first (using session_id, or "__private__"
@@ -214,7 +251,7 @@ class SemanticCache:
         hits only for entries explicitly stored under share_scope="shared".
         """
         # Try session-scoped (or private, if no session_id) key first
-        session_key = self._key(prompt, session_id or "__private__")
+        session_key = self._key(prompt, session_id or "__private__", context)
         if session_key in self._exact:
             entry = self._exact[session_key]
             if not entry.is_expired(self.ttl_seconds):
@@ -224,7 +261,7 @@ class SemanticCache:
                 return entry
 
         # Try shared key
-        key = self._key(prompt, "__shared__")
+        key = self._key(prompt, "__shared__", context)
 
         # 1. Exact match
         if key in self._exact:
@@ -254,6 +291,10 @@ class SemanticCache:
                 if entry.is_expired(self.ttl_seconds):
                     continue
                 if entry.scope != "__shared__" and entry.scope != (session_id or "__private__"):
+                    continue
+                # Same rule as the exact key: a near-identical question in a
+                # different conversation state is a different question.
+                if entry.context != context:
                     continue
                 emb = self._embeddings.get(k)
                 if emb is None:
@@ -299,9 +340,11 @@ class SemanticCache:
         input_tokens: int = 0,
         output_tokens: int = 0,
         session_id: str = "",
+        context: str = "",
     ) -> None:
         """
-        Store a cache entry.
+        Store a cache entry. `context` is the conversation fingerprint
+        (see conversation_fingerprint) — pass the same value to get().
 
         Scoping rules (safe by default):
         - Default (`share_scope="session"`): EVERY prompt is scoped to
@@ -333,7 +376,7 @@ class SemanticCache:
 
         # Scoped key: sensitive/session-only responses keyed by session,
         # shared ones keyed by content alone.
-        key = self._key(prompt, scope)
+        key = self._key(prompt, scope, context)
 
         # Evict if at capacity
         while len(self._exact) >= self.max_size:
@@ -347,6 +390,7 @@ class SemanticCache:
             output_tokens=output_tokens or count_tokens(response),
             created_at=time.time(),
             scope=scope,
+            context=context,
         )
         self._exact[key] = entry
         self._exact.move_to_end(key)
@@ -370,13 +414,16 @@ class SemanticCache:
         who cannot name the scope still needs the stale answer gone.
         """
         removed = 0
+        # Scope and conversation context are part of the key hash and
+        # can't be reversed, so match on the stored prompt instead — in
+        # every conversation state, since "invalidate this prompt" means
+        # every answer to it. Entries store a 500-char prefix, so compare
+        # against the same prefix.
+        needle = prompt[:500]
         if session_id:
-            candidates = [self._key(prompt, session_id), self._key(prompt, "__shared__")]
+            candidates = [k for k, e in self._exact.items()
+                          if e.prompt == needle and e.scope in (session_id, "__shared__")]
         else:
-            # Scope is part of the key hash and can't be reversed, so
-            # match on the stored prompt instead. Entries store a 500-char
-            # prefix, so compare against the same prefix.
-            needle = prompt[:500]
             candidates = [k for k, e in self._exact.items() if e.prompt == needle]
         for key in candidates:
             if self._exact.pop(key, None) is not None:

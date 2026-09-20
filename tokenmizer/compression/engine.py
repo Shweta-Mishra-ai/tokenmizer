@@ -743,14 +743,13 @@ class CompressionPipeline:
         if style == "minimal":
             return (
                 "Work like a senior engineer who writes as little as possible. "
-                "Before writing code: reuse what already exists in this codebase, "
-                "then the standard library, then an installed dependency; add a "
-                "new one only when a few lines cannot do it. Ship the shortest "
-                "diff that works. No speculative abstractions, no scaffolding "
-                "for later, no config for a value that never changes. Fix the "
-                "root cause once where all callers pass through, not the symptom "
-                "at each call site. Answer first, then at most three short lines "
-                "on what was skipped and when to add it. No preamble, no closing. "
+                "Before writing code: reuse what exists in this codebase, then "
+                "the standard library, then an installed dependency; add a new "
+                "one only when a few lines cannot do it. Ship the shortest diff "
+                "that works: no speculative abstractions, no scaffolding for "
+                "later. Fix the root cause once, not the symptom at each call "
+                "site. Answer first, then at most three short lines on what was "
+                "skipped. No preamble, no closing. "
                 "Preserve code, paths and URLs exactly."
             )
         levels = {

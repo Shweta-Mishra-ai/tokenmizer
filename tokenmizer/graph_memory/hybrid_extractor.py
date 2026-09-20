@@ -94,6 +94,35 @@ from tokenmizer.graph_memory.patterns import (
 logger = logging.getLogger(__name__)
 
 
+def _parse_json_object(raw: str) -> Optional[dict]:
+    """The first JSON object in a model reply, or None.
+
+    The prompt says "JSON only", and most replies comply, but a smaller or
+    local model (the ones people run extraction on to keep it cheap) often
+    wraps the object in a sentence or a fenced block anyway. json.loads on
+    the whole reply then fails and the batch — already paid for — is thrown
+    away as an llm_extraction silent failure. Fences are stripped first;
+    then, if the reply still does not parse as a whole, the outermost
+    {...} span is tried on its own.
+    """
+    text = re.sub(r"```(?:json)?\s*|```", "", raw or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 @dataclass
 class ExtractedData:
     goals: list[str] = field(default_factory=list)
@@ -161,9 +190,12 @@ class HybridExtractor:
                 max_tokens=800,
             )
             raw = result.get("text", "")
-            # Strip markdown fences if present
-            raw = re.sub(r"```json\s*|```\s*", "", raw).strip()
-            data = json.loads(raw)
+            data = _parse_json_object(raw)
+            if data is None:
+                raise ValueError(
+                    f"no JSON object in the model's reply (first 120 chars: "
+                    f"{raw[:120]!r})"
+                )
             return self._dict_to_extracted(data)
         except Exception as e:
             # Warning, not debug: a provider timeout, rate limit, or

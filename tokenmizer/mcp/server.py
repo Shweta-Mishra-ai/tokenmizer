@@ -336,18 +336,21 @@ def handle_resume_session(args: dict) -> tuple[str, bool]:
     ctx = result.get("resume_context", "")
     tokens = result.get("token_count", 0)
     if not ctx:
-        # A checkpoint EXISTS (the API 404s via "error" above when none does) —
-        # its graph was just empty at checkpoint time. Saying "no checkpoint
-        # found" here would be wrong and send the user debugging the wrong
-        # thing.
+        # The API 404s (via "error" above) only when there is neither a
+        # checkpoint nor any node, so reaching here means the session is
+        # known but nothing in it survived extraction. Saying "no
+        # checkpoint found" would send the user debugging the wrong thing.
         return (
-            f"Checkpoint {result.get('checkpoint_id', '?')} exists for "
-            f"'{session_id}' but its graph was empty (no session activity "
-            f"had been recorded when it was created). Chat through the proxy "
-            f"with this session_id, then checkpoint again."
+            f"Session '{session_id}' exists but its memory has nothing to "
+            f"resume from (no decisions, tasks, files or errors were "
+            f"extracted). Chat through the proxy with this session_id, or "
+            f"checkpoint with the conversation as `messages`, then try again."
         ), False
+    source = "graph memory (live)" if result.get("source") == "live_graph" \
+        else f"checkpoint {result.get('checkpoint_id', '?')}"
     return (
-        f"[TokenMizer Resume — session: {session_id} — {tokens} tokens]\n\n"
+        f"[TokenMizer Resume — session: {session_id} — {tokens} tokens — "
+        f"from {source}]\n\n"
         f"{ctx}\n\n"
         f"[Paste the above into your system prompt to resume this session]"
     ), False

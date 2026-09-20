@@ -691,8 +691,19 @@ class OllamaProvider(BaseProvider):
         all_messages = messages[:]
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
+        # Same option mapping as _call(): the streaming path dropped
+        # temperature/top_p/stop on the floor, so a client got different
+        # sampling depending on whether it asked for a stream.
+        s = _sampling(kwargs)
+        options = {"num_predict": max_tokens}
+        if "temperature" in s:
+            options["temperature"] = s["temperature"]
+        if "top_p" in s:
+            options["top_p"] = s["top_p"]
+        if "stop" in s:
+            options["stop"] = _as_stop_list(s["stop"])
         payload = {"model": model, "messages": all_messages, "stream": True,
-                   "options": {"num_predict": max_tokens}}
+                   "options": options}
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream("POST", f"{self._base_url}/api/chat",
