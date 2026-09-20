@@ -31,6 +31,7 @@ from typing import Optional
 from tokenmizer.graph_memory.patterns import (
     _ALREADY_FIXED,
     _CAUSAL_LINK,
+    _CLAUSE_END,
     _COMPLETION_LEAD,
     _DECISION,
     _DECISION_FOR,
@@ -39,6 +40,7 @@ from tokenmizer.graph_memory.patterns import (
     _DECISION_PASSIVE,
     _DEPENDENCY,
     _ENDPOINT,
+    _ENDPOINT_ONLY,
     _ENV,
     _ERROR_ABSENCE,
     _ERROR_CANNOT_INITIAL,
@@ -67,6 +69,7 @@ from tokenmizer.graph_memory.patterns import (
     _FILE_COMMON,
     _FILE_EXTENSIONLESS,
     _FILE_PATH,
+    _FIX_LEAD,
     _FIX_PREFIX,
     _GOAL_OPENERS,
     _LEADING_CONNECTIVE,
@@ -132,6 +135,11 @@ class ExtractedData:
     decisions: list[dict] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Errors the transcript says were fixed, by label (a subset of
+    # `errors`). Kept as a parallel list rather than a flag on each entry
+    # so `errors` stays a plain list of strings for the merge/dedup code;
+    # _extracted_to_dict folds the two into {"label", "resolved"}.
+    resolved_errors: list[str] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
     environments: list[str] = field(default_factory=list)
     endpoints: list[str] = field(default_factory=list)
@@ -262,7 +270,30 @@ class HybridExtractor:
 
         # Tasks done: full history (completed = permanent fact)
         for m in _TASK_DONE.finditer(content):
-            task = _clip(m.group(1))
+            raw_task = m.group(1)
+            # "Implemented: POST /a, POST /b, POST /c" is three pieces of
+            # finished work, not one task whose label is a route list cut
+            # off at 80 chars (which also left the last route truncated).
+            # One task per route, read from the whole sentence rather than
+            # the capture, and verb-prefixed so the validator keeps it a
+            # TASK; the route itself is also an ENDPOINT node, and the
+            # graph links the two.
+            if _ENDPOINT_ONLY.match(raw_task.strip()):
+                sentence = content[m.start(1):]
+                stop = _CLAUSE_END.search(sentence)
+                sentence = sentence[:stop.start()] if stop else sentence
+                routes = [r.group(0).rstrip(".") for r in _ENDPOINT.finditer(sentence)]
+                if len(routes) >= 2:
+                    verb = re.match(r"\w+", m.group(0))
+                    prefix = (verb.group(0).capitalize() + " ") if verb else ""
+                    for route in routes:
+                        label = prefix + route
+                        norm = self._normalize(label)
+                        if norm not in seen_tasks:
+                            result.tasks_done.append(label)
+                            seen_tasks.add(norm)
+                    continue
+            task = _clip(raw_task)
             if len(task) < 5 or _is_only_paths(task) or _LEADING_CONNECTIVE.match(task):
                 continue
             norm = self._normalize(task)
@@ -429,7 +460,7 @@ class HybridExtractor:
         for m in _ENDPOINT.finditer(content):
             if _is_negated_context(content, m.start()):
                 continue
-            ep = m.group(0).strip()
+            ep = m.group(0).strip().rstrip(".")
             norm = self._normalize(ep)
             if norm not in seen_endpoints:
                 result.endpoints.append(ep)
@@ -530,6 +561,13 @@ class HybridExtractor:
                 # ("so", "which meant", "as a result") means the second
                 # clause is the consequence of the first rather than a
                 # second item. Keep the half that carries more of it.
+                # "Fixed: <error>" / "resolved the <error>" — the failure
+                # happened and is over. Recorded so the graph marks it
+                # resolved instead of carrying it into every resume as an
+                # open bug. The fix prefix stripped from the label above is
+                # the same signal when it sat inside the captured span.
+                if _FIX_LEAD.search(before) or _FIX_PREFIX.match(raw.strip()):
+                    result.resolved_errors.append(err)
                 key = (id(pattern), _sentence_index(content, label_start))
                 prior = sentence_claims.get(key)
                 # The window reaches a little INTO the current match: a

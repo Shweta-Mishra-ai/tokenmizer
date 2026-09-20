@@ -519,6 +519,14 @@ def _clip(text: str, max_chars: int = 90) -> str:
         s = cut[:space] if space >= 12 else cut
 
     s = _DANGLING_TAIL.sub("", s).strip(" ,;:—-")
+
+    # A parenthetical the cut landed inside — "Redis for refresh token
+    # storage (not DB" — reads as a typo on every surface that shows the
+    # label. Drop the open parenthetical when what precedes it still
+    # identifies the fact; close it otherwise.
+    if s.count("(") > s.count(")"):
+        head = s[:s.rfind("(")].rstrip(" ,;:—-")
+        s = head if len(head) >= _MIN_CLAUSE_CHARS // 2 else s + ")"
     return s
 
 
@@ -780,6 +788,18 @@ _ERROR_DAMAGE = re.compile(
 # cannot be used here: "WebSocket message NOT triggering re-render" and "NO
 # dial timeout" are real failures whose names contain a negator. Only the
 # phrases that mean *this used to happen and no longer does* are excluded.
+# The label is preceded by a statement that the failure was fixed:
+# "Fixed: 422 error — ...", "Resolved the timeout by ...". Distinct from
+# _ALREADY_FIXED, which means "not an error at all any more" and excludes
+# the match: here the error is real, was hit, and is now resolved — which
+# is exactly what a resume must say so the next session does not go
+# looking for a bug that is gone.
+_FIX_LEAD = re.compile(
+    r"\b(?:fixed|resolved|patched|solved|corrected|repaired|addressed|"
+    r"eliminated|closed)\b\s*[:\-—]?\s*(?:the\s+|a\s+|an\s+|this\s+|that\s+)?$",
+    re.IGNORECASE,
+)
+
 _ALREADY_FIXED = re.compile(
     r'\b(?:no longer|not any ?more|already fixed|since fixed)\b',
     re.IGNORECASE,
@@ -997,7 +1017,8 @@ _ERROR_SYMPTOM = re.compile(
 _DEPENDENCY = re.compile(
     r'(?:pip install|pip add|npm install|npm add|yarn add|pnpm add|poetry add|'
     r'cargo add|go get|adding|installed?)'
-    r'\s+([a-zA-Z][a-zA-Z0-9_\-]{2,40})',
+    # "Adding: redis" — the header form the task patterns already accept.
+    r'\s*[:\-]?\s+([a-zA-Z][a-zA-Z0-9_\-]{2,40})',
     re.IGNORECASE,
 )
 
@@ -1031,6 +1052,13 @@ _GOAL_OPENERS = re.compile(
 # "POST /api/auth/login", "GET /api/users/:id", etc.
 _ENDPOINT = re.compile(
     r'\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[\w\-/{}:.]+)',
+)
+# A span that is a list of routes and nothing else (parentheticals like
+# "(returns JWT)" and separators allowed): see the task pass.
+_ENDPOINT_ONLY = re.compile(
+    r'^(?:\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/[\w\-/{}:.]+'
+    r'(?:\s*\([^)]{0,40}\))?\s*[,;]?\s*(?:and\s+)?)+\.?\s*$',
+    re.IGNORECASE,
 )
 
 # Header format: "Schema: users table — id (UUID PK), email (unique)..."

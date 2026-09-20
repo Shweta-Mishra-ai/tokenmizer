@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -59,6 +60,8 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+_LEADING_ARTICLE = re.compile(r"^(?:a|an|the)\s+", re.IGNORECASE)
 
 
 # Lazy import to avoid circular dependency
@@ -511,7 +514,11 @@ class GraphMemory:
             ),
             "decisions":    extracted.decisions,
             "files":        extracted.files,
-            "errors":       extracted.errors,
+            "errors":       [
+                {"label": e, "resolved": e.lower().strip() in resolved}
+                for e in extracted.errors
+                for resolved in ({x.lower().strip() for x in extracted.resolved_errors},)
+            ],
             "dependencies": extracted.dependencies,
             "environments": extracted.environments,
             "endpoints":    extracted.endpoints,
@@ -608,6 +615,9 @@ class GraphMemory:
         # Goals
         for goal in data.get("goals", []):
             if goal:
+                # "building A dashboard" captures the article; the label is
+                # the headline of every resume, so it reads as a title.
+                goal = _LEADING_ARTICLE.sub("", goal.strip())
                 nid = self.add_node(NodeType.GOAL, goal, NodeStatus.IN_PROGRESS, importance=1.0)
                 if nid:
                     goal_ids.append(nid)
@@ -679,7 +689,7 @@ class GraphMemory:
                 # this one genuinely replaced, alongside the
                 # DecisionTransition that justifies it.
 
-        # Files — linked to tasks only if file name appears in task description
+        # Files — linked to tasks and decisions that name them
         for f in data.get("files", []):
             if not f or len(f) < 3:
                 continue
@@ -687,12 +697,20 @@ class GraphMemory:
             if nid:
                 file_ids.append(nid)
                 file_stem = f.split("/")[-1].split(".")[0].lower()
-                for tid in task_ids:
-                    task_node = self._nodes.get(tid)
-                    if task_node and file_stem and file_stem in task_node.label.lower():
-                        self.add_edge(tid, nid, EdgeType.IMPLEMENTS)
+                if file_stem and len(file_stem) > 2:
+                    for tid in task_ids:
+                        task_node = self._nodes.get(tid)
+                        if task_node and file_stem in task_node.label.lower():
+                            self.add_edge(tid, nid, EdgeType.IMPLEMENTS)
+                    # "Redis for sessions (see config.py)": the file a
+                    # decision names is where it lives.
+                    for did in decision_ids:
+                        dec = self._nodes.get(did)
+                        if dec and file_stem in dec.label.lower():
+                            self.add_edge(did, nid, EdgeType.RELATED_TO)
 
         # Errors — handle both str and dict formats
+        error_ids: list[str] = []
         for e in data.get("errors", []):
             if isinstance(e, str):
                 label, resolved = e, False
@@ -704,15 +722,54 @@ class GraphMemory:
             importance = 0.5 if resolved else 0.9
             err_nid = self.add_node(NodeType.ERROR, label, status, importance=importance)
             if err_nid:
+                error_ids.append(err_nid)
                 for fid in file_ids:
                     file_node = self._nodes.get(fid)
                     if file_node and file_node.label.split("/")[-1] in label:
                         self.add_edge(err_nid, fid, EdgeType.RELATED_TO)
 
-        # Dependencies (no edges — standalone nodes)
+        # Error <-> task. "Fixed: 422 error — missing email validation"
+        # yields a completed task AND an error with the same words: the
+        # task is the fix, so it FIXES the error and the error is resolved
+        # (the extractor also flags this from the phrasing; the graph rule
+        # covers a fix and a failure mentioned in different turns). An open
+        # error and an in-progress task about the same thing are the other
+        # relation a resume needs: the error BLOCKS the task. Both require
+        # real vocabulary overlap, not one shared word.
+        for eid in error_ids:
+            err = self._nodes.get(eid)
+            if err is None:
+                continue
+            err_words = self._meaningful_words(err.label)
+            for tid in task_ids:
+                task = self._nodes.get(tid)
+                if task is None:
+                    continue
+                shared = err_words & self._meaningful_words(task.label)
+                smaller = min(len(err_words), len(self._meaningful_words(task.label))) or 1
+                if task.status == NodeStatus.COMPLETED and len(shared) / smaller >= 0.6:
+                    self.add_edge(tid, eid, EdgeType.FIXES)
+                    if err.status == NodeStatus.FAILED:
+                        err.status = NodeStatus.COMPLETED
+                        err.importance = min(err.importance, 0.5)
+                        self._dirty = True
+                elif (task.status == NodeStatus.IN_PROGRESS
+                        and err.status == NodeStatus.FAILED and len(shared) >= 2):
+                    self.add_edge(eid, tid, EdgeType.BLOCKS)
+
+        # Dependencies — linked from the decisions, tasks and files that
+        # name them ("Redis for refresh token storage" DEPENDS_ON redis).
         for dep in data.get("dependencies", []):
             if dep and len(dep) > 1:
-                self.add_node(NodeType.DEPENDENCY, dep, NodeStatus.COMPLETED, importance=0.6)
+                dep_id = self.add_node(NodeType.DEPENDENCY, dep, NodeStatus.COMPLETED,
+                                       importance=0.6)
+                if not dep_id:
+                    continue
+                dep_word = dep.lower().strip()
+                for other_id in decision_ids + task_ids + file_ids:
+                    other = self._nodes.get(other_id)
+                    if other and dep_word in self._meaningful_words(other.label):
+                        self.add_edge(other_id, dep_id, EdgeType.DEPENDS_ON)
 
         # Environment (no edges — standalone nodes)
         for env in data.get("environments", data.get("environment", [])):
@@ -732,6 +789,13 @@ class GraphMemory:
                         file_parts = self._meaningful_words(file_node.label)
                         if ep_parts & file_parts:
                             self.add_edge(fid, ep_nid, EdgeType.IMPLEMENTS)
+                # The task that shipped the route ("POST /api/auth/login")
+                # implements the endpoint node of the same route.
+                ep_path = ep.lower()
+                for tid in task_ids:
+                    task_node = self._nodes.get(tid)
+                    if task_node and ep_path in task_node.label.lower():
+                        self.add_edge(tid, ep_nid, EdgeType.IMPLEMENTS)
 
         # Schemas
         for schema in data.get("schemas", []):
