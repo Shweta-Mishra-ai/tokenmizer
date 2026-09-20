@@ -120,6 +120,13 @@ _ownership = OwnershipStore(storage_dir=settings.graph_checkpoint.storage_dir)
 # storage_dir gives analytics the same durability the graph has. Without
 # it every savings figure resets to zero on restart — see engine.py.
 _analytics = AnalyticsEngine(storage_dir=settings.graph_checkpoint.storage_dir)
+# Built only when asked for: the store creates a database file, and a
+# feature that is off should leave no trace on disk.
+_preferences = None
+if settings.preferences.enabled:
+    from tokenmizer.preferences import PreferenceStore
+    _preferences = PreferenceStore(
+        storage_dir=settings.graph_checkpoint.storage_dir)
 _output_trimmer = OutputTrimmer()
 
 
@@ -980,6 +987,34 @@ async def _update_graph(
                     "role": "system",
                     "content": f"[Relevant session context]\n{ctx_block}",
                 })
+
+    # Preferences — habits that outlive this session, and so are NOT in
+    # this session's graph: "keep it brief", "always TypeScript". Off
+    # unless asked for; see PreferenceSettings for why. Appended for the
+    # same prompt-caching reason as the block above, and after it, since
+    # what this session is about matters more than how the reader likes
+    # their answers formatted.
+    if settings.preferences.enabled and _preferences is not None:
+        try:
+            if user_query:
+                _preferences.observe(principal, user_query)
+            pref_block = _preferences.context(
+                principal,
+                max_items=settings.preferences.max_items,
+                max_chars=settings.preferences.max_chars,
+            )
+        except Exception as e:                       # pragma: no cover - defensive
+            logger.warning("Preferences skipped for this turn: %s", e)
+            pref_block = ""
+        if pref_block:
+            sys_idx = next(
+                (i for i, m in enumerate(messages) if m.get("role") == "system"), None
+            )
+            if sys_idx is not None:
+                messages[sys_idx]["content"] = (
+                    f"{messages[sys_idx]['content']}\n\n{pref_block}")
+            else:
+                messages.insert(0, {"role": "system", "content": pref_block})
 
     # Context occupancy, measured per turn rather than accumulated: each
     # `messages` list already carries the full running conversation, so a

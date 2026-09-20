@@ -1297,10 +1297,10 @@ class GraphMemory:
             if node._evicted:
                 continue
 
-            # Was this node active at at_time?
-            was_created = node.valid_from <= at_time
-            not_yet_closed = (node.valid_until == 0.0 or node.valid_until > at_time)
-            if not (was_created and not_yet_closed):
+            # "Was this true then" has one definition, on the node —
+            # this used to restate it inline, so MemoryNode.is_valid_at
+            # sat unused beside a copy of itself.
+            if not node.is_valid_at(at_time):
                 continue
 
             if not query_words:

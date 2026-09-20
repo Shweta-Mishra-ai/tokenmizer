@@ -199,7 +199,6 @@ class SemanticCache:
         self._hit_exact = 0
         self._hit_semantic = 0
         self._miss = 0
-        self._preference_store = PreferenceStore()
 
     def _key(self, prompt: str, scope: str = "__shared__", context: str = "") -> str:
         """Include scope and conversation context in the key — session-
@@ -453,78 +452,13 @@ class SemanticCache:
 
 # ── Preference / Habit Store ──────────────────────────────────────────────────
 
-class PreferenceStore:
-    """
-    Stores user habits and preferences ONLY — never session content.
-
-    Your thinking (correct):
-      Cache should NOT save project-specific content across sessions.
-      It SHOULD remember things like:
-        - "I prefer concise answers"
-        - "Always use TypeScript"
-        - "Response format: bullet points"
-        - "My timezone is UTC+5:30"
-
-    This is separate from SemanticCache (which caches LLM responses).
-    PreferenceStore caches USER PREFERENCES that apply across all sessions.
-
-    What it NEVER stores:
-        - Passwords, API keys, secrets
-        - Project-specific data
-        - Code from a specific session
-        - Anything that looks like PII
-
-    What it STORES:
-        - Communication preferences ("be brief", "use examples")
-        - Technical preferences ("TypeScript", "snake_case", "pytest")
-        - Format preferences ("bullet points", "numbered lists")
-        - Style preferences ("formal", "casual")
-    """
-
-    # Patterns that indicate a preference/habit worth remembering
-    _PREFERENCE_SIGNALS = [
-        re.compile(r'\b(?:always|prefer|like|want|use)\b.{3,60}\b(?:format|style|language|approach|pattern|framework)\b', re.I),
-        re.compile(r'\b(?:be|keep it|make it|stay)\b.{2,40}\b(?:brief|concise|short|simple|direct|formal|casual)\b', re.I),
-        re.compile(r'\b(?:my|our)\b.{2,30}\b(?:preference|style|convention|standard|default)\b.{2,60}(?:is|are)\b', re.I),
-        re.compile(r'\b(?:i\s+(?:prefer|like|use|always|hate|avoid))\b.{3,80}', re.I),
-        re.compile(r'\bremember\s+(?:that\s+)?(?:i|my|we)\b.{3,100}', re.I),
-    ]
-
-    # NEVER treat these as preferences (too specific / sensitive)
-    _NOT_PREFERENCE = [
-        re.compile(r'\b(?:password|secret|key|token|credential)\b', re.I),
-        re.compile(r'\b(?:project|client|customer|company)\b.{3,30}\b(?:specific|only|internal)\b', re.I),
-        re.compile(r'[A-Z_]{5,}\s*=\s*\S'),  # env var
-        re.compile(r'sk-|ghp_|AIza'),          # API key patterns
-    ]
-
-    def __init__(self):
-        self._prefs: dict[str, str] = {}   # key → preference text
-
-    def is_preference(self, text: str) -> bool:
-        """True if text expresses a habit or preference worth remembering."""
-        for block in self._NOT_PREFERENCE:
-            if block.search(text):
-                return False
-        return any(p.search(text) for p in self._PREFERENCE_SIGNALS)
-
-    def save(self, key: str, value: str) -> None:
-        """Save a preference. key should be a short slug like 'response_style'."""
-        if not self.is_preference(value):
-            return  # silent reject — not a preference
-        self._prefs[key.lower().strip()] = value.strip()[:200]
-
-    def get(self, key: str) -> str:
-        return self._prefs.get(key.lower().strip(), "")
-
-    def all(self) -> dict[str, str]:
-        return dict(self._prefs)
-
-    def to_system_context(self) -> str:
-        """Format stored preferences as a system context block."""
-        if not self._prefs:
-            return ""
-        lines = ["[User preferences]"]
-        for k, v in self._prefs.items():
-            lines.append(f"  {k}: {v}")
-        return "\n".join(lines)
+# PreferenceStore used to live here: a detector, a store and a context
+# formatter for habits that outlive a session ("keep it brief", "always
+# TypeScript"). It had no callers — `save()` was never invoked from
+# anywhere — so `/api/cache/stats` reported a preference field that was
+# permanently the empty string.
+#
+# It is now `tokenmizer/preferences.py`, per-principal and SQLite-backed,
+# and wired into the request path behind `preferences.enabled`. It does
+# not belong beside a response cache: one remembers an answer to a
+# question, the other remembers something about a person.

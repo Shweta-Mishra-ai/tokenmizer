@@ -36,7 +36,11 @@ from pydantic import BaseModel, Field
 from tokenmizer.api import app as app_module
 from tokenmizer.core.tokenizer import count_tokens
 from tokenmizer.security.auth import verify_api_key
-from tokenmizer.security.ownership import OwnershipUnavailable, SessionAccessDenied
+from tokenmizer.security.ownership import (
+    DEV_PRINCIPAL,
+    OwnershipUnavailable,
+    SessionAccessDenied,
+)
 from tokenmizer.security.redaction import redact_messages
 
 logger = logging.getLogger(__name__)
@@ -175,17 +179,48 @@ async def analyze_file(req: AnalyzeRequest):
 
 @router.get("/api/cache/stats", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def cache_stats():
-    # NOTE: no "preference_context" field is returned here.
-    # SemanticCache._preference_store. PreferenceStore.save() has no
-    # callers anywhere in the codebase, so that field was always the
-    # empty string while implying a working cross-session preference-
-    # memory feature. Reporting an always-empty field for an unwired
-    # subsystem is worse than reporting nothing, so it is gone until the
-    # store is actually populated — which additionally needs a decision
-    # about scoping, since the store is process-global and would
-    # otherwise share one caller's preferences with every other
-    # principal (see security/ownership.py).
+    # Preferences are NOT reported here. They used to live inside the
+    # semantic cache and were never written, so this endpoint carried a
+    # permanently-empty field implying a feature that did not run. They
+    # are their own thing now, per principal, under /api/preferences.
     return app_module._cache.stats()
+
+
+@router.get("/api/preferences", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+async def list_preferences(request: Request):
+    """What this principal's habits are remembered as, and what that costs.
+
+    A memory of a person has to be readable by that person. `injected` is
+    the exact text added to a system prompt, so "why does it keep doing
+    that" has an answer you can look at rather than infer.
+    """
+    store = app_module._preferences
+    if store is None:
+        return {"enabled": False, "preferences": [], "injected": "",
+                "note": "preferences.enabled is off; nothing is remembered "
+                        "and nothing is injected."}
+    principal = getattr(request.state, "principal", DEV_PRINCIPAL)
+    settings = app_module.settings.preferences
+    return {
+        "enabled": True,
+        "preferences": [{"key": k, "value": v}
+                        for k, v in store.all(principal)],
+        "injected": store.context(principal, max_items=settings.max_items,
+                                  max_chars=settings.max_chars),
+    }
+
+
+@router.delete("/api/preferences", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
+async def forget_preferences(request: Request, key: str = ""):
+    """Forget one preference, or all of them.
+
+    A memory with no way to say "stop remembering that" is a liability.
+    """
+    store = app_module._preferences
+    if store is None:
+        return {"enabled": False, "forgotten": 0}
+    principal = getattr(request.state, "principal", DEV_PRINCIPAL)
+    return {"enabled": True, "forgotten": store.forget(principal, key or None)}
 
 
 @router.get("/api/graph/{session_id}/history", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])

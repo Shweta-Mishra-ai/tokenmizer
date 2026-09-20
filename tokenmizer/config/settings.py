@@ -113,6 +113,25 @@ class CacheSettings(BaseModel):
     share_scope: Literal["session", "shared"] = "session"
 
 
+class PreferenceSettings(BaseModel):
+    """Habits that outlive a session — "keep it brief", "always
+    TypeScript" — remembered per principal and injected into the system
+    prompt. See tokenmizer/preferences.py.
+
+    OFF by default, deliberately. The failure mode of a preference memory
+    is not forgetting: it is remembering something that was never a
+    preference and repeating it in every prompt you send for the rest of
+    the year. The detector is a set of regexes, it will have false
+    positives, and an operator should turn this on knowing that. `/api/
+    preferences` lists what was remembered and deletes any of it.
+    """
+    enabled: bool = False
+    # How many lines, and how much prompt they may take. The cost of the
+    # feature is exactly this.
+    max_items: int = 4
+    max_chars: int = 400
+
+
 class TerseOutputSettings(BaseModel):
     enabled: bool = True
     level: Literal["lite", "full", "ultra"] = "full"
@@ -239,6 +258,7 @@ class Settings(BaseSettings):
     # Deprecated; see RoutingSettings. Kept so old configs still load.
     routing: RoutingSettings = Field(default_factory=RoutingSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
+    preferences: PreferenceSettings = Field(default_factory=PreferenceSettings)
     terse_output: TerseOutputSettings = Field(default_factory=TerseOutputSettings)
 
     # Server
