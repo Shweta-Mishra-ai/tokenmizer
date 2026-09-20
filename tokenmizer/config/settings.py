@@ -1,7 +1,7 @@
 """TokenMizer configuration — Pydantic Settings with env var support."""
 from __future__ import annotations
 
-from typing import List, Literal
+from typing import List, Literal, Union
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,7 +53,23 @@ class GraphCheckpointSettings(BaseModel):
     # reasoning.py and decision_tracker.py already share, so enabling this
     # adds no new dependency and no second model in memory.
     # Without it this silently stays off rather than failing.
-    semantic_retrieval: bool = False
+    #
+    #   "auto" (the default) — on when the model is actually loadable, off
+    #                          otherwise. Measured on the retrieval eval:
+    #                          keyword ranking gets recall@6 82% over 40
+    #                          paraphrased questions, and the misses are
+    #                          exactly the paraphrases embeddings exist
+    #                          for. A capability that is present should not
+    #                          need a second switch to be used.
+    #   true / false        — force it, for a deployment that wants the
+    #                          behaviour pinned either way.
+    #
+    # "auto" resolves ONCE, at startup, by trying to load the model — not
+    # per request, and never by assuming the package being installed means
+    # the weights are present. sentence-transformers ships no weights, so
+    # "installed" and "loadable" are different questions on an air-gapped
+    # host or behind an egress proxy.
+    semantic_retrieval: Union[bool, Literal["auto"]] = "auto"
     # Rank a principal's OTHER sessions' nodes alongside the current
     # session's when building retrieval results (Memory.search() and the
     # proxy's context-injection step) — see graph_memory/cross_session.py.
@@ -365,6 +381,25 @@ def _is_production() -> bool:
     handle. Matches the flag name issue #28 itself proposed."""
     import os
     return os.environ.get("TOKENMIZER_ENV", "").strip().lower() == "production"
+
+
+def resolve_semantic_retrieval(value) -> bool:
+    """Turn the `semantic_retrieval` setting into a yes or a no.
+
+    "auto" means "on if the embedding model is actually loadable". That is
+    a question only trying can answer — sentence-transformers ships no
+    weights, so the package being installed says nothing about whether the
+    model is there on an air-gapped host or behind an egress proxy. The
+    engine caches the attempt per process, so this costs one try at
+    startup, not one per request.
+    """
+    if value is True or value is False:
+        return value
+    try:
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine
+        return bool(EmbeddingEngine.get().available)
+    except Exception:
+        return False
 
 
 def _routing_block_present(yaml_path: str) -> bool:

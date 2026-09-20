@@ -412,7 +412,13 @@ is a small sample and the same person wrote every label.
 **Retrieval is measured separately.** `python -m
 benchmarks.graph_retrieval.query_eval` scores what `query()` returns for
 questions phrased the way a person asks them, not in the node's own
-words: **recall@6 85%**, or 92% with `semantic_retrieval` on (n=13).
+words: **recall@6 82% over 40 cases**, keyword ranking only. The eval was
+13 cases until this branch, where one case flipping moved the headline by
+8 points; every case is checked to be answerable from its own transcript,
+because an ungrounded question measures extraction and reads as a
+retrieval failure forever. `semantic_retrieval: auto` turns on embedding
+similarity when the model actually loads — the 92% figure previously
+quoted for it predates the enlarged eval and has not been re-measured.
 
 **Independently verified against 7 other methods.** A separate
 100-session benchmark ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research),
@@ -479,7 +485,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1321 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1332 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

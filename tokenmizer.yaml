@@ -32,11 +32,19 @@ cors_origins:
 #   - "https://yourdomain.com"
 
 # ── State Backend ─────────────────────────────────────────────────────────────
-# NOT WIRED UP. tokenmizer/state/backend.py has no callers, so `redis`
-# changes nothing: all durable state (graph memory, checkpoints, session
-# ownership) is SQLite under graph_checkpoint.storage_dir. Tracked in
-# issue #27 alongside the per-row persistence needed for multi-process.
-state_backend: memory         # memory (dev) | redis (accepted, unused)
+# Where the state that is NOT the graph lives — today, the rate limiter's
+# token buckets.
+#
+#   memory  one process, nothing shared. Costs nothing per request.
+#   sqlite  shared by every worker on this host, in storage_dir. USE THIS
+#           WITH --workers N: "memory" enforces the configured limit once
+#           per worker, so 60/min across four workers is 240/min.
+#   redis   accepted so old configs load; never implemented, behaves as
+#           "memory" and warns at startup.
+#
+# Neither spans hosts: several machines behind a load balancer need the
+# limit at the load balancer.
+state_backend: memory         # memory | sqlite
 # redis_url: redis://localhost:6379/0
 
 # ── Rate limiting behind a proxy ──────────────────────────────────────────────
@@ -56,10 +64,14 @@ graph_checkpoint:
   max_resume_tokens: 400      # cap on standard resume block size
   use_llm_extraction: false   # true = your chat provider and model extract
                               # nodes in the background (see USAGE.md, Part 9)
-  semantic_retrieval: false   # true = blend embedding similarity into graph
-                              # retrieval. recall@6 85% -> 92% on the query
-                              # eval (n=13); needs tokenmizer[cache]
-                              # costs ~$0.001 per turn, much more accurate
+  semantic_retrieval: auto    # auto (default) = on when the embedding model
+                              # actually loads, off otherwise. true/false to
+                              # pin it. Keyword ranking gets recall@6 82% on
+                              # 40 paraphrased questions
+                              # (benchmarks.graph_retrieval.query_eval);
+                              # embeddings need tokenmizer[cache] and the
+                              # model present — installed is not the same as
+                              # loadable on an air-gapped host.
 
 # ── Compression ───────────────────────────────────────────────────────────────
 compression:
@@ -87,12 +99,31 @@ terse_output:
                               #   before a dependency, shortest diff that
                               #   works. One style at a time.
 
-# ── Context Routing ───────────────────────────────────────────────────────────
-# NOT IMPLEMENTED. Nothing reads these fields — setting enabled: true
-# changes no behaviour and logs a warning at startup. Kept only so that
-# existing config files carrying a `routing:` block still load.
-routing:
-  enabled: false              # has no effect
+# ── Model map ─────────────────────────────────────────────────────────────────
+# Send a client's model name somewhere else. Exact match, applied once.
+# This is what the removed `routing:` block was reached for; that block was
+# never implemented, is deprecated, and warns at startup if present.
+# model_map:
+#   gpt-4: claude-sonnet-4-6
+#   gpt-3.5-turbo: claude-haiku-4-5
+
+# ── Domain ────────────────────────────────────────────────────────────────────
+# Which vocabulary the extractor reads a session in. "coding" adds nothing
+# to the patterns that always run; the others add the phrasings a research
+# log, an incident review or a product discussion uses for the same shapes
+# (11% -> 96% macro F1 on benchmarks/eval/corpus_domains).
+domain: coding                # coding | research | ops | product
+
+# ── Preferences ───────────────────────────────────────────────────────────────
+# Habits that outlive a session ("keep it brief", "always TypeScript"),
+# remembered per principal and injected into the system prompt. OFF by
+# default: the failure mode is not forgetting, it is remembering something
+# that was never a preference and repeating it in every prompt. Read and
+# delete what it holds at /api/preferences.
+preferences:
+  enabled: false
+  max_items: 4
+  max_chars: 400
 
 # ── Memory ───────────────────────────────────────────────────────────────────
 memory:
