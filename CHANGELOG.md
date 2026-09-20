@@ -91,6 +91,47 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Fixed — the rate limit was enforced once per worker
+`RateLimiter` keeps its token buckets in a process dict. That is correct
+for one process and wrong for the deployment the Dockerfile ships: with
+`--workers 4`, a configured 60 requests per minute was enforced four times
+over and the operator got 240. A limit that is not the limit is worse than
+no limit, because it is written down.
+
+`state_backend: sqlite` puts the buckets in `storage_dir`, where every
+worker on the host shares one count. The whole read-modify-write runs
+inside a single `BEGIN IMMEDIATE` transaction — without that, two workers
+both read the last token, both decide they may spend it, and both allow
+the request, which is the classic lost update with the rate limit itself
+as the thing lost. Pinned by a test that spends one budget of ten from
+four real processes and asserts *exactly* ten: not "fewer than forty",
+because a limiter that is merely stricter than broken is still not the
+configured limit.
+
+`memory` remains the default and costs nothing for a single process. The
+shared store fails OPEN and says so: a limiter that fails closed turns a
+locked database file into a total outage, while one that fails open lets
+traffic through where an operator can still see the error — the same trade
+the graph makes when persistence breaks. Neither backend spans hosts, and
+the module says so rather than implying otherwise: several machines behind
+a load balancer need the limit at the load balancer.
+
+`state_backend: redis` was never implemented — nothing ever read it — so
+it behaves as `memory` and now warns at startup naming `sqlite`.
+
+### Removed — two more modules that documented their own uselessness
+- `tokenmizer/state/backend.py`, 145 lines, whose docstring opened with
+  "THIS MODULE HAS NO CALLERS". It was kept as "the right building block
+  for cross-worker coordination"; that block now exists and is SQLite,
+  like everything else durable here.
+- `tokenmizer/storage/__init__.py`, a protocol nothing imported and that
+  none of the three classes it named conformed to. Its own docstring said
+  "do not read its presence as evidence that the storage layer is
+  unified".
+
+An architecture that exists only in a docstring is not an architecture,
+and leaving it in place costs every reader the time to find out.
+
 ### Added — domain packs: the same ontology, another vocabulary
 Goal / task / decision / file / error is a *coding* ontology, and every
 regex family in `patterns.py` is a coding phrasing. Point the proxy at a

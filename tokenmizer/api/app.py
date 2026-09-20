@@ -121,7 +121,31 @@ _ownership = OwnershipStore(storage_dir=settings.graph_checkpoint.storage_dir)
 # it every savings figure resets to zero on restart — see engine.py.
 _analytics = AnalyticsEngine(storage_dir=settings.graph_checkpoint.storage_dir)
 _output_trimmer = OutputTrimmer()
-_rate_limiter = get_rate_limiter(rate=60, per_seconds=60, burst=10)
+
+
+def _build_rate_limiter():
+    """The shared limiter when the deployment asked for one, else the
+    per-process one.
+
+    `state_backend: memory` (the default) enforces the configured limit
+    once per worker, which with `--workers 4` is four times the number in
+    the config. That is fine for one process and wrong for the deployment
+    the Dockerfile ships, so `sqlite` puts the buckets where every worker
+    on the host can see them. A shared store that fails to open falls back
+    here rather than failing the proxy — the old behaviour, loudly.
+    """
+    if settings.state_backend == "sqlite":
+        from tokenmizer.api.shared_rate_limiter import SQLiteRateLimiter
+        shared = SQLiteRateLimiter(
+            rate=60, per_seconds=60, burst=10,
+            storage_dir=settings.graph_checkpoint.storage_dir,
+        )
+        if shared.available:
+            return shared
+    return get_rate_limiter(rate=60, per_seconds=60, burst=10)
+
+
+_rate_limiter = _build_rate_limiter()
 
 # Bounded LRU for session locks — prevents memory leak on long-running servers.
 # Max 1000 concurrent sessions; LRU eviction removes oldest UNHELD lock.

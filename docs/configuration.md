@@ -33,7 +33,7 @@ cache:
   enabled: true
   max_size: 10000
 
-state_backend: memory           # memory | redis — see note below
+state_backend: memory           # memory | sqlite — see note below
 ```
 
 ## Environment
@@ -77,18 +77,26 @@ config instead of warning, and `TOKENMIZER_TRUST_PROXY_HEADERS` changes
 who the rate limiter thinks you are — enabling it in front of an
 untrusted network lets any caller reset their own limit.
 
-> **`state_backend: redis` is not wired up.** `tokenmizer/state/backend.py`
-> has no callers — nothing reads from or writes to Redis. All durable
-> state (graph memory, checkpoints, session ownership) is SQLite under
-> `storage_dir`. The setting is accepted so existing configs keep
-> loading; it does not change behaviour.
+> **Set `state_backend: sqlite` if you run more than one worker.** The
+> rate limiter keeps its token buckets in process memory by default,
+> which means `--workers 4` enforces your configured limit four times
+> over — 60 requests a minute becomes 240. `sqlite` puts the buckets in
+> `storage_dir`, where every worker on the host shares one count, at the
+> cost of one small transaction per request. Neither option spans hosts:
+> several machines behind a load balancer need the limit at the load
+> balancer.
+>
+> **`state_backend: redis` was never implemented.** Nothing has ever read
+> it, so it behaves as `memory`. The value is still accepted so existing
+> configs load, and now logs a warning naming `sqlite` as the option that
+> covers the same deployment.
 
 ## Not implemented, despite being configurable
 
 | Setting | Status |
 |---|---|
 | `routing.*` | **Deprecated, removed next release.** Never implemented. Replaced by `model_map`. A config carrying the block still loads and logs a deprecation warning. |
-| `state_backend: redis` | Accepted, unused (see above). |
+| `state_backend: redis` | Accepted, never implemented; behaves as `memory` and warns. Use `sqlite` (see above). |
 
 ---
 

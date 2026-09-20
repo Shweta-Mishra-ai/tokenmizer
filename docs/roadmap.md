@@ -21,7 +21,7 @@ benchmark, the suite is right and this file is a bug.
 | Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
 | Resume block size | ~160-180 tokens standard tier | `benchmarks/resume_quality` |
-| Suite | 1285 tests, ruff clean | `pytest tests/` |
+| Suite | 1291 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
 several items below exist.
@@ -193,12 +193,30 @@ belief about behaviour either way. Complexity scoring stays unbuilt: it
 is a research problem, and a switch that silently does nothing is worse
 than no switch.
 
-**9. Multi-process state.**
-Graph and checkpoint writes are cross-process safe; the semantic cache,
-rate limiter and analytics are per worker. Either wire the existing
-`state/backend.py` to Redis for those three or remove the setting. A
-shared-SQLite counter table is the cheaper option and matches everything
-else in the project.
+**9. Multi-process state.**  *(done for the one that was a bug)*
+The rate limiter was the item on that list that was not merely
+suboptimal: with `--workers 4` it enforced the configured limit once per
+worker, so 60 requests a minute was 240. `state_backend: sqlite` puts the
+token buckets in `storage_dir` where every worker on the host shares one
+count, with the whole read-modify-write inside `BEGIN IMMEDIATE` — without
+that, two workers read the last token, both spend it, and the limit is
+lost. Pinned by a test that spends one budget from four real processes and
+asserts *exactly* the budget, because a limiter that is merely stricter
+than broken is still not the configured limit. `memory` stays the default
+and costs nothing for a single process.
+
+`state_backend: redis` was never implemented and is now honest about it:
+it behaves as `memory` and warns, naming `sqlite`. `tokenmizer/state/
+backend.py` (145 lines, no callers, its own docstring said so) and
+`tokenmizer/storage/__init__.py` (a protocol nothing imported and nothing
+conformed to) are deleted.
+
+Still per-worker, and deliberately: the semantic cache (a lower hit rate,
+not a wrong answer) and the analytics counters (already durable per
+worker; a shared view is a reporting change, not a correctness one).
+Neither is a limit somebody wrote down. Neither spans hosts either — that
+is a load-balancer concern and this says so rather than implying
+otherwise.
 
 **10. Gemini and Cohere: tools and streaming.**  *(done)*
 Both refused tool requests with a 501 and streamed with a 501, though

@@ -184,8 +184,23 @@ class Settings(BaseSettings):
     cohere_api_key: str = ""
     openrouter_api_key: str = ""
 
-    # State backend
-    state_backend: Literal["memory", "redis"] = "memory"
+    # Where the state that is NOT the graph lives — today, the rate
+    # limiter's token buckets.
+    #
+    #   memory  one process, nothing shared. The default, and correct for
+    #           a single-worker deployment: it costs nothing per request.
+    #   sqlite  shared by every worker on this host, in storage_dir. Use
+    #           it with `--workers N`, where "memory" enforces the
+    #           configured limit once PER WORKER — 60/min across four
+    #           workers is 240/min, and a limit that is not the limit is
+    #           worse than none because it is written down.
+    #   redis   accepted so old configs load; NEVER IMPLEMENTED. Nothing
+    #           has ever read it. Use "sqlite", which is implemented and
+    #           covers the same deployment.
+    #
+    # Neither option spans hosts: several machines behind a load balancer
+    # need the limit at the load balancer.
+    state_backend: Literal["memory", "sqlite", "redis"] = "memory"
     redis_url: str = "redis://localhost:6379/0"
 
     # Auth
@@ -427,6 +442,14 @@ def get_settings() -> Settings:
         # RoutingSettings' docstring. The warning fires on the block being
         # PRESENT, not on enabled, because a `routing:` block in a config
         # file is a belief about behaviour whichever way it is set.
+        if loaded.state_backend == "redis":
+            logger.warning(
+                "state_backend: redis is accepted but NOT IMPLEMENTED — "
+                "nothing has ever read it, so state is per-process as if "
+                "it were \"memory\". Use \"sqlite\" for a shared store "
+                "across workers on one host."
+            )
+
         if _routing_block_present(yaml_path):
             logger.warning(
                 "The `routing:` block is DEPRECATED and does nothing: "
