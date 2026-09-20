@@ -355,7 +355,9 @@ function renderSessions(payload) {
   el.innerHTML = sessions.slice(0, 12).map(s => {
     const t = s.by_type || {};
     const parts = ['decision','task','error','file'].filter(k => t[k])
-      .map(k => `${t[k]} ${k}${t[k] === 1 ? '' : 's'}`).join(' &middot; ');
+      // A literal character, not an entity: this string goes through esc()
+      // with the session id, so "&middot;" would render as its own source.
+      .map(k => `${t[k]} ${k}${t[k] === 1 ? '' : 's'}`).join(' · ');
     const when = s.updated_at ? new Date(s.updated_at * 1000).toLocaleString() : '';
     const sel = s.session_id === selectedSession ? ' sel' : '';
     return `<div class="srow pick${sel}" data-session="${esc(s.session_id)}">` +

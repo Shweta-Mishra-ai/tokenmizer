@@ -553,25 +553,37 @@ function layoutTimeline(){
   // created_at, and a time axis over a span of zero is a lie drawn to
   // four decimal places. The order nodes entered the graph IS the order
   // the transcript stated them, so fall back to that and say so on the
-  // axis rather than inventing dates.
-  const byTime=(t1-t0)>=2;
+  // axis rather than inventing dates. The bar is a minute, not a second:
+  // below that every tick renders the same clock time and the axis looks
+  // broken rather than degenerate.
+  const byTime=(t1-t0)>=60;
   if(!byTime){t0=0;t1=Math.max(1,vis.length-1)}
   const ordinal={}; nodes.forEach((n,i)=>ordinal[n.id]=i);
   const posOf=n=>byTime?(n.created_at||n.valid_from||t0):ordinal[n.id];
   const lanes=typesPresent.filter(t=>vis.some(n=>n.type===t));
-  const laneH=Math.max(58,Math.min(96,(H-150)/Math.max(lanes.length,1)));
-  const x0=150, x1=Math.max(x0+320,W-90);
-  const spread={};
+  // Lanes need to be tall enough for the rows the spreading below adds,
+  // which is driven by how many nodes crowd the busiest lane.
+  const busiest=Math.max.apply(null,
+    lanes.map(t=>vis.filter(n=>n.type===t).length).concat([1]));
+  const laneH=Math.max(64,Math.min(150,(H-170)/Math.max(lanes.length,1),
+                                   28+Math.min(busiest,6)*17));
+  // Room on the right for a label to run without sliding under the panel.
+  const x0=150, x1=Math.max(x0+320,W-230);
+  // Nodes from one turn share a position, and a label is ~34 characters
+  // wide, so placing them on one row stacks the text into an unreadable
+  // smear. Each lane keeps a set of rows; a node takes the first row
+  // whose last label ended before this one starts.
+  const LABEL_W=210, ROW_H=17;
+  const rows={};
   vis.slice().sort((a,b)=>posOf(a)-posOf(b)).forEach(n=>{
     const li=lanes.indexOf(n.type);
     const frac=t1>t0?(posOf(n)-t0)/(t1-t0):0.5;
     const x=x0+frac*(x1-x0);
-    // Nodes extracted from one turn share a timestamp; fan them out so
-    // labels stay readable instead of stacking into one dot.
-    const key=n.type+"|"+Math.round(x/26);
-    spread[key]=(spread[key]||0)+1;
-    const k=spread[key]-1;
-    n.fx=x+(k%3)*9; n.fy=100+li*laneH+((k%2)?14:-4)+Math.floor(k/3)*15;
+    const lane=rows[n.type]||(rows[n.type]=[]);
+    let row=lane.findIndex(lastRight=>x>=lastRight);
+    if(row===-1){row=lane.length;lane.push(0)}
+    lane[row]=x+LABEL_W;
+    n.fx=x; n.fy=100+li*laneH+row*ROW_H-(laneH/2-14);
     n.x=n.fx;n.y=n.fy;
   });
   gAx.innerHTML="";
