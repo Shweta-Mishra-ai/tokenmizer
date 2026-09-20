@@ -816,41 +816,198 @@ function chord(a,b){
 // ---- force simulation ------------------------------------------------------
 let alpha=1, mode="radial";
 const centroids={};
+// ---- force layout ----------------------------------------------------------
+//
+// Fruchterman-Reingold, and the reason for the rewrite: the previous model
+// paired a CAPPED repulsion (6000/d², ceiling 6) with a QUADRATIC spring
+// along every edge. At 400px apart an edge pulled with a force of ~25 per
+// step while repulsion contributed 0.4 — so connected nodes collapsed into
+// one clump and anything unconnected was left wherever its random seed put
+// it, exiled into empty canvas. Half the picture was blank and the other
+// half was unreadable.
+//
+// FR's two rules are in proportion to each other by construction:
+//
+//   repel  K²/d   every pair, no ceiling — distant nodes still spread
+//   attract d²/K  along edges only
+//
+// with K the ideal separation, derived from the area each node can have.
+// Displacement per step is capped by a cooling temperature, which is what
+// stops the early steps from throwing nodes off the canvas.
 function step(){
   if(mode!=="graph")return;
+  const n=nodes.length||1;
+  // Ideal separation: the side of the square each node would get if the
+  // canvas were divided evenly. 0.55 packs a little tighter than the
+  // textbook value, which leaves too much air at these node counts.
+  const K=Math.sqrt((W*H)/n)*0.55, K2=K*K;
+  const cx=W/2, cy=H/2;
+
   for(const k in centroids)delete centroids[k];
-  nodes.forEach(n=>{const c=centroids[n.community]||(centroids[n.community]={x:0,y:0,k:0});
-                    c.x+=n.x;c.y+=n.y;c.k++});
+  nodes.forEach(n2=>{if(!nbrs[n2.id].length)return;
+                     const c=centroids[n2.community]||(centroids[n2.community]={x:0,y:0,k:0});
+                     c.x+=n2.x;c.y+=n2.y;c.k++});
   for(const k in centroids){centroids[k].x/=centroids[k].k;centroids[k].y/=centroids[k].k}
-  for(let i=0;i<nodes.length;i++){
-    const a=nodes[i];
-    for(let j=i+1;j<nodes.length;j++){
-      const b=nodes[j];
-      let dx=b.x-a.x,dy=b.y-a.y,d2=dx*dx+dy*dy||1,d=Math.sqrt(d2);
-      let f=Math.min(6000/d2,6)*alpha;
-      const minD=(a.size||10)+(b.size||10)+16;
-      if(d<minD)f+=(minD-d)*0.3;
-      const lw=(a._lw+b._lw)/2, ady=Math.abs(dy), adx=Math.abs(dx);
-      if(ady<24&&adx<lw){const push=(lw-adx)*0.04*alpha, sx=dx<0?-1:1; a.vx-=sx*push; b.vx+=sx*push;}
-      dx/=d;dy/=d; a.vx-=dx*f;a.vy-=dy*f; b.vx+=dx*f;b.vy+=dy*f;
+
+  nodes.forEach(a=>{a._dx=0;a._dy=0});
+
+  // Only the connected nodes are simulated. FR's two rules are in balance
+  // ONLY for a node that has both: a node with no edge feels repulsion
+  // from every other node and nothing pulling back, so the cluster fires
+  // it at the wall and gravity — orders of magnitude weaker at that
+  // distance — never brings it home. That is exactly what the wall of
+  // exiled "config.py", "Python 3.12", "api/main.py" was. Unconnected
+  // facts are placed deliberately instead, in ringIsolates().
+  const sim=nodes.filter(a=>nbrs[a.id].length);
+  for(let i=0;i<sim.length;i++){
+    const a=sim[i];
+    for(let j=i+1;j<sim.length;j++){
+      const b=sim[j];
+      let dx=a.x-b.x, dy=a.y-b.y;
+      let d=Math.sqrt(dx*dx+dy*dy);
+      if(d<0.01){ // exactly coincident: nudge deterministically, not randomly
+        dx=(i-j)||1; dy=1; d=Math.sqrt(dx*dx+dy*dy);
+      }
+      const f=K2/d;
+      const ux=dx/d, uy=dy/d;
+      a._dx+=ux*f; a._dy+=uy*f;
+      b._dx-=ux*f; b._dy-=uy*f;
+      // Hard separation, so two dots never overlap however the forces
+      // balance. Drawn radius plus a gap, not the label width — labels
+      // are resolved separately once the layout settles.
+      const minD=a._r+b._r+22;
+      if(d<minD){
+        const push=(minD-d)*0.5;
+        a._dx+=ux*push; a._dy+=uy*push;
+        b._dx-=ux*push; b._dy-=uy*push;
+      }
     }
-    const c=centroids[a.community];
-    if(c&&c.k>1&&nbrs[a.id].length){a.vx+=(c.x-a.x)*0.006*alpha;a.vy+=(c.y-a.y)*0.006*alpha}
-    a.vx+=(W/2-a.x)*0.0012*alpha; a.vy+=(H/2-a.y)*0.0012*alpha;
   }
+
   links.forEach(l=>{
-    let dx=l.t.x-l.s.x,dy=l.t.y-l.s.y,d=Math.sqrt(dx*dx+dy*dy)||1;
-    const f=(d-140)*0.012*alpha; dx/=d;dy/=d;
-    l.s.vx+=dx*f*d*0.02;l.s.vy+=dy*f*d*0.02;
-    l.t.vx-=dx*f*d*0.02;l.t.vy-=dy*f*d*0.02;
+    let dx=l.s.x-l.t.x, dy=l.s.y-l.t.y;
+    const d=Math.sqrt(dx*dx+dy*dy)||0.01;
+    const f=(d*d)/K;
+    const ux=dx/d, uy=dy/d;
+    l.s._dx-=ux*f; l.s._dy-=uy*f;
+    l.t._dx+=ux*f; l.t._dy+=uy*f;
   });
-  nodes.forEach(n=>{
-    if(n.fx!==null){n.x=n.fx;n.y=n.fy;n.vx=0;n.vy=0;return}
-    n.vx*=0.8;n.vy*=0.8; n.x+=n.vx;n.y+=n.vy;
+
+  sim.forEach(a=>{
+    // Gravity holds the component near the middle and the community
+    // centroid is what makes the clusters read as clusters — but both
+    // have to be written in FR's own units to do anything at all. As
+    // LINEAR forces (0.022·d and 0.012·d) they contributed single digits
+    // against a spring of d²/K in the hundreds, so communities never
+    // gathered: the convex hull drawn round one spanned half the canvas
+    // and read as a smear rather than a cluster. Same d²/K spring,
+    // weighted well below an edge so a real relation still wins.
+    const pull=(px,py,w)=>{
+      let dx=px-a.x, dy=py-a.y;
+      const d=Math.sqrt(dx*dx+dy*dy)||0.01;
+      const f=(d*d)/K*w;
+      a._dx+=dx/d*f; a._dy+=dy/d*f;
+    };
+    pull(cx,cy,0.06);
+    const c=centroids[a.community];
+    if(c&&c.k>1)pull(c.x,c.y,0.30);
   });
-  alpha*=0.97;
+
+  // Temperature: the furthest any node may travel this step. Cooling is
+  // what makes the early chaos settle instead of oscillating.
+  const temp=K*0.35*alpha;
+  sim.forEach(a=>{
+    if(a.fx!==null){a.x=a.fx;a.y=a.fy;return}
+    const d=Math.sqrt(a._dx*a._dx+a._dy*a._dy)||1;
+    const m=Math.min(d,temp);
+    a.x+=a._dx/d*m;
+    a.y+=a._dy/d*m;
+    // Keep everything on the canvas. fit() reframes afterwards, but a node
+    // that leaves during the run drags the whole layout off-centre.
+    const pad=a._r+8;
+    a.x=Math.max(pad,Math.min(W-pad,a.x));
+    a.y=Math.max(pad,Math.min(H-pad,a.y));
+  });
+  alpha*=0.975;
 }
-function tick(){step();render();if(mode==="graph"&&alpha>0.003)requestAnimationFrame(tick)}
+
+function tick(){
+  step();
+  // Placing labels every frame would cost four box tests per node at 60fps
+  // for no benefit — the positions are meaningless until the layout has
+  // cooled. Once, at the end, and once more on any settled redraw.
+  if(mode==="graph"&&alpha<=0.003){placeLabels();fit()}
+  render();
+  if(mode==="graph"&&alpha>0.003)requestAnimationFrame(tick);
+}
+// Run the layout to rest before anything is drawn.
+//
+// Animating from the seed positions looked busy and, worse, was wrong:
+// the old code reframed the view on a 260ms timer while the simulation
+// still had three seconds of travel left in it, so the picture the reader
+// finally got was framed for a layout that no longer existed — nodes ran
+// off the bottom and behind the side panel. A settled layout is framed
+// once, correctly, and appears immediately. 28 nodes × 260 steps is under
+// 100k pair tests; the cap keeps a 500-node graph from blocking the tab.
+// Where an unconnected fact goes.
+//
+// A node with no relation is not a layout problem for physics to solve —
+// it has no physics. It is a category: something the session recorded
+// that nothing else in the session refers to yet, which the side panel
+// counts under "Unconnected nodes". So they are placed, not simulated.
+//
+// Two placements were tried. A ring around the cluster reads well with
+// two or three isolates and badly with seven: the ring has to clear the
+// cluster's own hulls, fit() then frames the ring, and the graph everyone
+// actually came to read gets squeezed into the middle third. A column
+// beside the cluster costs one narrow strip, keeps the isolates in
+// reading order, and leaves the rest of the canvas to the graph.
+const _ISO_ROW=30;
+function placeIsolates(){
+  const lone=nodes.filter(n=>!nbrs[n.id].length&&visible(n));
+  nodes.forEach(n=>{n._iso=false});
+  if(!lone.length)return;
+  const joined=nodes.filter(n=>nbrs[n.id].length&&visible(n));
+  let left=W*0.5, midY=H*0.5;
+  if(joined.length){
+    left=Math.min.apply(null,joined.map(n=>n.x-n._r));
+    const ys=joined.map(n=>n.y);
+    midY=(Math.min.apply(null,ys)+Math.max.apply(null,ys))/2;
+  }
+  // Grouped by type, then alphabetical: the same order the type filter
+  // lists them in, so the two read against each other.
+  const order=lone.slice().sort((a,b)=>{
+    const ta=typesPresent.indexOf(a.type), tb=typesPresent.indexOf(b.type);
+    return ta!==tb?ta-tb:a.label.localeCompare(b.label);
+  });
+  // Wrap into columns rather than run off the canvas: a session with
+  // thirty loose facts is a real session, not an edge case.
+  const rows=Math.max(1,Math.min(order.length,Math.floor((H-180)/_ISO_ROW)));
+  const cols=Math.ceil(order.length/rows);
+  const colW=210;
+  const x0=left-150-(cols-1)*colW;
+  const y0=midY-(Math.min(rows,order.length)-1)*_ISO_ROW/2;
+  order.forEach((n,i)=>{
+    n.x=x0+Math.floor(i/rows)*colW;
+    n.y=y0+(i%rows)*_ISO_ROW;
+    n._iso=true;
+  });
+  // Say what the column is. Without this it reads as a layout failure —
+  // which is precisely what it used to be.
+  const cap=el("text",{x:x0-12,y:y0-26,class:"axtx"},gAx);
+  cap.textContent="not linked to anything yet";
+}
+
+function settle(){
+  if(mode!=="graph")return;
+  const iters=Math.max(120,Math.min(300,Math.round(9000/Math.max(nodes.length,1))));
+  alpha=1;
+  for(let i=0;i<iters;i++)step();
+  alpha=0.002;
+  gAx.innerHTML="";
+  placeIsolates();
+  placeLabels(); fit(); render();
+}
 function reheat(a){if(mode!=="graph")return;alpha=Math.max(alpha,a);requestAnimationFrame(tick)}
 
 // ---- timeline layout -------------------------------------------------------
@@ -917,6 +1074,14 @@ function layoutTimeline(){
 function relayout(){
   if(mode==="radial")layoutRadial();
   else if(mode==="timeline")layoutTimeline();
+  else{
+    // Filtering out a type can leave a node with no VISIBLE neighbour, so
+    // the column is recomputed on every redraw, not once at settle. The
+    // caption is redrawn with it, hence the clear.
+    gAx.innerHTML="";
+    placeIsolates();
+  }
+  placeLabels();
   render();
 }
 function setMode(m){
@@ -928,7 +1093,7 @@ function setMode(m){
   if(m==="graph"){
     gAx.innerHTML="";
     nodes.forEach(n=>{n.fx=null;n.fy=null;n._a=undefined});
-    alpha=0.6;requestAnimationFrame(tick);setTimeout(fit,260);
+    settle();
   }else{relayout();fit()}
 }
 
@@ -1050,12 +1215,60 @@ function render(){
       n._lbl.setAttribute("y",0);
       n._lbl.setAttribute("transform","rotate("+(n._a*180/Math.PI+(flip?180:0))+")");
     }else{
-      n._lbl.setAttribute("text-anchor","start");
-      n._lbl.setAttribute("x",n._r+6);n._lbl.setAttribute("y",0);
+      n._lbl.setAttribute("text-anchor",n._side==="left"?"end":"start");
+      n._lbl.setAttribute("x",n._side==="left"?-(n._r+6):n._r+6);
+      n._lbl.setAttribute("y",n._dy2||0);
       n._lbl.removeAttribute("transform");
     }
   });
   renderHulls();
+}
+
+// A label is not where its node is — it is a box hanging off it, and two
+// of those overlap long before the dots do. The force step separates DOTS
+// (it has to: a label box is wider than it is tall, so using it as the
+// collision shape stretches the whole layout sideways). Labels are placed
+// afterwards, here, by trying four positions per node and keeping the
+// first that is free.
+//
+// This is what the force view was missing. "Implemented POST /api/aut…"
+// appeared three times stacked on itself, which reads as a rendering bug
+// rather than as three real tasks.
+const _LABEL_H=13;
+function placeLabels(){
+  if(mode==="radial"||PREVIEW)return;
+  const vis=nodes.filter(visible);
+  // Biggest first: an important node keeps the natural position, and the
+  // ones that move are the ones a reader scans last.
+  const order=vis.slice().sort((a,b)=>(b.importance||0)-(a.importance||0));
+  const taken=[];
+  const hits=(box)=>taken.some(t=>box.x<t.x2&&t.x<box.x2&&box.y<t.y2&&t.y<box.y2);
+  // right, left, then nudged down and up on the right — four tries, in the
+  // order that disturbs the reading least.
+  const tries=[[1,0],[-1,0],[1,_LABEL_H],[1,-_LABEL_H]];
+  order.forEach(n=>{
+    const w=Math.min(n.label.length,26)*5.9+8, off=n._r+6;
+    let placed=false;
+    // An isolate sits in its own column with clear canvas on the right
+    // and nothing to collide with; keep every one of them on that side so
+    // the column reads as a list.
+    const order2=n._iso?[[1,0]]:tries;
+    for(const [dir,dy] of order2){
+      const x=dir>0?n.x+off:n.x-off-w;
+      const box={x:x,y:n.y+dy-_LABEL_H/2,x2:x+w,y2:n.y+dy+_LABEL_H/2};
+      if(!hits(box)){
+        n._side=dir>0?"right":"left"; n._dy2=dy;
+        taken.push(box); placed=true; break;
+      }
+    }
+    if(!placed){
+      // Nothing free: keep it on the right and let it overlap rather than
+      // hiding a node's name. An unreadable label is better than no label,
+      // and the reader can drag the node.
+      n._side="right"; n._dy2=0;
+      taken.push({x:n.x+off,y:n.y-_LABEL_H/2,x2:n.x+off+w,y2:n.y+_LABEL_H/2});
+    }
+  });
 }
 
 // ---- zoom / pan / fit ------------------------------------------------------
@@ -1087,13 +1300,24 @@ function fit(){
       const len=labelExtent(n);
       grow(n.x+Math.cos(n._a)*len, n.y+Math.sin(n._a)*len);
     }
+    // Same reason in the force and timeline views, where a label runs
+    // horizontally from its dot on whichever side placeLabels() chose.
+    // Fitting to the dots alone is what pushed the right-hand labels
+    // under the side panel.
+    if(mode!=="radial"&&!PREVIEW){
+      const w=Math.min(n.label.length,26)*5.9+8, off=n._r+6;
+      const dy=n._dy2||0;
+      if(n._side==="left"){grow(n.x-off-w,n.y+dy)}else{grow(n.x+off+w,n.y+dy)}
+    }
   });
   // ...and the type ring lives outside even those.
   if(mode==="radial"&&radialCentre.band){
     const c=radialCentre, b=c.band+18;
     grow(c.cx-b,c.cy-b); grow(c.cx+b,c.cy+b);
   }
-  const pad=mode==="radial"?26:(mode==="timeline"?130:120);
+  // The force box already includes the label text, so the pad here is
+  // breathing room, not an allowance for what the box forgot.
+  const pad=mode==="radial"?26:(mode==="timeline"?130:34);
   const bw=Math.max(1,x1-x0+pad*2), bh=Math.max(1,y1-y0+pad*2);
   z.k=Math.min(2.2,Math.max(0.15,Math.min(W/bw,(H-60)/bh)));
   z.x=(W-(x0+x1)*z.k)/2; z.y=60+((H-60)-(y0+y1)*z.k)/2; applyZ();

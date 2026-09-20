@@ -334,3 +334,47 @@ class TestRadialViewContract:
         meta = to_vis_json(_graph(tmp_path))["meta"]
         assert meta["type_order"]
         assert set(meta["type_order"]) <= set(_TYPE_ORDER)
+
+
+class TestForceViewContract:
+    """The force view was rebuilt three times before it was readable.
+    What each round fixed is pinned here, because the failures are
+    invisible to a test that only asks whether the page renders.
+    """
+
+    def test_the_layout_is_settled_before_anything_is_drawn(self, tmp_path):
+        """The old code reframed the view on a 260ms timer while the
+        simulation still had seconds of travel left, so the picture the
+        reader got was framed for a layout that no longer existed —
+        nodes ran off the bottom and under the side panel."""
+        html = to_share_html(_graph(tmp_path))
+        assert "function settle()" in html
+        assert "setTimeout(fit" not in html
+
+    def test_unconnected_nodes_are_placed_not_simulated(self, tmp_path):
+        """A node with no edge feels repulsion from everything and has
+        no spring pulling back, so the cluster fires it at the canvas
+        wall and it stays there. Seven of them made a border of exiles."""
+        html = to_share_html(_graph(tmp_path))
+        assert "function placeIsolates()" in html
+        assert "const sim=nodes.filter(a=>nbrs[a.id].length)" in html
+        assert "not linked to anything yet" in html
+
+    def test_the_forces_are_fruchterman_reingold(self, tmp_path):
+        html = to_share_html(_graph(tmp_path))
+        assert "const f=K2/d" in html, "repulsion must be K²/d, uncapped"
+        assert "const f=(d*d)/K" in html, "attraction must be d²/K"
+
+    def test_cohesion_is_written_in_the_same_units_as_the_spring(
+            self, tmp_path):
+        """As a linear force it contributed single digits against a
+        spring in the hundreds, so communities never gathered and the
+        hull drawn round one spanned half the canvas."""
+        html = to_share_html(_graph(tmp_path))
+        assert "const f=(d*d)/K*w" in html
+
+    def test_fit_accounts_for_the_label_text(self, tmp_path):
+        """Fitting to the dots alone pushed every right-hand label under
+        the side panel."""
+        html = to_share_html(_graph(tmp_path))
+        assert 'if(mode!=="radial"&&!PREVIEW){' in html

@@ -91,6 +91,41 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Fixed — the force view was a clump, a border of exiles, and stacked labels
+
+The graph's force layout was the third thing in this product a reader saw
+and the worst of the three. Four defects, each with its own cause:
+
+- **The layout collapsed.** Repulsion was capped at 6 (`min(6000/d², 6)`)
+  while the link spring was quadratic, so at 400px apart an edge pulled
+  ~25 per step against 0.4 of repulsion. Replaced with Fruchterman-Reingold,
+  whose two rules are in proportion by construction: repel `K²/d` on every
+  pair with no ceiling, attract `d²/K` along edges only, with a cooling
+  temperature capping per-step travel.
+- **The seven unconnected nodes were pinned to the canvas walls.** A node
+  with no edge feels repulsion from everything and has nothing pulling
+  back; gravity, orders of magnitude weaker at that distance, never
+  brought it home. They are no longer simulated at all. An unconnected
+  fact is a category, not a physics problem — the side panel already
+  counts them — so they are placed in a column beside the cluster under
+  the caption "not linked to anything yet", grouped by type, wrapping
+  into further columns when there are many.
+- **The view was framed for a layout that no longer existed.** `fit()`
+  ran on a 260ms timer while the simulation still had seconds of travel
+  left, so nodes ended up off the bottom and under the side panel. The
+  layout now settles synchronously before the first paint and is framed
+  once, correctly — and the frame includes the label text, not just the
+  dots, which is what had been pushing every right-hand label off-screen.
+- **Community hulls were smears across half the canvas.** Cohesion was a
+  linear force (`0.012·d`) contributing single digits against a spring of
+  `d²/K` in the hundreds, so communities never gathered. Cohesion and
+  gravity are now written in FR's own units and weighted below a real
+  edge, which is what makes the clusters read as clusters.
+
+Labels are also resolved after the layout cools, by trying four positions
+per node in importance order: "Implemented POST /api/aut…" no longer
+appears three times stacked on itself.
+
 ### Added — remembered text is fenced, and an injection never becomes a node
 Closes #29's structural half, and the version of the problem that is
 specific to this product.
