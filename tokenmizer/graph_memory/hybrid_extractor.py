@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from tokenmizer.graph_memory.domains import get_pack
 from tokenmizer.graph_memory.patterns import (
     _ALREADY_FIXED,
     _CATEGORY_NOUN,
@@ -171,8 +172,12 @@ class HybridExtractor:
     drops heuristic-only items; 0.9 keeps only corroborated ones.
     """
 
-    def __init__(self, min_confidence: float = 0.55):
+    def __init__(self, min_confidence: float = 0.55, domain: str | None = None):
         self.min_confidence = min_confidence
+        # The domain pack's families run IN ADDITION to the coding ones,
+        # so a pack can only add recall and a coding session is
+        # bit-for-bit what it was. See graph_memory/domains.py.
+        self.pack = get_pack(domain)
 
     # ── Pass 1: LLM ──────────────────────────────────────────────────────────
 
@@ -268,8 +273,21 @@ class HybridExtractor:
         """
         # Goals: first 4 messages only (session intent captured early)
         if role == "user" and turn_idx < 4:
-            for m in _GOAL_OPENERS.finditer(content):
-                result.goals.append(_clip(m.group(1), 100))
+            # The domain pack's openers run FIRST and claim their sentence.
+            # "The goal this quarter is X" matches the product opener and
+            # the generic one, and the generic one — which knows nothing
+            # about "this quarter" — leaves that fragment at the front of
+            # the label. The more specific pattern should win the sentence,
+            # so a later match overlapping a span already taken is skipped
+            # rather than added as a second goal for the same sentence.
+            taken: list[tuple[int, int]] = []
+            for pattern in (*self.pack.goal_openers, _GOAL_OPENERS):
+                for m in pattern.finditer(content):
+                    if any(m.start() < end and start < m.end()
+                           for start, end in taken):
+                        continue
+                    taken.append((m.start(), m.end()))
+                    result.goals.append(_clip(m.group(1), 100))
 
         # Tasks done: full history (completed = permanent fact)
         for m in _TASK_DONE.finditer(content):
@@ -417,6 +435,55 @@ class HybridExtractor:
             if norm not in seen_decisions:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
+
+        # Domain pack — the phrasings a research, ops or product session
+        # uses for the same shapes. Empty for coding, so this loop is a
+        # no-op on the default path. Each pattern captures one group, the
+        # label; the same guards the coding passes use apply, because the
+        # noise a pack picks up is the same noise.
+        for pattern in self.pack.decisions:
+            for m in pattern.finditer(content):
+                if _is_negated_context(content, m.start()) or \
+                        _is_question_context(content, m.start()):
+                    continue
+                label = _clip(m.group(1))
+                norm = self._normalize(label)
+                if norm not in seen_decisions and len(norm) > 4:
+                    result.decisions.append(
+                        {"label": label, "reason": "", "source_role": role})
+                    seen_decisions.add(norm)
+
+        for pattern in self.pack.tasks_done:
+            for m in pattern.finditer(content):
+                task = _clip(m.group(1))
+                if len(task) < 5 or _is_only_paths(task) or \
+                        _LEADING_CONNECTIVE.match(task) or _CATEGORY_NOUN.match(task):
+                    continue
+                norm = self._normalize(task)
+                if norm not in seen_tasks and not any(
+                        self._subsumes(task, t) for t in result.tasks_done):
+                    result.tasks_done.append(task)
+                    seen_tasks.add(norm)
+
+        if is_recent:
+            for pattern in self.pack.tasks_wip:
+                for m in pattern.finditer(content):
+                    wip = _clip(m.group(1))
+                    if len(wip) < 5 or _is_only_paths(wip) or \
+                            _COMPLETION_LEAD.search(content[max(0, m.start() - 40):m.start()]):
+                        continue
+                    if any(self._subsumes(wip, g) for g in result.goals):
+                        continue
+                    if not any(self._subsumes(wip, t) for t in result.tasks_wip):
+                        result.tasks_wip.append(wip)
+
+            for pattern in self.pack.errors:
+                for m in pattern.finditer(content):
+                    err = _clip(m.group(1))
+                    if len(err) < 5 or _is_negated_context(content, m.start()):
+                        continue
+                    if not any(self._subsumes(err, e) for e in result.errors):
+                        result.errors.append(err)
 
         # Decision Pass 4: passive (bcrypt with cost factor 12)
         #
@@ -1036,11 +1103,20 @@ class HybridExtractor:
         return merged
 
 
-# Singleton
-_extractor: HybridExtractor | None = None
+# One extractor per domain pack. Packs are stateless and the patterns are
+# compiled once at import, so caching them costs nothing and keeps the
+# common case a dict lookup.
+_extractors: dict[str, HybridExtractor] = {}
 
-def get_hybrid_extractor() -> HybridExtractor:
-    global _extractor
-    if _extractor is None:
-        _extractor = HybridExtractor()
-    return _extractor
+
+def get_hybrid_extractor(domain: str | None = None) -> HybridExtractor:
+    if domain is None:
+        try:
+            from tokenmizer.config.settings import get_settings
+            domain = get_settings().domain
+        except Exception:
+            domain = "coding"
+    key = (domain or "coding").strip().lower()
+    if key not in _extractors:
+        _extractors[key] = HybridExtractor(domain=key)
+    return _extractors[key]

@@ -129,12 +129,16 @@ class GraphMemory:
     ARCHIVE_SUPERSEDED_AFTER_DAYS: float = 7.0
 
     def __init__(self, session_id: str, storage_dir: str = "./checkpoints",
-                 semantic_retrieval: bool = False):
+                 semantic_retrieval: bool = False, domain: str | None = None):
         self.session_id = session_id
         # Blend embedding similarity into query(). Off by default and passed
         # in rather than read from Settings, so this module stays independent
         # of config the way the rest of it is; api/app.py supplies the value.
         self.semantic_retrieval = semantic_retrieval
+        # Which domain pack the extractor runs (see graph_memory/domains.py).
+        # None falls back to settings.domain, and that to "coding", which
+        # adds no patterns — so the default path is unchanged.
+        self._domain = domain
         # node id -> (text embedded, vector). See _node_embeddings.
         self._embedding_cache: dict[str, tuple] = {}
         self._nodes: dict[str, MemoryNode] = {}
@@ -662,7 +666,7 @@ class GraphMemory:
 
         if extracted_data is None:
             from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
-            _he = get_hybrid_extractor()
+            _he = get_hybrid_extractor(self._domain)
             extracted_data = _he.heuristic_extract(new_messages, window_size=window_size)
         data = extracted_data if isinstance(extracted_data, dict) \
             else self._extracted_to_dict(extracted_data)
@@ -726,7 +730,17 @@ class GraphMemory:
                 # "building A dashboard" captures the article; the label is
                 # the headline of every resume, so it reads as a title.
                 goal = _LEADING_ARTICLE.sub("", goal.strip())
-                nid = self.add_node(NodeType.GOAL, goal, NodeStatus.IN_PROGRESS, importance=1.0)
+                # Provenance, not prose: a goal only ever comes from a goal
+                # opener matched in a USER turn in the first four messages.
+                # That is narrow enough to be evidence in itself, and the
+                # validator's own goal scorer cannot see it — it reads the
+                # label after the opener has been stripped, so "the goal
+                # this quarter is to get new teams onboarded in a day"
+                # reaches it as "to get new teams onboarded in a day" and
+                # scores as an unremarkable phrase. 0.8 is the LLM-only
+                # tier: good evidence, not corroborated.
+                nid = self.add_node(NodeType.GOAL, goal, NodeStatus.IN_PROGRESS,
+                                    importance=1.0, confidence=0.8)
                 if nid:
                     goal_ids.append(nid)
 

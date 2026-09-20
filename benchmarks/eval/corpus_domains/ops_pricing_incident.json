@@ -1,0 +1,41 @@
+{
+  "id": "ops_pricing_incident",
+  "origin": "synthetic",
+  "domain": "ops/incident",
+  "pack": "ops",
+  "notes": "A live incident. Stresses: the incident as the goal, symptoms as errors, a root cause and a rollback as decisions, and follow-ups that outlive the incident.",
+  "messages": [
+    {"role": "user", "content": "We are seeing an incident on the pricing service, checkout is failing for about a third of requests."},
+    {"role": "assistant", "content": "Error rate is 34 percent and p99 latency jumped to 8 seconds. Paged the database on-call."},
+    {"role": "user", "content": "any idea what changed"},
+    {"role": "assistant", "content": "Root cause is connection pool exhaustion after the 14:02 deploy. The runbook says drain and restart the pool workers."},
+    {"role": "user", "content": "do it"},
+    {"role": "assistant", "content": "Restarted the pool workers and rolled back to build 4471. Traffic is recovered."},
+    {"role": "user", "content": "are we clear"},
+    {"role": "assistant", "content": "Still monitoring the replica lag, which is at 40 seconds. Follow-up to add a pool-size alert before the next release."},
+    {"role": "user", "content": "anything for the writeup"},
+    {"role": "assistant", "content": "We are dropping about 2 percent of webhook deliveries while the queue drains. Escalated to the platform team."}
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "Paged the database on-call",
+      "Restarted the pool workers",
+      "Traffic is recovered",
+      "Escalated to the platform team"
+    ],
+    "pending_tasks": [
+      "monitoring the replica lag",
+      "Follow-up to add a pool-size alert"
+    ],
+    "decisions": [
+      "Root cause is connection pool exhaustion",
+      "rolled back to build 4471",
+      "The runbook says drain and restart the pool workers"
+    ],
+    "errors": [
+      "Error rate is 34 percent",
+      "We are seeing an incident on the pricing service",
+      "We are dropping about 2 percent of webhook deliveries"
+    ]
+  }
+}

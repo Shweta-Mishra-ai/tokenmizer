@@ -225,6 +225,31 @@ line is the part a summary loses — and
 `GET /api/graph/{session_id}/why?q=date-fns` replays the full chain with
 the trigger, the reason and the evidence for each hop.
 
+### Not only coding sessions
+
+Set `domain` and the same five shapes are read in another vocabulary.
+Nobody in an incident channel says "Decided:", and nobody in a research
+log says "Fixed:" — which is why those sessions used to come back nearly
+empty (**macro F1 11%**, decisions and errors at **0%**).
+
+```yaml
+domain: ops        # coding (default) · research · ops · product
+```
+
+```
+Incident: We are seeing an incident on the pricing service, checkout is failing
+Mitigating: Still monitoring the replica lag | Follow-up to add a pool-size alert
+Done: Restarted the pool workers and rolled back to build 4471 | Traffic is recovered
+Decided: Root cause is connection pool exhaustion after the 14:02 deploy
+Symptoms: Error rate is 34 percent and p99 latency jumped to 8 seconds
+```
+
+**11% to 96%** on the labelled sessions in `benchmarks/eval/corpus_domains`,
+with the coding corpus unchanged — a pack's patterns run *after* the
+coding ones and can only add. Three hand-written sessions, so read it as
+"the mechanism works on sessions of this shape", not as a generalisation
+claim; the [benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) say the same.
+
 ## Use it from your tools
 
 Four ways in, depending on where you work. All of them talk to the same
@@ -431,7 +456,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1264 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1285 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

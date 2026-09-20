@@ -1,0 +1,40 @@
+{
+  "id": "product_onboarding",
+  "origin": "synthetic",
+  "domain": "product/discovery",
+  "pack": "product",
+  "notes": "A quarterly planning and discovery session. Stresses: an outcome as the goal, customer signal as completed work, an ownership call and a descope as decisions, and a blocker as an error.",
+  "messages": [
+    {"role": "user", "content": "The goal this quarter is to get new teams to their first shared board within one day."},
+    {"role": "assistant", "content": "Customers said the invite flow is the drop-off point. We agreed that onboarding owns the whole first-run path."},
+    {"role": "user", "content": "what have we got out"},
+    {"role": "assistant", "content": "Shipped the one-click invite link. In discovery on the template gallery. Blocked on legal for the shared-link policy."},
+    {"role": "user", "content": "what is at risk"},
+    {"role": "assistant", "content": "The template gallery slipped to next quarter. We are cutting the custom domain work to protect the date."},
+    {"role": "user", "content": "how do we know it worked"},
+    {"role": "assistant", "content": "The requirement is 60 percent of new teams reaching a shared board on day one. Owner is the growth team."},
+    {"role": "user", "content": "anything from support"},
+    {"role": "assistant", "content": "Support tickets are up on the invite email landing in spam. Users reported the link expiring too fast."}
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "Customers said the invite flow is the drop-off point",
+      "Shipped the one-click invite link",
+      "Users reported the link expiring too fast"
+    ],
+    "pending_tasks": [
+      "In discovery on the template gallery"
+    ],
+    "decisions": [
+      "onboarding owns the whole first-run path",
+      "cutting the custom domain work",
+      "The requirement is 60 percent of new teams reaching a shared board",
+      "Owner is the growth team"
+    ],
+    "errors": [
+      "Blocked on legal for the shared-link policy",
+      "The template gallery slipped",
+      "Support tickets are up"
+    ]
+  }
+}

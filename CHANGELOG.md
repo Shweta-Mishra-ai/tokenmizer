@@ -91,6 +91,51 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Added — domain packs: the same ontology, another vocabulary
+Goal / task / decision / file / error is a *coding* ontology, and every
+regex family in `patterns.py` is a coding phrasing. Point the proxy at a
+research log, an incident review or a product discussion and it extracted
+almost nothing — measured, worse than "almost": **macro F1 11%** on three
+labelled sessions of that kind, with decisions and errors at **0%**. Not
+because the shapes are wrong, but because nobody in those rooms says
+"Decided:" or "Fixed:". They say "The hypothesis is", "Root cause:", "the
+customer asked for".
+
+`domain: research | ops | product` (coding is the default and adds
+nothing). The shapes a session has are already the five this ontology
+holds — something you are trying to establish, the steps you took, the
+calls you made, what went wrong, the artifacts you referenced — so a pack
+adds the phrasings that name those shapes in one domain, and the words
+the resume block uses for them:
+
+    research  Question  Investigating  Found    Concluded  Contradictions
+    ops       Incident  Mitigating     Done     Decided    Symptoms
+    product   Outcome   In flight      Shipped  Decided    Blockers
+
+The alternative — a node type per domain — would grow the ontology to
+thirty types of which a given session uses five, each needing a colour
+slot, a lane, a resume section and a row in every consumer.
+
+**11% to 96%** on `benchmarks/eval/corpus_domains`, three labelled
+sessions committed with the packs, because a pack without a corpus is a
+claim rather than a measurement. The coding corpus is unchanged at 97%: a
+pack's families run *after* the coding ones and can only add, which is
+pinned by a test asserting the coding result is a subset of every pack's.
+Reproduce the before number with `--ignore-packs`.
+
+Fixing this exposed the same bias one layer down. The validator's goal
+scorer rewarded only "build / create / develop / implement / design", so a
+research question, an incident and a quarterly outcome were extracted
+correctly and then **rejected for not being about building software**.
+Goals are also written with the confidence their provenance deserves: a
+goal only ever comes from a goal opener matched in a user turn in the
+first four messages, which the validator cannot see because it reads the
+label after the opener has been stripped.
+
+Still open, and stated rather than quietly omitted: a **data** pack, real
+captured transcripts per pack instead of the hand-written sessions
+committed here, and per-pack LLM extraction schemas.
+
 ### Added — tools on all nine providers, streamed or not
 `stream: true` plus `tools` used to mean one of two things depending on
 who was behind the proxy. Anthropic and Ollama fell back to a buffered

@@ -40,6 +40,11 @@ from tokenmizer.graph_memory.graph import (  # noqa: E402
     NodeType,
 )
 
+# Set from --ignore-packs. A module-level flag rather than a parameter
+# threaded through evaluate(): extract() is called from the resume-quality
+# runner too, and that one has no opinion about packs.
+IGNORE_PACKS = False
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -63,7 +68,9 @@ def extract(session) -> tuple[dict[str, list[str]], set[frozenset[str]]]:
     the relation working, not the extractor saying one thing twice.
     """
     with tempfile.TemporaryDirectory() as d:
-        g = GraphMemory(session.id, storage_dir=d)
+        # A session may declare a domain pack; the default is coding.
+        g = GraphMemory(session.id, storage_dir=d,
+                        domain=None if IGNORE_PACKS else getattr(session, "pack", None))
         g.extract_from_messages(session.messages, incremental=False)
         nodes = [n for n in g._nodes.values() if not n._evicted]
         by_id = {n.id: n for n in nodes}
@@ -233,10 +240,16 @@ def main() -> int:
     ap.add_argument("--errors", action="store_true", help="list every miss and false positive")
     ap.add_argument("--threshold", type=float, default=0.6, help="match strictness (default 0.6)")
     ap.add_argument("--sweep", action="store_true", help="sweep the match threshold")
+    ap.add_argument("--ignore-packs", action="store_true",
+                    help="run every session with the coding patterns only, "
+                         "whatever pack it declares — the before number for "
+                         "a domain pack")
     ap.add_argument("--json", dest="json_out", help="write machine-readable results here")
     args = ap.parse_args()
 
     logging.disable(logging.CRITICAL)  # extraction logs would drown the report
+    global IGNORE_PACKS
+    IGNORE_PACKS = args.ignore_packs
 
     try:
         sessions = corpus_mod.load(args.corpus)
