@@ -102,12 +102,35 @@ the one thing an outside contributor actually gets.
 Now a top-level section leading with the contributor avatars, which are
 generated from GitHub's own contributors list and update with no edit
 from anyone, above a link to the full contributor graph. The named list
-of what each person fixed stays underneath, because an avatar cannot say
+of what each person did stays underneath, because an avatar cannot say
 "negated-decision handling in the decision tracker" — and
 `test_every_merged_contributor_is_credited` already guards it against
 being dropped by a restructure, which is exactly how it was lost once
 before. That test now matches the heading at either level, so moving the
 section cannot silently disable the check.
+
+### Fixed — the contributors nobody was counting
+
+An audit of every merged pull request and every issue against the
+README's list found the code credits complete and the rest of it
+missing entirely:
+
+- **@0xfroOty reported five of the bugs they are credited for fixing**
+  (#19, #20, #23, #30, #34) and the README mentioned only the pull
+  requests — while the Contributing section three paragraphs above says
+  in as many words that the report is the harder half.
+- **@TechNovaWorldai filed #62 before sending #63**, and only the fix
+  was listed.
+- **@neoneye was not mentioned at all.** An independent analysis of
+  TokenMizer and a listing among other agent-memory systems in the agent
+  memory atlas (#39) — no commits, so the avatar grid will never show
+  this contribution either.
+
+The section now separates sending a fix, finding the bug, and reviewing
+the project from outside, and says plainly that the avatars count commits
+and the lists below do not. `test_every_merged_contributor_is_credited`
+covers all five people, which matters most for the two who exist in no
+other record: nothing but that list would notice them going missing.
 
 ### Added — the graph explorer, in motion, in the README
 

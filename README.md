@@ -530,12 +530,26 @@ it and said so. Thank you.
   <sub>Updates itself as people contribute &middot; <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/graphs/contributors">full contributor graph</a></sub>
 </div>
 
-What each of them fixed:
+The avatars above come from GitHub's contributor list, which counts
+commits. These lists do not, because some of the most useful things
+anyone did here never touched the code.
+
+**Sent a fix**
 
 - [**@0xfroOty**](https://github.com/0xfroOty) — negated-decision handling in the decision tracker ([#22](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/22)), `OutputTrimmer` level alignment ([#25](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/25)), streaming cache-hit analytics ([#31](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/31))
 - [**@pollychen-lab**](https://github.com/pollychen-lab) — graph node IDs derived from stored (truncated) labels ([#21](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/21)), semantic-opposite decision detection ([#26](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/26))
 - [**@floze-the-genius**](https://github.com/floze-the-genius) — dashboard stats authentication fix ([#35](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/35))
 - [**@TechNovaWorldai**](https://github.com/TechNovaWorldai) — the `minimal` terse prompt trimmed back under its own token budget ([#63](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/63))
+
+**Found the bug in the first place** — which this project considers the
+harder half, and says so above
+
+- [**@0xfroOty**](https://github.com/0xfroOty) — opposite decisions merged into one node ([#19](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/19)), node IDs colliding after label truncation ([#20](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/20)), `full` trimming behaving like `lite` ([#23](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/23)), streaming always recording `cache_hit=False` ([#30](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/30)), dashboard stats failing under an API key ([#34](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/34))
+- [**@TechNovaWorldai**](https://github.com/TechNovaWorldai) — the terse prompt over its own budget ([#62](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/62))
+
+**Looked at it from the outside**
+
+- [**@neoneye**](https://github.com/neoneye) (Simon Strandgaard) — an independent analysis of TokenMizer and a place for it among other agent-memory systems in the [agent memory atlas](https://neoneye.github.io/agent-memory-atlas/compare/) ([#39](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/39))
 
 ## Support
 
