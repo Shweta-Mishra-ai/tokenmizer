@@ -66,7 +66,7 @@ def test_short_followup_still_receives_session_context(client, followup):
         "model": "gpt-4o", "session_id": f"short-{followup.replace('?', '')}",
         "messages": HISTORY + [{"role": "user", "content": followup}],
     })
-    assert "[Relevant session context]" in _sent_system_text(provider), (
+    assert "relevant session context" in _sent_system_text(provider), (
         f"a {len(followup.split())}-word follow-up got no graph context; "
         "these are the turns that most need it"
     )
@@ -79,7 +79,7 @@ def test_long_query_behaviour_is_unchanged(client):
         "messages": HISTORY + [
             {"role": "user", "content": "which datastore did we choose for orders"}],
     })
-    assert "[Relevant session context]" in _sent_system_text(provider)
+    assert "relevant session context" in _sent_system_text(provider)
 
 
 def test_last_substantive_query_walks_back_past_short_turns():

@@ -43,6 +43,7 @@ from tokenmizer.filters.file_intelligence import FileIntelligence
 from tokenmizer.graph_memory.graph import GraphMemory
 from tokenmizer.providers.providers import build_provider
 from tokenmizer.security.auth import verify_api_key
+from tokenmizer.security.fencing import fence
 from tokenmizer.security.middleware import injection_guard
 from tokenmizer.security.ownership import (
     DEV_PRINCIPAL,
@@ -985,7 +986,7 @@ async def _update_graph(
                 # client's own system prompt stay cacheable.
                 messages[sys_idx]["content"] = (
                     f"{messages[sys_idx]['content']}\n\n"
-                    f"[Relevant session context]\n{ctx_block}"
+                    f"{fence(ctx_block, 'relevant session context')}"
                 )
             else:
                 # A system message is not guaranteed to exist: layer 2
@@ -994,7 +995,7 @@ async def _update_graph(
                 # depend on that unrelated setting.
                 messages.insert(0, {
                     "role": "system",
-                    "content": f"[Relevant session context]\n{ctx_block}",
+                    "content": fence(ctx_block, "relevant session context"),
                 })
 
     # Preferences — habits that outlive this session, and so are NOT in
@@ -1019,11 +1020,12 @@ async def _update_graph(
             sys_idx = next(
                 (i for i, m in enumerate(messages) if m.get("role") == "system"), None
             )
+            fenced = fence(pref_block, "remembered preferences")
             if sys_idx is not None:
                 messages[sys_idx]["content"] = (
-                    f"{messages[sys_idx]['content']}\n\n{pref_block}")
+                    f"{messages[sys_idx]['content']}\n\n{fenced}")
             else:
-                messages.insert(0, {"role": "system", "content": pref_block})
+                messages.insert(0, {"role": "system", "content": fenced})
 
     # Context occupancy, measured per turn rather than accumulated: each
     # `messages` list already carries the full running conversation, so a

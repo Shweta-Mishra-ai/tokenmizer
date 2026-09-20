@@ -114,4 +114,4 @@ class TestInjectedContextKeepsTheSystemPrefixStable:
         )
         system = next(m["content"] for m in updated if m["role"] == "system")
         assert system.startswith(stable), "the stable prefix must come first"
-        assert "[Relevant session context]" in system[len(stable):]
+        assert "relevant session context" in system[len(stable):]

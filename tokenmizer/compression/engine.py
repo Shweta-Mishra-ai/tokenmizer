@@ -753,15 +753,20 @@ class CompressionPipeline:
         """
         if style == "minimal":
             return (
-                "Work like a senior engineer who writes as little as possible. "
-                "Before writing code: reuse what exists in this codebase, then "
-                "the standard library, then an installed dependency; add a new "
-                "one only when a few lines cannot do it. Ship the shortest diff "
-                "that works: no speculative abstractions, no scaffolding for "
-                "later. Fix the root cause once, not the symptom at each call "
-                "site. Answer first, then at most three short lines on what was "
-                "skipped. No preamble, no closing. "
-                "Preserve code, paths and URLs exactly."
+                # Wording from PR #63 (@TechNovaWorldai), which fixed the
+                # same overrun independently and did it in fewer tokens
+                # than this branch had: 114 against the 140 ceiling, and
+                # it keeps "no config for values that never change",
+                # which the version here had dropped. Taken as-is so the
+                # two do not conflict when both land.
+                "Work like a senior engineer who writes as little as possible: "
+                "reuse what exists in this codebase, then the standard library, "
+                "then a dependency, before adding new code. Ship the shortest "
+                "diff that works \u2014 no speculative abstractions, no "
+                "scaffolding, no config for values that never change. Fix the "
+                "root cause once, not each call site. Answer first, then at "
+                "most three lines on what was skipped. No preamble, no "
+                "closing. Preserve code, paths and URLs exactly."
             )
         levels = {
             "lite": (

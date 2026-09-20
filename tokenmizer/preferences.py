@@ -127,22 +127,44 @@ class PreferenceStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path), timeout=5.0,
                                check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        # Losing the race to set the journal mode is not a failure: it is a
+        # property of the file and persists once any process has set it.
+        # Same fix as the shared rate limiter, for the same startup race.
+        for pragma in ("journal_mode=WAL", "synchronous=NORMAL"):
+            try:
+                conn.execute(f"PRAGMA {pragma}")
+            except sqlite3.OperationalError:
+                pass
         return conn
 
     def _init(self) -> bool:
-        try:
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as conn:
-                conn.execute(_SCHEMA)
-            return True
-        except Exception as e:
-            logger.warning(
-                "Preference store unavailable (%s) — preferences will not be "
-                "remembered across sessions; nothing else is affected.", e,
-            )
-            return False
+        """Create the table, retrying while the file is merely busy.
+
+        Every worker runs `CREATE TABLE IF NOT EXISTS` at startup, so on a
+        cold start with several workers some of them meet a locked
+        database. Treating the first failure as final disabled the store
+        for that worker's whole life.
+        """
+        delay = 0.05
+        last: Exception | None = None
+        for _ in range(6):
+            try:
+                self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._connect() as conn:
+                    conn.execute(_SCHEMA)
+                return True
+            except sqlite3.OperationalError as e:
+                last = e
+                time.sleep(delay)
+                delay = min(delay * 2, 0.8)
+            except Exception as e:
+                last = e
+                break
+        logger.warning(
+            "Preference store unavailable (%s) — preferences will not be "
+            "remembered across sessions; nothing else is affected.", last,
+        )
+        return False
 
     def observe(self, principal: str, text: str) -> str | None:
         """Record `text` if it states a preference. Returns the key, or None.

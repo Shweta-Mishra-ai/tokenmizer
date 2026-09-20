@@ -25,6 +25,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from tokenmizer.core.tokenizer import count_messages_tokens
+from tokenmizer.security.fencing import fence
 
 if TYPE_CHECKING:
     from tokenmizer.graph_memory.graph import GraphMemory
@@ -113,7 +114,11 @@ class SmartMessageWindow:
 
         bridge_parts = []
         if graph_ctx:
-            bridge_parts.append(f"[Session context from earlier conversation]\n{graph_ctx}")
+            # Fenced for the same reason the proxy fences its context block:
+            # this is conversation text being promoted into a system
+            # message, where an imperative reads as an instruction rather
+            # than as a record of one. See security/fencing.py.
+            bridge_parts.append(fence(graph_ctx, "session context from earlier turns"))
 
         # Add a note about what's omitted
         bridge_parts.append(
