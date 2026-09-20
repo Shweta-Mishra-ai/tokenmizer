@@ -508,6 +508,17 @@ def _find_by_word_overlap(
     return to_supersede
 
 
+# Words that are sentence scaffold rather than any part of the choice.
+# "use" is deliberately absent: it is half of the use/avoid opposite pair
+# that _is_same_decision checks before it gets here.
+_SCAFFOLD_WORDS = frozenset({
+    "the", "a", "an", "for", "it", "its", "this", "that", "these", "those",
+    "we", "our", "us", "i", "my", "you", "your", "to", "with", "in", "on",
+    "of", "and", "or", "is", "are", "be", "been", "will", "would", "should",
+    "can", "as", "at", "by", "from", "here", "now", "then", "so",
+})
+
+
 def _names_competing_alternatives(label_a: str, label_b: str) -> bool:
     """
     True if both labels name a technology from the SAME topic bucket but
@@ -529,8 +540,16 @@ def _names_competing_alternatives(label_a: str, label_b: str) -> bool:
     When this returns True the callers must NOT treat the pair as a
     duplicate — the supersession path is what should handle it.
     """
-    kw_a = _matched_topic_keywords(label_a, "")
-    kw_b = _matched_topic_keywords(label_b, "")
+    from tokenmizer.graph_memory.patterns import canonical_word
+
+    # Folded onto one spelling per technology first: "PostgreSQL" and
+    # "Postgres" are the same choice, and comparing them raw made each the
+    # other's exclusive keyword — so "PostgreSQL for order storage" and
+    # "Postgres for orders" read as two products competing for the
+    # database slot, and every resume block for that session carried a
+    # "Conflicting (unresolved)" line about a conflict that did not exist.
+    kw_a = {canonical_word(k) for k in _matched_topic_keywords(label_a, "")}
+    kw_b = {canonical_word(k) for k in _matched_topic_keywords(label_b, "")}
     if not kw_a or not kw_b:
         return False          # no tech vocabulary on one side — no signal
 
@@ -547,9 +566,17 @@ def _names_competing_alternatives(label_a: str, label_b: str) -> bool:
         # "Use PostgreSQL 16 with pgvector"): same choice, more detail.
         return False
 
-    topics_a = {_KEYWORD_TO_TOPIC[k] for k in exclusive_a if k in _KEYWORD_TO_TOPIC}
-    topics_b = {_KEYWORD_TO_TOPIC[k] for k in exclusive_b if k in _KEYWORD_TO_TOPIC}
-    return bool(topics_a & topics_b)
+    # _KEYWORD_TO_TOPIC is keyed on the vocabulary's own spellings, so a
+    # canonicalised keyword has to be looked up under both.
+    def _topics(keywords: set) -> set:
+        out = set()
+        for k in keywords:
+            for spelling, topic in _KEYWORD_TO_TOPIC.items():
+                if canonical_word(spelling) == k:
+                    out.add(topic)
+        return out
+
+    return bool(_topics(exclusive_a) & _topics(exclusive_b))
 
 
 def _is_same_decision(label_a: str, label_b: str) -> bool:
@@ -564,11 +591,17 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
         return False
 
     def _norm(s: str) -> str:
+        from tokenmizer.graph_memory.patterns import canonical_word
+
         s = s.lower().rstrip(".,!?;:")
-        # Normalize common tech name variants
         s = re.sub(r"[^\w\s]", " ", s)
         s = s.replace("next js", "nextjs").replace("node js", "nodejs")
         s = s.replace("type script", "typescript").replace("java script", "javascript")
+        # One spelling per technology and no plurals, so "PostgreSQL for
+        # order storage" and "Postgres for orders" are recognised as one
+        # decision instead of two on the same topic — which the contested
+        # check then reported as an unresolved conflict in every resume.
+        s = " ".join(canonical_word(w) for w in s.split())
         return re.sub(r"\s+", " ", s).strip()
 
     a, b = _norm(label_a), _norm(label_b)
@@ -623,11 +656,23 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
     # threshold. The extractor can emit both variants from one message.
     # The smaller set must have >= 2 words — a single shared word
     # ("postgresql") is a subset of many genuinely different decisions.
-    smaller, larger = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
+    # Scaffold words carry no part of the choice, and they are the reason
+    # two phrasings of one decision miss the threshold: "cenkalti/backoff
+    # for it" and "Use cenkalti/backoff" name the same library and share
+    # 2 words of 4. Dropped only for the containment/overlap tail below —
+    # the negation and opposite-term checks above need the full sets,
+    # since "use" is half of the use/avoid pair.
+    content_a = words_a - _SCAFFOLD_WORDS
+    content_b = words_b - _SCAFFOLD_WORDS
+    if not content_a or not content_b:
+        content_a, content_b = words_a, words_b
+
+    smaller, larger = ((content_a, content_b) if len(content_a) <= len(content_b)
+                       else (content_b, content_a))
     if len(smaller) >= 2 and smaller <= larger:
         return True
-    overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
-    return overlap >=   0.82
+    overlap = len(content_a & content_b) / max(len(content_a), len(content_b))
+    return overlap >= 0.82
 
 
 # ── Error dedup (Phase 3) ─────────────────────────────────────────────────

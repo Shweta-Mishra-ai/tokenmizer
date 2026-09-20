@@ -531,6 +531,36 @@ _SOLUTION_VERB = re.compile(
 )
 
 
+# A captured task that opens on an article or a preposition is the tail of
+# a sentence whose verb the pattern consumed: "Removed |the dependency from
+# go.mod|", "Fixed |by adding a 5 second timeout|". The label lands in the
+# resume block, which is the thing the product exists to produce, and
+# "Done: the dependency from go.mod" does not say what happened to it.
+# "to" is deliberately absent: it opens a purpose clause, not an object.
+# "Removed |to prove the bake worked|" reads worse with the verb restored,
+# not better, because the verb already had its object elsewhere.
+_FRAGMENT_OPENER = re.compile(
+    r"^(?:the|a|an|by|from|with|in|on|at|into|onto|via|using|after|"
+    r"before|during|over|under)\b",
+    re.IGNORECASE,
+)
+
+
+def restore_verb(verb: str, label: str) -> str:
+    """Put the matched verb back in front of a fragment label.
+
+    Only when the label reads as a fragment: "virtual environment setup"
+    is already a statement and gains nothing from "Completed" in front of
+    it, while "the dependency from go.mod" is not a statement at all.
+    """
+    if not label or not verb or not _FRAGMENT_OPENER.match(label):
+        return label
+    verb = verb.strip()
+    if not verb:
+        return label
+    return verb[0].upper() + verb[1:].lower() + " " + label
+
+
 def _is_only_paths(text: str) -> bool:
     """True if `text` is nothing but filenames.
 
@@ -1174,3 +1204,41 @@ _SCHEMA_STOP_WORDS = frozenset({
     "the", "a", "an", "this", "that", "data", "lookup", "routing",
     "truth", "below", "above", "following", "same", "new",
 })
+
+
+# ── Shared technology vocabulary ──────────────────────────────────────────────
+#
+# One spelling per technology, so two modules that both need to know
+# "postgres" and "PostgreSQL" are the same thing cannot drift apart:
+# graph.py expands query and label tokens with it, decision_tracker.py
+# folds labels onto it before deciding whether two decisions are the same.
+# Without the second use, "PostgreSQL for order storage" and "Postgres for
+# orders" were two decisions on one topic — which the tracker then reported
+# as an unresolved conflict in every resume block.
+CANONICAL_TECH = {
+    "postgresql": "postgres", "psql": "postgres", "pg": "postgres",
+    "mongodb": "mongo",
+    "nextjs": "next", "next.js": "next",
+    "nodejs": "node", "node.js": "node",
+    "typescript": "ts", "javascript": "js",
+    "kubernetes": "k8s",
+    "golang": "go",
+    "postgres": "postgres",
+}
+
+
+def canonical_word(word: str) -> str:
+    """One spelling for a technology name, with a plural folded off.
+
+    "orders" and "order" are the same noun in a decision label, and a
+    label that says "PostgreSQL" is naming what another says as
+    "Postgres".
+    """
+    w = (word or "").lower().strip(".,!?:;()[]")
+    if w in CANONICAL_TECH:
+        return CANONICAL_TECH[w]
+    if len(w) > 4 and w.endswith("ies"):
+        w = w[:-3] + "y"
+    elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        w = w[:-1]
+    return CANONICAL_TECH.get(w, w)
