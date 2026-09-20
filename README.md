@@ -115,8 +115,27 @@ configuration reference are in
 
 ## See it
 
-Nothing here is a mockup. Every screenshot is the shipped UI rendering a
-session from the labelled corpus in `benchmarks/eval/corpus`.
+Nothing here is a mockup. Every screenshot and the demo below are the
+shipped UI rendering a session from the labelled corpus in
+`benchmarks/eval/corpus`.
+
+### The session graph is a page you drive, not a picture
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/graph-demo.gif" width="900" alt="The graph explorer in use: the radial map, a node selected to show its type, confidence, first-seen date and every relation, the force layout with communities and unconnected facts, a node type filtered out, the timeline, and the light theme"/>
+  <br/>
+  <sub>Radial &rarr; select a node &rarr; force &rarr; filter a type &rarr; timeline &rarr; light. Regenerate with <code>python scripts/gen_graph_demo.py</code>.</sub>
+</div>
+
+Select a node and you get its type, status, community, importance,
+confidence, when it was first seen and every relation it carries — the
+provenance behind a fact, not just the fact. Filter a type or a community
+and the counts move with it. Three layouts, a light theme and a PNG
+export are one click each.
+
+It is **one self-contained HTML file with no external requests**, so it
+opens offline, works from a `file://` URL, and can be sent to someone who
+has never installed TokenMizer.
 
 ### The dashboard tells you what it actually knows
 
@@ -147,10 +166,7 @@ The panel beside it counts what the session knows and what is missing —
 open issues, decisions changed, history gaps, unconnected nodes — then
 lists the detected communities, the hotspots everything hangs off, and
 which kinds of node point at which. Filter by type or community, search,
-click a node for its confidence, its dates and the supersession chain
-behind it. Force and timeline layouts are one click away. One
-self-contained HTML file with no external requests, so it opens offline
-and can be sent to someone.
+click a node for the supersession chain behind it.
 
 ### The same session as a story
 
@@ -485,7 +501,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1402 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1403 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it
