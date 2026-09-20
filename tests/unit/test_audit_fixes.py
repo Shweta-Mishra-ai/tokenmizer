@@ -382,13 +382,20 @@ class TestSettingsAreActuallyRead:
         assert CheckpointManager(storage_dir=str(tmp_path),
                                  max_resume_tokens=42)._max_resume_tokens == 42
 
-    def test_routing_enabled_warns_that_it_does_nothing(self, tmp_path, monkeypatch, caplog):
+    @pytest.mark.parametrize("block", [
+        "routing:\n  enabled: true\n",
+        # Disabled, but the operator still wrote three model names and
+        # believes they mean something. The warning is about the block.
+        "routing:\n  enabled: false\n  simple_model: claude-haiku-4-5\n",
+    ])
+    def test_routing_block_warns_that_it_does_nothing(self, block, tmp_path,
+                                                      monkeypatch, caplog):
         import logging
 
         import tokenmizer.config.settings as settings_module
 
         cfg = tmp_path / "tokenmizer.yaml"
-        cfg.write_text("routing:\n  enabled: true\n")
+        cfg.write_text(block)
         monkeypatch.setenv("TOKENMIZER_CONFIG", str(cfg))
         monkeypatch.setattr(settings_module, "_settings", None)
         monkeypatch.delenv("TOKENMIZER_ENV", raising=False)
@@ -397,9 +404,28 @@ class TestSettingsAreActuallyRead:
             settings_module.get_settings()
         monkeypatch.setattr(settings_module, "_settings", None)
 
-        assert any("NOT IMPLEMENTED" in r.message for r in caplog.records), (
-            "a setting that does nothing must say so"
+        assert any("DEPRECATED" in r.message and "model_map" in r.message
+                   for r in caplog.records), (
+            "a setting that does nothing must say so, and name what replaced it"
         )
+
+    def test_no_routing_block_does_not_warn(self, tmp_path, monkeypatch, caplog):
+        """The deprecation must not fire for everyone who has a config."""
+        import logging
+
+        import tokenmizer.config.settings as settings_module
+
+        cfg = tmp_path / "tokenmizer.yaml"
+        cfg.write_text("default_model: claude-sonnet-4-6\n")
+        monkeypatch.setenv("TOKENMIZER_CONFIG", str(cfg))
+        monkeypatch.setattr(settings_module, "_settings", None)
+        monkeypatch.delenv("TOKENMIZER_ENV", raising=False)
+
+        with caplog.at_level(logging.WARNING):
+            settings_module.get_settings()
+        monkeypatch.setattr(settings_module, "_settings", None)
+
+        assert not any("routing" in r.message for r in caplog.records)
 
 
 class TestStreamDoesNotCacheTruncatedResponses:

@@ -77,6 +77,55 @@ class TestStatsCommand:
         assert "tokenmizer serve" in _plain(result.output), result.output
 
 
+class TestStatsShowsDurability:
+    """`/health` reports `degraded` with the counters behind it and the
+    dashboard renders them; `tokenmizer stats` printed a cheerful token
+    count and nothing else. A deployment whose checkpoints have been
+    failing all day must not look fine from the CLI."""
+
+    def _run(self, monkeypatch, health):
+        def fake_get(url, **kwargs):
+            if url.endswith("/health"):
+                if isinstance(health, Exception):
+                    raise health
+                return _FakeResponse(200, health)
+            return _FakeResponse(200, {"daily": {}})
+
+        monkeypatch.setattr(httpx, "get", fake_get)
+        result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0, result.output
+        return _plain(result.output)
+
+    def test_ok_says_ok(self, monkeypatch):
+        out = self._run(monkeypatch, {"status": "ok"})
+        assert "Durability: ok" in out
+
+    def test_degraded_names_each_failure(self, monkeypatch):
+        out = self._run(monkeypatch, {
+            "status": "degraded",
+            "persist_failures": {"checkpoint": 3, "graph": 0},
+            "sessions_with_unreadable_graph": ["a", "b"],
+            "sessions_without_durable_storage": [],
+            "sessions_with_data_loss": ["c"],
+            "checkpoint_storage_broken": True,
+            "checkpoint_data_loss": False,
+        })
+        assert "DEGRADED" in out
+        assert "checkpoint" in out and "3" in out
+        assert "unreadable graph: 2" in out
+        assert "lost stored memory: 1" in out
+        assert "Checkpoint storage is broken" in out
+        # A counter at zero is not a failure and must not be listed as one.
+        assert "graph): 0" not in out
+
+    def test_unreachable_health_is_not_reported_as_healthy(self, monkeypatch):
+        out = self._run(monkeypatch, httpx.ConnectError("refused"))
+        assert "could not read /health" in out
+        assert "Durability: ok" not in out, (
+            "unknown and healthy are different answers"
+        )
+
+
 class TestCheckpointCommand:
 
     def test_encodes_session_id(self, monkeypatch):

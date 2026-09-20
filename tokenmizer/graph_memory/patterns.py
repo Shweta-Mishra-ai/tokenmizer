@@ -106,7 +106,15 @@ _FILE_EXTENSIONLESS = re.compile(
 # The lookahead is what makes this safe for labels that legitimately
 # contain dots — `moment.js`, `React.lazy`, `Python 3.12`, `go.mod` —
 # where the dot is not followed by whitespace or end-of-string.
-_CLAUSE_SPAN = r'((?:(?![.!?](?=\s|$))[^\n]){5,80})'
+#
+# The 80-character ceiling is a budget, not a place to stop reading, so the
+# span ends on a word boundary: without that, a sentence that runs past it
+# was cut mid-token and the label shipped as "...confusion matri" or
+# "...destroyed memory is queryab". The second branch is the fallback for a
+# span with no boundary inside the budget at all (one very long token, like
+# a URL), where a hard cut is better than dropping the fact entirely.
+_SPAN_CHAR = r'(?:(?![.!?](?=\s|$))[^\n])'
+_CLAUSE_SPAN = r'(' + _SPAN_CHAR + r'{5,80}(?!\w)|' + _SPAN_CHAR + r'{5,80})'
 
 # Pass 1: explicit verb ("decided:", "going with", "will use")
 _DECISION = re.compile(
@@ -172,7 +180,14 @@ _DECISION_FOR = re.compile(
     r'zustand|redux|tanstack|mypy|pyright|black|isort|poetry|pytorch|torch|'
     r'tensorflow|jax|transformers|vllm|ollama|litellm|langgraph|crewai|'
     r'styled-components|cypress'
-    r')\b(?:(?!\s+(?:to|with|for)\s+\w)[^.!?\n,—\-]){0,40})',
+    # `\b` alone is satisfied by the dot in `React.lazy`, so "Decided: code
+    # splitting with React.lazy" produced BOTH the real decision and a bare
+    # "Use React" beside it. A tech name followed by a dot and more word
+    # characters is part of a longer identifier — React.lazy, redis.conf,
+    # torch.nn — and naming it is not choosing it. Only a dot is guarded:
+    # `postgres-15` and `bert-base-uncased` are how versions are written,
+    # and those ARE the choice.
+    r')\b(?!\.\w)(?:(?!\s+(?:to|with|for)\s+\w)[^.!?\n,—\-]){0,40})',
     re.IGNORECASE,
 )
 
@@ -670,6 +685,36 @@ _TASK_DONE = re.compile(
     r'merged|refactored|cleaned|migrated|restructured|removed|'
     r'switched|replaced)'
     r'[\s:\-]+' + _CLAUSE_SPAN,
+    re.IGNORECASE,
+)
+
+# ── Guards against a completion verb that is not a completion ───────────────
+#
+# _TASK_DONE matches a past-tense verb followed by a span. Two ways that
+# reads work into a sentence that describes none.
+
+# The verb is an adjective on one of the ontology's own nouns. "vanished
+# from completed tasks and appeared as a spurious file" recorded "tasks and
+# appeared as a spurious file" as finished work; so did "completed tasks F1
+# dropped from 77 to 75". Talking ABOUT the categories is exactly what a
+# session reviewing its own extraction does, and it was the largest single
+# source of spurious completed tasks on the real-transcript corpus.
+_CATEGORY_NOUN = re.compile(
+    r'^(?:tasks?|decisions?|errors?|files?|items?|goals?|endpoints?|'
+    r'schemas?|nodes?|labels?)\b',
+    re.IGNORECASE,
+)
+
+# The clause opens by saying the work is NOT done, and the completion verb
+# belongs to a subordinate phrase inside it: "Working on a CI step that runs
+# the image with the network removed to prove the bake worked" is one piece
+# of outstanding work, not a finished task called "to prove the bake
+# worked". This is the mirror of _COMPLETION_LEAD, which stops finished work
+# being read as a to-do.
+_WIP_LEAD = re.compile(
+    r'\b(?:working on|currently|in progress|about to|going to|planning to|'
+    r'need(?:s|ed)? to|still|next up|todo|to do|blocked on)\b'
+    r'[^.!?\n]{0,90}$',
     re.IGNORECASE,
 )
 

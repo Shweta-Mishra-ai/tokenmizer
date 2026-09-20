@@ -54,24 +54,48 @@ _SELECTORS = {
 }
 
 
-def extract(session) -> dict[str, list[str]]:
-    """Run the real extraction pipeline over a session's messages."""
+def extract(session) -> tuple[dict[str, list[str]], set[frozenset[str]]]:
+    """Run the real extraction pipeline over a session's messages.
+
+    Returns the labels per category, and the label pairs the graph itself
+    says are a fix and the error it fixed — the near-duplicate check
+    exempts those, because "hit X" and "fixed X" appearing together is
+    the relation working, not the extractor saying one thing twice.
+    """
     with tempfile.TemporaryDirectory() as d:
         g = GraphMemory(session.id, storage_dir=d)
         g.extract_from_messages(session.messages, incremental=False)
         nodes = [n for n in g._nodes.values() if not n._evicted]
+        by_id = {n.id: n for n in nodes}
+        fixes = {
+            frozenset((by_id[e.source_id].label, by_id[e.target_id].label))
+            for e in g._edges
+            if e.type.value == "fixes"
+            and e.source_id in by_id and e.target_id in by_id
+        }
     return {
         cat: [n.label for n in nodes if sel(n)]
         for cat, sel in _SELECTORS.items()
-    }
+    }, fixes
 
 
 def evaluate(sessions, threshold: float = 0.6) -> dict:
     per_session, totals = {}, {}
     all_labels: list[str] = []
+    # The transcripts the labels came from, so "truncated mid-word" can be
+    # checked against the source instead of guessed from the label's shape.
+    corpus: list[str] = []
+    # Label pairs the graph says are a fix and its error.
+    exempt: set[frozenset[str]] = set()
+    # One bucket per session: only labels that can collide in the same
+    # resume block are candidates for "near-duplicate". See label_quality.
+    groups: list[list[str]] = []
 
     for s in sessions:
-        got = extract(s)
+        corpus.extend(str(m.get("content", "")) for m in s.messages)
+        got, fixes = extract(s)
+        groups.append([x for cat, v in got.items() if cat != "files" for x in v])
+        exempt.update(fixes)
         scores = {}
         for cat in _SELECTORS:
             want = s.expected(cat)
@@ -99,7 +123,8 @@ def evaluate(sessions, threshold: float = 0.6) -> dict:
     return {
         "per_session": per_session,
         "micro": micro,
-        "labels": label_quality(all_labels),
+        "labels": label_quality(all_labels, "\n".join(corpus),
+                                 groups=groups, exempt=exempt),
         "threshold": threshold,
     }
 

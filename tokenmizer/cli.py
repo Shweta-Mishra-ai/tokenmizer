@@ -299,6 +299,69 @@ def stats(
         f"[yellow]Cost saved:   ${d.get('cost_saved_usd', 0):.4f}[/yellow]",
         border_style="green",
     ))
+    _print_durability(server, headers)
+
+
+def _print_durability(server: str, headers: dict) -> None:
+    """Print what `/health` knows about writes that did not land.
+
+    Savings are the pleasant number; this is the one that matters. A
+    deployment whose checkpoints have been failing all day still reports
+    a cheerful token count, and the operator reading it has no idea their
+    memory is gone — `/health` and the dashboard already said so, and
+    `tokenmizer stats` was the surface that did not.
+
+    A health call that itself fails is reported, never assumed healthy:
+    "could not read" and "nothing wrong" are different answers.
+    """
+    import httpx
+
+    try:
+        r = httpx.get(f"{server}/health", headers=headers, timeout=5)
+        h = r.json() if r.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        h = None
+
+    if h is None:
+        console.print(Panel.fit(
+            "[yellow]Durability: could not read /health[/yellow]\n"
+            "[dim]Not the same as healthy — the counters below are unknown.[/dim]",
+            border_style="yellow",
+        ))
+        return
+
+    failures = h.get("persist_failures") or {}
+    unreadable = h.get("sessions_with_unreadable_graph") or []
+    no_durability = h.get("sessions_without_durable_storage") or []
+    data_loss = h.get("sessions_with_data_loss") or []
+    ckpt_broken = h.get("checkpoint_storage_broken")
+    ckpt_loss = h.get("checkpoint_data_loss")
+
+    if h.get("status") == "ok":
+        console.print(Panel.fit(
+            "[green]Durability: ok[/green]\n"
+            "[dim]No failed writes, unreadable graphs or data loss.[/dim]",
+            border_style="green",
+        ))
+        return
+
+    lines = ["[bold red]Durability: DEGRADED[/bold red]"]
+    for path, n in sorted(failures.items()):
+        if n:
+            lines.append(f"[red]Failed writes ({path}): {n:,}[/red]")
+    if unreadable:
+        lines.append(f"[red]Sessions with an unreadable graph: {len(unreadable)}[/red]")
+    if no_durability:
+        lines.append(f"[red]Sessions with no durable storage: {len(no_durability)}[/red]")
+    if data_loss:
+        lines.append(f"[red]Sessions that lost stored memory: {len(data_loss)}[/red]")
+    if ckpt_broken:
+        lines.append("[red]Checkpoint storage is broken[/red]")
+    if ckpt_loss:
+        lines.append("[red]Checkpoint data was lost to corruption recovery[/red]")
+    lines.append("[dim]Full detail: GET /health[/dim]")
+
+    console.print(Panel.fit("\n".join(lines), border_style="red"))
 
 
 @app.command()

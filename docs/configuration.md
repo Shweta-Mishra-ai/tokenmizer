@@ -11,6 +11,13 @@ Every setting, where it can be set, and which ones fail loudly. Precedence is **
 provider: anthropic
 default_model: claude-sonnet-4-6
 
+# Send a client's model name somewhere else. Exact match, applied once,
+# empty by default. The response carries `tokenmizer.model_mapped_from`
+# whenever a substitution happened.
+model_map:
+  gpt-4: claude-sonnet-4-6
+  gpt-3.5-turbo: claude-haiku-4-5
+
 graph_checkpoint:
   enabled: true
   trigger_at_percent: 0.85
@@ -80,7 +87,7 @@ untrusted network lets any caller reset their own limit.
 
 | Setting | Status |
 |---|---|
-| `routing.*` | No implementation. `savings.routing` is always 0. Setting `enabled: true` logs a warning and changes nothing. |
+| `routing.*` | **Deprecated, removed next release.** Never implemented. Replaced by `model_map`. A config carrying the block still loads and logs a deprecation warning. |
 | `state_backend: redis` | Accepted, unused (see above). |
 
 ---

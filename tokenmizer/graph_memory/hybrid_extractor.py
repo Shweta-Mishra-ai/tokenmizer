@@ -30,6 +30,7 @@ from typing import Optional
 
 from tokenmizer.graph_memory.patterns import (
     _ALREADY_FIXED,
+    _CATEGORY_NOUN,
     _CAUSAL_LINK,
     _CLAUSE_END,
     _COMPLETION_LEAD,
@@ -81,6 +82,7 @@ from tokenmizer.graph_memory.patterns import (
     _TASK_DONE_PASSIVE,
     _TASK_TODO,
     _TASK_WIP,
+    _WIP_LEAD,
     EXTRACTION_SYSTEM,
     EXTRACTION_USER_TEMPLATE,
     _clip,
@@ -294,6 +296,15 @@ class HybridExtractor:
                             result.tasks_done.append(label)
                             seen_tasks.add(norm)
                     continue
+            # "completed tasks F1 dropped from 77 to 75" — the verb is an
+            # adjective on one of our own category nouns, and the sentence
+            # reports a measurement, not finished work.
+            if _CATEGORY_NOUN.match(raw_task.lstrip()):
+                continue
+            # "Working on a CI step ... with the network removed to prove
+            # the bake worked" — the clause already said this is not done.
+            if _WIP_LEAD.search(content[max(0, m.start() - 110):m.start()]):
+                continue
             verb = re.match(r"\w+", m.group(0))
             task = restore_verb(verb.group(0) if verb else "", _clip(raw_task))
             if len(task) < 5 or _is_only_paths(task) or _LEADING_CONNECTIVE.match(task):
