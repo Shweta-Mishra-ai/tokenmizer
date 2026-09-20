@@ -299,7 +299,8 @@ class RepetitiveHistoryPruner:
 
         for i, msg in enumerate(messages):
             content = msg.get("content", "")
-            if msg.get("role") == "assistant" and len(content) > 200:
+            if (msg.get("role") == "assistant" and isinstance(content, str)
+                    and len(content) > 200 and not msg.get("tool_calls")):
                 key = " ".join(content.split()).lower()
                 if key in first_seen:
                     turn = first_seen[key]
@@ -723,8 +724,18 @@ class CompressionPipeline:
             if msg.get("role") == "system":
                 result.append(msg)
                 continue
-
+            # Tool traffic is structured data the model and the client
+            # agreed on: a tool result is what the tool returned, an
+            # assistant turn with tool_calls is the request that produced
+            # it. Whitespace collapsing or filler stripping inside either
+            # corrupts the exchange (JSON, file contents, ids), so both go
+            # through untouched. So does any non-string content.
             content = msg.get("content", "")
+            if (msg.get("role") == "tool" or msg.get("tool_calls")
+                    or not isinstance(content, str)):
+                result.append(msg)
+                continue
+
             cr = self.compress_text(content, min_tokens=self.min_tokens_to_compress)
             total_saved += cr.original_tokens - cr.compressed_tokens
             result.append({**msg, "content": cr.compressed_text})
