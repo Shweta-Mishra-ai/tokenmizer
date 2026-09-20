@@ -24,7 +24,13 @@ from tokenmizer.providers.tools import (
     anthropic_response,
     anthropic_tool_choice,
     anthropic_tools,
+    cohere_messages,
+    cohere_stream_event,
     finish_reason,
+    gemini_contents,
+    gemini_response,
+    gemini_tool_config,
+    gemini_tools,
     normalize_tool_calls,
     ollama_messages,
     ollama_tool_calls,
@@ -270,9 +276,10 @@ def _anthropic_system_param(system_text: str, model: str):
 class AnthropicProvider(BaseProvider):
 
     supports_tools = True
-    # Tool-use deltas are not carried over text_stream; a streamed tool
-    # request is answered from chat() in one piece by the proxy.
-    supports_tool_stream = False
+    # text_stream carries only text, so the raw event stream is read
+    # instead: content_block_start(tool_use) then input_json_delta. See
+    # chat_stream.
+    supports_tool_stream = True
 
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-6"):
         super().__init__(api_key, model)
@@ -390,8 +397,49 @@ class AnthropicProvider(BaseProvider):
             async with client.messages.stream(
                 model=model, messages=conv, max_tokens=max_tokens, **kwargs_clean
             ) as s:
-                async for chunk in s.text_stream:
-                    yield chunk
+                # The raw event stream, not `text_stream`: the latter is
+                # text only, so a streamed tool request had to be answered
+                # from chat() in one piece and re-chunked. The events map
+                # one-for-one onto the OpenAI delta shape the proxy
+                # re-emits — a tool_use block start carries the id and
+                # name, and each input_json_delta a slice of the arguments.
+                #
+                # Anthropic indexes CONTENT BLOCKS (text and tool_use share
+                # one sequence); OpenAI indexes tool calls. Mapping between
+                # the two is this dict, not the raw index, or a call that
+                # follows a text block is announced at index 1 with nothing
+                # at index 0 and every SDK that assembles by index breaks.
+                ordinal: dict[int, int] = {}
+                async for event in s:
+                    kind = getattr(event, "type", "")
+                    if kind == "content_block_start":
+                        block = getattr(event, "content_block", None)
+                        if getattr(block, "type", "") == "tool_use":
+                            idx = len(ordinal)
+                            ordinal[getattr(event, "index", 0)] = idx
+                            yield {"tool_calls": [{
+                                "index": idx,
+                                "id": getattr(block, "id", "") or "",
+                                "type": "function",
+                                "function": {"name": getattr(block, "name", "") or "",
+                                             "arguments": ""},
+                            }]}
+                    elif kind == "content_block_delta":
+                        delta = getattr(event, "delta", None)
+                        dtype = getattr(delta, "type", "")
+                        if dtype == "text_delta":
+                            text = getattr(delta, "text", "")
+                            if text:
+                                yield text
+                        elif dtype == "input_json_delta":
+                            idx = ordinal.get(getattr(event, "index", 0))
+                            if idx is None:
+                                continue    # a block we never opened
+                            yield {"tool_calls": [{
+                                "index": idx,
+                                "function": {
+                                    "arguments": getattr(delta, "partial_json", "") or ""},
+                            }]}
         except anthropic.RateLimitError as e:
             raise ProviderError("anthropic", "rate_limit", str(e), retryable=True)
         except anthropic.APIStatusError as e:
@@ -558,8 +606,32 @@ class GrokProvider(OpenAIProvider):
 
 class CohereProvider(BaseProvider):
 
+    # v2 takes the OpenAI tool shape as-is; only the streamed event names
+    # differ. See providers/tools.py.
+    supports_tools = True
+    supports_tool_stream = True
+
     def __init__(self, api_key: str, model: str = "command-r-plus"):
         super().__init__(api_key, model)
+
+    def _chat_kwargs(self, kwargs: dict) -> dict:
+        """Sampling and tools, shared by both paths so the streaming one
+        cannot drift from the other."""
+        s = _sampling(kwargs)
+        out: dict = {}
+        if "temperature" in s:
+            out["temperature"] = s["temperature"]
+        if "top_p" in s:
+            out["p"] = s["top_p"]                # Cohere names top_p as `p`
+        if "stop" in s:
+            out["stop_sequences"] = _as_stop_list(s["stop"])
+        tk = tool_kwargs(kwargs)
+        if tk.get("tools"):
+            out["tools"] = tk["tools"]
+            # v2 has no tool_choice; "none" and "required" cannot be
+            # enforced, and pretending otherwise would be worse than the
+            # model simply deciding for itself.
+        return out
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
@@ -574,17 +646,12 @@ class CohereProvider(BaseProvider):
             all_messages = [{"role": "system", "content": system}] + all_messages
 
         try:
-            s = _sampling(kwargs)
-            cohere_kw = {}
-            if "temperature" in s:
-                cohere_kw["temperature"] = s["temperature"]
-            if "top_p" in s:
-                cohere_kw["p"] = s["top_p"]          # Cohere names top_p as `p`
-            if "stop" in s:
-                cohere_kw["stop_sequences"] = _as_stop_list(s["stop"])
-            resp = await client.chat(model=model, messages=all_messages,
-                                     max_tokens=max_tokens, **cohere_kw)
+            resp = await client.chat(model=model,
+                                     messages=cohere_messages(all_messages),
+                                     max_tokens=max_tokens,
+                                     **self._chat_kwargs(kwargs))
             text = resp.message.content[0].text if resp.message.content else ""
+            calls = normalize_tool_calls(getattr(resp.message, "tool_calls", None))
             usage = resp.usage
             return LLMResponse(
                 text=text,
@@ -592,6 +659,8 @@ class CohereProvider(BaseProvider):
                 output_tokens=usage.tokens.output_tokens if usage else count_tokens(text),
                 model=model,
                 provider="cohere",
+                finish_reason=finish_reason(getattr(resp, "finish_reason", None), calls),
+                tool_calls=calls,
             )
         except Exception as e:
             # Word-boundary matching, not a bare substring check: "rate" is
@@ -603,6 +672,41 @@ class CohereProvider(BaseProvider):
             # genuine rate-limit phrased without the literal word "rate"
             # ("too many requests") was marked NOT retryable when it should
             # have been.
+            raise ProviderError("cohere", "api_error", str(e),
+                                retryable=bool(_RETRYABLE_TEXT.search(str(e))))
+
+    async def chat_stream(self, messages: list[dict], model: str = "",
+                          max_tokens: int = 4096, system: str = "", **kwargs):
+        """True streaming, text and tool calls.
+
+        This used to raise, so `stream: true` on Cohere was a 501 — v2 has
+        had `chat_stream` throughout.
+        """
+        try:
+            import cohere
+        except ImportError:
+            raise ImportError("pip install cohere")
+
+        model = model or self.default_model
+        client = cohere.AsyncClientV2(api_key=self.api_key)
+        all_messages = messages[:]
+        if system:
+            all_messages = [{"role": "system", "content": system}] + all_messages
+
+        try:
+            stream = client.chat_stream(model=model,
+                                        messages=cohere_messages(all_messages),
+                                        max_tokens=max_tokens,
+                                        **self._chat_kwargs(kwargs))
+            async for event in stream:
+                mapped = cohere_stream_event(event)
+                if not mapped:
+                    continue
+                if "text" in mapped:
+                    yield mapped["text"]
+                else:
+                    yield mapped
+        except Exception as e:
             raise ProviderError("cohere", "api_error", str(e),
                                 retryable=bool(_RETRYABLE_TEXT.search(str(e))))
 
@@ -651,8 +755,37 @@ class GeminiProvider(BaseProvider):
       of guessing from message text alone.
     """
 
+    supports_tools = True
+    # The SDK carries function_call parts on the streamed chunks, so a
+    # streamed tool request does not have to fall back to a buffered call.
+    supports_tool_stream = True
+
     def __init__(self, api_key: str, model: str = "gemini-1.5-pro"):
         super().__init__(api_key, model)
+
+    def _config_kwargs(self, kwargs: dict, max_tokens: int,
+                       system_instruction: Optional[str]) -> dict:
+        """Everything that goes into GenerateContentConfig. Shared so the
+        streaming path cannot drift from the non-streaming one, which is
+        how it lost temperature/top_p/stop the last time."""
+        s = _sampling(kwargs)
+        gen_kw: dict = {"max_output_tokens": max_tokens}
+        if system_instruction:
+            gen_kw["system_instruction"] = system_instruction
+        if "temperature" in s:
+            gen_kw["temperature"] = s["temperature"]
+        if "top_p" in s:
+            gen_kw["top_p"] = s["top_p"]
+        if "stop" in s:
+            gen_kw["stop_sequences"] = _as_stop_list(s["stop"])
+        tk = tool_kwargs(kwargs)
+        declarations = gemini_tools(tk.get("tools") or [])
+        if declarations:
+            gen_kw["tools"] = declarations
+            config = gemini_tool_config(tk.get("tool_choice"))
+            if config:
+                gen_kw["tool_config"] = config
+        return gen_kw
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
@@ -671,35 +804,24 @@ class GeminiProvider(BaseProvider):
 
         conversation = conversation_messages(messages)
 
-        # Build full history (all turns except last). Each part must be a
-        # dict/Part with a "text" key — unlike the old SDK, a bare string
-        # in `parts` is a validation error, not an implicit text part.
-        history = []
-        for msg in conversation[:-1]:
-            role = "user" if msg["role"] == "user" else "model"
-            history.append({"role": role, "parts": [{"text": msg["content"]}]})
-
-        last_msg = conversation[-1]["content"] if conversation else ""
+        # generate_content over the whole conversation, not chats.create
+        # with a history and one last message: the chat helper takes plain
+        # text for the latest turn, which cannot express an assistant turn
+        # that asked for a tool or the client's results coming back. Those
+        # are content parts, and this is the call that takes them.
+        contents = gemini_contents(conversation)
 
         try:
-            s = _sampling(kwargs)
-            gen_kw = {"max_output_tokens": max_tokens}
-            if system_instruction:
-                gen_kw["system_instruction"] = system_instruction
-            if "temperature" in s:
-                gen_kw["temperature"] = s["temperature"]
-            if "top_p" in s:
-                gen_kw["top_p"] = s["top_p"]
-            if "stop" in s:
-                gen_kw["stop_sequences"] = _as_stop_list(s["stop"])
+            gen_kw = self._config_kwargs(kwargs, max_tokens, system_instruction)
 
-            chat = client.aio.chats.create(
-                model=model, history=history,
+            resp = await client.aio.models.generate_content(
+                model=model, contents=contents,
                 config=types.GenerateContentConfig(**gen_kw),
             )
-            # Native async — not run_in_executor
-            resp = await chat.send_message(last_msg)
-            text = resp.text or ""
+            candidates = getattr(resp, "candidates", None) or []
+            text, calls = gemini_response(candidates[0]) if candidates else ("", [])
+            if not text and not calls:
+                text = getattr(resp, "text", "") or ""
             # Real API-reported usage when the SDK provides it.
             # prompt_token_count is the full effective prompt size
             # (Google's own docs: "includes ... cached content"), so unlike
@@ -723,7 +845,64 @@ class GeminiProvider(BaseProvider):
                 output_tokens=output_tokens,
                 model=model,
                 provider="gemini",
+                finish_reason=finish_reason(
+                    getattr(candidates[0], "finish_reason", None) if candidates else None,
+                    calls),
+                tool_calls=calls,
             )
+        except Exception as e:
+            raise ProviderError("gemini", "api_error", str(e),
+                                retryable=_gemini_error_is_retryable(e))
+
+    async def chat_stream(self, messages: list[dict], model: str = "",
+                          max_tokens: int = 4096, system: str = "", **kwargs):
+        """True streaming, text and tool calls.
+
+        This used to raise, so `stream: true` on Gemini was a 501 — the
+        SDK has had `generate_content_stream` throughout.
+        """
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError:
+            raise ImportError("pip install google-genai")
+
+        model = model or self.default_model
+        client = genai.Client(api_key=self.api_key)
+
+        sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
+        if system:
+            sys_parts.insert(0, system)
+        system_instruction = "\n\n".join(sys_parts) if sys_parts else None
+        contents = gemini_contents(conversation_messages(messages))
+        gen_kw = self._config_kwargs(kwargs, max_tokens, system_instruction)
+
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=model, contents=contents,
+                config=types.GenerateContentConfig(**gen_kw),
+            )
+            # Gemini sends a whole function_call part rather than argument
+            # fragments, so each becomes one delta carrying the complete
+            # arguments. The ordinal is ours: Gemini does not number them.
+            emitted = 0
+            async for chunk in stream:
+                candidates = getattr(chunk, "candidates", None) or []
+                if not candidates:
+                    text = getattr(chunk, "text", "") or ""
+                    if text:
+                        yield text
+                    continue
+                text, calls = gemini_response(candidates[0])
+                if text:
+                    yield text
+                if calls:
+                    yield {"tool_calls": [
+                        {"index": emitted + i, "id": c["id"], "type": "function",
+                         "function": dict(c["function"])}
+                        for i, c in enumerate(calls)
+                    ]}
+                    emitted += len(calls)
         except Exception as e:
             raise ProviderError("gemini", "api_error", str(e),
                                 retryable=_gemini_error_is_retryable(e))
@@ -734,7 +913,11 @@ class GeminiProvider(BaseProvider):
 class OllamaProvider(BaseProvider):
 
     supports_tools = True
-    supports_tool_stream = False
+    # Ollama does not stream tool-call fragments — it sends the finished
+    # calls on the last message — but the stream carries them, which is
+    # what this flag means: the proxy does not have to fall back to a
+    # buffered non-streaming call to get them.
+    supports_tool_stream = True
 
     def __init__(self, model: str = "llama3", base_url: str = "http://localhost:11434"):
         super().__init__(api_key="", model=model)
@@ -808,8 +991,14 @@ class OllamaProvider(BaseProvider):
             options["top_p"] = s["top_p"]
         if "stop" in s:
             options["stop"] = _as_stop_list(s["stop"])
-        payload = {"model": model, "messages": all_messages, "stream": True,
-                   "options": options}
+        payload = {"model": model, "messages": ollama_messages(all_messages),
+                   "stream": True, "options": options}
+        tk = tool_kwargs(kwargs)
+        if tk.get("tools"):
+            # The streaming payload carried no tools at all, so a client
+            # that asked for tools AND a stream got a model that could not
+            # see them — the same silent drop the non-streaming path had.
+            payload["tools"] = tk["tools"]
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream("POST", f"{self._base_url}/api/chat",
@@ -819,9 +1008,21 @@ class OllamaProvider(BaseProvider):
                         if not line.strip():
                             continue
                         data = _json.loads(line)
-                        chunk = data.get("message", {}).get("content", "")
+                        message = data.get("message", {}) or {}
+                        chunk = message.get("content", "")
                         if chunk:
                             yield chunk
+                        # Ollama sends finished calls on one message rather
+                        # than fragments, so each becomes a single delta
+                        # carrying the whole arguments string. The proxy
+                        # assembles by index either way.
+                        calls = ollama_tool_calls(message.get("tool_calls"))
+                        if calls:
+                            yield {"tool_calls": [
+                                {"index": i, "id": c["id"], "type": "function",
+                                 "function": dict(c["function"])}
+                                for i, c in enumerate(calls)
+                            ]}
                         if data.get("done"):
                             break
         except ProviderError:

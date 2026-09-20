@@ -237,6 +237,203 @@ def ollama_tool_calls(tool_calls: Any) -> list[dict]:
     return normalize_tool_calls(tool_calls)
 
 
+# ── Cohere (v2) ───────────────────────────────────────────────────────────────
+#
+# Cohere v2 already speaks the OpenAI shape for tools: the declarations,
+# the assistant's `tool_calls`, and a `role: "tool"` turn carrying a
+# `tool_call_id` are all as-is. What differs is the streamed event names
+# and that a tool result's content is a list of parts.
+
+def cohere_messages(messages: list[dict]) -> list[dict]:
+    """The conversation as Cohere v2 messages."""
+    out: list[dict] = []
+    for m in messages:
+        if m.get("role") == "tool":
+            out.append({
+                "role": "tool",
+                "tool_call_id": m.get("tool_call_id") or "",
+                "content": [{"type": "document",
+                             "document": {"data": m.get("content") or ""}}],
+            })
+            continue
+        if m.get("tool_calls"):
+            out.append({
+                "role": "assistant",
+                # v2 rejects a null content on a tool-call turn; "" is
+                # what every other adapter here sends for the same shape.
+                "content": m.get("content") or "",
+                "tool_calls": normalize_tool_calls(m["tool_calls"]),
+            })
+            continue
+        out.append(m)
+    return out
+
+
+def cohere_stream_event(event: Any) -> Optional[dict]:
+    """One Cohere v2 stream event -> a text chunk, a tool-call delta, or
+    None for the events that carry no payload (block start/end, message
+    lifecycle).
+
+    Returns `{"text": ...}` or `{"tool_calls": [...]}` so the caller does
+    not have to know the event vocabulary.
+    """
+    kind = _get(event, "type") or ""
+    delta = _get(event, "delta")
+    message = _get(delta, "message") if delta is not None else None
+
+    if kind == "content-delta":
+        content = _get(message, "content")
+        text = _get(content, "text") if content is not None else None
+        return {"text": text} if text else None
+
+    if kind in ("tool-call-start", "tool-call-delta"):
+        calls = _get(message, "tool_calls")
+        if calls is None:
+            return None
+        # v2 sends one call per event, indexed by the event's own `index`.
+        call = calls[0] if isinstance(calls, list) else calls
+        fn = _get(call, "function")
+        out: dict = {"index": _get(event, "index") or 0}
+        if kind == "tool-call-start":
+            out["id"] = _get(call, "id") or new_call_id()
+            out["type"] = "function"
+        f: dict = {}
+        name = _get(fn, "name") if fn is not None else None
+        if name:
+            f["name"] = name
+        args = _get(fn, "arguments") if fn is not None else None
+        if args is not None:
+            f["arguments"] = args if isinstance(args, str) else json.dumps(args)
+        if kind == "tool-call-start":
+            f.setdefault("arguments", "")
+        out["function"] = f
+        return {"tool_calls": [out]}
+
+    return None
+
+
+# ── Gemini ────────────────────────────────────────────────────────────────────
+#
+# google-genai calls a declaration a FunctionDeclaration, groups them under
+# a Tool, and answers with a function_call part inside the candidate's
+# content. The schema is JSON Schema with a different spelling of the keys,
+# so the parameters object passes through unchanged.
+
+def gemini_tools(tools: list[dict]) -> list[dict]:
+    """OpenAI `tools` -> the `tools` list google-genai's config takes."""
+    declarations = []
+    for t in tools or []:
+        fn = t.get("function") or {}
+        if not fn.get("name"):
+            continue
+        declarations.append({
+            "name": fn["name"],
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+        })
+    return [{"function_declarations": declarations}] if declarations else []
+
+
+def gemini_tool_config(tool_choice: Any) -> Optional[dict]:
+    """OpenAI `tool_choice` -> Gemini's function_calling_config.
+
+    "auto" is Gemini's own default, so it is expressed as None rather than
+    as an explicit AUTO — sending a config where none is needed is a
+    difference between providers for no reason.
+    """
+    if tool_choice in (None, "auto"):
+        return None
+    if tool_choice == "none":
+        return {"function_calling_config": {"mode": "NONE"}}
+    if tool_choice == "required":
+        return {"function_calling_config": {"mode": "ANY"}}
+    if isinstance(tool_choice, dict):
+        name = (tool_choice.get("function") or {}).get("name")
+        if name:
+            return {"function_calling_config": {
+                "mode": "ANY", "allowed_function_names": [name]}}
+    return None
+
+
+def gemini_response(candidate: Any) -> tuple[str, list[dict]]:
+    """A Gemini candidate -> (text, tool_calls in the OpenAI shape).
+
+    Gemini has no id for a call; the client needs one to match the result
+    it sends back, so one is minted here — the same thing the Anthropic
+    path does not have to do because Anthropic supplies one.
+    """
+    content = _get(candidate, "content")
+    parts = _get(content, "parts") or []
+    text_parts: list[str] = []
+    calls: list[dict] = []
+    for part in parts:
+        text = _get(part, "text")
+        if text:
+            text_parts.append(text)
+        fc = _get(part, "function_call")
+        if fc is None:
+            continue
+        name = _get(fc, "name")
+        if not name:
+            continue
+        args = _get(fc, "args")
+        calls.append({
+            "id": new_call_id(),
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(args if isinstance(args, dict) else {}),
+            },
+        })
+    return "".join(text_parts), calls
+
+
+def gemini_contents(conv: list[dict]) -> list[dict]:
+    """The conversation as google-genai `contents`, tool turns included.
+
+    An assistant turn that asked for tools becomes function_call parts; the
+    client's `role: "tool"` results become function_response parts on a
+    user turn, which is where Gemini expects them. Without this a second
+    agent-loop turn sent Gemini a conversation with the call and its result
+    missing, and the model asked for the same tool again.
+    """
+    out: list[dict] = []
+    for m in conv:
+        role = m.get("role")
+        if role == "tool":
+            # Gemini matches a response to a call by NAME, not by id, and
+            # the OpenAI shape only carries the id — so the name is looked
+            # up from the assistant turn that requested it, above.
+            name = m.get("name") or _tool_name_for(conv, m.get("tool_call_id"))
+            out.append({"role": "user", "parts": [{"function_response": {
+                "name": name or "tool",
+                "response": {"result": m.get("content") or ""},
+            }}]})
+            continue
+        parts: list[dict] = []
+        if m.get("content"):
+            parts.append({"text": m["content"]})
+        for tc in normalize_tool_calls(m.get("tool_calls")):
+            parts.append({"function_call": {
+                "name": tc["function"]["name"],
+                "args": parse_arguments(tc["function"]["arguments"]),
+            }})
+        if not parts:
+            continue
+        out.append({"role": "user" if role == "user" else "model", "parts": parts})
+    return out
+
+
+def _tool_name_for(conv: list[dict], call_id: Optional[str]) -> Optional[str]:
+    if not call_id:
+        return None
+    for m in conv:
+        for tc in normalize_tool_calls(m.get("tool_calls")):
+            if tc["id"] == call_id:
+                return tc["function"]["name"]
+    return None
+
+
 # ── Shared response helpers ───────────────────────────────────────────────────
 
 def finish_reason(native: Optional[str], tool_calls: list[dict]) -> str:

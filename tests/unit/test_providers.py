@@ -117,38 +117,34 @@ class _FakeGeminiResponse:
         self.usage_metadata = usage
 
 
-class _FakeGeminiChat:
+class _FakeGeminiModels:
+    """Fakes client.aio.models — `generate_content`, not `chats.create`.
+
+    The adapter moved off the chat helper because that helper takes the
+    latest turn as plain text, which cannot express an assistant turn that
+    asked for a tool or the client's results coming back: both are content
+    parts, and generate_content is the call that takes them.
+    """
+
     def __init__(self, response, received_config: dict):
         self._response = response
         self._received_config = received_config
 
-    async def send_message(self, *args, **kwargs):
+    async def generate_content(self, *, model, contents=None, config=None):
+        # `config` carries system_instruction when a system prompt is
+        # present — the bug an earlier test guarded against is that its
+        # tokens never made it into input_tokens.
+        self._received_config["config"] = config
+        self._received_config["contents"] = contents
         if isinstance(self._response, Exception):
             raise self._response
         return self._response
 
 
-class _FakeGeminiChats:
-    """Fakes client.aio.chats — the google-genai (not google-generativeai)
-    entry point GeminiProvider._call uses since the SDK migration."""
-
-    def __init__(self, response, received_config: dict):
-        self._response = response
-        self._received_config = received_config
-
-    def create(self, *, model, history=None, config=None):
-        # Constructor is called with system_instruction set on `config`
-        # when a system prompt is present — the bug an earlier test
-        # guarded against is that system_instruction's tokens never made
-        # it into input_tokens.
-        self._received_config["config"] = config
-        return _FakeGeminiChat(self._response, self._received_config)
-
-
 class _FakeGeminiClient:
     def __init__(self, response, received_config: dict, **kwargs):
         class _Aio:
-            chats = _FakeGeminiChats(response, received_config)
+            models = _FakeGeminiModels(response, received_config)
         self.aio = _Aio()
 
 

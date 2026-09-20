@@ -47,12 +47,18 @@ messages += [resp.choices[0].message,
              {"role": "tool", "tool_call_id": call.id, "content": '{"temp_c": 31}'}]
 ```
 
-| Provider | `tools` | Streamed tool-call deltas |
+| Provider | `tools` | Streamed tool calls |
 |---|---|---|
-| OpenAI, DeepSeek, Mistral, OpenRouter, Grok | forwarded as-is | yes |
-| Anthropic | translated (`input_schema`, `tool_use` / `tool_result` blocks) | answer built in one piece, emitted as chunks |
-| Ollama | translated (`arguments` as a dict) | same as Anthropic; no `tool_choice` |
-| Gemini, Cohere | **501** — refused rather than sent without its tools | — |
+| OpenAI, DeepSeek, Mistral, OpenRouter, Grok | forwarded as-is | fragments, as the API sends them |
+| Anthropic | translated (`input_schema`, `tool_use` / `tool_result` blocks) | fragments (`input_json_delta`) |
+| Cohere | v2 takes the OpenAI shape; tool results become document parts | fragments (`tool-call-delta`); no `tool_choice` |
+| Ollama | translated (`arguments` as a dict) | whole calls on the last message; no `tool_choice` |
+| Gemini | translated (`function_declarations`, `function_call` / `function_response` parts) | whole calls per chunk |
+
+Every provider's deltas come out in the OpenAI chunk shape, indexed by
+tool call — so a client assembles them the same way whatever is behind
+the proxy. Anthropic indexes content blocks rather than calls and Gemini
+numbers nothing at all; both are mapped here rather than passed on.
 
 What the pipeline does with tool traffic: tool turns are redacted like any
 other message and otherwise passed through untouched (no compression, no
