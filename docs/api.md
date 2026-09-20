@@ -8,8 +8,8 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/v1/chat/completions` | POST | OpenAI-compatible proxy |
-| `/api/resume/{id}` | GET | Get resume context |
+| `/v1/chat/completions` | POST | OpenAI-compatible proxy, including `tools` / `tool_choice` and `role: "tool"` messages (see below) |
+| `/api/resume/{id}` | GET | Resume context. Built live from the graph whenever it is newer than the latest checkpoint (or there is none) — `source: "live_graph"` — else from the checkpoint. 404 only when both are empty |
 | `/api/checkpoint` | POST | Manual checkpoint. Optional JSON body `{"messages": [{role, content}, ...]}` is extracted into the graph first, so a checkpoint made outside the proxy (MCP tool, CLI) populates the session |
 | `/api/analyze` | POST | File → token-budgeted digest (CSV/JSON/PDF/Excel/logs/code) |
 | `/api/checkpoints/{id}` | GET | List a session's checkpoints |
@@ -28,6 +28,38 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 | `/api/stats` | GET | Token savings analytics |
 | `/health` | GET | Health check |
 | `/docs` | GET | Swagger UI |
+
+### Tool calling
+
+Send the OpenAI shape and get it back:
+
+```python
+resp = client.chat.completions.create(
+    model="claude-sonnet-4-6",                       # any supported provider's model
+    messages=[{"role": "user", "content": "weather in Pune?"}],
+    tools=[{"type": "function", "function": {"name": "get_weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}],
+    extra_body={"session_id": "my-project"},
+)
+call = resp.choices[0].message.tool_calls[0]          # finish_reason == "tool_calls"
+# run the tool, then continue the loop:
+messages += [resp.choices[0].message,
+             {"role": "tool", "tool_call_id": call.id, "content": '{"temp_c": 31}'}]
+```
+
+| Provider | `tools` | Streamed tool-call deltas |
+|---|---|---|
+| OpenAI, DeepSeek, Mistral, OpenRouter, Grok | forwarded as-is | yes |
+| Anthropic | translated (`input_schema`, `tool_use` / `tool_result` blocks) | answer built in one piece, emitted as chunks |
+| Ollama | translated (`arguments` as a dict) | same as Anthropic; no `tool_choice` |
+| Gemini, Cohere | **501** — refused rather than sent without its tools | — |
+
+What the pipeline does with tool traffic: tool turns are redacted like any
+other message and otherwise passed through untouched (no compression, no
+history pruning); windowing keeps a tool call and its results together; a
+tool-call answer is never cached or output-trimmed; a request that ends on
+a tool result is never served from the cache. The deprecated
+`functions` / `function_call` fields are ignored with a warning.
 
 ---
 

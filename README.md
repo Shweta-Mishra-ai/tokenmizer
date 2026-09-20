@@ -213,6 +213,13 @@ Any OpenAI-compatible client works by pointing `base_url` at
 Continue.dev, Aider, LangChain, LlamaIndex, the OpenAI SDKs in every
 language, and `curl`.
 
+Tool calling goes through too: send `tools` / `tool_choice` in the OpenAI
+shape and get `message.tool_calls` back, plain or streamed, with `role:
+"tool"` results round-tripping to the model. Native for OpenAI, DeepSeek,
+Mistral, OpenRouter and Grok; translated for Anthropic and Ollama; a 501
+for Gemini and Cohere rather than a silent drop. A tool-call turn is never
+cached or trimmed, and tool traffic is never compressed.
+
 → [**API & CLI reference**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) — every endpoint, every command,
 every MCP tool.
 
@@ -317,9 +324,14 @@ here rather than left to be discovered:
 
 | Setting | Status |
 |---|---|
-| `routing.*` | No implementation. `savings.routing` is always `0`. Enabling it logs a warning and changes nothing. |
+| `routing.*` | No implementation. `savings.routing` is always `0`. Enabling it logs a warning and changes nothing. The dashboard labels the layer "Not implemented". |
 | `state_backend: redis` | Accepted and unused. `tokenmizer/state/backend.py` has no callers; all durable state is SQLite. |
-| `tools` / `tool_choice` (function calling) | Accepted (the request body isn't validated against a strict schema, so a standard OpenAI client sending them never gets a 422) but not forwarded to any provider. The model responds with no knowledge of the tools it was given. Logs a warning server-side per request. |
+| `functions` / `function_call` (the deprecated OpenAI shape) | Accepted and ignored, with a server-side warning. Use `tools` / `tool_choice`, which are forwarded. |
+| Tool calling on Gemini and Cohere | Refused with a 501. The other seven providers forward it. |
+| Streamed tool-call deltas on Anthropic and Ollama | The answer is produced in one piece and emitted as chunks; the stream is valid but not incremental. |
+
+The prioritised plan for these and everything else is in
+[**docs/roadmap.md**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/roadmap.md).
 
 ## Documentation
 
@@ -330,7 +342,8 @@ here rather than left to be discovered:
 | [**API & CLI**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/api.md) | Endpoints, commands, MCP tools, Claude Code integration |
 | [**Deployment**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/deployment.md) | Docker, multiple workers, durability, session isolation, security |
 | [**Benchmarks**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) | Extraction quality, memory quality, storage, running your own |
-| [**Comparisons**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/comparisons.md) | Mem0, Zep, longer context windows, running alongside other token tools, and the roadmap |
+| [**Comparisons**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/comparisons.md) | Mem0, Zep, longer context windows, running alongside other token tools |
+| [**Roadmap**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/roadmap.md) | Measured state of every layer, the defects fixed on the way, and the prioritised plan |
 | [**Contributing**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md) | Setup, layer rules, and how to improve extraction |
 | [**Testing**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/TESTING.md) | How to run the suite, the coverage floor, and known limits of the local audit scripts |
 | [**Changelog**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CHANGELOG.md) · [**Security**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/SECURITY.md) | Release history and how to report a vulnerability |
@@ -341,7 +354,7 @@ here rather than left to be discovered:
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1074 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1142 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

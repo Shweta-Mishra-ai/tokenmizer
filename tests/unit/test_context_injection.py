@@ -92,3 +92,26 @@ class TestContextInjectionWithoutExistingSystemMessage:
         system_msgs = [m for m in updated if m.get("role") == "system"]
         assert len(system_msgs) == 1, "must not create a SECOND system message"
         assert "You are a helpful coding assistant." in system_msgs[0]["content"]
+
+
+class TestInjectedContextKeepsTheSystemPrefixStable:
+
+    async def test_context_block_is_appended_after_the_clients_system_prompt(
+        self, graph_with_signal, monkeypatch
+    ):
+        """Provider prompt caching keys on the longest unchanged prefix of
+        the system prompt. The context block changes every turn, so at the
+        front it invalidated the cache on every request behind an agent
+        with a long stable system prompt. It belongs at the end."""
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
+        stable = "You are the deployment assistant. " * 40
+        raw = [{"role": "user", "content": "how are we handling database access right now"}]
+        messages = [{"role": "system", "content": stable}] + [dict(m) for m in raw]
+
+        updated, _ = await app_module._update_graph(
+            "ctx-inject-test", graph_with_signal, raw, messages,
+            "claude-sonnet-4-6", {}, raw[0]["content"],
+        )
+        system = next(m["content"] for m in updated if m["role"] == "system")
+        assert system.startswith(stable), "the stable prefix must come first"
+        assert "[Relevant session context]" in system[len(stable):]

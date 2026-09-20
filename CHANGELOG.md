@@ -9,6 +9,78 @@ on Windows: the conditions of a Claude Code user with a session worth
 remembering. Suite is now 769 tests; every published number below was
 re-derived from a run.
 
+### Added — tool/function calling is forwarded, not dropped
+`tools` / `tool_choice` / `parallel_tool_calls` reach the provider and
+`message.tool_calls` comes back in the OpenAI shape, plain or streamed.
+OpenAI, DeepSeek, Mistral, OpenRouter and Grok pass the shape through,
+with streamed tool-call deltas; Anthropic (`input_schema`, `tool_use` /
+`tool_result` blocks, consecutive results merged into one user turn) and
+Ollama (dict `arguments`) are translated in `providers/tools.py`; Gemini
+and Cohere refuse with a 501 rather than sending the model a conversation
+it cannot see the tools for. Tool turns pass through redaction and skip
+compression and history pruning; a tool-call answer is never cached or
+output-trimmed; a request that ends on a tool result is never served from
+the cache; `count_messages_tokens` counts a call's name and arguments.
+`max_completion_tokens` is honoured as OpenAI's current alias. The
+deprecated `functions` / `function_call` pair is still ignored, with a
+warning. Before this every agent framework that relies on function calling
+broke silently behind the proxy. 32 tests in `test_tool_calling.py`.
+
+### Fixed — the semantic cache served the wrong answer to repeated short turns
+The cache keyed on the final user message alone, so the second
+"continue", "yes" or "run the tests" of a session was served the first
+one's answer for the whole TTL. Entries now carry a fingerprint of every
+message before the final user turn (`SemanticCache.conversation_fingerprint`)
+and both the exact and the semantic lookup require it to match. A
+single-turn prompt has no prior state and keys exactly as before.
+
+### Fixed — resume said "no checkpoint" to a session full of memory
+The auto-checkpoint trigger measures the request AFTER windowing, and
+windowing keeps the request small, so on a default config a long proxy
+session rarely crosses the threshold and never gets a checkpoint; the
+graph is persisted on every turn regardless. `GET /api/resume` now builds
+the block live from the graph whenever the graph is newer than the latest
+checkpoint or there is none (`source: "live_graph"`, the checkpoint's
+"Continue from" hint kept), and 404s only when both are empty. MCP and
+CLI report the source.
+
+### Fixed — the injected context block defeated provider prompt caching
+The per-turn `[Relevant session context]` block was prepended to the
+system prompt. Anthropic caches the longest unchanged prefix, so behind
+an agent with a long stable system prompt the cache was invalidated on
+every request. The block is appended now; the terse prompt and the
+client's own system prompt stay cacheable.
+
+### Fixed — a batch of silent failures
+- LLM extraction discarded a reply that wrapped its JSON in prose or a
+  fence — paid for, then counted as an `llm_extraction` failure. The first
+  JSON object in the reply is used.
+- With `use_llm_extraction` on and no key, the same warning was logged on
+  every chat turn of every session. Once now.
+- `OllamaProvider.chat_stream` dropped `temperature` / `top_p` / `stop`.
+- The context-window table sent GPT-4.1, GPT-5, the o-series, DeepSeek,
+  Mistral, Grok, Cohere and local models to a 128k default; for the 1M
+  models that meant the auto-checkpoint fired far too late.
+- `count_tokens` memoised texts of any size (4096 multi-megabyte entries
+  retained); texts over 32k chars are counted uncached.
+- The dashboard advertised a "Context Router — Beta" that has no
+  implementation; it now says "Not implemented". CONTESTED nodes had no
+  entry in the graph page's opacity map.
+- The `minimal` terse prompt is shortened for token headroom.
+
+### Measured — why the retrieval floor stays
+Gating context injection on keyword overlap (a node must share a word
+with the question) took recall@6 on the paraphrase eval from 85% to 46%:
+"which database are we on" shares no word with "Use PostgreSQL", and the
+importance/type ranking is what surfaces it. The floor and ranking are
+unchanged and the docstring says why; plural folding ("orders" ->
+"order") is added since it only adds matches. Semantic retrieval is the
+path to higher recall, not a keyword gate.
+
+### Tests
+The suite resets the process-global rate limiter per test; proxy tests
+no longer 429 depending on file order. Suite is 1142 tests.
+
 ### Fixed — every turn of a long session failed on Anthropic and Gemini
 `SmartMessageWindow` kept `conv_msgs[-protect_recent:]`. A chat request
 always ends on a user turn, so an even `protect_recent` (the default is 10)
