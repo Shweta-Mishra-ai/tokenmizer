@@ -517,13 +517,25 @@ what matters, not its content.
 [CONTRIBUTING.md](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md) covers setup, the layer rules, and how
 to run the eval harness.
 
-### Contributors
+## Contributors
 
-Thanks to everyone who has sent a fix upstream:
+TokenMizer is better because of the people who found something wrong with
+it and said so. Thank you.
+
+<div align="center">
+  <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=Shweta-Mishra-ai/tokenmizer" alt="Everyone who has contributed to TokenMizer"/>
+  </a>
+  <br/>
+  <sub>Updates itself as people contribute &middot; <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/graphs/contributors">full contributor graph</a></sub>
+</div>
+
+What each of them fixed:
 
 - [**@0xfroOty**](https://github.com/0xfroOty) — negated-decision handling in the decision tracker ([#22](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/22)), `OutputTrimmer` level alignment ([#25](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/25)), streaming cache-hit analytics ([#31](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/31))
 - [**@pollychen-lab**](https://github.com/pollychen-lab) — graph node IDs derived from stored (truncated) labels ([#21](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/21)), semantic-opposite decision detection ([#26](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/26))
 - [**@floze-the-genius**](https://github.com/floze-the-genius) — dashboard stats authentication fix ([#35](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/35))
+- [**@TechNovaWorldai**](https://github.com/TechNovaWorldai) — the `minimal` terse prompt trimmed back under its own token budget ([#63](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/63))
 
 ## Support
 

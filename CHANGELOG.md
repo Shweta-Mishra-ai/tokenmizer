@@ -91,6 +91,24 @@ and say which path answered. Only a TRANSPORT failure falls back: a 401,
 would bypass the session-ownership boundary it was enforcing. Savings
 stay proxy-only and say why rather than reporting zeros.
 
+### Changed — Contributors is its own section, and it maintains itself
+
+It was a subsection of Contributing, and it was a hand-written list —
+which went stale the first time a PR merged: #63 landed and its author
+was not in it. A list that only stays correct while somebody remembers
+to edit it is a promise the project will eventually break, and credit is
+the one thing an outside contributor actually gets.
+
+Now a top-level section leading with the contributor avatars, which are
+generated from GitHub's own contributors list and update with no edit
+from anyone, above a link to the full contributor graph. The named list
+of what each person fixed stays underneath, because an avatar cannot say
+"negated-decision handling in the decision tracker" — and
+`test_every_merged_contributor_is_credited` already guards it against
+being dropped by a restructure, which is exactly how it was lost once
+before. That test now matches the heading at either level, so moving the
+section cannot silently disable the check.
+
 ### Added — the graph explorer, in motion, in the README
 
 Three still screenshots could show what the graph looks like and none of
