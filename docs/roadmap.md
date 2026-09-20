@@ -18,9 +18,10 @@ benchmark, the suite is right and this file is a bug.
 | Extraction, macro F1 on the labelled corpus | 96% overall; **90% on real transcripts**, 97% synthetic | `python -m benchmarks.eval` |
 | Label quality | 15% of labels truncated mid-word; 40 near-duplicate pairs over 171 labels | same run |
 | Retrieval, recall@6 on paraphrased questions | 85% keyword; 92% with `semantic_retrieval` (n=13) | `benchmarks.graph_retrieval.query_eval` |
+| Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
 | Resume block size | ~160-180 tokens standard tier | `benchmarks/resume_quality` |
-| Suite | 1140 tests, ruff clean | `pytest tests/` |
+| Suite | 1185 tests, ruff clean | `pytest tests/` |
 
 Read the 90% real-transcript figure as the honest one. It is the reason
 several items below exist.
@@ -41,6 +42,12 @@ the seams between layers, where no layer's own tests look.
 | Injected context prepended to the system prompt | Token counts looked fine; the loss was in the provider's cache-hit rate | Layer 4 was defeating layer 5 on every turn. Done: appended |
 | LLM extraction discarded prose-wrapped JSON | Counted as a "silent failure" and nothing more | Local and small models do this constantly; the cheap-extraction story depended on it not happening |
 | Keyword gate on context injection (attempted) | Would have *saved* tokens and looked like a win | Measured first: recall 85% to 46%. Reverted. The importance ranking is doing real work; do not gate without the semantic pass |
+| A supersession the transcript stated outright was parsed, passed through, and never read | The topic classifier sometimes rediscovered it, so the feature worked in the demo | The corpus session that exists to demonstrate `/why` produced no trail at all. `record_supersession` is now the one place a transition is written, reached from both paths |
+| "Next.js instead of React for better SEO" recorded "better SEO" as the technology chosen | A decision node is a decision node; nothing looks at whether it is a noun | Reading two operand orders with one pattern. Split into forward and reverse forms; "instead of" is one decision naming its alternative, not a change over time |
+| "PostgreSQL for order storage" and "Postgres for orders" reported as an unresolved conflict | It reads like a real finding, so a user goes looking for the conflict | Two modules knew the tech vocabulary and only one used it. One table in `patterns.py` now, folded by both |
+| `FIXES`, `BLOCKS` and `DEPENDS_ON` existed in the ontology and nothing created them | The graph still rendered; it was just sparser than it should be | An ontology is a claim about what the graph contains. 11 of 25 nodes were unclustered because the edges that would group them were never made |
+| `/health` returned `ok` whatever had happened | Uptime monitors were green | The counters existed and were only reachable from `/api/stats`. For a tool whose claim is "your context is safe", that is the one check that must not lie |
+| Five of six MCP tools answered "connection refused" on a fresh install | The plugin installs the MCP server; nothing starts the proxy | They now read the same SQLite store directly, and only fall back on a transport failure so a running proxy's refusal is never bypassed |
 
 ---
 
@@ -71,7 +78,9 @@ the per-session retention cap. Now that resume reads the live graph this
 is about the checkpoint diff and the "Continue from" hint, not about
 losing memory.
 
-**3. Streamed tool-call deltas on Anthropic.**
+**3. Streamed tool-call deltas on Anthropic.**  *(partially done: tools
+are forwarded and answered in one piece; only the incremental stream is
+missing)*
 The answer is currently built in one piece and emitted as chunks. The SDK
 event stream carries `content_block_start` (tool_use) and
 `input_json_delta`; map them to the same dict events the OpenAI adapter
@@ -85,13 +94,10 @@ across the corpus). Bundle the weight download into the Docker build
 `EmbeddingEngine.available`. The keyword-gate measurement above is the
 reason this is the path and not a cheaper one.
 
-**5. Silent failures on the health surface.**
-`persist_failures`, `load_failed`, `persistence_broken` and the
-extraction-unavailable reason exist, but only under `/api/stats` and in
-`meta` on the graph page. Put them on `/health` (status `degraded` when
-any is non-zero), on a dashboard card, and in the CLI's `stats`. A
-health check that returns `ok` while checkpoints fail is the failure
-mode this project exists to prevent.
+**5. The CLI's `stats` should show the durability counters too.**
+`/health` reports `degraded` with the counters behind it, and the
+dashboard renders them; `tokenmizer stats` still does not. Same three
+lines, same source.
 
 ### P1 — more sessions, more domains, more of the pipeline real
 
@@ -109,9 +115,11 @@ corpus, because the coding numbers above are only trustworthy because
 that corpus exists.
 
 **7. Label quality.**
-15% of labels are cut mid-word and 40 pairs near-duplicate. Clip at
-sentence or clause boundaries, and run the near-duplicate merge the
-extractor already has for decisions across every category. Both are
+Labels spanning more than one sentence are down to 0% and the decision
+near-duplicate merge now folds technology spellings and scaffold words,
+but 15% of labels are still cut mid-word and the near-duplicate count is
+39 across all categories. Run the same merge for tasks and files, and
+clip at a word boundary with an ellipsis rather than mid-token. Both are
 visible in `benchmarks.eval`'s label-quality block, so the target is
 numeric: under 5% truncation, under 15 near-duplicate pairs.
 
@@ -137,13 +145,13 @@ Cohere v2 has both. Same test shape as the three adapters that have them.
 ### P2 — the graph as a product
 
 **11. Graph page.**
-The page is a community explorer with decision history. Missing: a
-timeline view (decisions and errors on a time axis, with supersessions as
-arcs), a checkpoint-to-checkpoint diff view (the `graph_diff` each
-checkpoint already stores), a path highlight for `/why`, a light theme,
-keyboard navigation, and a canvas renderer for graphs past the 200-node
-prune cap. Keep the zero-external-dependency rule; it is why the page
-can be shared as a file.
+The page now has community hulls, a type legend that filters, a timeline
+mode, the supersession chain in the node detail, a light theme and
+keyboard shortcuts. Still missing: a checkpoint-to-checkpoint diff view
+(the `graph_diff` each checkpoint already stores), a path highlight that
+walks a whole `/why` chain on the canvas, and a canvas renderer for
+graphs past the 200-node prune cap. Keep the zero-external-dependency
+rule; it is why the page can be shared as a file.
 
 **12. Reasoning.**
 `impact()` is one hop. Two-hop impact ("which files does the decision

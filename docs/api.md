@@ -26,7 +26,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 | `/api/graph/{id}/reasoning` | GET | **Reasoning view:** active decisions by topic, recent changes, consistency audit |
 | `/api/ontology` | GET | Machine-readable graph ontology (types, relations, status state machine) |
 | `/api/stats` | GET | Token savings analytics |
-| `/health` | GET | Health check |
+| `/health` | GET | Liveness AND durability. `status` is `degraded`, not `ok`, when a write has failed, a session's stored graph could not be read, storage is not durable, or memory was displaced by corruption recovery; the counters behind it are in the body. No API key required |
 | `/docs` | GET | Swagger UI |
 
 ### Tool calling
@@ -154,8 +154,21 @@ env = { TOKENMIZER_URL = "http://localhost:8000" }
 ```
 </details>
 
-Then restart the client. Keep `tokenmizer serve` running for the
-checkpoint/resume/stats/reasoning tools (file analysis works without it).
+Then restart the client.
+
+**The proxy is optional for most tools.** `checkpoint_session`,
+`resume_session`, `get_graph_stats`, `why_decision` and `analyze_file`
+fall back to reading and writing the SQLite store directly when nothing
+answers at `TOKENMIZER_URL`, and say so in the reply. Point
+`TOKENMIZER_STORAGE_DIR` at the same directory as
+`graph_checkpoint.storage_dir` if you have moved it (default:
+`./checkpoints`). Only `get_savings_stats` needs the proxy, because
+savings are measured on requests that pass through it.
+
+Only a transport failure falls back. A 401, 403 or 404 means the proxy is
+running and refused, and answering from local storage would bypass the
+session-ownership boundary it was enforcing — so those stay errors.
+
 If `tokenmizer-mcp` isn't on your PATH, use `"command": "python"`,
 `"args": ["-m", "tokenmizer.mcp.server"]` instead.
 

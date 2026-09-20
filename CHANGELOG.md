@@ -9,6 +9,115 @@ on Windows: the conditions of a Claude Code user with a session worth
 remembering. Suite is now 769 tests; every published number below was
 re-derived from a run.
 
+### Fixed — the graph reported conflicts, fragments and changes that were not real
+Four defects a reader takes for data, all of them visible in the resume
+block, which is the thing the product exists to produce.
+
+- **A supersession the transcript stated outright was parsed and then
+  discarded.** `ExtractedData.superseded` was passed through
+  `_extracted_to_dict` and never read by `_apply_extracted`, so a change
+  was only recorded when the topic classifier happened to bucket both
+  sides together. On the corpus session that exists to demonstrate `/why`
+  it did not, and the trail was empty. `GraphMemory.record_supersession`
+  is now the one place a transition is written, reached from the tracker
+  and from the text.
+- **"Next.js instead of React for better SEO" recorded "better SEO" as
+  the technology chosen.** One pattern listed "instead of" beside
+  "switched from" and then required a trailing to/with/for, so the two
+  operand orders were read as one — and "date-fns instead of moment.js"
+  matched nothing at all. Forward ("switched from A to B") and replace
+  ("replaced A with B") are now separate patterns sharing an operand
+  cleaner that stops at a sentence boundary and rejects an article plus a
+  single common noun. "instead of" is one decision naming its rejected
+  alternative, which is what the labelled corpus records.
+- **"PostgreSQL for order storage" and "Postgres for orders" were
+  reported as an unresolved conflict** in every resume for that session.
+  Two modules knew the technology vocabulary and only one used it; it now
+  lives once in `patterns.py`, with plurals folded, and scaffold words
+  ("for it", "the") are dropped before the containment test. Competing
+  alternatives still stay separate — six pairs are pinned either way.
+- **The Changes line did not line up with the changes.**
+  `to_context_line()` used " | Reason: " and `context_block` joins
+  transitions with " | ".
+
+### Added — the relations the ontology always claimed
+`FIXES`, `BLOCKS` and `DEPENDS_ON` were defined and nothing created them.
+A task that fixed a bug now FIXES the error node and closes it; an error
+introduced by "Fixed:"/"Resolved:" is recorded resolved rather than
+carried into every resume as open; an open error BLOCKS the in-progress
+task about it; a dependency is linked from the decisions, tasks and files
+that name it, and a bare package name is accepted by the validator at all
+(a DEPENDENCY node previously required a version pin). Decisions naming a
+file link to it, and a task shipping a route implements the endpoint.
+Measured on the fastapi_auth session: 17 edges to 26, unclustered nodes
+11 to 7.
+
+Small communities are folded into the neighbour they are most attached
+to, so a session reads as three groups rather than nine pairs.
+
+### Improved — extraction and label quality
+"Implemented: POST /a, POST /b, POST /c" is one task per route read from
+the whole sentence, not one label cut at 80 characters (completed-task
+F1 91 to 95 at the time of that change). A label whose verb the pattern
+consumed gets it back when it reads as a fragment: "the dependency from
+go.mod" becomes "Removed the dependency from go.mod". Labels spanning
+more than one sentence: 2% to 0%. Endpoints lose a trailing dot, a label
+cut inside a parenthetical is closed or trimmed, goals lose a leading
+article.
+
+Net on the corpus: macro F1 96%, decisions 97%, files 99%, errors 94%,
+pending tasks 95%, completed tasks 94%. Completed-task precision is 91%
+where it was 93%, and real-corpus macro 89% where it was 90% — spent
+knowingly on labels that read as statements.
+
+### Added — /health reports durability, not just liveness
+`status` was the literal string "ok" whatever had happened, so a
+deployment whose checkpoint writes had been failing for a day reported
+healthy to every uptime monitor pointed at it. It now returns `degraded`
+with the counters behind it: failed writes by source, sessions whose
+stored graph could not be read, sessions without durable storage,
+sessions whose memory was displaced by corruption recovery, and the
+checkpoint store's own state. Still open, still needs no API key.
+
+### Added — the MCP tools work without the proxy
+The MCP server ships with the plugin and `tokenmizer serve` is a separate
+process nobody started, so the most likely state on a fresh install was
+five of six tools answering nothing but "connection refused" — for a
+graph sitting on disk the whole time. `checkpoint_session`,
+`resume_session`, `get_graph_stats` and `why_decision` now read and write
+that store directly (`TOKENMIZER_STORAGE_DIR`, default `./checkpoints`)
+and say which path answered. Only a TRANSPORT failure falls back: a 401,
+403 or 404 means the proxy is running and refused, and answering locally
+would bypass the session-ownership boundary it was enforcing. Savings
+stay proxy-only and say why rather than reporting zeros.
+
+### Changed — the graph page is an explorer, not a picture
+Community hulls, a node-type legend that filters, relation names on the
+focused node's edges, the supersession chain and first-seen /
+no-longer-current dates in the node detail, importance and confidence
+bars, a light theme, keyboard shortcuts, and PNG export that bakes theme
+colours. New **timeline mode** puts each node type in its own lane
+ordered by when the fact entered the session; when a whole transcript was
+checkpointed at once every node shares a timestamp, so it falls back to
+the order the session stated things and labels the axis accordingly
+rather than drawing five identical clock times. Still one self-contained
+file with no external requests.
+
+### Changed — the dashboard shows the deployment, not an example
+Its two largest cards were hard-coded: an example resume block and an
+example session legend, which said the same thing on a fresh install and
+on a deployment with a thousand sessions. They are now the selected
+session's live resume block (labelled with whether it came from the graph
+or a checkpoint) and that session's graph embedded from the same
+self-contained page. A health pill and a degraded banner read `/health`,
+and a getting-started card replaces the session list while there is
+nothing to show.
+
+### Fixed — `scripts/gen_demo_gif.py` only ran on Windows
+It loaded Consolas by filename while the README tells every reader they
+can regenerate the GIF with it. It now tries the platform fonts in turn
+and fails with a sentence naming the fix.
+
 ### Added — tool/function calling is forwarded, not dropped
 `tools` / `tool_choice` / `parallel_tool_calls` reach the provider and
 `message.tool_calls` comes back in the OpenAI shape, plain or streamed.
@@ -79,7 +188,7 @@ path to higher recall, not a keyword gate.
 
 ### Tests
 The suite resets the process-global rate limiter per test; proxy tests
-no longer 429 depending on file order. Suite is 1142 tests.
+no longer 429 depending on file order. Suite is 1185 tests.
 
 ### Fixed — every turn of a long session failed on Anthropic and Gemini
 `SmartMessageWindow` kept `conv_msgs[-protect_recent:]`. A chat request
