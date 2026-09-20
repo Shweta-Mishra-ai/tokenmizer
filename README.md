@@ -121,7 +121,7 @@ session from the labelled corpus in `benchmarks/eval/corpus`.
 ### The dashboard tells you what it actually knows
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/dashboard.png" width="900" alt="TokenMizer dashboard: savings, sessions, the live resume block and an embedded session graph"/>
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/dashboard.png" width="900" alt="TokenMizer dashboard: savings, sessions, the live resume block and an embedded radial session graph"/>
 </div>
 
 Your sessions, the live resume block each one would inject right now, and
@@ -132,14 +132,25 @@ rather than saying `ok` whatever happened.
 ### The session graph, grouped the way you would group it
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/graph-explorer.png" width="900" alt="The interactive session graph: nodes filled by detected community and ringed by type, with hulls, a type legend and filters"/>
+  <img src="https://raw.githubusercontent.com/Shweta-Mishra-ai/tokenmizer/main/docs/assets/graph-explorer.png" width="900" alt="The session graph as a radial map: one arc per node type, named on the ring, with relations drawn as chords through the middle and a panel of session numbers, communities and hotspots"/>
 </div>
 
-Nodes are filled by detected community and ringed by type, so the shape
-of the work is visible before you read a single label. Filter by type or
-community, search, click a node for its confidence, its dates and the
-supersession chain behind it. One self-contained HTML file with no
-external requests, so it opens offline and can be sent to someone.
+Each node type gets its own arc of the circle, named on the ring, and
+relations are drawn as chords bowed through the middle — so the shape of
+the session is readable before you read a single label, and which type a
+node is comes from *where it sits*, not from telling two hues apart. The
+palette is checked with a validator, not by eye: every adjacent pair
+clears the colour-blind separation floor, and the four types that carry
+no meaning of their own share one neutral grey.
+
+The panel beside it counts what the session knows and what is missing —
+open issues, decisions changed, history gaps, unconnected nodes — then
+lists the detected communities, the hotspots everything hangs off, and
+which kinds of node point at which. Filter by type or community, search,
+click a node for its confidence, its dates and the supersession chain
+behind it. Force and timeline layouts are one click away. One
+self-contained HTML file with no external requests, so it opens offline
+and can be sent to someone.
 
 ### The same session as a story
 
@@ -420,7 +431,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1185 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1199 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it
