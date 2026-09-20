@@ -289,13 +289,6 @@ only under load, and the failure mode was a security control quietly
 turning itself off. `tests/unit/test_cold_start_contention.py` starts
 eight workers at once and asserts that none of them disables itself.
 
-### Fixed — the `minimal` terse prompt, taking PR #63's wording
-[@TechNovaWorldai](https://github.com/TechNovaWorldai) fixed the same
-overrun independently in #63 and did it in fewer tokens than this branch
-had — 114 against the 140 ceiling, keeping "no config for values that
-never change", which this branch's version had dropped. Taken as-is, with
-credit, so the two do not conflict when both land.
-
 ### Changed — `semantic_retrieval: auto`, and a retrieval eval worth quoting
 The setting defaulted to `false`, so a deployment with the embedding model
 sitting in its image ranked context by token overlap anyway unless somebody
@@ -803,6 +796,14 @@ path to higher recall, not a keyword gate.
 ### Tests
 The suite resets the process-global rate limiter per test; proxy tests
 no longer 429 depending on file order. Suite is 1185 tests.
+### Fixed — `minimal` terse-output style exceeded its own token budget
+`terse_system_prompt(style="minimal")` is injected on every request, so its
+own size works against the tokens it is meant to save. It had grown to 151
+tokens against `test_minimal_prompt_is_paid_for_every_turn_so_it_stays_short`'s
+140-token ceiling, failing on `main`. Reworded to keep the same rules
+(reuse before writing, shortest diff, fix the root cause once, "Preserve
+code, paths and URLs exactly") in fewer words — no behavior change, ~114
+tokens by the same estimate.
 
 ### Fixed — every turn of a long session failed on Anthropic and Gemini
 `SmartMessageWindow` kept `conv_msgs[-protect_recent:]`. A chat request

@@ -753,12 +753,6 @@ class CompressionPipeline:
         """
         if style == "minimal":
             return (
-                # Wording from PR #63 (@TechNovaWorldai), which fixed the
-                # same overrun independently and did it in fewer tokens
-                # than this branch had: 114 against the 140 ceiling, and
-                # it keeps "no config for values that never change",
-                # which the version here had dropped. Taken as-is so the
-                # two do not conflict when both land.
                 "Work like a senior engineer who writes as little as possible: "
                 "reuse what exists in this codebase, then the standard library, "
                 "then a dependency, before adding new code. Ship the shortest "
