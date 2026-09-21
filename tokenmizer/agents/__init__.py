@@ -23,10 +23,13 @@ proxy uses, so an agent and the proxy can share a session.
 """
 from __future__ import annotations
 
+import logging
 from typing import Iterable, Optional
 
 from tokenmizer.graph_memory.graph import GraphMemory
 from tokenmizer.graph_memory.types import NodeType
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["Memory"]
 
@@ -38,7 +41,7 @@ class Memory:
         self,
         session_id: Optional[str] = None,
         storage_dir: str = "./checkpoints",
-        semantic_retrieval: bool = False,
+        semantic_retrieval: Optional[bool] = None,
         cross_session_recall: Optional[bool] = None,
         principal: Optional[str] = None,
     ):
@@ -52,6 +55,17 @@ class Memory:
                 )
         self.session_id = session_id
         self._storage_dir = storage_dir
+        if semantic_retrieval is None:
+            # None means "whatever this deployment is configured for",
+            # which is "auto" by default: on when the embedding model
+            # actually loads. An in-process caller gets the same ranking
+            # the proxy gets, rather than a quietly worse one.
+            from tokenmizer.config.settings import (
+                get_settings,
+                resolve_semantic_retrieval,
+            )
+            semantic_retrieval = resolve_semantic_retrieval(
+                get_settings().graph_checkpoint.semantic_retrieval)
         self._graph = GraphMemory(
             session_id, storage_dir=storage_dir,
             semantic_retrieval=semantic_retrieval,
@@ -83,8 +97,15 @@ class Memory:
         try:
             from tokenmizer.security.ownership import OwnershipStore
             OwnershipStore(storage_dir=storage_dir).claim(session_id, principal)
-        except Exception:
-            pass
+        except Exception as e:
+            # Best-effort, but not silent. This is the one path in the
+            # module that fails with NO trace at all, and its consequence
+            # is invisible by construction: the session simply never turns
+            # up in a cross-session search, which reads as "nothing was
+            # remembered" rather than as a failure.
+            logger.debug("Could not claim ownership of session %r for %r "
+                         "(%s) — it will not be discoverable from another "
+                         "session", session_id, principal, e)
 
     # ── Write ────────────────────────────────────────────────────────────────
 
@@ -153,15 +174,26 @@ class Memory:
         from tokenmizer.security.ownership import OwnershipStore
 
         store = OwnershipStore(storage_dir=self._storage_dir)
+        # An unreadable ownership store means cross-session recall returns
+        # nothing, which is indistinguishable from "this principal owns no
+        # other sessions" unless it is said out loud.
         try:
             owner = store.claim(self.session_id, self._principal)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "Ownership store unreadable, so no other session of this "
+                "principal can be recalled: %s", e,
+            )
             return []
         if owner != self._principal:
             return []
         try:
             sessions = store.sessions_for(owner)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "Could not list this principal's sessions, so cross-session "
+                "recall has nothing to draw on: %s", e,
+            )
             return []
         return [sid for sid in sessions if sid != self.session_id]
 

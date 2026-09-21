@@ -11,6 +11,13 @@ Every setting, where it can be set, and which ones fail loudly. Precedence is **
 provider: anthropic
 default_model: claude-sonnet-4-6
 
+# Send a client's model name somewhere else. Exact match, applied once,
+# empty by default. The response carries `tokenmizer.model_mapped_from`
+# whenever a substitution happened.
+model_map:
+  gpt-4: claude-sonnet-4-6
+  gpt-3.5-turbo: claude-haiku-4-5
+
 graph_checkpoint:
   enabled: true
   trigger_at_percent: 0.85
@@ -24,9 +31,11 @@ compression:
 
 cache:
   enabled: true
-  max_size: 10000
+  max_size: 10000               # entries
+  max_bytes: 268435456          # 256 MiB — the bound that is actually memory
+  max_entry_bytes: 1048576      # one answer bigger than this is not cached
 
-state_backend: memory           # memory | redis — see note below
+state_backend: memory           # memory | sqlite — see note below
 ```
 
 ## Environment
@@ -61,6 +70,11 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_GRAPH_CHECKPOINT__USE_LLM_EXTRACTION` | `false` | Hybrid LLM + heuristic extraction (needs a key, ~$0.001/turn) |
 | `TOKENMIZER_CACHE__ENABLED` | `true` | Semantic cache |
 | `TOKENMIZER_CACHE__SIMILARITY_THRESHOLD` | `0.92` | How close a hit must be |
+| `TOKENMIZER_CACHE__MAX_SIZE` | `10000` | Cap on cached **entries** |
+| `TOKENMIZER_CACHE__MAX_BYTES` | `268435456` | Cap on cached **bytes** (256 MiB). An entry holds a whole response, so the entry cap alone is not a memory bound — 10,000 answers of 60 KB is 579 MiB measured. Whichever bound binds first wins |
+| `TOKENMIZER_CACHE__MAX_ENTRY_BYTES` | `1048576` | A single response larger than this is served but not cached, so one huge answer cannot evict the whole cache |
+| `TOKENMIZER_CACHE__MAX_SEMANTIC_SCAN` | `2000` | Most-recent entries compared on a cache miss. The semantic layer is an O(n) loop on the request path; this bounds its worst case |
+| `TOKENMIZER_REQUEST_TIMEOUT` | `120` | Seconds an upstream call may hang. Every vendor SDK defaults to 600, which on a proxy holds a request, its session lock and its extraction slot for ten minutes. `0` restores the SDK default |
 | `TOKENMIZER_COMPRESSION__ENABLED` | `true` | Prompt compression |
 | `TIKTOKEN_CACHE_DIR` | *(unset)* | Where tiktoken looks for its BPE vocabulary. Set it, and pre-download, to run without egress — the Docker image does this at build time |
 
@@ -70,18 +84,50 @@ config instead of warning, and `TOKENMIZER_TRUST_PROXY_HEADERS` changes
 who the rate limiter thinks you are — enabling it in front of an
 untrusted network lets any caller reset their own limit.
 
-> **`state_backend: redis` is not wired up.** `tokenmizer/state/backend.py`
-> has no callers — nothing reads from or writes to Redis. All durable
-> state (graph memory, checkpoints, session ownership) is SQLite under
-> `storage_dir`. The setting is accepted so existing configs keep
-> loading; it does not change behaviour.
+> **Set `state_backend: sqlite` if you run more than one worker.** The
+> rate limiter keeps its token buckets in process memory by default,
+> which means `--workers 4` enforces your configured limit four times
+> over — 60 requests a minute becomes 240. `sqlite` puts the buckets in
+> `storage_dir`, where every worker on the host shares one count, at the
+> cost of one small transaction per request. Neither option spans hosts:
+> several machines behind a load balancer need the limit at the load
+> balancer.
+>
+> **`state_backend: redis` was never implemented.** Nothing has ever read
+> it, so it behaves as `memory`. The value is still accepted so existing
+> configs load, and now logs a warning naming `sqlite` as the option that
+> covers the same deployment.
+
+## Preferences — habits that outlive a session
+
+```yaml
+preferences:
+  enabled: false     # OFF by default; read the note
+  max_items: 4       # lines injected into the system prompt
+  max_chars: 400     # and their total size
+```
+
+The session graph remembers what you decided about a project. This
+remembers what is true of *you* — "keep it brief", "always TypeScript" —
+per principal, in `storage_dir`, and injects a few lines into the system
+prompt.
+
+> **Off by default on purpose.** The failure mode of a preference memory
+> is not forgetting; it is remembering something that was never a
+> preference and repeating it in every prompt you send for the rest of
+> the year. The detector is a set of regexes and it will have false
+> positives. `GET /api/preferences` shows exactly what is remembered and
+> the exact text injected; `DELETE /api/preferences` (optionally
+> `?key=...`) forgets it. Secrets, env vars and complaints ("I hate this
+> bug") are excluded by construction, but do not mistake that for a
+> guarantee.
 
 ## Not implemented, despite being configurable
 
 | Setting | Status |
 |---|---|
-| `routing.*` | No implementation. `savings.routing` is always 0. Setting `enabled: true` logs a warning and changes nothing. |
-| `state_backend: redis` | Accepted, unused (see above). |
+| `routing.*` | **Deprecated, removed next release.** Never implemented. Replaced by `model_map`. A config carrying the block still loads and logs a deprecation warning. |
+| `state_backend: redis` | Accepted, never implemented; behaves as `memory` and warns. Use `sqlite` (see above). |
 
 ---
 

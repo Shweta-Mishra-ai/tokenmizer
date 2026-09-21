@@ -292,14 +292,30 @@ def test_every_merged_contributor_is_credited():
     shrunk. Adding a contributor is expected; removing one has to be
     deliberate enough to edit this list.
     """
-    credited_at_0_5_0 = {"0xfroOty", "pollychen-lab", "floze-the-genius"}
+    # Everyone whose work is merged. Add to this when a PR lands; the
+    # point of the set is that removing a name has to be deliberate.
+    # Everyone whose contribution is recorded, code or not. The avatar
+    # grid in that section only counts commits, so the ones who reported
+    # a bug or reviewed the project from outside exist ONLY in this list
+    # — nothing else in the repo would notice them going missing.
+    credited = {"0xfroOty", "pollychen-lab", "floze-the-genius",
+                "TechNovaWorldai", "neoneye"}
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    section = readme.split("### Contributors", 1)
-    assert len(section) == 2, "the README no longer credits contributors"
+    # Matches the heading at either level. It was nested under
+    # Contributing and is now a section of its own, and which of those it
+    # is has nothing to do with whether anyone was dropped — the thing
+    # this test exists to catch.
+    m = re.search(r"^#{2,3} Contributors$", readme, re.M)
+    assert m, "the README no longer credits contributors"
+    body = readme[m.end():]
+    # Stop at the next heading of the same level or higher.
+    nxt = re.search(r"^## ", body, re.M)
+    if nxt:
+        body = body[:nxt.start()]
 
-    handles = set(re.findall(r"github\.com/([\w.-]+)\)", section[1].split("\n## ")[0]))
-    missing = credited_at_0_5_0 - handles
+    handles = set(re.findall(r"github\.com/([\w.-]+)\)", body))
+    missing = credited - handles
     assert not missing, (
         f"contributors dropped from the README: {sorted(missing)}. "
         f"If someone must genuinely be removed, edit this test too."

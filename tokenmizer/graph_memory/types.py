@@ -28,6 +28,10 @@ class NodeType(str, Enum):
     TEST = "test"                 # test file / test result
     ENDPOINT = "endpoint"         # HTTP endpoint definition
     SCHEMA = "schema"             # data model / DB schema
+    # A note for turns windowing dropped: the constraints and numbers the
+    # ontology has no node for, which would otherwise leave the session
+    # entirely once the turn that stated them is replaced. See summary.py.
+    SUMMARY = "summary"
 
 
 class NodeStatus(str, Enum):
@@ -173,8 +177,12 @@ class DecisionTransition:
             if self.confidence_delta < -0.05
             else ""
         )
+        # " — " and not " | ": context_block.py joins several of these
+        # with " | ", so a reason carrying the same separator turned the
+        # Changes line into a list whose items did not line up with the
+        # changes they described.
         return (
-            f"Changed: {self.from_label!r} → {self.to_label!r}"
+            f"{self.from_label!r} \u2192 {self.to_label!r}"
             f"{delta_str}"
-            + (f" | Reason: {self.reason[:80]}" if self.reason else "")
+            + (f" \u2014 {self.reason[:80]}" if self.reason else "")
         )

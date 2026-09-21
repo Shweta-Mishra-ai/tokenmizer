@@ -1,0 +1,41 @@
+{
+  "id": "research_rag_eval",
+  "origin": "synthetic",
+  "domain": "research/ml",
+  "pack": "research",
+  "notes": "An evaluation study. Stresses: a question stated as the goal, findings as completed work, a conclusion as a decision, and a negative result that contradicts the rest — the thing a resume must not drop.",
+  "messages": [
+    {"role": "user", "content": "The research question is whether retrieval augmentation beats fine-tuning on our support corpus."},
+    {"role": "assistant", "content": "Read the RAG survey and reviewed four papers on domain adaptation. Still investigating whether index size matters."},
+    {"role": "user", "content": "what did the first run show"},
+    {"role": "assistant", "content": "The experiment showed RAG at 71 percent and fine-tuning at 68 percent on the held-out set. This contradicts the vendor benchmark, which put fine-tuning ahead."},
+    {"role": "user", "content": "is that difference real"},
+    {"role": "assistant", "content": "Not statistically significant at n=120. The sample is too small to call it. Measured a 4 point spread across three seeds."},
+    {"role": "user", "content": "so what do we do"},
+    {"role": "assistant", "content": "Concluded that retrieval wins on our corpus for cost reasons even at parity. Open question whether it holds for documents over 8k tokens."},
+    {"role": "user", "content": "anything else outstanding"},
+    {"role": "assistant", "content": "Still analysing the per-category breakdown. Found that the gap is entirely in the billing questions."}
+  ],
+  "ground_truth": {
+    "completed_tasks": [
+      "Read the RAG survey",
+      "reviewed four papers on domain adaptation",
+      "The experiment showed RAG at 71 percent",
+      "Measured a 4 point spread across three seeds",
+      "Found that the gap is entirely in the billing questions"
+    ],
+    "pending_tasks": [
+      "investigating whether index size matters",
+      "Open question whether it holds for documents over 8k tokens",
+      "analysing the per-category breakdown"
+    ],
+    "decisions": [
+      "retrieval wins on our corpus"
+    ],
+    "errors": [
+      "This contradicts the vendor benchmark",
+      "Not statistically significant at n=120",
+      "The sample is too small"
+    ]
+  }
+}

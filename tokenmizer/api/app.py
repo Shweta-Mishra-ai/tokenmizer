@@ -18,6 +18,7 @@ file actually handles a given request.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -37,12 +38,13 @@ from tokenmizer.checkpoints.manager import CheckpointManager
 from tokenmizer.compression.engine import CompressionPipeline
 from tokenmizer.compression.output_trimmer import OutputTrimmer
 from tokenmizer.compression.window import SmartMessageWindow, needs_windowing
-from tokenmizer.config.settings import get_settings
+from tokenmizer.config.settings import get_settings, resolve_semantic_retrieval
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.filters.file_intelligence import FileIntelligence
 from tokenmizer.graph_memory.graph import GraphMemory
 from tokenmizer.providers.providers import build_provider
 from tokenmizer.security.auth import verify_api_key
+from tokenmizer.security.fencing import fence
 from tokenmizer.security.middleware import injection_guard
 from tokenmizer.security.ownership import (
     DEV_PRINCIPAL,
@@ -111,6 +113,9 @@ _cache = SemanticCache(
     ttl_seconds=settings.cache.ttl_seconds,
     max_size=settings.cache.max_size,
     share_scope=settings.cache.share_scope,
+    max_bytes=settings.cache.max_bytes,
+    max_entry_bytes=settings.cache.max_entry_bytes,
+    max_semantic_scan=settings.cache.max_semantic_scan,
 )
 _checkpoint_mgr = CheckpointManager(
     storage_dir=settings.graph_checkpoint.storage_dir,
@@ -120,8 +125,48 @@ _ownership = OwnershipStore(storage_dir=settings.graph_checkpoint.storage_dir)
 # storage_dir gives analytics the same durability the graph has. Without
 # it every savings figure resets to zero on restart — see engine.py.
 _analytics = AnalyticsEngine(storage_dir=settings.graph_checkpoint.storage_dir)
+# Built only when asked for: the store creates a database file, and a
+# feature that is off should leave no trace on disk.
+# Resolved once, at import: "auto" asks whether the embedding model
+# actually loads, which is a question worth asking at startup and not on
+# every request. See resolve_semantic_retrieval.
+_SEMANTIC_RETRIEVAL = resolve_semantic_retrieval(
+    settings.graph_checkpoint.semantic_retrieval)
+if _SEMANTIC_RETRIEVAL and settings.graph_checkpoint.semantic_retrieval == "auto":
+    logger.info("Semantic retrieval is ON — the embedding model loaded. "
+                "Set graph_checkpoint.semantic_retrieval: false to pin it off.")
+
+_preferences = None
+if settings.preferences.enabled:
+    from tokenmizer.preferences import PreferenceStore
+    _preferences = PreferenceStore(
+        storage_dir=settings.graph_checkpoint.storage_dir)
 _output_trimmer = OutputTrimmer()
-_rate_limiter = get_rate_limiter(rate=60, per_seconds=60, burst=10)
+
+
+def _build_rate_limiter():
+    """The shared limiter when the deployment asked for one, else the
+    per-process one.
+
+    `state_backend: memory` (the default) enforces the configured limit
+    once per worker, which with `--workers 4` is four times the number in
+    the config. That is fine for one process and wrong for the deployment
+    the Dockerfile ships, so `sqlite` puts the buckets where every worker
+    on the host can see them. A shared store that fails to open falls back
+    here rather than failing the proxy — the old behaviour, loudly.
+    """
+    if settings.state_backend == "sqlite":
+        from tokenmizer.api.shared_rate_limiter import SQLiteRateLimiter
+        shared = SQLiteRateLimiter(
+            rate=60, per_seconds=60, burst=10,
+            storage_dir=settings.graph_checkpoint.storage_dir,
+        )
+        if shared.available:
+            return shared
+    return get_rate_limiter(rate=60, per_seconds=60, burst=10)
+
+
+_rate_limiter = _build_rate_limiter()
 
 # Bounded LRU for session locks — prevents memory leak on long-running servers.
 # Max 1000 concurrent sessions; LRU eviction removes oldest UNHELD lock.
@@ -135,8 +180,36 @@ _session_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
 # was doing — for the background extraction task, that would mean the
 # graph quietly stops gaining nodes from this path with no error at all.
 # Each task removes itself via the done-callback, so this set never grows
-# unbounded.
+# unbounded *over time* — but nothing bounded how many could be in flight
+# AT ONCE. One burst of a few thousand requests meant a few thousand
+# concurrent extraction tasks, each holding its slice of the transcript
+# and each making an upstream call: a memory spike and a self-inflicted
+# rate limit on the cheap provider, at exactly the moment the proxy is
+# busiest. See _extraction_slot() below.
 _background_tasks: set[asyncio.Task] = set()
+
+# Backpressure on the background LLM extraction pass.
+#
+# Shedding this is safe in a way that shedding most work is not: the
+# HEURISTIC extraction already ran synchronously before the task was
+# scheduled, so the graph has this turn's facts either way. What is lost
+# is the accuracy of the LLM pass for that one turn — precisely the
+# degradation the existing exception handler already documents as "no
+# data lost, just less accurate extraction this turn".
+#
+# Concurrency, not a queue length, is the limit that matters: a queue
+# just moves the memory from tasks to a list and adds latency to work
+# that is already best-effort. Over the limit, the turn keeps its
+# heuristic facts and the shed is counted in /api/stats.
+_EXTRACTION_MAX_CONCURRENT = 8
+_extraction_inflight = 0
+# Tasks created but not yet started. The slot counter alone is not enough:
+# a task that has not been scheduled yet holds its closure — including the
+# whole transcript it was given — so creating N of them and letting them
+# shed on entry still spends the memory the cap exists to save. Capacity
+# is therefore checked BEFORE the task is created, and again on entry,
+# because the loop can hand out slots between the two.
+_extraction_pending = 0
 
 
 def _track_background_task(coro) -> asyncio.Task:
@@ -147,6 +220,36 @@ def _track_background_task(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+def _extraction_has_capacity() -> bool:
+    """Is it worth CREATING an extraction task at all?
+
+    Counts the ones already queued as well as the ones running, because a
+    queued task is not free: it pins its slice of the transcript until the
+    loop gets to it.
+    """
+    return (_extraction_inflight + _extraction_pending) < _EXTRACTION_MAX_CONCURRENT
+
+
+@contextlib.contextmanager
+def _extraction_slot():
+    """Occupy one of the concurrent-extraction slots, or yield False.
+
+    A counter rather than an asyncio.Semaphore because the caller must be
+    able to DECLINE when the limit is reached. `Semaphore.acquire()`
+    waits, and waiting is the failure mode this exists to prevent: the
+    tasks pile up holding memory instead of being dropped cheaply.
+    """
+    global _extraction_inflight
+    if _extraction_inflight >= _EXTRACTION_MAX_CONCURRENT:
+        yield False
+        return
+    _extraction_inflight += 1
+    try:
+        yield True
+    finally:
+        _extraction_inflight -= 1
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
@@ -184,6 +287,11 @@ _smart_window = SmartMessageWindow(
 )
 _file_intelligence = FileIntelligence()
 _extraction_provider = None   # lazy — only built if use_llm_extraction=True
+# Reason LLM extraction is unavailable, logged ONCE. The check re-runs on
+# every request (a key can be configured later without a restart), but the
+# warning must not: with use_llm_extraction on and no key it was emitted
+# for every chat turn of every session, which buried every other log line.
+_extraction_unavailable_reason: Optional[str] = None
 
 
 def _get_extraction_provider():
@@ -205,24 +313,29 @@ def _get_extraction_provider():
     Only instantiated when use_llm_extraction=True; None means
     "heuristic extraction only", logged once with the reason.
     """
-    global _extraction_provider
+    global _extraction_provider, _extraction_unavailable_reason
     if _extraction_provider is not None:
         return _extraction_provider
 
     provider = settings.provider.lower()
     override = (settings.graph_checkpoint.extraction_model or "").strip()
     if provider != "ollama" and not settings.get_api_key_for_provider(provider):
-        logger.warning(
-            "use_llm_extraction is on but provider=%r has no API key configured; "
-            "falling back to heuristic extraction.", provider,
-        )
+        reason = (f"use_llm_extraction is on but provider={provider!r} has no API "
+                  f"key configured; falling back to heuristic extraction.")
+        if reason != _extraction_unavailable_reason:
+            logger.warning(reason)
+            _extraction_unavailable_reason = reason
         return None
     try:
         _extraction_provider = build_provider(settings, model=override or None)
     except ValueError as e:
-        logger.warning("use_llm_extraction is on but no provider could be built (%s); "
-                       "falling back to heuristic extraction.", e)
+        reason = (f"use_llm_extraction is on but no provider could be built ({e}); "
+                  f"falling back to heuristic extraction.")
+        if reason != _extraction_unavailable_reason:
+            logger.warning(reason)
+            _extraction_unavailable_reason = reason
         return None
+    _extraction_unavailable_reason = None
     return _extraction_provider
 
 
@@ -372,7 +485,7 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
             _graph_cache[session_id] = GraphMemory(
                 session_id,
                 storage_dir=settings.graph_checkpoint.storage_dir,
-                semantic_retrieval=settings.graph_checkpoint.semantic_retrieval,
+                semantic_retrieval=_SEMANTIC_RETRIEVAL,
             )
         _graph_cache_touch(session_id)
         return _graph_cache[session_id]
@@ -380,14 +493,32 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
 
 # ── Context window sizes ──────────────────────────────────────────────────────
 
-# Newest Claude models (fable-5, opus-4-8, sonnet-5, haiku-4-5) all match the
-# "claude" prefix entry. Add a specific entry ONLY if a model's window differs.
+# Context window per model family, in tokens. Only feeds the auto-checkpoint
+# trigger (context_pct = tokens sent / window), so an entry that is too
+# SMALL checkpoints early (harmless) and one that is too LARGE never
+# checkpoints (the failure this table exists to prevent) — when unsure,
+# prefer the smaller published figure. Longest matching key wins, so a
+# specific entry beats its family's catch-all. Newest Claude models
+# (fable-5, opus-4-8, sonnet-5, haiku-4-5) all match the "claude" entry;
+# add a specific entry ONLY if a model's window differs.
 _CONTEXT_WINDOWS = {
     "claude-fable-5": 200_000, "claude-opus-4-8": 200_000,
     "claude-sonnet": 200_000, "claude-opus": 200_000, "claude-haiku": 200_000,
     "claude": 200_000,
-    "gpt-4o": 128_000, "gpt-4": 128_000, "gpt-3.5": 16_000,
-    "gemini": 1_000_000, "deepseek": 64_000,
+    # OpenAI: the 4.1 family and the 5 series are far larger than 4o; the
+    # reasoning models sit at 200k. Longest-key matching keeps "gpt-4o"
+    # from being shadowed by "gpt-4", and "gpt-4.1" from matching "gpt-4".
+    "gpt-4.1": 1_000_000, "gpt-4o": 128_000, "gpt-4": 128_000, "gpt-3.5": 16_000,
+    "gpt-5": 400_000,
+    "o1": 200_000, "o3": 200_000, "o4": 200_000,
+    "gemini": 1_000_000,
+    "deepseek": 128_000,
+    "mistral": 128_000, "codestral": 256_000,
+    "grok": 128_000,
+    "command-r": 128_000,
+    # Local models vary by build; 32k is the common default `num_ctx`
+    # ceiling, and a too-small figure only checkpoints early.
+    "llama": 32_000, "qwen": 32_000, "mixtral": 32_000, "phi": 16_000,
 }
 
 
@@ -546,13 +677,38 @@ class ChatMessage(BaseModel):
     """OpenAI-style message. `content` accepts a plain string OR a list of
     content blocks (multimodal format). Blocks are normalized to text —
     TokenMizer is a text proxy; non-text blocks (images) are dropped with
-    their text parts preserved."""
+    their text parts preserved.
+
+    Tool calling carries three more fields, all optional: an assistant
+    turn's `tool_calls`, and a `role: "tool"` turn's `tool_call_id` (and
+    OpenAI's optional `name`). They ride through the pipeline untouched
+    and reach the provider adapter, which speaks them natively or
+    translates them (see providers/tools.py)."""
+    model_config = {"extra": "allow"}
+
     role: str
     content: str | list | None = ""
+    tool_calls: Optional[list] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
 
     def text(self) -> str:
         from tokenmizer.graph_memory.helpers import _content_to_text
         return _content_to_text(self.content)
+
+    def to_dict(self) -> dict:
+        """The pipeline's message shape: role + text content, plus the
+        tool fields only when set, so an ordinary message is exactly the
+        two-key dict every layer has always seen."""
+        d: dict = {"role": self.role, "content": self.text()}
+        if self.tool_calls:
+            from tokenmizer.providers.tools import normalize_tool_calls
+            d["tool_calls"] = normalize_tool_calls(self.tool_calls)
+        if self.tool_call_id:
+            d["tool_call_id"] = self.tool_call_id
+        if self.name:
+            d["name"] = self.name
+        return d
 
 
 class ChatRequest(BaseModel):
@@ -565,11 +721,27 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     messages: list[ChatMessage]
     max_tokens: Optional[int] = 4096
+    # OpenAI's current name for the same limit; newer SDK defaults and the
+    # o-series reject `max_tokens` and send this instead. Without it the
+    # client's limit was silently replaced by the 4096 default above.
+    max_completion_tokens: Optional[int] = None
     stream: Optional[bool] = False
     session_id: Optional[str] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     stop: Optional[str | list[str]] = None
+    # Tool/function calling, OpenAI shape. Forwarded to providers that
+    # support it (see BaseProvider.supports_tools); a 501 otherwise.
+    tools: Optional[list[dict]] = None
+    tool_choice: Optional[str | dict] = None
+    parallel_tool_calls: Optional[bool] = None
+
+
+def _max_tokens(req: "ChatRequest") -> int:
+    """The completion limit the client asked for, under either name."""
+    if req.max_completion_tokens is not None:
+        return req.max_completion_tokens
+    return req.max_tokens or 4096
 
 
 def _sampling_kwargs(req: "ChatRequest") -> dict:
@@ -581,6 +753,18 @@ def _sampling_kwargs(req: "ChatRequest") -> dict:
         kw["top_p"] = req.top_p
     if req.stop is not None:
         kw["stop"] = req.stop
+    return kw
+
+
+def _tool_kwargs(req: "ChatRequest") -> dict:
+    """Tool-calling params to forward (only when the request declares tools)."""
+    if not req.tools:
+        return {}
+    kw: dict = {"tools": req.tools}
+    if req.tool_choice is not None:
+        kw["tool_choice"] = req.tool_choice
+    if req.parallel_tool_calls is not None:
+        kw["parallel_tool_calls"] = req.parallel_tool_calls
     return kw
 
 
@@ -747,6 +931,7 @@ async def _update_graph(
     Returns (updated_messages, checkpoint_status) — checkpoint_status surfaces
     auto-checkpoint success/failure to the caller instead of only logging it.
     """
+    global _extraction_pending
     context_window = _context_window(model)
 
     # Extraction: heuristic sync now, LLM async in background
@@ -764,6 +949,28 @@ async def _update_graph(
                     _g=graph, _msgs=new_msgs, _all=raw_messages,
                     _cheap=cheap, _lock=_lock_ref, _sid=session_id,
                 ):
+                    global _extraction_pending
+                    _extraction_pending -= 1
+                    with _extraction_slot() as got_slot:
+                        if not got_slot:
+                            # At capacity. This turn keeps the heuristic
+                            # facts extracted synchronously above; only
+                            # the LLM refinement is dropped. Counted as a
+                            # shed, not a failure: the operator's fix is
+                            # to raise the limit or add capacity, which is
+                            # a different action from fixing a broken key.
+                            _analytics.record_shed("llm_extraction")
+                            logger.info(
+                                "Background LLM extraction shed for session "
+                                "%s — %d already in flight (limit %d). The "
+                                "turn keeps its heuristic facts.",
+                                _sid, _extraction_inflight,
+                                _EXTRACTION_MAX_CONCURRENT,
+                            )
+                            return
+                        await _run_extraction(_g, _msgs, _all, _cheap, _lock, _sid)
+
+                async def _run_extraction(_g, _msgs, _all, _cheap, _lock, _sid):
                     async with _lock:
                         try:
                             from tokenmizer.graph_memory.hybrid_extractor import HybridExtractor
@@ -797,7 +1004,21 @@ async def _update_graph(
                             )
                             _analytics.record_silent_failure("llm_extraction")
 
-                _track_background_task(_background_extract())
+                if _extraction_has_capacity():
+                    _extraction_pending += 1
+                    _track_background_task(_background_extract())
+                else:
+                    # Do not even build the coroutine: its closure holds
+                    # this turn's transcript, and a queue of those is the
+                    # memory spike the cap exists to prevent.
+                    _analytics.record_shed("llm_extraction")
+                    logger.info(
+                        "Background LLM extraction not scheduled for session "
+                        "%s — %d running, %d queued (limit %d). The turn keeps "
+                        "its heuristic facts.",
+                        session_id, _extraction_inflight, _extraction_pending,
+                        _EXTRACTION_MAX_CONCURRENT,
+                    )
             else:
                 graph.extract_from_messages(raw_messages, incremental=True)
         else:
@@ -855,9 +1076,16 @@ async def _update_graph(
                 (i for i, m in enumerate(messages) if m.get("role") == "system"), None
             )
             if sys_idx is not None:
+                # APPENDED, not prepended. Provider prompt caching (layer
+                # 5) caches the longest unchanged prefix of the system
+                # prompt; this block changes every turn, and at the front
+                # it invalidated the cache on every request behind any
+                # agent with a long stable system prompt — the one place
+                # the cache pays. At the end, the terse prompt and the
+                # client's own system prompt stay cacheable.
                 messages[sys_idx]["content"] = (
-                    f"[Relevant session context]\n{ctx_block}\n\n"
-                    f"{messages[sys_idx]['content']}"
+                    f"{messages[sys_idx]['content']}\n\n"
+                    f"{fence(ctx_block, 'relevant session context')}"
                 )
             else:
                 # A system message is not guaranteed to exist: layer 2
@@ -866,17 +1094,63 @@ async def _update_graph(
                 # depend on that unrelated setting.
                 messages.insert(0, {
                     "role": "system",
-                    "content": f"[Relevant session context]\n{ctx_block}",
+                    "content": fence(ctx_block, "relevant session context"),
                 })
 
-    # Context occupancy is measured from what will actually be sent this
-    # turn (post file-intelligence/compression/windowing/injection), NOT
-    # accumulated across turns. Each `messages` list already carries the
-    # full running conversation, so a running total would double-count
-    # every earlier turn, and it could never fall again after windowing
-    # shrank the payload. This is a pure function of `messages`: no
-    # shared mutable state, and it reflects the windowing just applied.
-    context_pct = count_messages_tokens(messages, model) / context_window
+    # Preferences — habits that outlive this session, and so are NOT in
+    # this session's graph: "keep it brief", "always TypeScript". Off
+    # unless asked for; see PreferenceSettings for why. Appended for the
+    # same prompt-caching reason as the block above, and after it, since
+    # what this session is about matters more than how the reader likes
+    # their answers formatted.
+    if settings.preferences.enabled and _preferences is not None:
+        try:
+            if user_query:
+                _preferences.observe(principal, user_query)
+            pref_block = _preferences.context(
+                principal,
+                max_items=settings.preferences.max_items,
+                max_chars=settings.preferences.max_chars,
+            )
+        except Exception as e:                       # pragma: no cover - defensive
+            logger.warning("Preferences skipped for this turn: %s", e)
+            pref_block = ""
+        if pref_block:
+            sys_idx = next(
+                (i for i, m in enumerate(messages) if m.get("role") == "system"), None
+            )
+            fenced = fence(pref_block, "remembered preferences")
+            if sys_idx is not None:
+                messages[sys_idx]["content"] = (
+                    f"{messages[sys_idx]['content']}\n\n{fenced}")
+            else:
+                messages.insert(0, {"role": "system", "content": fenced})
+
+    # Context occupancy, measured per turn rather than accumulated: each
+    # `messages` list already carries the full running conversation, so a
+    # running total would double-count every earlier turn and could never
+    # fall again after windowing shrank the payload. A pure function of
+    # its inputs — no shared mutable state.
+    #
+    # Measured against BOTH sides, and the fuller one wins:
+    #
+    #   sent — what leaves here this turn, after file intelligence,
+    #          compression, windowing and injection. This is what the
+    #          provider's window has to hold.
+    #   raw  — the conversation the CLIENT is holding, which is what is
+    #          actually running out of room and what a resume has to
+    #          replace.
+    #
+    # Comparing only `sent` made the trigger almost inert exactly where it
+    # matters: windowing keeps the sent payload near-constant, so a session
+    # 40 turns deep sent the same 30% it sent at turn 5 and never
+    # checkpointed, while the client's own history was the thing about to
+    # be truncated. Now that resume reads the live graph, nothing is lost
+    # when the trigger is late — but the checkpoint diff and the "Continue
+    # from" hint are, and those are the parts a resume cannot rebuild.
+    sent_pct = count_messages_tokens(messages, model) / context_window
+    raw_pct = count_messages_tokens(raw_messages, model) / context_window
+    context_pct = max(sent_pct, raw_pct)
 
     # Auto-checkpoint.
     #
@@ -946,9 +1220,11 @@ async def _call_provider(
     `input_tokens == 0`, which would misclassify any real provider
     response that happens to report zero input tokens.
     """
-    # Cache lookup
+    # Cache lookup. Keyed on the prompt AND the conversation it was asked
+    # in — see SemanticCache.conversation_fingerprint.
+    cache_ctx = _cache.conversation_fingerprint(raw_messages or [])
     if settings.cache.enabled and user_content:
-        cached = _cache.get(user_content, session_id=session_id)
+        cached = _cache.get(user_content, session_id=session_id, context=cache_ctx)
         if cached:
             savings["cache"] = count_tokens(user_content, model)
             output_tokens = count_tokens(cached.response, model)
@@ -959,8 +1235,8 @@ async def _call_provider(
     # shares one safe copy. Deliberately NOT re-redacted here: doing so
     # would mask a regression if ingestion ever stopped redacting.
     provider = _get_provider()
-    kwargs = dict(model=model, max_tokens=req.max_tokens or 4096, stream=False,
-                  **_sampling_kwargs(req))
+    kwargs = dict(model=model, max_tokens=_max_tokens(req), stream=False,
+                  **_sampling_kwargs(req), **_tool_kwargs(req))
     try:
         resp = await provider.chat(messages=messages, **kwargs)
     except Exception as e:
@@ -1024,6 +1300,15 @@ async def _call_provider(
     output_tokens  = resp.output_tokens
     input_tokens   = resp.input_tokens
     latency_ms     = resp.latency_ms
+    if outcome is not None:
+        outcome["tool_calls"] = list(resp.tool_calls or [])
+        outcome["finish_reason"] = resp.finish_reason
+
+    # A turn the model answered with a tool call is neither trimmed (the
+    # text, if any, is the model's note to the caller) nor cached (the
+    # cached answer would replay a tool request against a different world).
+    if resp.tool_calls:
+        return response_text, input_tokens, output_tokens, latency_ms, False
 
     # Output trim
     if settings.terse_output.enabled:
@@ -1037,7 +1322,7 @@ async def _call_provider(
     if settings.cache.enabled and user_content:
         _cache.set(user_content, response_text,
                    input_tokens=input_tokens, output_tokens=output_tokens,
-                   session_id=session_id)
+                   session_id=session_id, context=cache_ctx)
 
     return response_text, input_tokens, output_tokens, latency_ms, False
 
@@ -1084,8 +1369,27 @@ def _stream_response(req, messages, model, user_content, session_id,
             payload.update(extra)
         return "data: " + _json.dumps(payload) + "\n\n"
 
+    cache_ctx = _cache.conversation_fingerprint(raw_messages or [])
+
+    tool_kw = _tool_kwargs(req)
+    # An adapter that supports tools but cannot stream tool-call deltas
+    # answers the request from chat() and the answer is emitted as chunks:
+    # the client still gets a valid SSE stream, just not an incremental one.
+    buffered_tools = bool(tool_kw) and not getattr(provider, "supports_tool_stream", False)
+
+    async def _buffered_tool_stream(candidate):
+        resp = await provider.chat(
+            messages=candidate, model=model, max_tokens=_max_tokens(req),
+            **_sampling_kwargs(req), **tool_kw,
+        )
+        if resp.text:
+            yield resp.text
+        if resp.tool_calls:
+            yield {"tool_calls": [{**tc, "index": i} for i, tc in enumerate(resp.tool_calls)]}
+
     async def _gen():
         full_text = ""
+        saw_tool_calls = False
         t0 = time.monotonic()
         cache_hit = False
         stream_failed = False
@@ -1093,8 +1397,8 @@ def _stream_response(req, messages, model, user_content, session_id,
         yield _chunk({"role": "assistant"})
         try:
             cached = (
-                _cache.get(user_content, session_id=session_id)
-                if settings.cache.enabled and user_content
+                _cache.get(user_content, session_id=session_id, context=cache_ctx)
+                if settings.cache.enabled and user_content and not tool_kw
                 else None
             )
 
@@ -1113,12 +1417,23 @@ def _stream_response(req, messages, model, user_content, session_id,
                 for attempt, candidate in enumerate(candidates):
                     last_error = None
                     try:
-                        async for piece in provider.chat_stream(
-                            messages=candidate,
-                            model=model,
-                            max_tokens=req.max_tokens or 4096,
-                            **_sampling_kwargs(req),
-                        ):
+                        pieces = (
+                            _buffered_tool_stream(candidate) if buffered_tools
+                            else provider.chat_stream(
+                                messages=candidate,
+                                model=model,
+                                max_tokens=_max_tokens(req),
+                                **_sampling_kwargs(req), **tool_kw,
+                            )
+                        )
+                        async for piece in pieces:
+                            if isinstance(piece, dict):
+                                # A tool-call delta (see OpenAIProvider.
+                                # chat_stream): re-emitted in the same
+                                # OpenAI chunk shape.
+                                saw_tool_calls = True
+                                yield _chunk({"tool_calls": piece["tool_calls"]})
+                                continue
                             full_text += piece
                             yield _chunk({"content": piece})
                         succeeded = True
@@ -1131,7 +1446,7 @@ def _stream_response(req, messages, model, user_content, session_id,
                         # retrying now would duplicate or interleave
                         # output. This failure is final regardless of
                         # attempts left.
-                        if full_text:
+                        if full_text or saw_tool_calls:
                             break
                         if attempt == 0 and len(candidates) > 1:
                             correlation_id = uuid.uuid4().hex[:12]
@@ -1177,7 +1492,7 @@ def _stream_response(req, messages, model, user_content, session_id,
                            "type": "internal_error"}}
             ) + "\n\n"
         yield _chunk(
-            {}, finish="stop",
+            {}, finish="tool_calls" if saw_tool_calls else "stop",
             extra={"tokenmizer": {"fallback": {"transform_rejected": True}}}
             if transform_rejected else None,
         )
@@ -1198,9 +1513,10 @@ def _stream_response(req, messages, model, user_content, session_id,
         # truncated answer to every future matching prompt, long after the
         # provider recovered. Re-writing a cache HIT is equally pointless.
         if (settings.cache.enabled and user_content and full_text
-                and not stream_failed and not cache_hit):
+                and not stream_failed and not cache_hit and not saw_tool_calls):
             _cache.set(user_content, full_text, input_tokens=input_tokens,
-                       output_tokens=output_tokens, session_id=session_id)
+                       output_tokens=output_tokens, session_id=session_id,
+                       context=cache_ctx)
         _analytics.record(
             session_id=session_id, provider=settings.provider, model=model,
             input_tokens_original=orig_input_tokens,
@@ -1227,26 +1543,42 @@ async def chat_completions(req: ChatRequest, request: Request):
     """
     session_id = req.session_id or str(uuid.uuid4())
     model      = req.model or settings.default_model
+    # One exact-match substitution, never re-applied, so a map that points
+    # at another of its own keys cannot loop. The original name is echoed
+    # back below: a client that asked for one model and reads an answer
+    # shaped like another should be able to see why from the response.
+    mapped_from = None
+    if model in settings.model_map:
+        mapped_from, model = model, settings.model_map[model]
+        logger.debug("model_map: %r -> %r (session %r)", mapped_from, model, session_id)
     savings: dict[str, int] = {}
 
-    # ChatRequest uses extra="allow" precisely so a standard OpenAI client
-    # sending its full request shape never gets a 422 — but that means
-    # tool/function-calling fields are accepted with a 200 and silently
-    # have NO effect: no provider path here forwards them. A caller
-    # relying on tool use gets a response that quietly ignored what it
-    # asked for, with nothing in the API response pointing at why. This
-    # can't become a hard error without breaking the extra="allow"
-    # contract for every OTHER unrecognized field, so at minimum it must
-    # not be silent to whoever operates the proxy.
-    _unsupported = (req.model_extra or {}).keys() & {"tools", "tool_choice", "functions", "function_call"}
-    if _unsupported:
+    # Tool calling. `tools`/`tool_choice` are forwarded (see
+    # providers/tools.py); the legacy `functions`/`function_call` pair is
+    # not translated and, since ChatRequest uses extra="allow" so no
+    # standard client ever gets a 422, its presence must at least not be
+    # silent to whoever operates the proxy.
+    _legacy = (req.model_extra or {}).keys() & {"functions", "function_call"}
+    if _legacy:
         logger.warning(
-            "Request for session %r included %s — tool/function-calling "
-            "is not implemented by any provider adapter and these fields "
-            "are ignored. The model will respond with no knowledge of "
-            "the tools it was given.",
-            session_id, sorted(_unsupported),
+            "Request for session %r used the deprecated %s fields — these "
+            "are ignored. Send `tools`/`tool_choice` instead; the model "
+            "will respond with no knowledge of the functions it was given.",
+            session_id, sorted(_legacy),
         )
+    if req.tools:
+        try:
+            provider_for_tools = _get_provider()
+        except ValueError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        if not getattr(provider_for_tools, "supports_tools", False):
+            raise HTTPException(
+                status_code=501,
+                detail=(f"Tool calling is not implemented for provider "
+                        f"'{settings.provider}' (supported: anthropic, openai, "
+                        f"deepseek, mistral, openrouter, grok, ollama). The "
+                        f"request was refused rather than sent without its tools."),
+            )
 
     await _check_rate_limit(request)
 
@@ -1281,7 +1613,7 @@ async def chat_completions(req: ChatRequest, request: Request):
     #   - checkpoint storage (SQLite) and the graph DB itself
     # Redacting once here means every downstream path is safe by construction
     # instead of relying on each call site to remember to redact.
-    raw_messages = [{"role": m.role, "content": m.text()} for m in req.messages]
+    raw_messages = [m.to_dict() for m in req.messages]
     raw_messages = redact_messages(raw_messages)
     # Per-dict copy, not raw_messages[:]. A shallow list copy shares every
     # dict, so Layer 2's terse-prompt injection — which prepends onto the
@@ -1296,13 +1628,17 @@ async def chat_completions(req: ChatRequest, request: Request):
     user_query   = next(
         (m["content"] for m in reversed(raw_messages) if m.get("role") == "user"), ""
     )
-    user_content = user_query
+    # The cache key is the final user turn. A request that ends on a tool
+    # result (the agent loop's second half) or that declares tools is not
+    # cacheable: the answer is a step in a plan, not a reply to a
+    # question, and user_content="" disables both lookup and write.
+    ends_on_user = bool(raw_messages) and raw_messages[-1].get("role") == "user"
+    user_content = user_query if (ends_on_user and not req.tools) else ""
 
     # Layer 0-2: file intelligence, compression, terse injection
     messages = _apply_compression_layers(messages, settings, savings)
 
     orig_input_tokens = count_messages_tokens(raw_messages, model)
-    savings["routing"] = 0
 
     # Layer 4: graph update + context injection (mutates messages)
     checkpoint_status: dict = {"attempted": False, "succeeded": False, "checkpoint_id": None}
@@ -1345,11 +1681,17 @@ async def chat_completions(req: ChatRequest, request: Request):
                                 raw_messages=raw_messages)
 
     # Layer 5: call provider (or return cache hit)
-    fallback: dict = {}
+    outcome: dict = {}
     response_text, input_tokens_actual, output_tokens, latency_ms, cache_hit = await _call_provider(
         req, messages, model, user_content, session_id, savings,
-        raw_messages=raw_messages, outcome=fallback,
+        raw_messages=raw_messages, outcome=outcome,
     )
+    # What the provider answered with, and — separately — whether the
+    # transformed request was rejected on the way. Only the latter is
+    # reported as `fallback`.
+    tool_calls = outcome.pop("tool_calls", None) or []
+    finish_reason = outcome.pop("finish_reason", None) or "stop"
+    fallback = outcome
     if fallback:
         # The transformed request was rejected and the client's own
         # messages went through instead: what was sent is what they sent.
@@ -1370,6 +1712,16 @@ async def chat_completions(req: ChatRequest, request: Request):
         layer_savings=savings,
     )
 
+    message: dict = {"role": "assistant", "content": response_text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+        # OpenAI sends null content for a pure tool-call turn; clients
+        # (and their SDKs' pydantic models) accept "" but expect the key.
+        message["content"] = response_text or None
+        finish_reason = "tool_calls"
+    elif finish_reason == "tool_calls":
+        finish_reason = "stop"
+
     return {
         "id":      f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object":  "chat.completion",
@@ -1378,8 +1730,8 @@ async def chat_completions(req: ChatRequest, request: Request):
         "session_id": session_id,
         "choices": [{
             "index":         0,
-            "message":       {"role": "assistant", "content": response_text},
-            "finish_reason": "stop",
+            "message":       message,
+            "finish_reason": finish_reason,
         }],
         "usage": {
             "prompt_tokens":          input_tokens_actual,
@@ -1400,6 +1752,10 @@ async def chat_completions(req: ChatRequest, request: Request):
             # rejected and the turn went through untransformed. Zero
             # savings this turn, and a bug to report with `ref`.
             **({"fallback": fallback} if fallback else {}),
+            # Present only when `model_map` substituted the model, so an
+            # answer from a model the client never named is traceable to
+            # the config rather than looking like a provider bug.
+            **({"model_mapped_from": mapped_from} if mapped_from else {}),
         },
     }
 
@@ -1407,7 +1763,52 @@ async def chat_completions(req: ChatRequest, request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "timestamp": time.time()}
+    """Liveness AND the failure counters that were only visible in logs.
+
+    `status` was the literal string "ok" whatever had happened, so a
+    deployment whose checkpoints had been failing for a day, or whose
+    graph database had been quarantined after corruption, reported
+    healthy to every uptime monitor pointed at it. For a tool whose whole
+    claim is "your context is safe", that is the one check that must not
+    lie.
+
+    "degraded" means the proxy is serving requests but something it was
+    trusted to keep has failed: a write that did not land, a session
+    whose stored graph could not be read, storage that is not durable, or
+    memory displaced by corruption recovery. The detail says which, and
+    every counter here is also available in /api/stats.
+    """
+    failures = _analytics.persist_failures
+    sessions_load_failed = sorted(
+        sid for sid, g in _graph_cache.items() if g._load_failed)
+    sessions_no_durability = sorted(
+        sid for sid, g in _graph_cache.items() if g._persistence_broken)
+    sessions_data_loss = sorted(
+        sid for sid, g in _graph_cache.items() if g._data_loss_detected)
+    checkpoints_broken = bool(getattr(_checkpoint_mgr, "persistence_broken", False))
+    checkpoints_data_loss = bool(getattr(_checkpoint_mgr, "data_loss_detected", False))
+
+    degraded = bool(failures or sessions_load_failed or sessions_no_durability
+                    or sessions_data_loss or checkpoints_broken or checkpoints_data_loss)
+    return {
+        "status": "degraded" if degraded else "ok",
+        "timestamp": time.time(),
+        "version": __version__,
+        "sessions_in_memory": len(_graph_cache),
+        # Non-zero means something was lost or not written. Each key names
+        # the path that failed; see AnalyticsEngine.record_silent_failure.
+        "persist_failures": failures,
+        # Deliberate, bounded degradation — NOT part of `degraded`. A
+        # proxy shedding the optional LLM extraction pass under load is
+        # working as configured; calling that unhealthy would train an
+        # operator to ignore the field that means something was lost.
+        "shed": _analytics.shed,
+        "sessions_with_unreadable_graph": sessions_load_failed,
+        "sessions_without_durable_storage": sessions_no_durability,
+        "sessions_with_data_loss": sessions_data_loss,
+        "checkpoint_storage_broken": checkpoints_broken,
+        "checkpoint_data_loss": checkpoints_data_loss,
+    }
 
 
 @app.get("/")

@@ -234,7 +234,24 @@ class TestHealthAndDocs:
         c, _ = client
         r = c.get("/health")
         assert r.status_code == 200
-        assert r.json()["status"] == "ok"
+        body = r.json()
+        # `status` now reflects real durability state, and the analytics
+        # counters it reads are a process-global singleton every other
+        # test in the suite shares — so assert the contract, and clear the
+        # counters first when asserting the healthy value specifically.
+        assert set(body) >= {"status", "timestamp", "persist_failures"}
+        assert body["status"] in ("ok", "degraded")
+
+    def test_health_is_ok_when_nothing_has_failed(self, client):
+        import tokenmizer.api.app as app_module
+
+        c, _ = client
+        saved = dict(app_module._analytics._persist_failures)
+        app_module._analytics._persist_failures.clear()
+        try:
+            assert c.get("/health").json()["status"] == "ok"
+        finally:
+            app_module._analytics._persist_failures.update(saved)
 
     def test_graph_share_html(self, client):
         """Shareable graph page: self-contained interactive HTML.

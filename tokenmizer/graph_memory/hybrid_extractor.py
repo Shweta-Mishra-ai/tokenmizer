@@ -28,9 +28,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from tokenmizer.graph_memory.domains import get_pack
 from tokenmizer.graph_memory.patterns import (
     _ALREADY_FIXED,
+    _CATEGORY_NOUN,
     _CAUSAL_LINK,
+    _CLAUSE_END,
     _COMPLETION_LEAD,
     _DECISION,
     _DECISION_FOR,
@@ -39,6 +42,7 @@ from tokenmizer.graph_memory.patterns import (
     _DECISION_PASSIVE,
     _DEPENDENCY,
     _ENDPOINT,
+    _ENDPOINT_ONLY,
     _ENV,
     _ERROR_ABSENCE,
     _ERROR_CANNOT_INITIAL,
@@ -67,6 +71,7 @@ from tokenmizer.graph_memory.patterns import (
     _FILE_COMMON,
     _FILE_EXTENSIONLESS,
     _FILE_PATH,
+    _FIX_LEAD,
     _FIX_PREFIX,
     _GOAL_OPENERS,
     _LEADING_CONNECTIVE,
@@ -74,11 +79,11 @@ from tokenmizer.graph_memory.patterns import (
     _SCHEMA_STOP_WORDS,
     _SCHEMA_TABLE,
     _SOLUTION_VERB,
-    _SUPERSEDED,
     _TASK_DONE,
     _TASK_DONE_PASSIVE,
     _TASK_TODO,
     _TASK_WIP,
+    _WIP_LEAD,
     EXTRACTION_SYSTEM,
     EXTRACTION_USER_TEMPLATE,
     _clip,
@@ -89,9 +94,40 @@ from tokenmizer.graph_memory.patterns import (
     _is_question_context,
     _sentence_index,
     _tech_mention_is_a_decision,
+    find_supersessions,
+    restore_verb,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_object(raw: str) -> Optional[dict]:
+    """The first JSON object in a model reply, or None.
+
+    The prompt says "JSON only", and most replies comply, but a smaller or
+    local model (the ones people run extraction on to keep it cheap) often
+    wraps the object in a sentence or a fenced block anyway. json.loads on
+    the whole reply then fails and the batch — already paid for — is thrown
+    away as an llm_extraction silent failure. Fences are stripped first;
+    then, if the reply still does not parse as a whole, the outermost
+    {...} span is tried on its own.
+    """
+    text = re.sub(r"```(?:json)?\s*|```", "", raw or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 @dataclass
@@ -103,6 +139,11 @@ class ExtractedData:
     decisions: list[dict] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Errors the transcript says were fixed, by label (a subset of
+    # `errors`). Kept as a parallel list rather than a flag on each entry
+    # so `errors` stays a plain list of strings for the merge/dedup code;
+    # _extracted_to_dict folds the two into {"label", "resolved"}.
+    resolved_errors: list[str] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
     environments: list[str] = field(default_factory=list)
     endpoints: list[str] = field(default_factory=list)
@@ -131,8 +172,12 @@ class HybridExtractor:
     drops heuristic-only items; 0.9 keeps only corroborated ones.
     """
 
-    def __init__(self, min_confidence: float = 0.55):
+    def __init__(self, min_confidence: float = 0.55, domain: str | None = None):
         self.min_confidence = min_confidence
+        # The domain pack's families run IN ADDITION to the coding ones,
+        # so a pack can only add recall and a coding session is
+        # bit-for-bit what it was. See graph_memory/domains.py.
+        self.pack = get_pack(domain)
 
     # ── Pass 1: LLM ──────────────────────────────────────────────────────────
 
@@ -161,9 +206,12 @@ class HybridExtractor:
                 max_tokens=800,
             )
             raw = result.get("text", "")
-            # Strip markdown fences if present
-            raw = re.sub(r"```json\s*|```\s*", "", raw).strip()
-            data = json.loads(raw)
+            data = _parse_json_object(raw)
+            if data is None:
+                raise ValueError(
+                    f"no JSON object in the model's reply (first 120 chars: "
+                    f"{raw[:120]!r})"
+                )
             return self._dict_to_extracted(data)
         except Exception as e:
             # Warning, not debug: a provider timeout, rate limit, or
@@ -225,12 +273,58 @@ class HybridExtractor:
         """
         # Goals: first 4 messages only (session intent captured early)
         if role == "user" and turn_idx < 4:
-            for m in _GOAL_OPENERS.finditer(content):
-                result.goals.append(_clip(m.group(1), 100))
+            # The domain pack's openers run FIRST and claim their sentence.
+            # "The goal this quarter is X" matches the product opener and
+            # the generic one, and the generic one — which knows nothing
+            # about "this quarter" — leaves that fragment at the front of
+            # the label. The more specific pattern should win the sentence,
+            # so a later match overlapping a span already taken is skipped
+            # rather than added as a second goal for the same sentence.
+            taken: list[tuple[int, int]] = []
+            for pattern in (*self.pack.goal_openers, _GOAL_OPENERS):
+                for m in pattern.finditer(content):
+                    if any(m.start() < end and start < m.end()
+                           for start, end in taken):
+                        continue
+                    taken.append((m.start(), m.end()))
+                    result.goals.append(_clip(m.group(1), 100))
 
         # Tasks done: full history (completed = permanent fact)
         for m in _TASK_DONE.finditer(content):
-            task = _clip(m.group(1))
+            raw_task = m.group(1)
+            # "Implemented: POST /a, POST /b, POST /c" is three pieces of
+            # finished work, not one task whose label is a route list cut
+            # off at 80 chars (which also left the last route truncated).
+            # One task per route, read from the whole sentence rather than
+            # the capture, and verb-prefixed so the validator keeps it a
+            # TASK; the route itself is also an ENDPOINT node, and the
+            # graph links the two.
+            if _ENDPOINT_ONLY.match(raw_task.strip()):
+                sentence = content[m.start(1):]
+                stop = _CLAUSE_END.search(sentence)
+                sentence = sentence[:stop.start()] if stop else sentence
+                routes = [r.group(0).rstrip(".") for r in _ENDPOINT.finditer(sentence)]
+                if len(routes) >= 2:
+                    verb = re.match(r"\w+", m.group(0))
+                    prefix = (verb.group(0).capitalize() + " ") if verb else ""
+                    for route in routes:
+                        label = prefix + route
+                        norm = self._normalize(label)
+                        if norm not in seen_tasks:
+                            result.tasks_done.append(label)
+                            seen_tasks.add(norm)
+                    continue
+            # "completed tasks F1 dropped from 77 to 75" — the verb is an
+            # adjective on one of our own category nouns, and the sentence
+            # reports a measurement, not finished work.
+            if _CATEGORY_NOUN.match(raw_task.lstrip()):
+                continue
+            # "Working on a CI step ... with the network removed to prove
+            # the bake worked" — the clause already said this is not done.
+            if _WIP_LEAD.search(content[max(0, m.start() - 110):m.start()]):
+                continue
+            verb = re.match(r"\w+", m.group(0))
+            task = restore_verb(verb.group(0) if verb else "", _clip(raw_task))
             if len(task) < 5 or _is_only_paths(task) or _LEADING_CONNECTIVE.match(task):
                 continue
             norm = self._normalize(task)
@@ -342,6 +436,55 @@ class HybridExtractor:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
+        # Domain pack — the phrasings a research, ops or product session
+        # uses for the same shapes. Empty for coding, so this loop is a
+        # no-op on the default path. Each pattern captures one group, the
+        # label; the same guards the coding passes use apply, because the
+        # noise a pack picks up is the same noise.
+        for pattern in self.pack.decisions:
+            for m in pattern.finditer(content):
+                if _is_negated_context(content, m.start()) or \
+                        _is_question_context(content, m.start()):
+                    continue
+                label = _clip(m.group(1))
+                norm = self._normalize(label)
+                if norm not in seen_decisions and len(norm) > 4:
+                    result.decisions.append(
+                        {"label": label, "reason": "", "source_role": role})
+                    seen_decisions.add(norm)
+
+        for pattern in self.pack.tasks_done:
+            for m in pattern.finditer(content):
+                task = _clip(m.group(1))
+                if len(task) < 5 or _is_only_paths(task) or \
+                        _LEADING_CONNECTIVE.match(task) or _CATEGORY_NOUN.match(task):
+                    continue
+                norm = self._normalize(task)
+                if norm not in seen_tasks and not any(
+                        self._subsumes(task, t) for t in result.tasks_done):
+                    result.tasks_done.append(task)
+                    seen_tasks.add(norm)
+
+        if is_recent:
+            for pattern in self.pack.tasks_wip:
+                for m in pattern.finditer(content):
+                    wip = _clip(m.group(1))
+                    if len(wip) < 5 or _is_only_paths(wip) or \
+                            _COMPLETION_LEAD.search(content[max(0, m.start() - 40):m.start()]):
+                        continue
+                    if any(self._subsumes(wip, g) for g in result.goals):
+                        continue
+                    if not any(self._subsumes(wip, t) for t in result.tasks_wip):
+                        result.tasks_wip.append(wip)
+
+            for pattern in self.pack.errors:
+                for m in pattern.finditer(content):
+                    err = _clip(m.group(1))
+                    if len(err) < 5 or _is_negated_context(content, m.start()):
+                        continue
+                    if not any(self._subsumes(err, e) for e in result.errors):
+                        result.errors.append(err)
+
         # Decision Pass 4: passive (bcrypt with cost factor 12)
         #
         # Gated by _tech_mention_is_a_decision for the same reason Pass 3 is:
@@ -361,13 +504,14 @@ class HybridExtractor:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
-        # Superseded + both sides as decisions
-        for m in _SUPERSEDED.finditer(content):
-            old_label = m.group(1).strip()
-            new_label = m.group(2).strip()
+        # Superseded + both sides as decisions. See find_supersessions:
+        # "switched from A to B" and "B instead of A" state the same change
+        # with the operands in opposite orders, and reading both with one
+        # pattern recorded the rationale as the replacement decision.
+        for old_label, new_label, m_start, m_end in find_supersessions(content):
             result.superseded.append({"old": old_label, "new": new_label})
-            start = max(0, m.start() - 60)
-            surrounding = content[start:m.end() + 80].replace("\n", " ").strip()
+            start = max(0, m_start - 60)
+            surrounding = content[start:m_end + 80].replace("\n", " ").strip()
             for label in (f"Use {old_label}", f"Use {new_label}"):
                 norm = self._normalize(label)
                 if norm not in seen_decisions and len(norm) > 6:
@@ -397,7 +541,7 @@ class HybridExtractor:
         for m in _ENDPOINT.finditer(content):
             if _is_negated_context(content, m.start()):
                 continue
-            ep = m.group(0).strip()
+            ep = m.group(0).strip().rstrip(".")
             norm = self._normalize(ep)
             if norm not in seen_endpoints:
                 result.endpoints.append(ep)
@@ -498,6 +642,13 @@ class HybridExtractor:
                 # ("so", "which meant", "as a result") means the second
                 # clause is the consequence of the first rather than a
                 # second item. Keep the half that carries more of it.
+                # "Fixed: <error>" / "resolved the <error>" — the failure
+                # happened and is over. Recorded so the graph marks it
+                # resolved instead of carrying it into every resume as an
+                # open bug. The fix prefix stripped from the label above is
+                # the same signal when it sat inside the captured span.
+                if _FIX_LEAD.search(before) or _FIX_PREFIX.match(raw.strip()):
+                    result.resolved_errors.append(err)
                 key = (id(pattern), _sentence_index(content, label_start))
                 prior = sentence_claims.get(key)
                 # The window reaches a little INTO the current match: a
@@ -952,11 +1103,20 @@ class HybridExtractor:
         return merged
 
 
-# Singleton
-_extractor: HybridExtractor | None = None
+# One extractor per domain pack. Packs are stateless and the patterns are
+# compiled once at import, so caching them costs nothing and keeps the
+# common case a dict lookup.
+_extractors: dict[str, HybridExtractor] = {}
 
-def get_hybrid_extractor() -> HybridExtractor:
-    global _extractor
-    if _extractor is None:
-        _extractor = HybridExtractor()
-    return _extractor
+
+def get_hybrid_extractor(domain: str | None = None) -> HybridExtractor:
+    if domain is None:
+        try:
+            from tokenmizer.config.settings import get_settings
+            domain = get_settings().domain
+        except Exception:
+            domain = "coding"
+    key = (domain or "coding").strip().lower()
+    if key not in _extractors:
+        _extractors[key] = HybridExtractor(domain=key)
+    return _extractors[key]

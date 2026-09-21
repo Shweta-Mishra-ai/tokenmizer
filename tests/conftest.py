@@ -41,3 +41,18 @@ def set_test_env():
     """Set environment variables for tests so no real API calls are made."""
     os.environ.setdefault("TOKENMIZER_ANTHROPIC_API_KEY", "test-key")
     os.environ.setdefault("TOKENMIZER_STATE_BACKEND", "memory")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limit_buckets():
+    """Every TestClient request in the suite comes from one address and hits
+    one process-global token bucket (60/min, burst 10). The suite as a
+    whole makes more requests than that, so which test got the 429 depended
+    on file order and on how many proxy tests the suite had gained since
+    the last time someone noticed. Buckets are reset per test; the limiter
+    itself is tested directly in test_rate_limiter.py."""
+    import sys
+    app_module = sys.modules.get("tokenmizer.api.app")
+    if app_module is not None:
+        app_module._rate_limiter._buckets.clear()
+    yield

@@ -116,8 +116,37 @@ def _count_with_anthropic_sdk(text: str) -> int | None:
 # holds references to text the request already owns.
 # 4096 entries bounds memory to a few MB of retained strings; move
 # to a per-message content hash if very large single messages ever matter.
-@functools.lru_cache(maxsize=4096)
+# Texts above this size are counted without being memoised. The cache
+# bounds entry COUNT, not bytes: 4096 entries of a multi-megabyte pasted
+# file would retain gigabytes. Such texts are rare and the cost of
+# re-encoding one is small next to the request that carried it.
+_MEMO_MAX_CHARS = 32_000
+
+
 def count_tokens(text: str, model: str = "gpt-4o") -> int:
+    """
+    Accurate token count for the given model.
+
+    Memoised on (text, model) for texts up to _MEMO_MAX_CHARS — see
+    _count_tokens_memo for why, and the constant for why not beyond.
+    """
+    if text and len(text) > _MEMO_MAX_CHARS:
+        return _count_tokens_uncached(text, model)
+    return _count_tokens_memo(text, model)
+
+
+@functools.lru_cache(maxsize=4096)
+def _count_tokens_memo(text: str, model: str = "gpt-4o") -> int:
+    return _count_tokens_uncached(text, model)
+
+
+# The memo's stats/clear are exposed on the public name so callers (and
+# tests) that inspect `count_tokens.cache_info()` keep working.
+count_tokens.cache_info = _count_tokens_memo.cache_info    # type: ignore[attr-defined]
+count_tokens.cache_clear = _count_tokens_memo.cache_clear  # type: ignore[attr-defined]
+
+
+def _count_tokens_uncached(text: str, model: str = "gpt-4o") -> int:
     """
     Accurate token count for the given model.
 
@@ -157,16 +186,19 @@ def _encode_len(enc, text: str) -> int:
 
 
 def count_messages_tokens(messages: list[dict], model: str = "gpt-4o") -> int:
-    """Count tokens across all messages including OpenAI/Anthropic role overhead."""
+    """Count tokens across all messages including OpenAI/Anthropic role
+    overhead. An assistant turn's tool calls are counted too — the function
+    name and its JSON arguments are sent to the model like any other text,
+    and an agent's context is often mostly that."""
     total = 0
     for msg in messages:
         total += 4  # per-message framing tokens
-        total += count_tokens(msg.get("content", ""), model)
+        content = msg.get("content", "")
+        total += count_tokens(content if isinstance(content, str) else str(content or ""), model)
         total += count_tokens(msg.get("role", ""), model)
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+            total += count_tokens(str(fn.get("name", "")), model)
+            total += count_tokens(str(fn.get("arguments", "")), model)
     total += 2  # reply priming
     return total
-
-
-def chars_to_tokens_estimate(chars: int) -> int:
-    """Fast estimate when we only have char count (e.g. for size checks)."""
-    return max(1, chars // _FALLBACK_RATIO)

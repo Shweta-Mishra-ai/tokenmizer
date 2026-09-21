@@ -47,6 +47,20 @@ class CacheEntry:
     # query can return another session's private entry purely because
     # cosine similarity cleared the threshold, bypassing scope entirely.
     scope: str = "__shared__"
+    # Digest of the conversation the prompt was asked IN (every message
+    # before the final user turn). A cached answer is only a correct
+    # answer to the same question asked in the same state: "continue",
+    # "yes", "try again" and "run the tests" recur constantly inside one
+    # coding session and mean something different every time. Keyed on
+    # the prompt alone, the second "continue" of a session was served the
+    # first one's answer for the whole TTL. Empty string = single-turn
+    # prompt with no prior conversation, which is where the cache earns
+    # its keep.
+    context: str = ""
+
+    # Bytes this entry costs, measured once at construction. The cache is
+    # bounded by this as well as by entry count; see SemanticCache.
+    nbytes: int = 0
 
     def is_expired(self, ttl_seconds: int) -> bool:
         return (time.time() - self.created_at) > ttl_seconds
@@ -166,6 +180,9 @@ class SemanticCache:
         ttl_seconds: int = 3600,
         max_size: int = 10_000,
         share_scope: str = "session",
+        max_bytes: int = 256 * 1024 * 1024,
+        max_entry_bytes: int = 1024 * 1024,
+        max_semantic_scan: int = 2_000,
     ):
         """
         share_scope:
@@ -182,29 +199,127 @@ class SemanticCache:
         self.ttl_seconds = ttl_seconds
         self.max_size = max_size
         self.share_scope = share_scope
+        # A cap on entries is not a cap on memory: an entry holds a whole
+        # LLM response. 10,000 entries at 60 KB is 600 MB resident, and
+        # the only thing `stats()` used to report was "utilization_pct:
+        # 100", which reads as a full cache rather than as a gigabyte.
+        # Both bounds are enforced and both are reported.
+        self.max_bytes = max_bytes
+        # A per-entry cap above the total cap is not a cap: the eviction
+        # loop would empty the cache for one entry and then store it over
+        # budget anyway. Clamp, and say so — an operator who set these two
+        # values inconsistently gets a working proxy and a log line, not a
+        # bound that silently is not one.
+        if max_entry_bytes > max_bytes:
+            logger.warning(
+                "cache.max_entry_bytes (%d) exceeds cache.max_bytes (%d) — "
+                "clamping the per-entry cap to the total, which is the most "
+                "one entry can occupy in any case.",
+                max_entry_bytes, max_bytes,
+            )
+            max_entry_bytes = max_bytes
+        self.max_entry_bytes = max_entry_bytes
+        self.max_semantic_scan = max_semantic_scan
         self._exact: OrderedDict[str, CacheEntry] = OrderedDict()
         self._embeddings: dict[str, object] = {}  # key → embedding
         self._embedder = EmbeddingEngine.get()
+        self._bytes = 0
         self._eviction_count = 0
+        self._evicted_for_bytes = 0
+        self._rejected_too_large = 0
+        self._expired_swept = 0
+        self._sets_since_sweep = 0
         self._hit_exact = 0
         self._hit_semantic = 0
         self._miss = 0
-        self._preference_store = PreferenceStore()
 
-    def _key(self, prompt: str, scope: str = "__shared__") -> str:
-        """Include scope in key — session-specific entries don't collide across sessions."""
-        data = f"{scope}:{prompt}"
+    def _key(self, prompt: str, scope: str = "__shared__", context: str = "") -> str:
+        """Include scope and conversation context in the key — session-
+        specific entries don't collide across sessions, and the same
+        prompt asked in a different conversation state never collides
+        with an earlier answer (see CacheEntry.context)."""
+        data = f"{scope}:{context}:{prompt}"
         return hashlib.sha256(data.encode()).hexdigest()[:24]
+
+    @staticmethod
+    def conversation_fingerprint(messages: list[dict]) -> str:
+        """Digest of the conversation a prompt is asked in: every message
+        except the final user turn. Callers pass the result as `context`
+        to get()/set(). Pure function of role+content, so two clients
+        holding the same history produce the same fingerprint.
+
+        Returns "" for a conversation with no prior turns, so a single-
+        turn prompt keys exactly as it always has."""
+        prior = list(messages)
+        if prior and prior[-1].get("role") == "user":
+            prior = prior[:-1]
+        if not prior:
+            return ""
+        h = hashlib.sha256()
+        for m in prior:
+            h.update(str(m.get("role", "")).encode())
+            h.update(b"\x1f")
+            content = m.get("content", "")
+            h.update((content if isinstance(content, str) else str(content)).encode())
+            h.update(b"\x1e")
+        return h.hexdigest()[:24]
+
+    # Rough per-entry overhead that is not the response text: the key,
+    # the truncated prompt, the dataclass itself, and the embedding vector
+    # when there is one (384 float32s for the default model). Approximate
+    # on purpose — the point is a bound an operator can reason about, not
+    # an exact heap measurement, and sys.getsizeof on every set() would
+    # cost more than it tells anyone.
+    _ENTRY_OVERHEAD = 700
+    _EMBEDDING_BYTES = 384 * 4
+
+    def _measure(self, prompt: str, response: str) -> int:
+        return (len(response.encode("utf-8", "replace"))
+                + len(prompt[:500].encode("utf-8", "replace"))
+                + self._ENTRY_OVERHEAD)
+
+    def _drop(self, key: str) -> None:
+        """Remove one entry and give back its bytes. Every removal goes
+        through here, so `_bytes` cannot drift away from the contents."""
+        entry = self._exact.pop(key, None)
+        if entry is None:
+            return
+        self._bytes -= entry.nbytes
+        if self._embeddings.pop(key, None) is not None:
+            self._bytes -= self._EMBEDDING_BYTES
+        if self._bytes < 0:  # belt and braces: never report a negative size
+            self._bytes = 0
 
     def _evict_lru(self) -> None:
         """Remove the least-recently-used entry."""
         if not self._exact:
             return
-        lru_key, _ = self._exact.popitem(last=False)
-        self._embeddings.pop(lru_key, None)
+        lru_key = next(iter(self._exact))
+        self._drop(lru_key)
         self._eviction_count += 1
 
-    def get(self, prompt: str, session_id: str = "") -> Optional[CacheEntry]:
+    def _sweep_expired(self) -> int:
+        """Drop entries past their TTL.
+
+        Expiry used to be checked only on lookup, so an entry nobody asks
+        for again was never reclaimed — it sat until LRU pressure reached
+        it. On a low-traffic proxy with a large cache that is an hour of
+        dead responses held for nothing. A full scan is O(n) but runs once
+        every `_SWEEP_EVERY` sets, so the amortised cost is a handful of
+        timestamp comparisons per request.
+        """
+        now = time.time()
+        dead = [k for k, e in self._exact.items()
+                if (now - e.created_at) > self.ttl_seconds]
+        for k in dead:
+            self._drop(k)
+        self._expired_swept += len(dead)
+        return len(dead)
+
+    _SWEEP_EVERY = 256
+
+    def get(self, prompt: str, session_id: str = "",
+            context: str = "") -> Optional[CacheEntry]:
         """
         Look up cache.
         Checks session-scoped key first (using session_id, or "__private__"
@@ -214,7 +329,7 @@ class SemanticCache:
         hits only for entries explicitly stored under share_scope="shared".
         """
         # Try session-scoped (or private, if no session_id) key first
-        session_key = self._key(prompt, session_id or "__private__")
+        session_key = self._key(prompt, session_id or "__private__", context)
         if session_key in self._exact:
             entry = self._exact[session_key]
             if not entry.is_expired(self.ttl_seconds):
@@ -224,14 +339,13 @@ class SemanticCache:
                 return entry
 
         # Try shared key
-        key = self._key(prompt, "__shared__")
+        key = self._key(prompt, "__shared__", context)
 
         # 1. Exact match
         if key in self._exact:
             entry = self._exact[key]
             if entry.is_expired(self.ttl_seconds):
-                del self._exact[key]
-                self._embeddings.pop(key, None)
+                self._drop(key)
                 self._miss += 1
                 return None
             self._exact.move_to_end(key)  # mark as recently used
@@ -250,10 +364,27 @@ class SemanticCache:
             best_score = 0.0
             best_key = None
 
-            for k, entry in self._exact.items():
+            # Newest first, and bounded. This loop is O(n) Python on the
+            # MISS path — the path a request takes when the cache did not
+            # help it — so at max_size=10,000 it was ten thousand dict
+            # lookups and dot products added to the latency of every
+            # uncached request. Walking from the most-recently-used end
+            # and stopping after max_semantic_scan bounds that; what it
+            # skips is the coldest tail, which is also the least likely
+            # to match.
+            scanned = 0
+            for k in reversed(self._exact):
+                if scanned >= self.max_semantic_scan:
+                    break
+                scanned += 1
+                entry = self._exact[k]
                 if entry.is_expired(self.ttl_seconds):
                     continue
                 if entry.scope != "__shared__" and entry.scope != (session_id or "__private__"):
+                    continue
+                # Same rule as the exact key: a near-identical question in a
+                # different conversation state is a different question.
+                if entry.context != context:
                     continue
                 emb = self._embeddings.get(k)
                 if emb is None:
@@ -299,9 +430,11 @@ class SemanticCache:
         input_tokens: int = 0,
         output_tokens: int = 0,
         session_id: str = "",
+        context: str = "",
     ) -> None:
         """
-        Store a cache entry.
+        Store a cache entry. `context` is the conversation fingerprint
+        (see conversation_fingerprint) — pass the same value to get().
 
         Scoping rules (safe by default):
         - Default (`share_scope="session"`): EVERY prompt is scoped to
@@ -333,11 +466,43 @@ class SemanticCache:
 
         # Scoped key: sensitive/session-only responses keyed by session,
         # shared ones keyed by content alone.
-        key = self._key(prompt, scope)
+        key = self._key(prompt, scope, context)
 
-        # Evict if at capacity
+        nbytes = self._measure(prompt, response)
+        if nbytes > self.max_entry_bytes:
+            # Serve it, do not remember it. One 40 MB answer would
+            # otherwise evict the entire useful cache to store a single
+            # entry that is unlikely ever to be asked for again. Counted,
+            # not silent: a rising rejected_too_large in /api/cache/stats
+            # is how an operator learns the per-entry cap is wrong for
+            # their traffic rather than wondering why the hit rate fell.
+            self._rejected_too_large += 1
+            logger.debug(
+                "Response of %d bytes exceeds max_entry_bytes=%d — served "
+                "but not cached", nbytes, self.max_entry_bytes,
+            )
+            return
+
+        # Replacing an existing key must give its bytes back first, or the
+        # total drifts upward by the old entry's size on every overwrite.
+        if key in self._exact:
+            self._drop(key)
+
+        self._sets_since_sweep += 1
+        if self._sets_since_sweep >= self._SWEEP_EVERY:
+            self._sets_since_sweep = 0
+            self._sweep_expired()
+
+        # Evict if at capacity — on EITHER bound. Leave room for the
+        # embedding too, so a cache full of vectors still lands under the
+        # byte budget rather than a fraction over it.
+        incoming = nbytes + (self._EMBEDDING_BYTES
+                             if self._embedder.available else 0)
         while len(self._exact) >= self.max_size:
             self._evict_lru()
+        while self._exact and self._bytes + incoming > self.max_bytes:
+            self._evict_lru()
+            self._evicted_for_bytes += 1
 
         entry = CacheEntry(
             key=key,
@@ -347,15 +512,19 @@ class SemanticCache:
             output_tokens=output_tokens or count_tokens(response),
             created_at=time.time(),
             scope=scope,
+            context=context,
+            nbytes=nbytes,
         )
         self._exact[key] = entry
         self._exact.move_to_end(key)
+        self._bytes += nbytes
 
         # Store embedding for semantic lookup
         if self._embedder.available:
             emb = self._embedder.embed(prompt)
             if emb is not None:
                 self._embeddings[key] = emb
+                self._bytes += self._EMBEDDING_BYTES
 
     def invalidate(self, prompt: str, session_id: str = "") -> int:
         """Remove cached entries for `prompt`. Returns how many were removed.
@@ -370,23 +539,27 @@ class SemanticCache:
         who cannot name the scope still needs the stale answer gone.
         """
         removed = 0
+        # Scope and conversation context are part of the key hash and
+        # can't be reversed, so match on the stored prompt instead — in
+        # every conversation state, since "invalidate this prompt" means
+        # every answer to it. Entries store a 500-char prefix, so compare
+        # against the same prefix.
+        needle = prompt[:500]
         if session_id:
-            candidates = [self._key(prompt, session_id), self._key(prompt, "__shared__")]
+            candidates = [k for k, e in self._exact.items()
+                          if e.prompt == needle and e.scope in (session_id, "__shared__")]
         else:
-            # Scope is part of the key hash and can't be reversed, so
-            # match on the stored prompt instead. Entries store a 500-char
-            # prefix, so compare against the same prefix.
-            needle = prompt[:500]
             candidates = [k for k, e in self._exact.items() if e.prompt == needle]
         for key in candidates:
-            if self._exact.pop(key, None) is not None:
+            if key in self._exact:
+                self._drop(key)
                 removed += 1
-            self._embeddings.pop(key, None)
         return removed
 
     def clear(self) -> None:
         self._exact.clear()
         self._embeddings.clear()
+        self._bytes = 0
 
     def stats(self) -> dict:
         total = self._hit_exact + self._hit_semantic + self._miss
@@ -395,7 +568,17 @@ class SemanticCache:
             "entries": len(self._exact),
             "max_size": self.max_size,
             "utilization_pct": round(len(self._exact) / self.max_size * 100, 1),
+            # What the entry count does not tell an operator: how much
+            # memory this is. A cache at 12% of its entry cap can be at
+            # 100% of its byte cap, and only one of those two numbers
+            # explains the resident size of the process.
+            "bytes": self._bytes,
+            "max_bytes": self.max_bytes,
+            "bytes_pct": round(self._bytes / max(1, self.max_bytes) * 100, 1),
             "evictions": self._eviction_count,
+            "evicted_for_bytes": self._evicted_for_bytes,
+            "rejected_too_large": self._rejected_too_large,
+            "expired_swept": self._expired_swept,
             "hit_rate": round(hit_rate, 3),
             "hit_exact": self._hit_exact,
             "hit_semantic": self._hit_semantic,
@@ -406,78 +589,13 @@ class SemanticCache:
 
 # ── Preference / Habit Store ──────────────────────────────────────────────────
 
-class PreferenceStore:
-    """
-    Stores user habits and preferences ONLY — never session content.
-
-    Your thinking (correct):
-      Cache should NOT save project-specific content across sessions.
-      It SHOULD remember things like:
-        - "I prefer concise answers"
-        - "Always use TypeScript"
-        - "Response format: bullet points"
-        - "My timezone is UTC+5:30"
-
-    This is separate from SemanticCache (which caches LLM responses).
-    PreferenceStore caches USER PREFERENCES that apply across all sessions.
-
-    What it NEVER stores:
-        - Passwords, API keys, secrets
-        - Project-specific data
-        - Code from a specific session
-        - Anything that looks like PII
-
-    What it STORES:
-        - Communication preferences ("be brief", "use examples")
-        - Technical preferences ("TypeScript", "snake_case", "pytest")
-        - Format preferences ("bullet points", "numbered lists")
-        - Style preferences ("formal", "casual")
-    """
-
-    # Patterns that indicate a preference/habit worth remembering
-    _PREFERENCE_SIGNALS = [
-        re.compile(r'\b(?:always|prefer|like|want|use)\b.{3,60}\b(?:format|style|language|approach|pattern|framework)\b', re.I),
-        re.compile(r'\b(?:be|keep it|make it|stay)\b.{2,40}\b(?:brief|concise|short|simple|direct|formal|casual)\b', re.I),
-        re.compile(r'\b(?:my|our)\b.{2,30}\b(?:preference|style|convention|standard|default)\b.{2,60}(?:is|are)\b', re.I),
-        re.compile(r'\b(?:i\s+(?:prefer|like|use|always|hate|avoid))\b.{3,80}', re.I),
-        re.compile(r'\bremember\s+(?:that\s+)?(?:i|my|we)\b.{3,100}', re.I),
-    ]
-
-    # NEVER treat these as preferences (too specific / sensitive)
-    _NOT_PREFERENCE = [
-        re.compile(r'\b(?:password|secret|key|token|credential)\b', re.I),
-        re.compile(r'\b(?:project|client|customer|company)\b.{3,30}\b(?:specific|only|internal)\b', re.I),
-        re.compile(r'[A-Z_]{5,}\s*=\s*\S'),  # env var
-        re.compile(r'sk-|ghp_|AIza'),          # API key patterns
-    ]
-
-    def __init__(self):
-        self._prefs: dict[str, str] = {}   # key → preference text
-
-    def is_preference(self, text: str) -> bool:
-        """True if text expresses a habit or preference worth remembering."""
-        for block in self._NOT_PREFERENCE:
-            if block.search(text):
-                return False
-        return any(p.search(text) for p in self._PREFERENCE_SIGNALS)
-
-    def save(self, key: str, value: str) -> None:
-        """Save a preference. key should be a short slug like 'response_style'."""
-        if not self.is_preference(value):
-            return  # silent reject — not a preference
-        self._prefs[key.lower().strip()] = value.strip()[:200]
-
-    def get(self, key: str) -> str:
-        return self._prefs.get(key.lower().strip(), "")
-
-    def all(self) -> dict[str, str]:
-        return dict(self._prefs)
-
-    def to_system_context(self) -> str:
-        """Format stored preferences as a system context block."""
-        if not self._prefs:
-            return ""
-        lines = ["[User preferences]"]
-        for k, v in self._prefs.items():
-            lines.append(f"  {k}: {v}")
-        return "\n".join(lines)
+# PreferenceStore used to live here: a detector, a store and a context
+# formatter for habits that outlive a session ("keep it brief", "always
+# TypeScript"). It had no callers — `save()` was never invoked from
+# anywhere — so `/api/cache/stats` reported a preference field that was
+# permanently the empty string.
+#
+# It is now `tokenmizer/preferences.py`, per-principal and SQLite-backed,
+# and wired into the request path behind `preferences.enabled`. It does
+# not belong beside a response cache: one remembers an answer to a
+# question, the other remembers something about a person.

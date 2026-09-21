@@ -40,6 +40,9 @@ NODE_TYPES: dict[NodeType, str] = {
     NodeType.TEST:        "Test file or test result.",
     NodeType.ENDPOINT:    "HTTP endpoint definition.",
     NodeType.SCHEMA:      "Data model or DB schema; never decays.",
+    NodeType.SUMMARY:     ("Constraints and numbers from turns windowing dropped "
+                           "— the facts the other types have no node for. One per "
+                           "session, rewritten as the dropped span grows."),
 }
 
 # ── Edge types: (domain, range, semantics) ───────────────────────────────────

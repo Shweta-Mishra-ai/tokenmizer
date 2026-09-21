@@ -106,7 +106,15 @@ _FILE_EXTENSIONLESS = re.compile(
 # The lookahead is what makes this safe for labels that legitimately
 # contain dots — `moment.js`, `React.lazy`, `Python 3.12`, `go.mod` —
 # where the dot is not followed by whitespace or end-of-string.
-_CLAUSE_SPAN = r'((?:(?![.!?](?=\s|$))[^\n]){5,80})'
+#
+# The 80-character ceiling is a budget, not a place to stop reading, so the
+# span ends on a word boundary: without that, a sentence that runs past it
+# was cut mid-token and the label shipped as "...confusion matri" or
+# "...destroyed memory is queryab". The second branch is the fallback for a
+# span with no boundary inside the budget at all (one very long token, like
+# a URL), where a hard cut is better than dropping the fact entirely.
+_SPAN_CHAR = r'(?:(?![.!?](?=\s|$))[^\n])'
+_CLAUSE_SPAN = r'(' + _SPAN_CHAR + r'{5,80}(?!\w)|' + _SPAN_CHAR + r'{5,80})'
 
 # Pass 1: explicit verb ("decided:", "going with", "will use")
 _DECISION = re.compile(
@@ -172,7 +180,14 @@ _DECISION_FOR = re.compile(
     r'zustand|redux|tanstack|mypy|pyright|black|isort|poetry|pytorch|torch|'
     r'tensorflow|jax|transformers|vllm|ollama|litellm|langgraph|crewai|'
     r'styled-components|cypress'
-    r')\b(?:(?!\s+(?:to|with|for)\s+\w)[^.!?\n,—\-]){0,40})',
+    # `\b` alone is satisfied by the dot in `React.lazy`, so "Decided: code
+    # splitting with React.lazy" produced BOTH the real decision and a bare
+    # "Use React" beside it. A tech name followed by a dot and more word
+    # characters is part of a longer identifier — React.lazy, redis.conf,
+    # torch.nn — and naming it is not choosing it. Only a dot is guarded:
+    # `postgres-15` and `bert-base-uncased` are how versions are written,
+    # and those ARE the choice.
+    r')\b(?!\.\w)(?:(?!\s+(?:to|with|for)\s+\w)[^.!?\n,—\-]){0,40})',
     re.IGNORECASE,
 )
 
@@ -312,27 +327,120 @@ _DECISION_CONFIG = re.compile(
     re.IGNORECASE,
 )
 
+# ── Supersession ──────────────────────────────────────────────────────────────
+#
+# Two phrasings state the same fact with the operands in OPPOSITE orders,
+# and reading both with one pattern produced a false decision rather than
+# merely missing one:
+#
+#   forward — "switched FROM moment.js TO date-fns"   (old, then new)
+#   reverse — "date-fns INSTEAD OF moment.js"         (new, then old)
+#
+# A single pattern listing "instead of" alongside "switched from" and then
+# requiring a trailing "to/with/for" read "Next.js instead of React for
+# better SEO" as old="React", new="better SEO" — recording a decision to
+# use "better SEO" and superseding the real one with it. The same pattern
+# could not match "date-fns instead of moment.js" at all, because nothing
+# follows the old side. Hence three patterns and one operand cleaner.
+#
+# `/` and `@` belong in an operand: real dependency names carry them
+# (`cenkalti/backoff`, `@scope/pkg`, `psf/black`).
+_OPERAND = r'[\w][\w\s\./@\-]{2,40}'
+
+# "switched from X to Y", "moved from X to Y", "migrating away from X to Y"
 _SUPERSEDED = re.compile(
-    r'(?:'
-    r'switched?\s+(?:from|away\s+from)|'
-    r'switching?\s+from|'
-    r'replacing|'
-    r'instead\s+of|'
-    r'moved?\s+from|'
-    r'migrat\w+\s+(?:from|away\s+from)|'
-    r'dropping|'
-    r'no\s+longer\s+using|'
-    r'replaced?\s+\w+\s+with|'
-    r'moving\s+(?:away\s+from|from)'
-    r')'
-    # `/` and `@` belong in both sides: real dependency names carry them
-    # (`cenkalti/backoff`, `@scope/pkg`, `psf/black`). Without `/`, the old
-    # side could only match up to the slash and the whole supersession
-    # failed to parse — "Switching from cenkalti/backoff to a hand-rolled
-    # retry loop" recorded no transition and lost the new decision with it.
-    r'\s+(\w[\w\s\./@\-]{2,30}?)\s+(?:to|with|for)\s+(\w[\w\s\./@\-]{2,30})',
+    r'(?:switch(?:ed|ing)?|mov(?:ed|ing)|migrat(?:ed|ing))\s+'
+    r'(?:away\s+)?from\s+(' + _OPERAND + r')\s+(?:to|over\s+to|onto)\s+(' + _OPERAND + r')',
     re.IGNORECASE,
 )
+
+# "replaced X with Y", "replacing X by Y"
+_SUPERSEDED_REPLACE = re.compile(
+    r'replac(?:ed|ing|es)?\s+(' + _OPERAND + r')\s+(?:with|by)\s+(' + _OPERAND + r')',
+    re.IGNORECASE,
+)
+
+# "Y instead of X" is deliberately NOT a supersession.
+#
+# It states ONE decision and the alternative it was chosen over, in one
+# sentence, at one moment — "quarantine by rename instead of unlink" is a
+# single choice, and the labelled corpus records it as one decision with
+# that whole phrase as its label. Reading it as a change over time
+# produced three decisions per sentence (the phrase plus a node for each
+# side), a chain that ran in a circle, and — because the old pattern
+# listed "instead of" alongside "switched from" and then demanded a
+# trailing "to/with/for" — labels like "better SEO" recorded as the
+# technology chosen. "instead of", "rather than" and "in place of" appear
+# constantly in ordinary technical prose ("quoting only the macro rather
+# than the file"), so matching them here cost 28 points of decision
+# precision on the corpus for no transition anyone could trust.
+#
+# A transition needs evidence that the state actually CHANGED: something
+# was in use, and then it was not. That is what the two patterns above say
+# and what this one cannot.
+
+# An operand runs on into the clause that explains it — "React for better
+# SEO", "moment.js because it ships every locale". Everything from the
+# first connective on is rationale, not the name of the thing chosen.
+_OPERAND_TAIL = re.compile(
+    r'\s+(?:for|because|since|so|as|which|that|and|but|due|given|after|'
+    r'when|while|to)\b.*$',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+# A sentence boundary inside an operand: the same lookahead the clause
+# patterns use, so `moment.js` and `3.12` keep their dots while
+# "pglogical. Created infra/dms_task.tf" stops at the full stop.
+_OPERAND_SENTENCE = re.compile(r"[.!?;](?=\s|$)|\s[\u2014\u2013]\s")
+
+
+# "Replaced THE PATTERN with ..." — an article followed by one ordinary
+# word is a common noun, not the name of a thing that can be adopted or
+# dropped. "Replaced the hand-rolled retry loop with cenkalti/backoff" is
+# the same shape with three words and IS a real change, so the test is
+# the word count, not the article alone.
+_COMMON_NOUN_OPERAND = re.compile(r"^(?:a|an|the)\s+[\w\-]+$", re.IGNORECASE)
+
+
+def _supersede_operand(text: str) -> str:
+    """One side of a supersession, trimmed to the thing being named.
+
+    Returns "" when the span is a common noun phrase rather than a name.
+    """
+    s = " ".join((text or "").split())
+    cut = _OPERAND_SENTENCE.search(s)
+    if cut:
+        s = s[:cut.start()]
+    s = _OPERAND_TAIL.sub("", s).strip(" ,;:.\u2014-")
+    if _COMMON_NOUN_OPERAND.match(s):
+        return ""
+    s = re.sub(r"^(?:a|an|the)\s+", "", s, flags=re.IGNORECASE)
+    return s.strip(" ,;:.\u2014-")
+
+
+def find_supersessions(content: str) -> list[tuple[str, str, int, int]]:
+    """Every "X was replaced by Y" the text states, as
+    (old, new, match_start, match_end).
+
+    Deduplicated on (old, new) so two phrasings of one change in the same
+    message do not produce two transitions.
+    """
+    found: list[tuple[str, str, int, int]] = []
+    seen: set[tuple[str, str]] = set()
+    for pattern in (_SUPERSEDED, _SUPERSEDED_REPLACE):
+        for m in pattern.finditer(content or ""):
+            old = _supersede_operand(m.group(1))
+            new = _supersede_operand(m.group(2))
+            if len(old) < 2 or len(new) < 2 or old.lower() == new.lower():
+                continue
+            key = (old.lower(), new.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((old, new, m.start(), m.end()))
+    return found
+
 
 # ── Evidence extraction patterns ──────────────────────────────────────────────
 
@@ -438,6 +546,36 @@ _SOLUTION_VERB = re.compile(
 )
 
 
+# A captured task that opens on an article or a preposition is the tail of
+# a sentence whose verb the pattern consumed: "Removed |the dependency from
+# go.mod|", "Fixed |by adding a 5 second timeout|". The label lands in the
+# resume block, which is the thing the product exists to produce, and
+# "Done: the dependency from go.mod" does not say what happened to it.
+# "to" is deliberately absent: it opens a purpose clause, not an object.
+# "Removed |to prove the bake worked|" reads worse with the verb restored,
+# not better, because the verb already had its object elsewhere.
+_FRAGMENT_OPENER = re.compile(
+    r"^(?:the|a|an|by|from|with|in|on|at|into|onto|via|using|after|"
+    r"before|during|over|under)\b",
+    re.IGNORECASE,
+)
+
+
+def restore_verb(verb: str, label: str) -> str:
+    """Put the matched verb back in front of a fragment label.
+
+    Only when the label reads as a fragment: "virtual environment setup"
+    is already a statement and gains nothing from "Completed" in front of
+    it, while "the dependency from go.mod" is not a statement at all.
+    """
+    if not label or not verb or not _FRAGMENT_OPENER.match(label):
+        return label
+    verb = verb.strip()
+    if not verb:
+        return label
+    return verb[0].upper() + verb[1:].lower() + " " + label
+
+
 def _is_only_paths(text: str) -> bool:
     """True if `text` is nothing but filenames.
 
@@ -519,6 +657,14 @@ def _clip(text: str, max_chars: int = 90) -> str:
         s = cut[:space] if space >= 12 else cut
 
     s = _DANGLING_TAIL.sub("", s).strip(" ,;:—-")
+
+    # A parenthetical the cut landed inside — "Redis for refresh token
+    # storage (not DB" — reads as a typo on every surface that shows the
+    # label. Drop the open parenthetical when what precedes it still
+    # identifies the fact; close it otherwise.
+    if s.count("(") > s.count(")"):
+        head = s[:s.rfind("(")].rstrip(" ,;:—-")
+        s = head if len(head) >= _MIN_CLAUSE_CHARS // 2 else s + ")"
     return s
 
 
@@ -539,6 +685,36 @@ _TASK_DONE = re.compile(
     r'merged|refactored|cleaned|migrated|restructured|removed|'
     r'switched|replaced)'
     r'[\s:\-]+' + _CLAUSE_SPAN,
+    re.IGNORECASE,
+)
+
+# ── Guards against a completion verb that is not a completion ───────────────
+#
+# _TASK_DONE matches a past-tense verb followed by a span. Two ways that
+# reads work into a sentence that describes none.
+
+# The verb is an adjective on one of the ontology's own nouns. "vanished
+# from completed tasks and appeared as a spurious file" recorded "tasks and
+# appeared as a spurious file" as finished work; so did "completed tasks F1
+# dropped from 77 to 75". Talking ABOUT the categories is exactly what a
+# session reviewing its own extraction does, and it was the largest single
+# source of spurious completed tasks on the real-transcript corpus.
+_CATEGORY_NOUN = re.compile(
+    r'^(?:tasks?|decisions?|errors?|files?|items?|goals?|endpoints?|'
+    r'schemas?|nodes?|labels?)\b',
+    re.IGNORECASE,
+)
+
+# The clause opens by saying the work is NOT done, and the completion verb
+# belongs to a subordinate phrase inside it: "Working on a CI step that runs
+# the image with the network removed to prove the bake worked" is one piece
+# of outstanding work, not a finished task called "to prove the bake
+# worked". This is the mirror of _COMPLETION_LEAD, which stops finished work
+# being read as a to-do.
+_WIP_LEAD = re.compile(
+    r'\b(?:working on|currently|in progress|about to|going to|planning to|'
+    r'need(?:s|ed)? to|still|next up|todo|to do|blocked on)\b'
+    r'[^.!?\n]{0,90}$',
     re.IGNORECASE,
 )
 
@@ -780,6 +956,18 @@ _ERROR_DAMAGE = re.compile(
 # cannot be used here: "WebSocket message NOT triggering re-render" and "NO
 # dial timeout" are real failures whose names contain a negator. Only the
 # phrases that mean *this used to happen and no longer does* are excluded.
+# The label is preceded by a statement that the failure was fixed:
+# "Fixed: 422 error — ...", "Resolved the timeout by ...". Distinct from
+# _ALREADY_FIXED, which means "not an error at all any more" and excludes
+# the match: here the error is real, was hit, and is now resolved — which
+# is exactly what a resume must say so the next session does not go
+# looking for a bug that is gone.
+_FIX_LEAD = re.compile(
+    r"\b(?:fixed|resolved|patched|solved|corrected|repaired|addressed|"
+    r"eliminated|closed)\b\s*[:\-—]?\s*(?:the\s+|a\s+|an\s+|this\s+|that\s+)?$",
+    re.IGNORECASE,
+)
+
 _ALREADY_FIXED = re.compile(
     r'\b(?:no longer|not any ?more|already fixed|since fixed)\b',
     re.IGNORECASE,
@@ -997,7 +1185,8 @@ _ERROR_SYMPTOM = re.compile(
 _DEPENDENCY = re.compile(
     r'(?:pip install|pip add|npm install|npm add|yarn add|pnpm add|poetry add|'
     r'cargo add|go get|adding|installed?)'
-    r'\s+([a-zA-Z][a-zA-Z0-9_\-]{2,40})',
+    # "Adding: redis" — the header form the task patterns already accept.
+    r'\s*[:\-]?\s+([a-zA-Z][a-zA-Z0-9_\-]{2,40})',
     re.IGNORECASE,
 )
 
@@ -1032,6 +1221,13 @@ _GOAL_OPENERS = re.compile(
 _ENDPOINT = re.compile(
     r'\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[\w\-/{}:.]+)',
 )
+# A span that is a list of routes and nothing else (parentheticals like
+# "(returns JWT)" and separators allowed): see the task pass.
+_ENDPOINT_ONLY = re.compile(
+    r'^(?:\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/[\w\-/{}:.]+'
+    r'(?:\s*\([^)]{0,40}\))?\s*[,;]?\s*(?:and\s+)?)+\.?\s*$',
+    re.IGNORECASE,
+)
 
 # Header format: "Schema: users table — id (UUID PK), email (unique)..."
 _SCHEMA_HEADER = re.compile(
@@ -1053,3 +1249,41 @@ _SCHEMA_STOP_WORDS = frozenset({
     "the", "a", "an", "this", "that", "data", "lookup", "routing",
     "truth", "below", "above", "following", "same", "new",
 })
+
+
+# ── Shared technology vocabulary ──────────────────────────────────────────────
+#
+# One spelling per technology, so two modules that both need to know
+# "postgres" and "PostgreSQL" are the same thing cannot drift apart:
+# graph.py expands query and label tokens with it, decision_tracker.py
+# folds labels onto it before deciding whether two decisions are the same.
+# Without the second use, "PostgreSQL for order storage" and "Postgres for
+# orders" were two decisions on one topic — which the tracker then reported
+# as an unresolved conflict in every resume block.
+CANONICAL_TECH = {
+    "postgresql": "postgres", "psql": "postgres", "pg": "postgres",
+    "mongodb": "mongo",
+    "nextjs": "next", "next.js": "next",
+    "nodejs": "node", "node.js": "node",
+    "typescript": "ts", "javascript": "js",
+    "kubernetes": "k8s",
+    "golang": "go",
+    "postgres": "postgres",
+}
+
+
+def canonical_word(word: str) -> str:
+    """One spelling for a technology name, with a plural folded off.
+
+    "orders" and "order" are the same noun in a decision label, and a
+    label that says "PostgreSQL" is naming what another says as
+    "Postgres".
+    """
+    w = (word or "").lower().strip(".,!?:;()[]")
+    if w in CANONICAL_TECH:
+        return CANONICAL_TECH[w]
+    if len(w) > 4 and w.endswith("ies"):
+        w = w[:-3] + "y"
+    elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        w = w[:-1]
+    return CANONICAL_TECH.get(w, w)

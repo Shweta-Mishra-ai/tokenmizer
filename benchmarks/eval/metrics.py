@@ -159,7 +159,25 @@ class LabelQuality:
         return 100.0 * self.multi_sentence / self.count if self.count else 0.0
 
 
-def label_quality(labels: list[str]) -> LabelQuality:
+def label_quality(labels: list[str], source: str = "",
+                  groups: list[list[str]] | None = None,
+                  exempt: set[frozenset[str]] | None = None) -> LabelQuality:
+    """`source` is the transcript the labels were extracted from.
+
+    Without it, "truncated" was guessed: any label of 60 characters or
+    more that ended on a letter was counted as cut mid-word. That flags
+    every long label that simply ends in a word — 22 of the 26 it counted
+    on this corpus were clean ("...in scripts/backfill.py", "...zero
+    lost"), so the number it reported was mostly its own false positives
+    and the roadmap target derived from it was never real.
+
+    With the transcript, the test is exact rather than a guess: a label is
+    cut mid-word if the text it was taken from continues with a word
+    character where the label stops. `source` is optional only so the
+    function keeps working for callers that have labels and nothing else;
+    those get the old heuristic, and the caller in this package passes the
+    transcript.
+    """
     labels = [x for x in labels if x and x.strip()]
     if not labels:
         return LabelQuality(0, 0.0, 0, 0, 0)
@@ -167,23 +185,54 @@ def label_quality(labels: list[str]) -> LabelQuality:
     truncated = 0
     for x in labels:
         s = x.rstrip()
+        if not s:
+            continue
+        if source:
+            # Every occurrence: the same phrase can appear both mid-
+            # sentence and at the end of one. It counts as cut only if
+            # the label never lands on a word boundary anywhere.
+            at, cut_everywhere, seen = source.find(s), True, False
+            while at != -1:
+                seen = True
+                after = source[at + len(s):at + len(s) + 1]
+                if not (after and (after.isalnum() or after == "_")):
+                    cut_everywhere = False
+                    break
+                at = source.find(s, at + 1)
+            if seen and cut_everywhere:
+                truncated += 1
         # A label that stops on a word character, with no terminal
         # punctuation, and is long enough to have been clipped by a
         # fixed-width capture rather than simply being short.
-        if len(s) >= 60 and s and s[-1].isalnum():
+        elif len(s) >= 60 and s[-1].isalnum():
             truncated += 1
 
     multi = sum(1 for x in labels if _SENTENCE_END.search(x))
 
+    # Only labels that can appear in the SAME resume block can be
+    # duplicates of each other. Pooling every session's labels into one
+    # bucket counted `persistence.py` in three different sessions as two
+    # near-duplicate pairs, and a task that names the file it touched
+    # ("User model in api/models.py") as a duplicate of the file node
+    # api/models.py — which is the TOUCHES relation working, not the
+    # extractor repeating itself. 33 of the 38 pairs this used to report
+    # were one of those two artefacts.
     dupes = 0
-    toks = [tokens(x) for x in labels]
-    for i in range(len(labels)):
-        for j in range(i + 1, len(labels)):
-            a, b = toks[i], toks[j]
-            if not a or not b:
-                continue
-            smaller = a if len(a) <= len(b) else b
-            if len(a & b) / len(smaller) >= 0.8:
+    for bucket in (groups if groups is not None else [labels]):
+        toks = [tokens(x) for x in bucket]
+        for i in range(len(bucket)):
+            for j in range(i + 1, len(bucket)):
+                a, b = toks[i], toks[j]
+                if not a or not b:
+                    continue
+                smaller = a if len(a) <= len(b) else b
+                if len(a & b) / len(smaller) < 0.8:
+                    continue
+                # "Fixed the teardown race" beside "race in the teardown"
+                # is the FIXES edge, and a resume block is meant to show
+                # both: what broke, and that it is now dealt with.
+                if exempt and frozenset((bucket[i], bucket[j])) in exempt:
+                    continue
                 dupes += 1
 
     return LabelQuality(

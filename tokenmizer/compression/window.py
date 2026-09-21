@@ -25,6 +25,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from tokenmizer.core.tokenizer import count_messages_tokens
+from tokenmizer.security.fencing import fence
 
 if TYPE_CHECKING:
     from tokenmizer.graph_memory.graph import GraphMemory
@@ -93,12 +94,31 @@ class SmartMessageWindow:
             # empty one; the provider guard would otherwise reject it.
             return messages, 0
 
+        # Before the old turns are replaced, keep what the ontology has no
+        # node for — a stated constraint, a budget, a deadline. Those are
+        # the facts that leave the session permanently at this point, and
+        # nothing else in the pipeline is looking for them. Best-effort by
+        # design: a failure here must not cost the caller their answer, and
+        # the windowing below is correct without it.
+        try:
+            graph.record_span_summary(old)
+        except Exception as e:                      # pragma: no cover - defensive
+            logger.warning(
+                "Span summary failed for %s (windowing continues, but the "
+                "constraints stated in the dropped turns are now lost): %s",
+                getattr(graph, "session_id", "?"), e,
+            )
+
         # Build graph context to replace old turns
         graph_ctx = graph.to_context_block(token_budget=self.graph_context_budget)
 
         bridge_parts = []
         if graph_ctx:
-            bridge_parts.append(f"[Session context from earlier conversation]\n{graph_ctx}")
+            # Fenced for the same reason the proxy fences its context block:
+            # this is conversation text being promoted into a system
+            # message, where an imperative reads as an instruction rather
+            # than as a record of one. See security/fencing.py.
+            bridge_parts.append(fence(graph_ctx, "session context from earlier turns"))
 
         # Add a note about what's omitted
         bridge_parts.append(

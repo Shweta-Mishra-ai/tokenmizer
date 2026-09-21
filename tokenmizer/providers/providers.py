@@ -14,11 +14,28 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from tokenmizer.core.errors import ProviderError
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
+from tokenmizer.providers.tools import (
+    anthropic_messages,
+    anthropic_response,
+    anthropic_tool_choice,
+    anthropic_tools,
+    cohere_messages,
+    cohere_stream_event,
+    finish_reason,
+    gemini_contents,
+    gemini_response,
+    gemini_tool_config,
+    gemini_tools,
+    normalize_tool_calls,
+    ollama_messages,
+    ollama_tool_calls,
+    tool_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +135,9 @@ def _ollama_error_is_retryable(exc: Exception) -> bool:
         if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
             return True
     except Exception:
+        # httpx missing or shaped differently — fall through to matching
+        # the message text, which is what this returns anyway for every
+        # provider SDK that wraps its own errors.
         pass
     return bool(_RETRYABLE_TEXT.search(str(exc)))
 
@@ -134,6 +154,9 @@ class LLMResponse:
     latency_ms: float = 0.0
     finish_reason: str = "stop"
     cached: bool = False
+    # OpenAI-shaped tool calls the model asked for, empty for a plain
+    # answer. See providers/tools.py for the shape and the translations.
+    tool_calls: list = field(default_factory=list)
 
     @property
     def total_tokens(self) -> int:
@@ -144,10 +167,43 @@ class LLMResponse:
 
 class BaseProvider(ABC):
 
+    # Tool/function calling. `supports_tools` — the adapter forwards
+    # `tools`/`tool_choice` and returns `tool_calls` (see providers/
+    # tools.py). `supports_tool_stream` — chat_stream() can carry tool-call
+    # deltas as dict events alongside text chunks; without it the proxy
+    # answers a streamed tool request from chat() in one piece. The
+    # proxy refuses a tool request up front (501) for an adapter without
+    # `supports_tools`, rather than sending the model a conversation it
+    # cannot see the tools for.
+    supports_tools: bool = False
+    supports_tool_stream: bool = False
+
+    # How long an upstream call may hang before it is abandoned.
+    #
+    # Every vendor SDK here defaults to 600 seconds. On a proxy that is
+    # not a timeout, it is an outage: a hung upstream holds the request,
+    # the session lock, the extraction slot and the session's place in
+    # the graph cache for ten minutes, and a handful of them is the whole
+    # worker. 120s matches what the Ollama adapter already used, and is
+    # comfortably longer than a slow long-form completion.
+    #
+    # Set from settings.request_timeout by build_provider() below; a
+    # bare BaseProvider (as tests construct) gets this class default. Env
+    # parsing/validation lives once in config/settings.py, same as every
+    # other TOKENMIZER_* value — not read from os.environ here.
+    request_timeout: float = 120.0
+
     def __init__(self, api_key: str = "", model: str = ""):
         self.api_key = api_key
         self.default_model = model
         self._retry_delays = [1.0, 2.0, 4.0]
+
+    @property
+    def _timeout_kwargs(self) -> dict:
+        """`{"timeout": n}` for an SDK client, or `{}` to keep its own
+        default. One place, so an adapter cannot be the one that forgot."""
+        t = self.request_timeout
+        return {"timeout": t} if t and t > 0 else {}
 
     @abstractmethod
     async def _call(
@@ -241,8 +297,26 @@ def _anthropic_system_param(system_text: str, model: str):
 
 class AnthropicProvider(BaseProvider):
 
+    supports_tools = True
+    # text_stream carries only text, so the raw event stream is read
+    # instead: content_block_start(tool_use) then input_json_delta. See
+    # chat_stream.
+    supports_tool_stream = True
+
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-6"):
         super().__init__(api_key, model)
+
+    @staticmethod
+    def _tool_params(kwargs: dict) -> dict:
+        """`tools` / `tool_choice` in Anthropic's shape, or nothing."""
+        tk = tool_kwargs(kwargs)
+        if not tk.get("tools"):
+            return {}
+        params: dict = {"tools": anthropic_tools(tk["tools"])}
+        choice = anthropic_tool_choice(tk.get("tool_choice"), tk.get("parallel_tool_calls"))
+        if choice is not None:
+            params["tool_choice"] = choice
+        return params
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
@@ -250,13 +324,14 @@ class AnthropicProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install anthropic")
 
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
+        client = anthropic.AsyncAnthropic(api_key=self.api_key,
+                                          **self._timeout_kwargs)
 
         # Separate system messages from conversation
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
             sys_parts.insert(0, system)
-        conv = conversation_messages(messages)
+        conv = anthropic_messages(conversation_messages(messages))
         system_text = "\n\n".join(sys_parts) if sys_parts else None
 
         try:
@@ -266,6 +341,7 @@ class AnthropicProvider(BaseProvider):
                 kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
             if system_text:
                 kwargs_clean["system"] = _anthropic_system_param(system_text, model)
+            kwargs_clean.update(self._tool_params(kwargs))
 
             if stream:
                 full_text = ""
@@ -283,23 +359,30 @@ class AnthropicProvider(BaseProvider):
                     # prompt. The non-streaming branch below already uses
                     # resp.usage for the same reason.
                     final = await s.get_final_message()
+                # text_stream carries text blocks only; tool_use blocks
+                # are read off the final message.
+                _, calls = anthropic_response(getattr(final, "content", None))
                 return LLMResponse(text=full_text,
                                    input_tokens=final.usage.input_tokens,
                                    output_tokens=final.usage.output_tokens,
                                    model=model, provider="anthropic",
-                                   finish_reason=final.stop_reason or "stop")
+                                   finish_reason=(finish_reason(final.stop_reason, calls)
+                                                  if calls else final.stop_reason or "stop"),
+                                   tool_calls=calls)
 
             resp = await client.messages.create(
                 model=model, messages=conv, max_tokens=max_tokens, **kwargs_clean
             )
-            text = resp.content[0].text if resp.content else ""
+            text, calls = anthropic_response(resp.content)
             return LLMResponse(
                 text=text,
                 input_tokens=resp.usage.input_tokens,
                 output_tokens=resp.usage.output_tokens,
                 model=model,
                 provider="anthropic",
-                finish_reason=resp.stop_reason or "stop",
+                finish_reason=(finish_reason(resp.stop_reason, calls)
+                               if calls else resp.stop_reason or "stop"),
+                tool_calls=calls,
             )
         except anthropic.RateLimitError as e:
             raise ProviderError("anthropic", "rate_limit", str(e), retryable=True, retry_after=60.0)
@@ -315,15 +398,17 @@ class AnthropicProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install anthropic")
         model = model or self.default_model
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
+        client = anthropic.AsyncAnthropic(api_key=self.api_key,
+                                          **self._timeout_kwargs)
 
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
             sys_parts.insert(0, system)
-        conv = conversation_messages(messages)
+        conv = anthropic_messages(conversation_messages(messages))
         kwargs_clean = _sampling(kwargs)
         if "stop" in kwargs_clean:
             kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
+        kwargs_clean.update(self._tool_params(kwargs))
         if sys_parts:
             # Same cacheability rule as the non-streaming path — this used
             # to pass a bare string, so streaming requests never got prompt
@@ -336,8 +421,49 @@ class AnthropicProvider(BaseProvider):
             async with client.messages.stream(
                 model=model, messages=conv, max_tokens=max_tokens, **kwargs_clean
             ) as s:
-                async for chunk in s.text_stream:
-                    yield chunk
+                # The raw event stream, not `text_stream`: the latter is
+                # text only, so a streamed tool request had to be answered
+                # from chat() in one piece and re-chunked. The events map
+                # one-for-one onto the OpenAI delta shape the proxy
+                # re-emits — a tool_use block start carries the id and
+                # name, and each input_json_delta a slice of the arguments.
+                #
+                # Anthropic indexes CONTENT BLOCKS (text and tool_use share
+                # one sequence); OpenAI indexes tool calls. Mapping between
+                # the two is this dict, not the raw index, or a call that
+                # follows a text block is announced at index 1 with nothing
+                # at index 0 and every SDK that assembles by index breaks.
+                ordinal: dict[int, int] = {}
+                async for event in s:
+                    kind = getattr(event, "type", "")
+                    if kind == "content_block_start":
+                        block = getattr(event, "content_block", None)
+                        if getattr(block, "type", "") == "tool_use":
+                            idx = len(ordinal)
+                            ordinal[getattr(event, "index", 0)] = idx
+                            yield {"tool_calls": [{
+                                "index": idx,
+                                "id": getattr(block, "id", "") or "",
+                                "type": "function",
+                                "function": {"name": getattr(block, "name", "") or "",
+                                             "arguments": ""},
+                            }]}
+                    elif kind == "content_block_delta":
+                        delta = getattr(event, "delta", None)
+                        dtype = getattr(delta, "type", "")
+                        if dtype == "text_delta":
+                            text = getattr(delta, "text", "")
+                            if text:
+                                yield text
+                        elif dtype == "input_json_delta":
+                            idx = ordinal.get(getattr(event, "index", 0))
+                            if idx is None:
+                                continue    # a block we never opened
+                            yield {"tool_calls": [{
+                                "index": idx,
+                                "function": {
+                                    "arguments": getattr(delta, "partial_json", "") or ""},
+                            }]}
         except anthropic.RateLimitError as e:
             raise ProviderError("anthropic", "rate_limit", str(e), retryable=True)
         except anthropic.APIStatusError as e:
@@ -346,7 +472,34 @@ class AnthropicProvider(BaseProvider):
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 
+def _stream_tool_call_delta(tc) -> dict:
+    """One streamed tool-call fragment in the OpenAI chunk shape. Unlike a
+    whole call, every field is optional here: later fragments carry only
+    `index` and a slice of `arguments`."""
+    def g(obj, key):
+        return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+    fn = g(tc, "function")
+    out: dict = {"index": g(tc, "index") or 0}
+    if g(tc, "id"):
+        out["id"] = g(tc, "id")
+        out["type"] = "function"
+    if fn is not None:
+        f: dict = {}
+        if g(fn, "name"):
+            f["name"] = g(fn, "name")
+        if g(fn, "arguments") is not None:
+            f["arguments"] = g(fn, "arguments")
+        out["function"] = f
+    return out
+
+
 class OpenAIProvider(BaseProvider):
+
+    # The proxy's wire shape IS this API's shape, so tools pass straight
+    # through, streamed or not.
+    supports_tools = True
+    supports_tool_stream = True
 
     def __init__(self, api_key: str, model: str = "gpt-4o",
                  base_url: Optional[str] = None):
@@ -362,6 +515,7 @@ class OpenAIProvider(BaseProvider):
         client = AsyncOpenAI(
             api_key=self.api_key,
             **({"base_url": self._base_url} if self._base_url else {}),
+            **self._timeout_kwargs,
         )
 
         all_messages = messages[:]
@@ -370,6 +524,7 @@ class OpenAIProvider(BaseProvider):
 
         try:
             sampling = _sampling(kwargs)  # OpenAI SDK accepts temperature/top_p/stop natively
+            sampling.update(tool_kwargs(kwargs))  # tools/tool_choice pass through as-is
             if stream:
                 full_text = ""
                 input_tokens = count_messages_tokens(all_messages, model)
@@ -388,13 +543,15 @@ class OpenAIProvider(BaseProvider):
                 model=model, messages=all_messages, max_tokens=max_tokens, **sampling
             )
             choice = resp.choices[0]
+            calls = normalize_tool_calls(getattr(choice.message, "tool_calls", None))
             return LLMResponse(
                 text=choice.message.content or "",
                 input_tokens=resp.usage.prompt_tokens,
                 output_tokens=resp.usage.completion_tokens,
                 model=model,
                 provider="openai",
-                finish_reason=choice.finish_reason or "stop",
+                finish_reason=finish_reason(choice.finish_reason, calls),
+                tool_calls=calls,
             )
         except Exception as e:
             raise ProviderError("openai", "api_error", str(e),
@@ -412,6 +569,7 @@ class OpenAIProvider(BaseProvider):
         client = AsyncOpenAI(
             api_key=self.api_key,
             **({"base_url": self._base_url} if self._base_url else {}),
+            **self._timeout_kwargs,
         )
         all_messages = messages[:]
         if system:
@@ -419,12 +577,22 @@ class OpenAIProvider(BaseProvider):
         try:
             stream = await client.chat.completions.create(
                 model=model, messages=all_messages, max_tokens=max_tokens,
-                stream=True, **_sampling(kwargs),
+                stream=True, **_sampling(kwargs), **tool_kwargs(kwargs),
             )
             async for chunk in stream:
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if delta:
-                    yield delta
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                text = getattr(delta, "content", None)
+                if text:
+                    yield text
+                # Tool-call deltas arrive as partial objects keyed by
+                # `index` (the id and name first, then argument fragments).
+                # Forwarded as one dict event per chunk so the proxy can
+                # re-emit them in the same OpenAI chunk shape.
+                calls = getattr(delta, "tool_calls", None)
+                if calls:
+                    yield {"tool_calls": [_stream_tool_call_delta(tc) for tc in calls]}
         except Exception as e:
             raise ProviderError(self.__class__.__name__.lower().replace("provider", ""),
                                 "api_error", str(e),
@@ -464,8 +632,32 @@ class GrokProvider(OpenAIProvider):
 
 class CohereProvider(BaseProvider):
 
+    # v2 takes the OpenAI tool shape as-is; only the streamed event names
+    # differ. See providers/tools.py.
+    supports_tools = True
+    supports_tool_stream = True
+
     def __init__(self, api_key: str, model: str = "command-r-plus"):
         super().__init__(api_key, model)
+
+    def _chat_kwargs(self, kwargs: dict) -> dict:
+        """Sampling and tools, shared by both paths so the streaming one
+        cannot drift from the other."""
+        s = _sampling(kwargs)
+        out: dict = {}
+        if "temperature" in s:
+            out["temperature"] = s["temperature"]
+        if "top_p" in s:
+            out["p"] = s["top_p"]                # Cohere names top_p as `p`
+        if "stop" in s:
+            out["stop_sequences"] = _as_stop_list(s["stop"])
+        tk = tool_kwargs(kwargs)
+        if tk.get("tools"):
+            out["tools"] = tk["tools"]
+            # v2 has no tool_choice; "none" and "required" cannot be
+            # enforced, and pretending otherwise would be worse than the
+            # model simply deciding for itself.
+        return out
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
@@ -480,17 +672,12 @@ class CohereProvider(BaseProvider):
             all_messages = [{"role": "system", "content": system}] + all_messages
 
         try:
-            s = _sampling(kwargs)
-            cohere_kw = {}
-            if "temperature" in s:
-                cohere_kw["temperature"] = s["temperature"]
-            if "top_p" in s:
-                cohere_kw["p"] = s["top_p"]          # Cohere names top_p as `p`
-            if "stop" in s:
-                cohere_kw["stop_sequences"] = _as_stop_list(s["stop"])
-            resp = await client.chat(model=model, messages=all_messages,
-                                     max_tokens=max_tokens, **cohere_kw)
+            resp = await client.chat(model=model,
+                                     messages=cohere_messages(all_messages),
+                                     max_tokens=max_tokens,
+                                     **self._chat_kwargs(kwargs))
             text = resp.message.content[0].text if resp.message.content else ""
+            calls = normalize_tool_calls(getattr(resp.message, "tool_calls", None))
             usage = resp.usage
             return LLMResponse(
                 text=text,
@@ -498,6 +685,8 @@ class CohereProvider(BaseProvider):
                 output_tokens=usage.tokens.output_tokens if usage else count_tokens(text),
                 model=model,
                 provider="cohere",
+                finish_reason=finish_reason(getattr(resp, "finish_reason", None), calls),
+                tool_calls=calls,
             )
         except Exception as e:
             # Word-boundary matching, not a bare substring check: "rate" is
@@ -509,6 +698,41 @@ class CohereProvider(BaseProvider):
             # genuine rate-limit phrased without the literal word "rate"
             # ("too many requests") was marked NOT retryable when it should
             # have been.
+            raise ProviderError("cohere", "api_error", str(e),
+                                retryable=bool(_RETRYABLE_TEXT.search(str(e))))
+
+    async def chat_stream(self, messages: list[dict], model: str = "",
+                          max_tokens: int = 4096, system: str = "", **kwargs):
+        """True streaming, text and tool calls.
+
+        This used to raise, so `stream: true` on Cohere was a 501 — v2 has
+        had `chat_stream` throughout.
+        """
+        try:
+            import cohere
+        except ImportError:
+            raise ImportError("pip install cohere")
+
+        model = model or self.default_model
+        client = cohere.AsyncClientV2(api_key=self.api_key)
+        all_messages = messages[:]
+        if system:
+            all_messages = [{"role": "system", "content": system}] + all_messages
+
+        try:
+            stream = client.chat_stream(model=model,
+                                        messages=cohere_messages(all_messages),
+                                        max_tokens=max_tokens,
+                                        **self._chat_kwargs(kwargs))
+            async for event in stream:
+                mapped = cohere_stream_event(event)
+                if not mapped:
+                    continue
+                if "text" in mapped:
+                    yield mapped["text"]
+                else:
+                    yield mapped
+        except Exception as e:
             raise ProviderError("cohere", "api_error", str(e),
                                 retryable=bool(_RETRYABLE_TEXT.search(str(e))))
 
@@ -557,8 +781,37 @@ class GeminiProvider(BaseProvider):
       of guessing from message text alone.
     """
 
+    supports_tools = True
+    # The SDK carries function_call parts on the streamed chunks, so a
+    # streamed tool request does not have to fall back to a buffered call.
+    supports_tool_stream = True
+
     def __init__(self, api_key: str, model: str = "gemini-1.5-pro"):
         super().__init__(api_key, model)
+
+    def _config_kwargs(self, kwargs: dict, max_tokens: int,
+                       system_instruction: Optional[str]) -> dict:
+        """Everything that goes into GenerateContentConfig. Shared so the
+        streaming path cannot drift from the non-streaming one, which is
+        how it lost temperature/top_p/stop the last time."""
+        s = _sampling(kwargs)
+        gen_kw: dict = {"max_output_tokens": max_tokens}
+        if system_instruction:
+            gen_kw["system_instruction"] = system_instruction
+        if "temperature" in s:
+            gen_kw["temperature"] = s["temperature"]
+        if "top_p" in s:
+            gen_kw["top_p"] = s["top_p"]
+        if "stop" in s:
+            gen_kw["stop_sequences"] = _as_stop_list(s["stop"])
+        tk = tool_kwargs(kwargs)
+        declarations = gemini_tools(tk.get("tools") or [])
+        if declarations:
+            gen_kw["tools"] = declarations
+            config = gemini_tool_config(tk.get("tool_choice"))
+            if config:
+                gen_kw["tool_config"] = config
+        return gen_kw
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
@@ -567,7 +820,11 @@ class GeminiProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install google-genai")
 
-        client = genai.Client(api_key=self.api_key)
+        client = genai.Client(
+            api_key=self.api_key,
+            **({"http_options": {"timeout": int(self.request_timeout * 1000)}}
+               if self.request_timeout and self.request_timeout > 0 else {}),
+        )
 
         # Extract system prompt
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
@@ -577,35 +834,24 @@ class GeminiProvider(BaseProvider):
 
         conversation = conversation_messages(messages)
 
-        # Build full history (all turns except last). Each part must be a
-        # dict/Part with a "text" key — unlike the old SDK, a bare string
-        # in `parts` is a validation error, not an implicit text part.
-        history = []
-        for msg in conversation[:-1]:
-            role = "user" if msg["role"] == "user" else "model"
-            history.append({"role": role, "parts": [{"text": msg["content"]}]})
-
-        last_msg = conversation[-1]["content"] if conversation else ""
+        # generate_content over the whole conversation, not chats.create
+        # with a history and one last message: the chat helper takes plain
+        # text for the latest turn, which cannot express an assistant turn
+        # that asked for a tool or the client's results coming back. Those
+        # are content parts, and this is the call that takes them.
+        contents = gemini_contents(conversation)
 
         try:
-            s = _sampling(kwargs)
-            gen_kw = {"max_output_tokens": max_tokens}
-            if system_instruction:
-                gen_kw["system_instruction"] = system_instruction
-            if "temperature" in s:
-                gen_kw["temperature"] = s["temperature"]
-            if "top_p" in s:
-                gen_kw["top_p"] = s["top_p"]
-            if "stop" in s:
-                gen_kw["stop_sequences"] = _as_stop_list(s["stop"])
+            gen_kw = self._config_kwargs(kwargs, max_tokens, system_instruction)
 
-            chat = client.aio.chats.create(
-                model=model, history=history,
+            resp = await client.aio.models.generate_content(
+                model=model, contents=contents,
                 config=types.GenerateContentConfig(**gen_kw),
             )
-            # Native async — not run_in_executor
-            resp = await chat.send_message(last_msg)
-            text = resp.text or ""
+            candidates = getattr(resp, "candidates", None) or []
+            text, calls = gemini_response(candidates[0]) if candidates else ("", [])
+            if not text and not calls:
+                text = getattr(resp, "text", "") or ""
             # Real API-reported usage when the SDK provides it.
             # prompt_token_count is the full effective prompt size
             # (Google's own docs: "includes ... cached content"), so unlike
@@ -629,7 +875,68 @@ class GeminiProvider(BaseProvider):
                 output_tokens=output_tokens,
                 model=model,
                 provider="gemini",
+                finish_reason=finish_reason(
+                    getattr(candidates[0], "finish_reason", None) if candidates else None,
+                    calls),
+                tool_calls=calls,
             )
+        except Exception as e:
+            raise ProviderError("gemini", "api_error", str(e),
+                                retryable=_gemini_error_is_retryable(e))
+
+    async def chat_stream(self, messages: list[dict], model: str = "",
+                          max_tokens: int = 4096, system: str = "", **kwargs):
+        """True streaming, text and tool calls.
+
+        This used to raise, so `stream: true` on Gemini was a 501 — the
+        SDK has had `generate_content_stream` throughout.
+        """
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError:
+            raise ImportError("pip install google-genai")
+
+        model = model or self.default_model
+        client = genai.Client(
+            api_key=self.api_key,
+            **({"http_options": {"timeout": int(self.request_timeout * 1000)}}
+               if self.request_timeout and self.request_timeout > 0 else {}),
+        )
+
+        sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
+        if system:
+            sys_parts.insert(0, system)
+        system_instruction = "\n\n".join(sys_parts) if sys_parts else None
+        contents = gemini_contents(conversation_messages(messages))
+        gen_kw = self._config_kwargs(kwargs, max_tokens, system_instruction)
+
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=model, contents=contents,
+                config=types.GenerateContentConfig(**gen_kw),
+            )
+            # Gemini sends a whole function_call part rather than argument
+            # fragments, so each becomes one delta carrying the complete
+            # arguments. The ordinal is ours: Gemini does not number them.
+            emitted = 0
+            async for chunk in stream:
+                candidates = getattr(chunk, "candidates", None) or []
+                if not candidates:
+                    text = getattr(chunk, "text", "") or ""
+                    if text:
+                        yield text
+                    continue
+                text, calls = gemini_response(candidates[0])
+                if text:
+                    yield text
+                if calls:
+                    yield {"tool_calls": [
+                        {"index": emitted + i, "id": c["id"], "type": "function",
+                         "function": dict(c["function"])}
+                        for i, c in enumerate(calls)
+                    ]}
+                    emitted += len(calls)
         except Exception as e:
             raise ProviderError("gemini", "api_error", str(e),
                                 retryable=_gemini_error_is_retryable(e))
@@ -638,6 +945,13 @@ class GeminiProvider(BaseProvider):
 # ── Ollama (local) ────────────────────────────────────────────────────────────
 
 class OllamaProvider(BaseProvider):
+
+    supports_tools = True
+    # Ollama does not stream tool-call fragments — it sends the finished
+    # calls on the last message — but the stream carries them, which is
+    # what this flag means: the proxy does not have to fall back to a
+    # buffered non-streaming call to get them.
+    supports_tool_stream = True
 
     def __init__(self, model: str = "llama3", base_url: str = "http://localhost:11434"):
         super().__init__(api_key="", model=model)
@@ -661,21 +975,30 @@ class OllamaProvider(BaseProvider):
             options["top_p"] = s["top_p"]
         if "stop" in s:
             options["stop"] = _as_stop_list(s["stop"])
-        payload = {"model": model, "messages": all_messages, "stream": False,
-                   "options": options}
+        payload = {"model": model, "messages": ollama_messages(all_messages),
+                   "stream": False, "options": options}
+        tk = tool_kwargs(kwargs)
+        if tk.get("tools"):
+            # Ollama takes OpenAI-shaped declarations; it has no
+            # tool_choice, so "none"/"required" cannot be enforced here.
+            payload["tools"] = tk["tools"]
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=self.request_timeout or None) as client:
             try:
                 r = await client.post(f"{self._base_url}/api/chat", json=payload)
                 r.raise_for_status()
                 data = r.json()
-                text = data.get("message", {}).get("content", "")
+                message = data.get("message", {})
+                text = message.get("content", "") or ""
+                calls = ollama_tool_calls(message.get("tool_calls"))
                 return LLMResponse(
                     text=text,
                     input_tokens=data.get("prompt_eval_count", count_messages_tokens(all_messages)),
                     output_tokens=data.get("eval_count", count_tokens(text)),
                     model=model,
                     provider="ollama",
+                    finish_reason=finish_reason(data.get("done_reason"), calls),
+                    tool_calls=calls,
                 )
             except Exception as e:
                 raise ProviderError("ollama", "api_error", str(e),
@@ -691,10 +1014,27 @@ class OllamaProvider(BaseProvider):
         all_messages = messages[:]
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
-        payload = {"model": model, "messages": all_messages, "stream": True,
-                   "options": {"num_predict": max_tokens}}
+        # Same option mapping as _call(): the streaming path dropped
+        # temperature/top_p/stop on the floor, so a client got different
+        # sampling depending on whether it asked for a stream.
+        s = _sampling(kwargs)
+        options = {"num_predict": max_tokens}
+        if "temperature" in s:
+            options["temperature"] = s["temperature"]
+        if "top_p" in s:
+            options["top_p"] = s["top_p"]
+        if "stop" in s:
+            options["stop"] = _as_stop_list(s["stop"])
+        payload = {"model": model, "messages": ollama_messages(all_messages),
+                   "stream": True, "options": options}
+        tk = tool_kwargs(kwargs)
+        if tk.get("tools"):
+            # The streaming payload carried no tools at all, so a client
+            # that asked for tools AND a stream got a model that could not
+            # see them — the same silent drop the non-streaming path had.
+            payload["tools"] = tk["tools"]
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=self.request_timeout or None) as client:
                 async with client.stream("POST", f"{self._base_url}/api/chat",
                                          json=payload) as r:
                     r.raise_for_status()
@@ -702,9 +1042,21 @@ class OllamaProvider(BaseProvider):
                         if not line.strip():
                             continue
                         data = _json.loads(line)
-                        chunk = data.get("message", {}).get("content", "")
+                        message = data.get("message", {}) or {}
+                        chunk = message.get("content", "")
                         if chunk:
                             yield chunk
+                        # Ollama sends finished calls on one message rather
+                        # than fragments, so each becomes a single delta
+                        # carrying the whole arguments string. The proxy
+                        # assembles by index either way.
+                        calls = ollama_tool_calls(message.get("tool_calls"))
+                        if calls:
+                            yield {"tool_calls": [
+                                {"index": i, "id": c["id"], "type": "function",
+                                 "function": dict(c["function"])}
+                                for i, c in enumerate(calls)
+                            ]}
                         if data.get("done"):
                             break
         except ProviderError:
@@ -779,4 +1131,11 @@ def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
     if provider not in mapping:
         raise ValueError(f"Unknown provider: {provider!r}. Valid: {list(mapping)}")
 
-    return mapping[provider]()
+    instance = mapping[provider]()
+    # request_timeout is a Settings field (config/settings.py), not read
+    # from the environment here — getattr covers a caller that passes
+    # something settings-shaped without it, falling back to the class
+    # default rather than raising.
+    instance.request_timeout = getattr(settings, "request_timeout",
+                                       instance.request_timeout)
+    return instance

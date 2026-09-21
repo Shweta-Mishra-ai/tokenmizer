@@ -22,6 +22,8 @@ from tokenmizer.graph_memory.types import EdgeType
 from tokenmizer.graph_memory.visualization import (
     _EDGE_COLOR,
     _TYPE_COLOR,
+    _TYPE_COLOR_LIGHT,
+    _TYPE_ORDER,
     _TYPE_SIZE,
     to_obsidian_canvas,
     to_share_html,
@@ -43,8 +45,49 @@ class TestColorMaps:
     def test_edge_colors_match_edge_type(self):
         assert set(_EDGE_COLOR) == {e.value for e in EdgeType}
 
-    def test_type_colors_are_distinct(self):
-        assert len(set(_TYPE_COLOR.values())) == len(_TYPE_COLOR)
+    # The eight categorical slots, in the order the palette validator was
+    # run on. Pinned so a hex cannot be changed by eye: re-run
+    #   node scripts/validate_palette.js "<the eight>" --mode dark --surface "#12141c"
+    # (and --mode light --surface "#f7f8fc" for the light set) and paste
+    # the new values here with the result.
+    CATEGORICAL = ["file", "endpoint", "task", "dependency",
+                   "goal", "schema", "decision", "error"]
+    VALIDATED_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500",
+                      "#d55181", "#008300", "#9085e9", "#e66767"]
+    VALIDATED_LIGHT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+                       "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
+
+    def test_the_categorical_slots_are_the_validated_ones(self):
+        """The old palette put goal (#e879f9) and decision (#a78bfa) 0.4
+        apart under protanopia and 10.9 apart for a full-colour reader, so
+        the two types the product is built around were indistinguishable
+        for a large share of people. These eight passed every check on
+        both surfaces; do not substitute a hex without re-running the
+        validator."""
+        assert [_TYPE_COLOR[t] for t in self.CATEGORICAL] == self.VALIDATED_DARK
+        assert [_TYPE_COLOR_LIGHT[t] for t in self.CATEGORICAL] == self.VALIDATED_LIGHT
+
+    def test_the_categorical_slots_are_distinct(self):
+        assert len(set(self.VALIDATED_DARK)) == 8
+        assert len(set(self.VALIDATED_LIGHT)) == 8
+
+    def test_types_beyond_the_eight_slots_share_one_neutral(self):
+        """A ninth series is folded into "other", never given a generated
+        hue — eight is the most a categorical palette can carry and still
+        be told apart. Position and the node label carry these types."""
+        rest = [t for t in _TYPE_COLOR if t not in self.CATEGORICAL]
+        assert rest, "the map should still cover every NodeType"
+        assert len(set(_TYPE_COLOR[t] for t in rest)) == 1
+        assert len(set(_TYPE_COLOR_LIGHT[t] for t in rest)) == 1
+
+    def test_both_themes_cover_every_type(self):
+        assert set(_TYPE_COLOR_LIGHT) == set(_TYPE_COLOR)
+
+    def test_every_type_has_a_place_in_the_layout_order(self):
+        """The radial view reads type off WHICH ARC a node sits on, so a
+        type missing from the order has no arc and no position — which is
+        the encoding that makes the palette legal in the first place."""
+        assert set(_TYPE_ORDER) == {t.value for t in NodeType}
 
 
 def _graph(tmp_path, session_id="t-viz"):
@@ -191,3 +234,147 @@ class TestShareHtmlPage:
     def test_no_entity_emoji_in_the_template(self, tmp_path):
         html = to_share_html(_graph(tmp_path))
         assert "&#129504;" not in html
+
+
+class TestDerivedAnalytics:
+    """The panel's numbers are computed here, not in the browser, so they
+    are testable and identical for every consumer of the export."""
+
+    def _graph_with_history(self, tmp_path):
+        g = GraphMemory(session_id="t-analytics", storage_dir=str(tmp_path))
+        g.extract_from_messages([
+            {"role": "user", "content": "We are building the checkout service"},
+            {"role": "assistant", "content":
+             "Decided: PostgreSQL for order storage. Created internal/store/postgres.go."},
+            {"role": "assistant", "content":
+             "Switched from moment.js to date-fns. The build fails with exit code 1."},
+        ], incremental=False)
+        return g
+
+    def test_counts_describe_the_session(self, tmp_path):
+        meta = to_vis_json(self._graph_with_history(tmp_path))["meta"]
+        counts = meta["counts"]
+        assert counts["nodes"] == meta["node_count"]
+        assert counts["relations"] == meta["edge_count"]
+        assert counts["decisions"] >= 1
+        assert counts["changes"] == meta["transition_count"] >= 1
+        assert counts["open_issues"] >= 1
+
+    def test_hotspots_rank_by_what_depends_on_a_node(self, tmp_path):
+        g = GraphMemory(session_id="t-hot", storage_dir=str(tmp_path))
+        goal = g.add_node(NodeType.GOAL, "Ship the checkout service",
+                          NodeStatus.IN_PROGRESS)
+        for i in range(3):
+            task = g.add_node(NodeType.TASK, f"Completed step number {i}",
+                              NodeStatus.COMPLETED)
+            g.add_edge(task, goal, EdgeType.PART_OF)
+        hotspots = to_vis_json(g)["meta"]["hotspots"]
+        assert hotspots[0]["label"] == "Ship the checkout service"
+        assert hotspots[0]["depends_on_it"] == 3
+        assert all("id" not in h for h in hotspots), "internal ids stay internal"
+
+    def test_flows_count_relations_between_types(self, tmp_path):
+        meta = to_vis_json(self._graph_with_history(tmp_path))["meta"]
+        pairs = {(f["source"], f["target"]): f["count"] for f in meta["flows"]}
+        assert pairs, "a session with edges must report flows"
+        assert sum(pairs.values()) <= meta["edge_count"]
+        counts = [f["count"] for f in meta["flows"]]
+        assert counts == sorted(counts, reverse=True), "flows are ranked"
+
+    def test_history_gaps_are_reported(self, tmp_path):
+        """A superseded decision with no transition means `why` has a hole
+        in it. It was only visible by calling /reasoning and reading a
+        list of anomalies."""
+        g = GraphMemory(session_id="t-gap", storage_dir=str(tmp_path))
+        nid = g.add_node(NodeType.DECISION, "Use the old approach",
+                         NodeStatus.COMPLETED)
+        g._nodes[nid].status = NodeStatus.SUPERSEDED
+        assert to_vis_json(g)["meta"]["counts"]["unexplained_supersessions"] == 1
+
+    def test_a_clean_session_reports_no_gaps(self, tmp_path):
+        meta = to_vis_json(self._graph_with_history(tmp_path))["meta"]
+        assert meta["counts"]["dangling_history"] == 0
+        assert meta["counts"]["unexplained_supersessions"] == 0
+
+    def test_empty_graph_analytics_do_not_crash(self, tmp_path):
+        meta = to_vis_json(GraphMemory("t-empty-an", storage_dir=str(tmp_path)))["meta"]
+        assert meta["counts"]["nodes"] == 0
+        assert meta["hotspots"] == [] and meta["flows"] == []
+
+    def test_nodes_are_exported_in_layout_order(self, tmp_path):
+        """The radial view reads type off position, so the arcs have to be
+        contiguous — which means the export, not the browser, decides the
+        order."""
+        g = self._graph_with_history(tmp_path)
+        types = [n["type"] for n in to_vis_json(g)["nodes"]]
+        first_seen = []
+        for t in types:
+            if t not in first_seen:
+                first_seen.append(t)
+        assert types == sorted(types, key=lambda t: first_seen.index(t)), \
+            "nodes of one type must be contiguous"
+        rank = {t: i for i, t in enumerate(_TYPE_ORDER)}
+        assert first_seen == sorted(first_seen, key=lambda t: rank[t])
+
+
+class TestRadialViewContract:
+    """What the page needs in order to render the radial layout at all."""
+
+    def test_the_page_defaults_to_radial(self, tmp_path):
+        html = to_share_html(_graph(tmp_path))
+        assert 'id="viewRadial"' in html
+        assert 'let alpha=1, mode="radial"' in html
+
+    def test_the_page_carries_both_palettes(self, tmp_path):
+        html = to_share_html(_graph(tmp_path))
+        assert "COLOR_DARK" in html and "COLOR_LIGHT" in html
+        assert "#9085e9" in html and "#4a3aa7" in html
+
+    def test_meta_carries_the_layout_order(self, tmp_path):
+        meta = to_vis_json(_graph(tmp_path))["meta"]
+        assert meta["type_order"]
+        assert set(meta["type_order"]) <= set(_TYPE_ORDER)
+
+
+class TestForceViewContract:
+    """The force view was rebuilt three times before it was readable.
+    What each round fixed is pinned here, because the failures are
+    invisible to a test that only asks whether the page renders.
+    """
+
+    def test_the_layout_is_settled_before_anything_is_drawn(self, tmp_path):
+        """The old code reframed the view on a 260ms timer while the
+        simulation still had seconds of travel left, so the picture the
+        reader got was framed for a layout that no longer existed —
+        nodes ran off the bottom and under the side panel."""
+        html = to_share_html(_graph(tmp_path))
+        assert "function settle()" in html
+        assert "setTimeout(fit" not in html
+
+    def test_unconnected_nodes_are_placed_not_simulated(self, tmp_path):
+        """A node with no edge feels repulsion from everything and has
+        no spring pulling back, so the cluster fires it at the canvas
+        wall and it stays there. Seven of them made a border of exiles."""
+        html = to_share_html(_graph(tmp_path))
+        assert "function placeIsolates()" in html
+        assert "const sim=nodes.filter(a=>nbrs[a.id].length)" in html
+        assert "not linked to anything yet" in html
+
+    def test_the_forces_are_fruchterman_reingold(self, tmp_path):
+        html = to_share_html(_graph(tmp_path))
+        assert "const f=K2/d" in html, "repulsion must be K²/d, uncapped"
+        assert "const f=(d*d)/K" in html, "attraction must be d²/K"
+
+    def test_cohesion_is_written_in_the_same_units_as_the_spring(
+            self, tmp_path):
+        """As a linear force it contributed single digits against a
+        spring in the hundreds, so communities never gathered and the
+        hull drawn round one spanned half the canvas."""
+        html = to_share_html(_graph(tmp_path))
+        assert "const f=(d*d)/K*w" in html
+
+    def test_fit_accounts_for_the_label_text(self, tmp_path):
+        """Fitting to the dots alone pushed every right-hand label under
+        the side panel."""
+        html = to_share_html(_graph(tmp_path))
+        assert 'if(mode!=="radial"&&!PREVIEW){' in html

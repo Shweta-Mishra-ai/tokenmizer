@@ -17,9 +17,33 @@ BG, FG = (13, 17, 23), (201, 209, 217)
 GREEN, PURPLE, YELLOW = (63, 185, 80), (137, 87, 229), (210, 153, 34)
 DIM, CYAN = (110, 118, 129), (57, 197, 187)
 
-font = ImageFont.truetype("consola.ttf", 17)
-bold = ImageFont.truetype("consolab.ttf", 17)
-big = ImageFont.truetype("consolab.ttf", 26)
+# Consolas exists on Windows and nowhere else, so this script could only
+# ever run on one platform — while the README tells every reader they can
+# regenerate the GIF with it. Try the platform fonts in turn and fail with
+# a sentence that names the fix rather than an OSError on a font filename.
+_REGULAR = ("consola.ttf", "DejaVuSansMono.ttf", "LiberationMono-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc")
+_BOLD = ("consolab.ttf", "DejaVuSansMono-Bold.ttf", "LiberationMono-Bold.ttf",
+         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+         "/System/Library/Fonts/Menlo.ttc")
+
+
+def _font(candidates, size):
+    for name in candidates:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    raise SystemExit(
+        "No monospace font found. Install one (on Debian/Ubuntu: "
+        "apt-get install fonts-dejavu-core) or edit _REGULAR/_BOLD above."
+    )
+
+
+font = _font(_REGULAR, 17)
+bold = _font(_BOLD, 17)
+big = _font(_BOLD, 26)
 
 
 def frame(lines, title="tokenmizer - demo"):

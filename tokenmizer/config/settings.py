@@ -1,7 +1,7 @@
 """TokenMizer configuration — Pydantic Settings with env var support."""
 from __future__ import annotations
 
-from typing import List, Literal
+from typing import List, Literal, Union
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,7 +53,23 @@ class GraphCheckpointSettings(BaseModel):
     # reasoning.py and decision_tracker.py already share, so enabling this
     # adds no new dependency and no second model in memory.
     # Without it this silently stays off rather than failing.
-    semantic_retrieval: bool = False
+    #
+    #   "auto" (the default) — on when the model is actually loadable, off
+    #                          otherwise. Measured on the retrieval eval:
+    #                          keyword ranking gets recall@6 82% over 40
+    #                          paraphrased questions, and the misses are
+    #                          exactly the paraphrases embeddings exist
+    #                          for. A capability that is present should not
+    #                          need a second switch to be used.
+    #   true / false        — force it, for a deployment that wants the
+    #                          behaviour pinned either way.
+    #
+    # "auto" resolves ONCE, at startup, by trying to load the model — not
+    # per request, and never by assuming the package being installed means
+    # the weights are present. sentence-transformers ships no weights, so
+    # "installed" and "loadable" are different questions on an air-gapped
+    # host or behind an egress proxy.
+    semantic_retrieval: Union[bool, Literal["auto"]] = "auto"
     # Rank a principal's OTHER sessions' nodes alongside the current
     # session's when building retrieval results (Memory.search() and the
     # proxy's context-injection step) — see graph_memory/cross_session.py.
@@ -71,20 +87,25 @@ class GraphCheckpointSettings(BaseModel):
 
 
 class RoutingSettings(BaseModel):
-    """NOT IMPLEMENTED — no code reads any field below.
+    """DEPRECATED — scheduled for removal one release after this one.
 
-    Complexity-based model routing was advertised as a pipeline layer
-    (the proxy even reports a `savings["routing"]` figure, hardcoded to
-    0), but there has never been an implementation: nothing reads
-    `enabled`, `simple_model`, `medium_model`, `complex_model`, or
-    `complexity_threshold`. Setting `enabled: true` does nothing at all
-    and produces no warning.
+    Complexity-based model routing was advertised as a pipeline layer, but
+    there has never been an implementation: nothing has ever read
+    `enabled`, `simple_model`, `medium_model`, `complex_model` or
+    `complexity_threshold`, and `savings["routing"]` was a hardcoded 0.
 
-    The fields are kept so that existing tokenmizer.yaml files carrying a
-    `routing:` block still load (Settings uses extra="forbid", so
+    What people actually asked this block for is "send model X to model Y",
+    which is now `model_map` at the top level and is implemented. Scoring a
+    prompt's complexity well enough to pick a model for someone is a
+    research problem, and shipping a switch that silently does nothing is
+    worse than not shipping it.
+
+    The fields are kept only so an existing tokenmizer.yaml carrying a
+    `routing:` block still loads — Settings uses extra="forbid", so
     deleting them would turn every such config into a hard startup
-    failure). get_settings() logs a warning if routing.enabled is true,
-    so nobody is left believing a switch did something.
+    failure. get_settings() warns whenever the block is present at all,
+    not just when it is enabled, because a `routing:` block in a config
+    file is a belief about behaviour either way.
     """
     enabled: bool = False
     simple_model: str = "claude-haiku-4-5"
@@ -98,6 +119,20 @@ class CacheSettings(BaseModel):
     similarity_threshold: float = 0.92
     ttl_seconds: int = 3600
     max_size: int = 10_000
+    # A cap on ENTRIES is not a cap on memory. An entry holds a full LLM
+    # response, and 10,000 of those at 60 KB each is 600 MB resident with
+    # nothing in the process to stop it — the operator sees
+    # "utilization_pct: 100" and no indication that it means a gigabyte.
+    # Both bounds are enforced; whichever binds first wins.
+    max_bytes: int = 256 * 1024 * 1024
+    # One pathological response must not be able to spend the whole
+    # budget. Above this an answer is served but not remembered.
+    max_entry_bytes: int = 1024 * 1024
+    # The semantic layer is an O(n) Python loop over the cache on every
+    # MISS, which is the request path. Scanning the most recent N is a
+    # bound on the worst case; the entries it skips are the coldest ones,
+    # which are also the least likely to match.
+    max_semantic_scan: int = 2_000
     # "session" (default): every cached prompt is scoped to its session_id,
     # never shared across sessions — safe by default for hosted/team use.
     # "shared": non-sensitive prompts are shared globally across sessions
@@ -106,6 +141,25 @@ class CacheSettings(BaseModel):
     # explicitly; do not flip this without understanding that heuristic's
     # documented limits.
     share_scope: Literal["session", "shared"] = "session"
+
+
+class PreferenceSettings(BaseModel):
+    """Habits that outlive a session — "keep it brief", "always
+    TypeScript" — remembered per principal and injected into the system
+    prompt. See tokenmizer/preferences.py.
+
+    OFF by default, deliberately. The failure mode of a preference memory
+    is not forgetting: it is remembering something that was never a
+    preference and repeating it in every prompt you send for the rest of
+    the year. The detector is a set of regexes, it will have false
+    positives, and an operator should turn this on knowing that. `/api/
+    preferences` lists what was remembered and deletes any of it.
+    """
+    enabled: bool = False
+    # How many lines, and how much prompt they may take. The cost of the
+    # feature is exactly this.
+    max_items: int = 4
+    max_chars: int = 400
 
 
 class TerseOutputSettings(BaseModel):
@@ -151,6 +205,24 @@ class Settings(BaseSettings):
 
     default_model: str = "claude-sonnet-4-6"
 
+    # Client model alias -> the model actually sent to the provider. This
+    # is what the never-implemented `routing` block was reached for: a
+    # client hard-codes "gpt-4" or an agent framework pins a name you do
+    # not run, and you want one place to redirect it without touching the
+    # client. Exact match on the requested name, applied once (the result
+    # is not re-mapped, so a map cannot loop), and reported back in
+    # `tokenmizer.model_mapped_from` so a surprising answer is traceable
+    # to the substitution rather than to the model.
+    model_map: dict[str, str] = Field(default_factory=dict)
+
+    # Which domain pack the extractor runs. "coding" (the default) adds
+    # nothing to the patterns that have always run, so changing this can
+    # only add recall on sessions the coding phrasings do not cover — a
+    # research log, an incident review, a product discussion. See
+    # graph_memory/domains.py, and docs/benchmarks.md for each pack's
+    # own measured numbers.
+    domain: Literal["coding", "research", "ops", "product"] = "coding"
+
     # API keys (prefer env vars over config file)
     anthropic_api_key: str = ""
     openai_api_key: str = ""
@@ -161,8 +233,23 @@ class Settings(BaseSettings):
     cohere_api_key: str = ""
     openrouter_api_key: str = ""
 
-    # State backend
-    state_backend: Literal["memory", "redis"] = "memory"
+    # Where the state that is NOT the graph lives — today, the rate
+    # limiter's token buckets.
+    #
+    #   memory  one process, nothing shared. The default, and correct for
+    #           a single-worker deployment: it costs nothing per request.
+    #   sqlite  shared by every worker on this host, in storage_dir. Use
+    #           it with `--workers N`, where "memory" enforces the
+    #           configured limit once PER WORKER — 60/min across four
+    #           workers is 240/min, and a limit that is not the limit is
+    #           worse than none because it is written down.
+    #   redis   accepted so old configs load; NEVER IMPLEMENTED. Nothing
+    #           has ever read it. Use "sqlite", which is implemented and
+    #           covers the same deployment.
+    #
+    # Neither option spans hosts: several machines behind a load balancer
+    # need the limit at the load balancer.
+    state_backend: Literal["memory", "sqlite", "redis"] = "memory"
     redis_url: str = "redis://localhost:6379/0"
 
     # Auth
@@ -198,9 +285,22 @@ class Settings(BaseSettings):
     compression: CompressionSettings = Field(default_factory=CompressionSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     graph_checkpoint: GraphCheckpointSettings = Field(default_factory=GraphCheckpointSettings)
+    # Deprecated; see RoutingSettings. Kept so old configs still load.
     routing: RoutingSettings = Field(default_factory=RoutingSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
+    preferences: PreferenceSettings = Field(default_factory=PreferenceSettings)
     terse_output: TerseOutputSettings = Field(default_factory=TerseOutputSettings)
+
+    # How long an upstream provider call may hang before it is
+    # abandoned. Every vendor SDK used by providers/providers.py
+    # defaults to 600 seconds; on a proxy that is not a timeout, it is
+    # an outage — a hung upstream holds the request, the session lock,
+    # the extraction slot and the session's place in the graph cache for
+    # ten minutes, and a handful of them is the whole worker. 120s
+    # matches what the Ollama adapter already used before this was a
+    # setting. 0 or less restores each SDK's own default, for anyone who
+    # genuinely wants to wait.
+    request_timeout: float = 120.0
 
     # Server
     # Was "0.0.0.0" (all interfaces) — the CLI's `serve` command didn't
@@ -308,6 +408,50 @@ def _is_production() -> bool:
     return os.environ.get("TOKENMIZER_ENV", "").strip().lower() == "production"
 
 
+def resolve_semantic_retrieval(value) -> bool:
+    """Turn the `semantic_retrieval` setting into a yes or a no.
+
+    "auto" means "on if the embedding model is actually loadable". That is
+    a question only trying can answer — sentence-transformers ships no
+    weights, so the package being installed says nothing about whether the
+    model is there on an air-gapped host or behind an egress proxy. The
+    engine caches the attempt per process, so this costs one try at
+    startup, not one per request.
+    """
+    if value is True or value is False:
+        return value
+    try:
+        from tokenmizer.semantic_cache.cache import EmbeddingEngine
+        return bool(EmbeddingEngine.get().available)
+    except Exception:
+        return False
+
+
+def _routing_block_present(yaml_path: str) -> bool:
+    """Is a `routing:` block configured at all, by file or by environment?
+
+    Deliberately not `settings.routing.enabled`: the point of the warning
+    is that the block does nothing whatever its value, so an operator who
+    wrote `routing: {enabled: false, simple_model: ...}` — and therefore
+    believes the other four fields mean something — has to be told too.
+    Never raises: a config that cannot be re-read is already reported by
+    the loader above, and a warning is not worth a second failure.
+    """
+    import os
+
+    if any(k.startswith("TOKENMIZER_ROUTING") for k in os.environ):
+        return True
+    if not os.path.exists(yaml_path):
+        return False
+    try:
+        import yaml
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f) or {}
+        return isinstance(data, dict) and "routing" in data
+    except Exception:
+        return False
+
+
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
@@ -375,13 +519,25 @@ def get_settings() -> Settings:
 
         # Warn about settings that are accepted but not implemented, so a
         # config value can never quietly mean nothing. See
-        # RoutingSettings' docstring.
-        if loaded.routing.enabled:
+        # RoutingSettings' docstring. The warning fires on the block being
+        # PRESENT, not on enabled, because a `routing:` block in a config
+        # file is a belief about behaviour whichever way it is set.
+        if loaded.state_backend == "redis":
             logger.warning(
-                "routing.enabled is set, but complexity-based model routing "
-                "is NOT IMPLEMENTED — no request will be routed differently. "
-                "The setting is accepted only so existing config files keep "
-                "loading. Remove it to avoid confusion."
+                "state_backend: redis is accepted but NOT IMPLEMENTED — "
+                "nothing has ever read it, so state is per-process as if "
+                "it were \"memory\". Use \"sqlite\" for a shared store "
+                "across workers on one host."
+            )
+
+        if _routing_block_present(yaml_path):
+            logger.warning(
+                "The `routing:` block is DEPRECATED and does nothing: "
+                "complexity-based model routing was never implemented, and "
+                "no request has ever been routed differently. It is still "
+                "accepted so existing config files keep loading, and will "
+                "be removed one release from now. To redirect a client's "
+                "model name to another model, use `model_map`."
             )
 
         _settings = loaded

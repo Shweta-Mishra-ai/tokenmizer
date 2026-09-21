@@ -56,9 +56,11 @@ files = ["pypdf>=4.0.0", "openpyxl>=3.1.0"]
 # ML compression (much better than heuristic-only)
 compression = ["llmlingua>=0.2.0"]
 
-# Redis client. NOTE: tokenmizer/state/backend.py has no callers, so
-# installing this changes nothing today. Kept so the dependency does not
-# have to be re-added when that backend is wired up.
+# Redis client. NOTE: nothing in TokenMizer talks to Redis. The module
+# that was going to (tokenmizer/state/backend.py) was deleted for having
+# no callers; shared cross-worker state is SQLite, like everything else
+# durable here. Kept as an extra only so an existing install does not
+# break on the name.
 redis = ["redis>=5.0.0"]
 
 # Observability

@@ -126,14 +126,14 @@ tokenmizer/
 │   └── storage/
 │       └── __init__.py              # StorageBackend protocol (documentation-level, not enforced — see note above)
 │
-├── scripts/                      # mcp_e2e_check.py, gen_demo_gif.py, setup/install helpers
+├── scripts/                      # mcp_e2e_check.py, gen_demo_gif.py, gen_graph_demo.py, setup helpers
 ├── benchmarks/
 │   ├── eval/                     # extraction P/R/F1 harness + labelled corpus
 │   ├── checkpoint_accuracy/      # graph vs summary baseline
 │   ├── graph_retrieval/          # category recall
 │   ├── persistence/              # write amplification + concurrency
 │   └── latency/                  # end-to-end proxy latency (needs a running server)
-└── tests/                        # 80 files, 1074 tests — see TESTING.md for how to run them
+└── tests/                        # 100 files, 1403 tests — see TESTING.md for how to run them
 ```
 
 ---

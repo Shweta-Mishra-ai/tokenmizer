@@ -32,9 +32,13 @@ def test_no_split_brained_duplicate_definitions():
     the SAME object, not a second, independently-recompiled copy — that
     would silently double memory and let the two drift if one were ever
     edited without the other."""
+    # `find_supersessions` replaced the bare `_SUPERSEDED` import: reading
+    # "switched from A to B" and "B instead of A" needs more than one
+    # pattern and an operand cleaner, and that logic belongs beside the
+    # patterns rather than inlined in the extractor's loop.
     shared_names = [
         "_DECISION", "_DECISION_FOR", "_FILE_PATH", "_ERROR_TYPED",
-        "_TASK_DONE", "_SUPERSEDED", "EXTRACTION_SYSTEM", "_clip",
+        "_TASK_DONE", "find_supersessions", "EXTRACTION_SYSTEM", "_clip",
     ]
     for name in shared_names:
         assert getattr(hybrid_extractor, name) is getattr(patterns, name), name

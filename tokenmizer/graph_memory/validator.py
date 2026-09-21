@@ -338,12 +338,29 @@ class GraphValidator:
             base += 0.15
         return base
 
+    # A goal names an outcome someone is working toward. The first list is
+    # what that looks like when the outcome is software; the second is what
+    # it looks like in every other kind of session, and its absence is why
+    # a research question, an incident or a quarterly outcome scored 0.50
+    # to 0.60 and was rejected — the domain packs extracted them correctly
+    # and this rejected them one layer down, for not being about building
+    # something. See graph_memory/domains.py.
+    _GOAL_BUILD = ("build", "create", "develop", "implement", "design")
+    _GOAL_OUTCOME = (
+        "whether", "question", "hypothesis",      # research
+        "incident", "outage", "degraded", "failing", "down",   # ops
+        "outcome", "objective", "want users", "want customers",  # product
+        "establish", "understand", "determine", "measure",
+        "restore", "recover", "migrate", "reduce", "improve", "launch",
+    )
+
     def _score_goal(self, label: str, base: float) -> float:
-        # Goals need to describe a system/product/outcome
         if len(label) < 15:
             base -= 0.20  # "fix bug" is not a goal
-        build_verbs = ["build", "create", "develop", "implement", "design"]
-        if any(v in label.lower() for v in build_verbs):
+        lowered = label.lower()
+        if any(v in lowered for v in self._GOAL_BUILD):
+            base += 0.15
+        elif any(v in lowered for v in self._GOAL_OUTCOME):
             base += 0.15
         return base
 
@@ -351,9 +368,16 @@ class GraphValidator:
         # Package names with versions are strong
         if re.search(r'[>=<]+\s*[\d.]+', label):
             base += 0.20
-        # Known package ecosystems
-        if re.match(r'^[a-z][a-z0-9\-_]+$', label, re.IGNORECASE):
-            base += 0.10  # looks like a package name
+        # A bare package name is what an install command names, and the
+        # extractor only emits dependencies from install commands ("pip
+        # install redis", "npm add zod"), so the shape alone is strong
+        # evidence. The generic length/word-count penalties above took
+        # "redis" to 0.35 — under the 0.65 floor — so a bare package name
+        # was never accepted and DEPENDENCY nodes only existed when a
+        # version pin happened to be quoted. Floor, not bonus: it must
+        # clear the threshold regardless of how short the name is.
+        if re.match(r'^[a-z@][a-z0-9\-_./@]{2,}$', label, re.IGNORECASE):
+            base = max(base + 0.10, 0.70)
         return base
 
     # ── Type mismatch detection ───────────────────────────────────────────────

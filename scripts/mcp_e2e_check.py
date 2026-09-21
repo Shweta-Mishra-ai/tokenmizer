@@ -79,8 +79,23 @@ def _seed_session_graph(session_id: str) -> None:
     g._persist(force=True)
 
 
+def _free_port() -> int:
+    """Ask the OS for a port nobody is on.
+
+    This used to be hard-coded to 8765, which is also the port a developer
+    running the proxy by hand reaches for — and a collision surfaced as
+    "proxy did not start within 5s", which reads like a broken app rather
+    than a busy port.
+    """
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
 def main() -> int:
-    port = 8765
+    port = _free_port()
     _seed_session_graph("mcp-e2e-test")
     server, server_thread = _start_proxy_in_thread(port)
     os.environ["TOKENMIZER_URL"] = f"http://127.0.0.1:{port}"
