@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import time
 from abc import ABC, abstractmethod
@@ -166,25 +165,6 @@ class LLMResponse:
 
 # ── Base ─────────────────────────────────────────────────────────────────────
 
-def _env_timeout(default: float = 120.0) -> float:
-    """Read TOKENMIZER_REQUEST_TIMEOUT, falling back to `default`.
-
-    A bad value is a misconfiguration, not a reason to fail startup —
-    but it is also not a reason to silently use a number the operator
-    did not choose, so it is logged."""
-    raw = os.environ.get("TOKENMIZER_REQUEST_TIMEOUT", "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning(
-            "TOKENMIZER_REQUEST_TIMEOUT=%r is not a number — using %ss",
-            raw, default,
-        )
-        return default
-
-
 class BaseProvider(ABC):
 
     # Tool/function calling. `supports_tools` — the adapter forwards
@@ -207,10 +187,11 @@ class BaseProvider(ABC):
     # worker. 120s matches what the Ollama adapter already used, and is
     # comfortably longer than a slow long-form completion.
     #
-    # Override per deployment with TOKENMIZER_REQUEST_TIMEOUT; a value of
-    # 0 or less restores the SDK default, for anyone who really does want
-    # to wait.
-    request_timeout: float = _env_timeout()
+    # Set from settings.request_timeout by build_provider() below; a
+    # bare BaseProvider (as tests construct) gets this class default. Env
+    # parsing/validation lives once in config/settings.py, same as every
+    # other TOKENMIZER_* value — not read from os.environ here.
+    request_timeout: float = 120.0
 
     def __init__(self, api_key: str = "", model: str = ""):
         self.api_key = api_key
@@ -1150,4 +1131,11 @@ def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
     if provider not in mapping:
         raise ValueError(f"Unknown provider: {provider!r}. Valid: {list(mapping)}")
 
-    return mapping[provider]()
+    instance = mapping[provider]()
+    # request_timeout is a Settings field (config/settings.py), not read
+    # from the environment here — getattr covers a caller that passes
+    # something settings-shaped without it, falling back to the class
+    # default rather than raising.
+    instance.request_timeout = getattr(settings, "request_timeout",
+                                       instance.request_timeout)
+    return instance

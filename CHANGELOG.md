@@ -215,6 +215,25 @@ those two they had.
   wearing a bound, so a test recounts the contents after sets,
   evictions, invalidations and overwrites.
 
+### Fixed — the request-timeout setting broke the repo's own env-var rule
+
+`request_timeout` was added to `providers.py` as a bespoke
+`os.environ.get("TOKENMIZER_REQUEST_TIMEOUT")` with its own parsing and
+its own warn-and-fall-back on a bad value. `CONTRIBUTING.md` says
+plainly that no module outside `config/settings.py` reads the
+environment directly, for exactly the reason this one now demonstrates:
+a second place with its own float-parsing and its own fallback behaviour
+is a second thing to get right, and this one did not match how every
+other setting handles a bad value.
+
+Now a normal `Settings.request_timeout` field. A malformed value is a
+`pydantic.ValidationError`, the same as a malformed `cache.max_size` or
+`terse_output.style` — one behaviour for a bad env var, not one per
+field. `build_provider()` carries it from `settings` onto the
+constructed instance; a bare `BaseProvider()`, as tests build directly,
+still gets the 120s class default. The environment variable name and
+observed behaviour are unchanged.
+
 ### Fixed — three ways load turned into an outage
 
 - **Nothing bounded concurrent background extraction.** The comment above

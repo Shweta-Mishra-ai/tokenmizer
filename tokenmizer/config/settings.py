@@ -291,6 +291,17 @@ class Settings(BaseSettings):
     preferences: PreferenceSettings = Field(default_factory=PreferenceSettings)
     terse_output: TerseOutputSettings = Field(default_factory=TerseOutputSettings)
 
+    # How long an upstream provider call may hang before it is
+    # abandoned. Every vendor SDK used by providers/providers.py
+    # defaults to 600 seconds; on a proxy that is not a timeout, it is
+    # an outage — a hung upstream holds the request, the session lock,
+    # the extraction slot and the session's place in the graph cache for
+    # ten minutes, and a handful of them is the whole worker. 120s
+    # matches what the Ollama adapter already used before this was a
+    # setting. 0 or less restores each SDK's own default, for anyone who
+    # genuinely wants to wait.
+    request_timeout: float = 120.0
+
     # Server
     # Was "0.0.0.0" (all interfaces) — the CLI's `serve` command didn't
     # even read this field until this fix (see cli.py), so the old
