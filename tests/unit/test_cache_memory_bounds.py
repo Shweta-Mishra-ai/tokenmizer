@@ -75,7 +75,14 @@ class TestExpiredEntriesAreReclaimed:
     def test_a_dead_entry_nobody_asks_for_is_swept(self):
         """Expiry used to be checked only on lookup, so an entry nobody
         queries again sat in memory until LRU pressure reached it."""
-        c = _cache(ttl_seconds=0, max_size=10_000)
+        # -1, not 0: is_expired() is `elapsed > ttl_seconds`, and a tight
+        # loop can run entirely inside ONE tick of a coarse wall clock —
+        # Windows' time.time() resolution is ~15ms, so `elapsed > 0` was
+        # false for entries created in the same tick as the check, and
+        # this failed there while passing everywhere else with finer
+        # clocks. -1 makes "already expired" true regardless of clock
+        # granularity, without changing what code path is exercised.
+        c = _cache(ttl_seconds=-1, max_size=10_000)
         for i in range(c._SWEEP_EVERY + 5):
             c.set(f"p{i}", "x" * 200, session_id="s")
 
