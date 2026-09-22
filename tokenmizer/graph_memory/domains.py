@@ -39,10 +39,13 @@ rather than a measurement.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 
 from tokenmizer.graph_memory.patterns import _SPAN_CHAR
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -235,7 +238,52 @@ PACKS: dict[str, DomainPack] = {
 }
 
 
-def get_pack(name: str | None) -> DomainPack:
+# Bad domain values already warned about, so a long session does not log
+# once per turn for one mistake made once at construction. Keyed on the
+# repr because the offending value need not be hashable.
+_warned_domains: set[str] = set()
+
+
+def normalize_domain(name) -> str:
+    """The canonical pack key for `name`, or `"coding"`.
+
+    One function, because there were two copies of
+    `(name or "coding").strip().lower()` — here and in
+    `get_hybrid_extractor` — and adding a type guard to only one of them
+    left the other still raising `AttributeError` on the same public
+    call. A rule written twice is a rule enforced once.
+
+    `name` arrives from `GraphMemory(domain=...)`, which is a public
+    export, so it is whatever the caller passed. A non-string used to
+    reach `.strip()` and raise three frames below the call that caused
+    it — the same deferred failure the corpus loader was fixed for. An
+    unknown TYPE is an unknown name: it degrades to coding like any
+    other, but says so once, because unlike a typo'd string a
+    non-string is unambiguously a programming error.
+    """
+    if name is not None and not isinstance(name, str):
+        # repr() is taken ONCE, here, and the result is what both the
+        # dedupe key and the log message use. Passing the raw value to
+        # the logger's %r instead looks equivalent and is not: logging
+        # formats lazily, so a __repr__ that raises would escape this
+        # guard and surface from inside the logging machinery — turning
+        # a degraded fallback back into the crash it exists to prevent.
+        try:
+            shown = repr(name)
+        except Exception:
+            shown = f"<unreprable {type(name).__name__}>"
+        key = f"{type(name).__name__}:{shown}"[:120]
+        if key not in _warned_domains:
+            _warned_domains.add(key)
+            logger.warning(
+                "domain must be a string or None, got %s (%s) — falling "
+                "back to the coding pack", type(name).__name__, shown,
+            )
+        return "coding"
+    return (name or "coding").strip().lower()
+
+
+def get_pack(name) -> DomainPack:
     """The pack for `name`, or the coding pack — which adds nothing, so an
     unknown name degrades to today's behaviour rather than to nothing."""
-    return PACKS.get((name or "coding").strip().lower(), CODING)
+    return PACKS.get(normalize_domain(name), CODING)

@@ -27,7 +27,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tokenmizer.graph_memory.domains import PACKS, get_pack  # noqa: E402
+from tokenmizer.graph_memory import domains as domains_mod  # noqa: E402
+from tokenmizer.graph_memory.domains import (  # noqa: E402
+    PACKS,
+    get_pack,
+    normalize_domain,
+)
 from tokenmizer.graph_memory.graph import GraphMemory  # noqa: E402
 from tokenmizer.graph_memory.hybrid_extractor import (  # noqa: E402
     HybridExtractor,
@@ -146,9 +151,99 @@ class TestDegradesToCoding:
         assert pack.name == "coding"
         assert pack.decisions == () and pack.errors == ()
 
+    @pytest.mark.parametrize("name,expected", [
+        ("research", "research"), ("  research  ", "research"),
+        ("RESEARCH", "research"), ("ReSeArCh", "research"),
+        ("ops", "ops"), ("product", "product"),
+    ])
+    def test_a_valid_name_is_normalised_then_resolved(self, name, expected):
+        """The strip/lower was only ever tested on the degrade path, so
+        nothing pinned that it resolves a real pack through the same
+        normalisation."""
+        assert get_pack(name).name == expected
+
     def test_the_extractor_cache_is_per_domain(self):
         assert get_hybrid_extractor("ops") is get_hybrid_extractor("ops")
         assert get_hybrid_extractor("ops") is not get_hybrid_extractor("research")
+
+    def test_the_cache_key_is_normalised_too(self):
+        """Otherwise "ops", " ops" and "OPS" each build and cache their
+        own identical extractor."""
+        assert get_hybrid_extractor("ops") is get_hybrid_extractor("  OPS  ")
+
+
+class TestANonStringDomainDoesNotCrash:
+    """`GraphMemory` is a public export and `domain=` is one of its
+    parameters, so the value is whatever a caller passed. A non-string
+    used to reach `.strip()` and raise AttributeError three frames below
+    the call that caused it — the same deferred-failure shape the corpus
+    loader was fixed for.
+
+    It was in TWO places: `get_pack` and `get_hybrid_extractor` held the
+    same `(name or "coding").strip().lower()` expression, and guarding
+    only the first left the public call still crashing in the second.
+    Both now go through `normalize_domain`.
+    """
+
+    @pytest.mark.parametrize("bad", [123, 3.5, True, ["research"], {"a": 1},
+                                     object()])
+    def test_get_pack_degrades_instead_of_raising(self, bad):
+        assert get_pack(bad).name == "coding"
+
+    @pytest.mark.parametrize("bad", [123, ["research"], {"a": 1}])
+    def test_normalize_domain_returns_the_coding_key(self, bad):
+        assert normalize_domain(bad) == "coding"
+
+    @pytest.mark.parametrize("bad", [123, ["research"]])
+    def test_the_extractor_factory_degrades_too(self, bad):
+        """The second copy of the expression — this is the one that was
+        still raising after get_pack alone was fixed."""
+        assert get_hybrid_extractor(bad) is get_hybrid_extractor("coding")
+
+    def test_the_public_graph_api_survives_it(self, tmp_path):
+        """End to end through the exported class, which is how a library
+        user would actually hit this."""
+        g = GraphMemory("bad-domain", storage_dir=str(tmp_path), domain=123)
+        g.extract_from_messages([
+            {"role": "user", "content": "Building an auth service"},
+            {"role": "assistant",
+             "content": "Completed: rate limiting with slowapi on every route"},
+        ], incremental=False)
+
+        assert any("rate limiting" in n.label.lower()
+                   for n in g._nodes.values()), (
+            "it must still extract with the coding pack, not just avoid "
+            "the crash"
+        )
+
+    def test_it_says_so_rather_than_degrading_silently(self, caplog):
+        domains_mod._warned_domains.clear()
+        with caplog.at_level("WARNING"):
+            get_pack(12345)
+
+        assert "domain must be a string" in caplog.text
+        assert "12345" in caplog.text, "the offending value names itself"
+
+    def test_it_warns_once_per_value_not_once_per_turn(self, caplog):
+        """extract_from_messages() calls get_hybrid_extractor() every
+        turn, so warning per call would log the same mistake all session
+        for one bad argument passed once at construction."""
+        domains_mod._warned_domains.clear()
+        with caplog.at_level("WARNING"):
+            for _ in range(5):
+                get_pack(999)
+
+        assert caplog.text.count("domain must be a string") == 1
+
+    def test_a_value_whose_repr_raises_is_still_handled(self):
+        """The warn-once key is built from repr(), so a __repr__ that
+        throws must not turn a degraded fallback into a crash."""
+        class _Hostile:
+            def __repr__(self):
+                raise RuntimeError("no repr for you")
+
+        domains_mod._warned_domains.clear()
+        assert get_pack(_Hostile()).name == "coding"
 
 
 class TestResumeVocabulary:

@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from tokenmizer.graph_memory.domains import get_pack
+from tokenmizer.graph_memory.domains import get_pack, normalize_domain
 from tokenmizer.graph_memory.patterns import (
     _ALREADY_FIXED,
     _CATEGORY_NOUN,
@@ -1116,7 +1116,10 @@ def get_hybrid_extractor(domain: str | None = None) -> HybridExtractor:
             domain = get_settings().domain
         except Exception:
             domain = "coding"
-    key = (domain or "coding").strip().lower()
+    # Shared with get_pack via domains.normalize_domain: this line and
+    # that one were the same expression written twice, and a type guard
+    # added to one of them left this one still raising AttributeError.
+    key = normalize_domain(domain)
     if key not in _extractors:
         _extractors[key] = HybridExtractor(domain=key)
     return _extractors[key]
