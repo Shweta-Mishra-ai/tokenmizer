@@ -9,6 +9,39 @@ on Windows: the conditions of a Claude Code user with a session worth
 remembering. Suite is now 769 tests; every published number below was
 re-derived from a run.
 
+### Fixed — a non-string `domain` crashed the public graph API, in two places
+
+`GraphMemory` is in `tokenmizer.__all__` and `domain=` is one of its
+parameters, so the value is whatever a caller passed. A non-string
+reached `(name or "coding").strip()` and raised `AttributeError` three
+frames below the call that caused it — the same deferred-failure shape
+the corpus loader was fixed for one entry above.
+
+It was in **two** places. `get_pack` and `get_hybrid_extractor` each held
+their own copy of `(name or "coding").strip().lower()`, and guarding only
+the first left the public call still crashing in the second — caught
+because the fix was verified end-to-end through `GraphMemory` rather than
+against `get_pack` alone. Both now go through one `normalize_domain()`.
+
+An unknown *type* is an unknown name: it degrades to the coding pack like
+any other unknown, but says so — once per distinct value, not once per
+turn, since `extract_from_messages()` re-resolves the extractor on every
+call and one bad argument passed once at construction should not log all
+session.
+
+The warning takes `repr()` **itself**, once, and logs the resulting
+string. Passing the raw value to the logger's `%r` looks equivalent and
+is not: logging formats lazily, so a `__repr__` that raises escapes the
+guard and surfaces from inside the logging machinery — turning the
+degraded fallback back into the crash it exists to prevent. Found by a
+test with a deliberately hostile `__repr__`, which failed against the
+first version of this fix.
+
+Also covers what `get_pack` never had a test for: that a *valid* name is
+normalised (`"  ReSeArCh  "` → the research pack) rather than only the
+degrade path, and that the extractor cache keys on the normalised name so
+`"ops"`, `" ops"` and `"OPS"` do not each build their own.
+
 ### Fixed — the eval harness's own corpus loader, and the coverage gaps around it
 
 An automated review bot flagged four functions in `benchmarks/eval/` as
