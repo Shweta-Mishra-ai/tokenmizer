@@ -9,6 +9,32 @@ on Windows: the conditions of a Claude Code user with a session worth
 remembering. Suite is now 769 tests; every published number below was
 re-derived from a run.
 
+### Fixed — the eval harness's own corpus loader, and the coverage gaps around it
+
+An automated review bot flagged four functions in `benchmarks/eval/` as
+under-tested on PR #64. Checked individually rather than acted on
+wholesale: two were already covered (`IGNORE_PACKS` via its effect on
+F1, `Session.pack` via the per-pack corpus check in
+`test_domain_packs.py`), and two were real gaps.
+
+- **`extract()`'s second return value had no test anywhere.** It is the
+  set of FIXES-edge label pairs `label_quality`'s near-duplicate check
+  exempts — untested, it could go permanently empty and nothing would
+  notice; `label_quality` keeps running, it just stops exempting
+  anything. Now pinned against a real committed corpus session
+  (`flaky_ci`), not a synthetic one built for the test.
+- **`Session.pack` reaching `GraphMemory(domain=...)`** was implied by
+  an F1-level test but never asserted directly.
+
+And one real bug found while writing those tests: `Session.pack` was
+the only field `corpus._validate()` did not type-check. Every other
+field there raises `CorpusError` loudly at load time — the module's own
+docstring promises exactly that, "raised loudly rather than skipped" —
+but a non-string `pack` in a malformed corpus file loaded silently and
+only failed three calls later, inside `domains.py`, as
+`AttributeError: 'int' object has no attribute 'strip'`. Now caught at
+the point the docstring already promised.
+
 ### Fixed — the graph reported conflicts, fragments and changes that were not real
 Four defects a reader takes for data, all of them visible in the resume
 block, which is the thing the product exists to produce.

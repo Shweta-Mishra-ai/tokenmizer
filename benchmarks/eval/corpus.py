@@ -129,6 +129,20 @@ def _validate(raw: dict, path: Path) -> Session:
         if not isinstance(m, dict) or "role" not in m or "content" not in m:
             raise CorpusError(f"{path.name}: message {i} needs 'role' and 'content'")
 
+    pack = raw.get("pack")
+    if pack is not None and not isinstance(pack, str):
+        # Every other field here is checked; this one was not, and the
+        # failure it produces without a check is instructive: not a
+        # CorpusError at load time but an AttributeError three calls
+        # later inside domains.py, when get_pack() tries pack.strip() on
+        # whatever JSON type slipped through. Caught here instead, at
+        # the point this module's own docstring promises: "raised
+        # loudly rather than skipped".
+        raise CorpusError(
+            f"{path.name}: pack must be a string or absent, "
+            f"got {type(pack).__name__}"
+        )
+
     gt = raw["ground_truth"]
     unknown = set(gt) - set(CATEGORIES)
     if unknown:
