@@ -59,6 +59,8 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_API_KEY` | *(empty)* | Client auth for TokenMizer itself. Empty = no auth, single shared principal |
 | `TOKENMIZER_PROVIDER` | `anthropic` | Upstream provider |
 | `TOKENMIZER_DEFAULT_MODEL` | `claude-sonnet-4-6` | Used when the request names no model |
+| `TOKENMIZER_MODEL_MAP` | `{}` | Client model name → the model actually sent upstream, as JSON. Exact match, applied once, reported back in `tokenmizer.model_mapped_from` |
+| `TOKENMIZER_STATE_BACKEND` | `memory` | Where the rate limiter's token buckets live: `memory` or `sqlite`. See the note below — `memory` enforces the limit once **per worker** |
 | `TOKENMIZER_<PROVIDER>_API_KEY` | *(empty)* | Upstream key — `ANTHROPIC`, `OPENAI`, `GEMINI`, `GROK`, `DEEPSEEK`, `MISTRAL`, `COHERE`, `OPENROUTER` |
 | `TOKENMIZER_PROXY_HOST` | `127.0.0.1` | Bind address. `0.0.0.0` accepts remote connections — set an API key first |
 | `TOKENMIZER_TRUST_PROXY_HEADERS` | `false` | Read `X-Forwarded-For` for rate-limit identity. Only enable behind a proxy you control; otherwise callers can forge it |
@@ -76,6 +78,28 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_CACHE__MAX_SEMANTIC_SCAN` | `2000` | Most-recent entries compared on a cache miss. The semantic layer is an O(n) loop on the request path; this bounds its worst case |
 | `TOKENMIZER_REQUEST_TIMEOUT` | `120` | Seconds an upstream call may hang. Every vendor SDK defaults to 600, which on a proxy holds a request, its session lock and its extraction slot for ten minutes. `0` restores the SDK default |
 | `TOKENMIZER_COMPRESSION__ENABLED` | `true` | Prompt compression |
+| `TOKENMIZER_COMPRESSION__ENGINE` | `heuristic` | `heuristic` or `llmlingua2`. The ML engine needs `pip install tokenmizer[compression]`; without it the heuristic runs and says so |
+| `TOKENMIZER_COMPRESSION__MIN_TOKENS_TO_COMPRESS` | `300` | Below this a prompt is passed through untouched — compressing a short prompt costs more than it saves |
+| `TOKENMIZER_DOMAIN` | `coding` | Which vocabulary the extractor runs: `coding`, `research`, `ops` or `product`. Adds phrasings for that domain; `coding` is what has always run. See [benchmarks.md](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) for each pack's measured numbers |
+| `TOKENMIZER_API_KEYS` | *(empty)* | Extra accepted credentials, as JSON. **Each one is a separate principal**, so callers get isolated sessions. With this empty the deployment is single-tenant: every caller shares one principal and one session namespace |
+| `TOKENMIZER_CORS_ORIGINS` | `["http://localhost:3000","http://localhost:8000"]` | Browser origins allowed to call the proxy, as JSON. Widen it only to origins you control — a wildcard lets any page a user visits spend their key |
+| `TOKENMIZER_PROXY_PORT` | `8000` | Port the CLI's `serve` binds to, alongside `TOKENMIZER_PROXY_HOST` |
+| `TOKENMIZER_MEMORY__MAX_TOKENS_BEFORE_SUMMARY` | `4000` | Conversation size at which older turns are summarised rather than carried verbatim |
+| `TOKENMIZER_MEMORY__RECENT_TURNS_VERBATIM` | `10` | How many recent turns always survive windowing untouched |
+| `TOKENMIZER_GRAPH_CHECKPOINT__MIN_CONFIDENCE` | `0.65` | Extraction confidence below which a fact is not written to the graph |
+| `TOKENMIZER_GRAPH_CHECKPOINT__SEMANTIC_RETRIEVAL` | `auto` | Rank injected context by embeddings. `auto` = on when the model actually loads, resolved once at startup; `true`/`false` pin it |
+| `TOKENMIZER_GRAPH_CHECKPOINT__CROSS_SESSION_RECALL` | `false` | Let a session retrieve facts from the same principal's other sessions |
+| `TOKENMIZER_CACHE__TTL_SECONDS` | `3600` | How long a cached answer stays valid |
+| `TOKENMIZER_CACHE__SHARE_SCOPE` | `session` | `session` scopes every cached prompt to its session. `shared` lets non-sensitive prompts cross sessions for a higher hit rate — read the sensitivity heuristic in `semantic_cache/cache.py` before enabling it |
+| `TOKENMIZER_COMPRESSION__RATIO` | `0.5` | Target share of the prompt to keep. Only the `llmlingua2` engine honours it; the heuristic engine drops what it can prove is safe to drop and ignores a ratio |
+| `TOKENMIZER_MEMORY__ENABLED` | `true` | Conversation windowing and summarisation. Off means every turn is sent verbatim |
+| `TOKENMIZER_GRAPH_CHECKPOINT__EXTRACTION_MODEL` | *(empty)* | Pin a different model **of the configured provider** for extraction — usually a cheaper one. Empty uses `default_model` |
+| `TOKENMIZER_PREFERENCES__ENABLED` | `false` | Cross-session preference memory. Off by default on purpose — see the section below before enabling it |
+| `TOKENMIZER_PREFERENCES__MAX_ITEMS` | `4` | Preference lines injected into the system prompt |
+| `TOKENMIZER_PREFERENCES__MAX_CHARS` | `400` | Total size of those lines |
+| `TOKENMIZER_TERSE_OUTPUT__ENABLED` | `true` | Inject the output-style instruction at all |
+| `TOKENMIZER_TERSE_OUTPUT__LEVEL` | `full` | How hard `lite`/`full`/`ultra` push, both in the injected instruction and in how much boilerplate the response trimmer strips. Ignored for the injected prompt when `style: minimal`, which is a single fixed instruction |
+| `TOKENMIZER_TERSE_OUTPUT__STYLE` | `terse` | Output-style prompt injected each turn: `terse`, `minimal`, or `off` |
 | `TIKTOKEN_CACHE_DIR` | *(unset)* | Where tiktoken looks for its BPE vocabulary. Set it, and pre-download, to run without egress — the Docker image does this at build time |
 
 Two variables are worth calling out because they fail loudly rather than

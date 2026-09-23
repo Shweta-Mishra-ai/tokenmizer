@@ -494,3 +494,95 @@ def test_internal_markdown_anchors_point_at_real_headings():
         "these links point at a fragment no heading actually produces "
         f"(dead in-page anchor once clicked): {offenders}"
     )
+
+
+def test_config_reference_documents_every_setting():
+    """Every `Settings` field must appear in docs/configuration.md as the
+    environment variable that sets it.
+
+    This file already enforces that the README documents every endpoint,
+    with the reason written above it: "docs drift silently; a script does
+    not". Settings had no such guard, and drifted — twenty of them, six
+    top-level and fourteen nested, were settable and undocumented,
+    including `request_timeout`, which decides how long a hung upstream
+    holds a worker.
+
+    The exclusions below are deliberate and each names why. They are
+    settings that exist only so an old config still loads; documenting
+    them as if they did something would be worse than the silence.
+    """
+    import re
+
+    from pydantic import BaseModel
+
+    from tokenmizer.config.settings import Settings
+
+    # Accepted for backward compatibility, implemented by nothing. Both
+    # are described under "Not implemented, despite being configurable"
+    # in the same document — as dead settings, not as knobs.
+    excluded = {
+        "redis_url",                    # never read; state_backend=redis is a no-op
+        "routing.enabled",              # deprecated block, removed next release
+        "routing.simple_model",
+        "routing.medium_model",
+        "routing.complex_model",
+        "routing.complexity_threshold",
+    }
+
+    doc = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+    documented = set(re.findall(r"TOKENMIZER_([A-Z0-9_]+)", doc))
+
+    def is_documented(env_suffix: str) -> bool:
+        if env_suffix in documented:
+            return True
+        # The provider keys share one row: `TOKENMIZER_<PROVIDER>_API_KEY`.
+        return env_suffix.endswith("_API_KEY") and "<PROVIDER>_API_KEY" in doc
+
+    undocumented = []
+    for name, field in Settings.model_fields.items():
+        annotation = field.annotation
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            for sub in annotation.model_fields:
+                dotted = f"{name}.{sub}"
+                if dotted not in excluded and not is_documented(
+                        f"{name}__{sub}".upper()):
+                    undocumented.append(dotted)
+        elif name not in excluded and not is_documented(name.upper()):
+            undocumented.append(name)
+
+    assert not undocumented, (
+        "settings settable but absent from docs/configuration.md: "
+        f"{sorted(undocumented)}"
+    )
+
+
+def test_the_config_reference_documents_no_setting_that_does_not_exist():
+    """The other direction: a documented `TOKENMIZER_*` variable that no
+    field backs is a promise the process ignores, which is how
+    `/api/analyze` got documented for an endpoint that did not exist."""
+    import re
+
+    from pydantic import BaseModel
+
+    from tokenmizer.config.settings import Settings
+
+    real = set()
+    for name, field in Settings.model_fields.items():
+        real.add(name.upper())
+        annotation = field.annotation
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            for sub in annotation.model_fields:
+                real.add(f"{name}__{sub}".upper())
+
+    # Not Settings fields: the config path is read before Settings exists,
+    # ENV gates the production safety check, and the placeholder row
+    # stands for the eight provider keys.
+    known_non_fields = {"CONFIG", "ENV", "<PROVIDER>_API_KEY"}
+
+    doc = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+    documented = set(re.findall(r"`TOKENMIZER_([A-Z0-9_<>]+)`", doc))
+
+    phantom = sorted(documented - real - known_non_fields)
+    assert not phantom, (
+        f"docs/configuration.md documents variables nothing reads: {phantom}"
+    )
