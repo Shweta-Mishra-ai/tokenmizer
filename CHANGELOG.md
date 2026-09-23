@@ -6,8 +6,59 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1448 tests; every published number below was
+remembering. Suite is now 1466 tests; every published number below was
 re-derived from a run.
+
+### Fixed — two places TokenMizer dropped information, not just tokens
+
+Every layer here is lossy by design; the line that matters is *what* it
+is allowed to lose. An audit for information loss — as opposed to
+crashes — found that line crossed in two places, both silently and both
+on the default configuration.
+
+**The output trimmer edited the answer a person reads.** It is the one
+stage that rewrites text after the model wrote it, so a deletion there
+is invisible: there is nothing to compare the answer against. Its own
+docstring promised "removes ONLY structural filler — never content", and
+that was false four ways, each reproduced before fixing:
+
+- `^` with `re.MULTILINE` matched the start of *any* line, so `Sure! `
+  was deleted from inside a fenced Python string literal — corrupting
+  code the reader then pastes.
+- The same anchor cut the first word off a real mid-answer sentence:
+  "Sure, the second is slower, but it is correct under concurrency."
+- `Is there anything (?:else|more)[^.!?]*[.!?]$` swallowed a genuine
+  question about specific state — "Is there anything else in the 003
+  batch you want rolled back?" — so the reader never saw they were
+  asked anything.
+- On `ultra`, the "In summary, …" rule deleted the only paragraph in the
+  answer carrying any numbers.
+
+Both halves of the fix already existed in this package and had simply
+never been applied to the response path: `CodeBlockGuard` routes code
+around the lossy prompt-side stages, and the prompt-side `_FILLER` list
+was anchored to a sentence start after it was caught corrupting words
+mid-token ("pressure" → "pres"). The trimmer now uses both, plus one
+rule the prompt side does not need — a filler phrase is only filler when
+what it swallowed carries no information, so a match holding a number, a
+code span, a path, a flag or a URL is kept whole however boilerplate it
+looks. Generic sign-offs are still removed.
+
+**A shared preamble made two replies one message.** `_msg_hash` hashed
+`text[:500]`, so an assistant reply that opens "Here is the updated
+module. I kept the existing structure…" and only differs past the
+500th character was the *same* message as the one before it. The proxy
+calls `extract_from_messages()` once per request, so the second reply
+arrived in a later call, matched an already-processed hash, and was
+filtered out whole: its decision, error and file were never extracted,
+permanently, with nothing logged. Reproduced with two replies sharing a
+preamble and differing only in their `Decided:` line — one node came out
+instead of two.
+
+This is the same defect `RepetitiveHistoryPruner` was fixed for one
+layer up, where keying on the first 60 characters deleted whole replies
+as duplicates. The hash now covers the whole message; an identical
+message is still deduplicated.
 
 ### Fixed — twenty settings were settable and undocumented, and nothing checked
 
