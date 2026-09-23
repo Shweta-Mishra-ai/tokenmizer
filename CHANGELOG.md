@@ -6,8 +6,31 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 769 tests; every published number below was
+remembering. Suite is now 1448 tests; every published number below was
 re-derived from a run.
+
+### Fixed — twenty settings were settable and undocumented, and nothing checked
+
+`docs/configuration.md` is the reference for what an operator can set.
+Twenty fields were not in it — six top-level and fourteen nested —
+including `request_timeout`, which decides how long a hung upstream holds
+a request, its session lock and its extraction slot.
+
+The drift is the symptom; the missing guard is the cause. This repo
+already asserts that the README documents every endpoint, and the reason
+is written above that test: *"docs drift silently; a script does not"*.
+Settings had no equivalent, so they drifted for as long as nobody looked.
+Two tests now close it in both directions: every `Settings` field must
+appear in the reference as the environment variable that sets it, and
+every `TOKENMIZER_*` variable documented there must be backed by a field
+— the same phantom-endpoint check that caught `/api/analyze` being
+documented for a route that did not exist.
+
+Two settings are excluded on purpose, each named in the test with its
+reason: `redis_url` and the deprecated `routing.*` block are accepted
+only so an existing config still loads, and are already described under
+"Not implemented, despite being configurable". Documenting them as knobs
+would be worse than the silence.
 
 ### Fixed — a malformed `messages` list failed three frames from the call
 
