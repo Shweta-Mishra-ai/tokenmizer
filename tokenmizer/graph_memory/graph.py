@@ -670,6 +670,21 @@ class GraphMemory:
              HybridExtractor.extract(), or the equivalent dict) — use it.
           2. Otherwise run the heuristic pass over the new messages.
         """
+        # Both public entry points into extraction land here —
+        # GraphMemory.extract_from_messages() and Memory.add() — and both
+        # take whatever the caller passes. A non-dict element used to
+        # reach _msg_hash() and die as
+        # `AttributeError: 'str' object has no attribute 'get'`, which
+        # names neither the offending message nor the shape expected, and
+        # in the proxy's background extraction surfaced frames away from
+        # the call that caused it. Raising here names both.
+        for i, m in enumerate(messages):
+            if not isinstance(m, dict):
+                raise TypeError(
+                    f"messages[{i}] must be a mapping with 'role' and "
+                    f"'content' keys, got {type(m).__name__}"
+                )
+
         if incremental:
             new_messages = [m for m in messages
                            if self._msg_hash(m) not in self._processed_hashes]
