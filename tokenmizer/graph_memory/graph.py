@@ -618,10 +618,30 @@ class GraphMemory:
         Hash a message for dedup tracking.
         Handles non-string content: None (empty), list (multimodal — extract text
         parts), dict, or any other type (str() fallback).
+
+        The hash covers the WHOLE message. It used to cover `text[:500]`,
+        which made two different messages sharing a 500-character opening
+        the same message — and since the proxy calls
+        extract_from_messages() once per request, the second one was
+        filtered out as already-processed and never extracted at all.
+
+        A shared opening is the normal case, not a corner one: an
+        assistant reply that begins "Here is the updated module. I kept
+        the existing structure..." runs past 500 characters before it
+        reaches the part that differs, so a session's second decision,
+        error or file could be dropped permanently with nothing logged.
+        Reproduced before fixing: two replies with the same preamble and
+        different `Decided:` lines extracted one node instead of two.
+
+        This is the same defect RepetitiveHistoryPruner was fixed for —
+        it keyed on the first 60 characters and deleted whole replies as
+        duplicates — one layer down, in the extractor rather than the
+        compressor. SHA-1 over a few KB is not a cost worth a silent
+        drop; nothing here was measured to need the prefix.
         """
         content = msg.get("content", "")
         text = _content_to_text(content)
-        return hashlib.sha1(text[:500].encode()).hexdigest()[:16]
+        return hashlib.sha1(text.encode()).hexdigest()[:16]
 
     @staticmethod
     def _extracted_to_dict(extracted) -> dict:
