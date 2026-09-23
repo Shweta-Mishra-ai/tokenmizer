@@ -9,6 +9,23 @@ on Windows: the conditions of a Claude Code user with a session worth
 remembering. Suite is now 769 tests; every published number below was
 re-derived from a run.
 
+### Fixed — a malformed `messages` list failed three frames from the call
+
+`GraphMemory.extract_from_messages(["hi"])` and `Memory.add("hi")` both
+died inside `_msg_hash` as `AttributeError: 'str' object has no attribute
+'get'`, which names neither the offending element nor the shape expected.
+On the proxy's background extraction path — where extraction runs inside
+a broad `except` — it was counted as a silent failure and never surfaced
+at all.
+
+Both entry points now validate the list before touching it and raise
+`TypeError` naming the index and the expected shape. `TypeError` rather
+than `AttributeError` because it is the caller that passed the wrong
+thing; the check runs before any node is written, so a list with a valid
+prefix is rejected whole rather than half-applied. Multimodal `content`
+as a list of parts is unaffected — only the message itself has to be a
+mapping.
+
 ### Fixed — a non-string `domain` crashed the public graph API, in two places
 
 `GraphMemory` is in `tokenmizer.__all__` and `domain=` is one of its
