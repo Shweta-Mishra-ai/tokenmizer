@@ -6,8 +6,99 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1466 tests; every published number below was
+remembering. Suite is now 1551 tests; every published number below was
 re-derived from a run.
+
+### Improved — extraction of how sessions actually talk, measured on text it was not tuned on
+
+The external benchmark in `tokenmizer-research` (memorybench) measured the
+heuristic pass at 53% completed-task recall, 37% pending, 54% decisions
+and 39% errors. Nearly every pattern keyed on a marker ("Done:", "TODO:",
+"Decided:"), and most of a working session states facts without one:
+"wrapped up the CSV export", "the GDPR export is next on the list",
+"Caddy felt like the right call", "ran into pool exhaustion".
+
+Added, per category (`patterns.py`, "Conversational forms"):
+
+- **Completed.** Phrasal verbs, "got X working", a subject with a
+  finished-state predicate ("X is in and working", "the PR's merged"),
+  and checkboxes.
+- **Pending.** To-do headers, negated completion ("haven't started X"),
+  deferral ("circle back to X"), narrated intent (recent window only), a
+  subject with an outstanding-state predicate, "up next is X", and
+  unchecked boxes. To-dos are read over the whole session. They were
+  windowed to the last 20 messages, so one stated early in a session over
+  30 messages never reached the graph.
+- **Decisions.** User imperatives ("Use X", "Build it with X"), "should
+  use X", "we'll go with X", "opting for", "I'd prefer X", and evaluative
+  predicates ("X won out"). A user's proposal ("Can we do this with
+  Celery?") counts only when the next assistant turn accepts it, including
+  when the two arrive in different extraction calls
+  (`heuristic_extract(prior_message=...)`).
+- **Errors.** "Bug:/Error:/Issue:" headers, "ran into X", and observation
+  verbs and "there's X", gated on defect vocabulary so "we're seeing a 20%
+  speedup" stays out.
+- **Files.** Multi-dot names (`vite.config.ts` was recorded as
+  `config.ts`), and extensionless build files with their directory
+  (`fastlane/Fastfile`). `moment.js` and other library names are no longer
+  files.
+- **Graph.** `add_node` merges a completion into the pending task it
+  finishes: containment on counted words, applied to plan/completion pairs
+  only. A task is no longer listed as both done and outstanding.
+
+**Measured** (macro F1, 95% bootstrap CI over sessions):
+
+| Corpus | Before | After |
+|---|---:|---:|
+| memorybench main (n=100) — tuned against | 61% | 92% |
+| held-out v1 (n=80) — used to find the second round | 40% | 79% |
+| **held-out v2 (n=80) — never tuned against** | **33%** | **51%** |
+
+The last row is the one to quote: +17.4 points [+14.6, +20.4] on phrasing
+the fixes never saw, with precision up in every category. The first row is
+fit, not generalisation. The second round of fixes gained 7 points on the
+set it was read from and 2 on v2. Pending recall (19%) and errors (45% F1)
+on v2 are still weak, and marker-free phrasing is out of reach of pattern
+matching. See `tokenmizer-research/benchmarks/results/REPORT_extraction_rounds.md`.
+
+**Cost.** Extraction is about 22% slower (median 15.3 → 18.6 ms per session,
+p95 24 → 31 ms), and the resume block carries about 47% more tokens on the
+main corpus (102 → 150), because it carries more facts. The internal eval
+(`python -m benchmarks.eval`) is unchanged at 97% macro F1.
+
+### Fixed — extraction bugs found on the way, most of them precision
+
+Each was reproduced before it was fixed, and each has a test in
+`tests/unit/test_extraction_conversational.py`. Several predate this
+release.
+
+- Adjectival "failed" was read as a failure. "Background retry for failed
+  webhook deliveries" is a feature, and "haven't started a rollback job
+  for failed deploys" is a to-do.
+- Error labels opened on a contraction's tail ("t started a rollback
+  job", "s work on a memory leak") and closed mid-word ("…missing
+  NSMotionUsageDescrip").
+- Decision verbs matched inside other words. "Excessive allocations
+  c**using** GC pressure" recorded the decision "GC pressure", "TODO:
+  wat**chOS** companion app" recorded "companion app", and "be**cause**"
+  made the next technology look chosen.
+- "Picked up duplicate rows" was read as a choice. "Logistic regression"
+  and "soft deletes" were read as defects.
+- Conditions were read as completions: "once the migration is merged we can
+  deploy" recorded the completed task "we can deploy", and "when the
+  backfill is done…" recorded "When the backfill".
+- A negation after a technology name was ignored: "Kafka wasn't the right
+  call" became "Use Kafka wasn't the right call".
+- "The retry fix landed in the last commit" became "Landed in in the last
+  commit". An intransitive completion verb now takes its subject.
+- `_TASK_WIP` had no word anchor: "re**writing** half of conftest.py"
+  was work in progress.
+- Markdown bold in front of a header (`**Decision:**`) defeated every
+  header pattern.
+- "Use sqlc" was kept beside "sqlc for type-safe database access".
+- A multi-dot filename pattern with an unbounded repeat took 3.5 s on the
+  15 KB adversarial payload. It was bounded before it shipped, and it is
+  pinned.
 
 ### Fixed — two places TokenMizer dropped information, not just tokens
 
