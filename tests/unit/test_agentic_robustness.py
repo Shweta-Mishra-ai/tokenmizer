@@ -362,3 +362,142 @@ def test_a_time_adverbial_before_the_subject_is_not_part_of_it():
     todo = _x([{"role": "assistant", "content":
                 "At some point documenting the model card has to happen too."}]).tasks_todo
     assert todo == ["documenting the model card"], todo
+
+
+# ── Round 5: general constructions, measured on held-out v3 ──────────────────
+
+@pytest.mark.parametrize("text,kind,needle", [
+    ("Payment webhooks: done.", "done", "payment webhooks"),
+    ("[done] the nightly export", "done", "nightly export"),
+    ("Managed to finish the CSV importer.", "done", "csv importer"),
+    ("The retention job went live on Monday.", "done", "retention job"),
+    ("Upcoming: rotating the signing keys.", "todo", "rotating the signing keys"),
+    ("The SSO migration keeps getting pushed.", "todo", "sso migration"),
+    ("The quota dashboard is waiting on review.", "todo", "quota dashboard"),
+    ("The audit trail needs to get done before the release.", "todo", "audit trail"),
+    ("Somebody should look into the cold-start budget.", "todo", "cold-start budget"),
+    ("We landed on Temporal for the workflows.", "decision", "temporal"),
+    ("After benchmarking, Valkey came out ahead.", "decision", "valkey"),
+    ("On-call got paged over a disk-full condition on the primary.", "error", "disk-full condition"),
+    ("The culprit was an unbounded retry loop.", "error", "unbounded retry loop"),
+    ("Error — checksum mismatch on the uploaded archive.", "error", "checksum mismatch"),
+    ("Customers reported double-charged renewals.", "error", "double-charged renewals"),
+])
+def test_general_constructions(text, kind, needle):
+    x = _x([{"role": "assistant", "content": text}])
+    got = {"done": x.tasks_done, "todo": x.tasks_todo + x.tasks_wip,
+           "decision": [d["label"] for d in x.decisions], "error": x.errors}[kind]
+    assert any(needle in g.lower() for g in got), got
+
+
+@pytest.mark.parametrize("text", [
+    "Nothing failed on the last run.",
+    "Shipped the deploy. Nothing failed overnight.",
+    "No jobs crashed this week.",
+    "Fixed by adding a 5 second context timeout in client.go.",
+])
+def test_no_failure_and_fix_descriptions_are_not_errors(text):
+    assert _x([{"role": "assistant", "content": text}]).errors == []
+
+
+def test_went_into_a_file_is_not_a_completion():
+    assert _x([{"role": "assistant", "content": "Most of the afternoon went into api/app.py."}]).tasks_done == []
+
+
+def test_object_window_stops_at_a_full_stop():
+    errors = _x([{"role": "assistant", "content":
+                  "The job failed on the last run. Most of the afternoon went elsewhere."}]).errors
+    assert all("afternoon" not in e for e in errors), errors
+
+
+def test_filename_at_the_end_of_an_error_is_kept_whole():
+    errors = _x([{"role": "assistant", "content":
+                  "The build fails with exit code 1 on the linter step in ci/lint.yml."}]).errors
+    assert any(e.endswith("ci/lint.yml") for e in errors), errors
+
+
+def test_planned_work_is_not_part_of_an_error_label():
+    errors = _x([{"role": "assistant", "content": "We need to fix the memory leak in the parser."}]).errors
+    assert errors == ["memory leak in the parser"], errors
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("Pendiente: migrar la base de datos.", "todo"),
+    ("Fehler: Verbindung abgelehnt.", "error"),
+    ("Erreur: délai dépassé sur l'export.", "error"),
+    ("Decisión: Postgres para pedidos.", "decision"),
+])
+def test_headers_in_other_languages(text, kind):
+    x = _x([{"role": "user", "content": text}])
+    got = {"todo": x.tasks_todo, "error": x.errors, "decision": x.decisions}[kind]
+    assert got, (text, x)
+
+
+def test_keyword_prefilter_never_changes_output():
+    """_PREFILTER skips a pattern when none of its keywords is in the
+    message. That is only safe if each keyword list is a superset; this
+    compares output with and without it."""
+    import dataclasses
+    import glob
+
+    import tokenmizer.graph_memory.hybrid_extractor as H
+
+    sessions = [json.load(open(f))["messages"]
+                for f in sorted(glob.glob("benchmarks/eval/corpus*/*.json"))]
+    sessions += [[{"role": "assistant", "content": t}] for t in (
+        "Deploy failed, rolled back.", "The cache returns stale data after a deploy.",
+        "Query takes 12 seconds, it used to take 200ms.", "stats reported healthy over an empty db",
+        "The fallback is unreachable.", "Rate limiting is implemented.", "The worker keeps restarting.",
+        "Docker build broke after the base image bump.", "one bad read deletes the whole file",
+    )]
+
+    def run():
+        return [dataclasses.asdict(H.HybridExtractor().heuristic_extract(s)) for s in sessions]
+
+    with_filter = run()
+    saved = dict(H._PREFILTER)
+    H._PREFILTER.clear()
+    try:
+        without = run()
+    finally:
+        H._PREFILTER.update(saved)
+    assert with_filter == without
+
+
+def test_llm_prompt_sees_content_blocks_tool_calls_and_language_rules():
+    import asyncio
+
+    seen = {}
+
+    async def fake_model(messages, system, max_tokens):
+        seen["prompt"], seen["system"] = messages[0]["content"], system
+        return {"text": '{"files": ["api/orders.py"]}'}
+
+    msgs = [
+        {"role": "user", "content": "Mujhe backend ka refactor karna hai"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "Editing now."},
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "api/orders.py"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "is_error": True,
+                                      "content": "Traceback (most recent call last):\nKeyError: id"}]},
+    ]
+    result = asyncio.run(HybridExtractor().llm_extract(msgs, fake_model))
+    assert "Editing now. [edited api/orders.py]" in seen["prompt"]
+    assert "[tool error: KeyError: id]" in seen["prompt"]
+    assert "any language" in seen["system"]
+    assert result.files == ["api/orders.py"]
+
+
+def test_a_match_across_a_blanked_quote_is_skipped():
+    assert _x([{"role": "assistant", "content":
+                'The one I found earlier: "retry for failed deliveries" read as an error.'}]).errors == []
+
+
+def test_postfix_status_must_end_its_clause():
+    assert _x([{"role": "assistant", "content":
+                "Now the per-message passes: completed and pending."}]).tasks_done == []
+
+
+def test_observation_verb_is_not_part_of_the_error_label():
+    assert _x([{"role": "assistant", "content": "We found a race in the fixture teardown."}]).errors == [
+        "race in the fixture teardown"]

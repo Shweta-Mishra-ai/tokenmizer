@@ -6,8 +6,46 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1616 tests; every published number below was
+remembering. Suite is now 1648 tests; every published number below was
 re-derived from a run.
+
+### Improved — agent sessions, noise on real text, and faster than before
+
+Measured on a real 900-message agent session, a fuzzer, a scan of every
+regex in the package and a concurrent load test — not only on labelled
+corpora.
+
+- **Agents.** Tool calls and tool results are read (`helpers.tool_signals`:
+  OpenAI `tool_calls`, Anthropic `tool_use`/`tool_result`, Gemini
+  `functionCall`): files from the arguments of tools that change files,
+  errors from failed results. `_msg_hash` hashed text only, so every
+  text-less tool turn after the first was skipped as already processed.
+  The LLM extraction prompt now sees content-block messages (dropped
+  whole before), tool edits and tool errors, and is told the conversation
+  may be in any language.
+- **Noise.** Quoted examples, table rows and code blocks are masked before
+  the prose patterns run. Messages that are not English get
+  language-neutral extraction only (paths, exception names, checkboxes,
+  headers — including `Pendiente:`, `Fehler:`, `Erreur:`, `Decisión:`).
+  On the real session, judged node by node: about 45% of stored facts
+  were genuine before, about 87% after.
+- **Hostile input.** A message of `"x"` + 4,000 spaces + `"x"` took 10
+  seconds in `_TASK_DONE_PASSIVE`; seven more patterns were quadratic on
+  blank lines, digit runs or hyphens. All linear now, pinned by tests. A
+  lone surrogate (`"\ud800"`, legal JSON) crashed extraction; it no longer
+  can. `max_tokens`, `temperature` and `top_p` are range-checked (422).
+- **Speed.** A keyword prefilter skips the expensive subject-window
+  patterns on messages that cannot match them — output identical with and
+  without it on 530 sessions. Extraction is now faster than before this
+  release despite everything added: median 15.3 → 13.5 ms per session,
+  p95 23.9 → 19.7 ms.
+- **More general constructions** ("X: done", "[done] X", "X keeps
+  slipping", "has to get done", "we landed on X", "X came out ahead",
+  "the pager went off for X", "the root cause was X"), and fixes for
+  "Nothing failed on the last run" (was an error), "…went into app.py"
+  (was a completed task) and "Fixed by adding a timeout" (was an error).
+  Held-out v3, written before this round and never tuned against, is the
+  measurement: see tokenmizer-research.
 
 ### Improved — extraction of how sessions actually talk, measured on text it was not tuned on
 

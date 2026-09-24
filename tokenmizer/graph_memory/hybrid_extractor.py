@@ -52,7 +52,9 @@ from tokenmizer.graph_memory.patterns import (
     _ENDPOINT_ONLY,
     _ENV,
     _ERROR_ABSENCE,
+    _ERROR_ALERT,
     _ERROR_CANNOT_INITIAL,
+    _ERROR_CAUSE,
     _ERROR_COUNT,
     _ERROR_DAMAGE,
     _ERROR_DETERMINER,
@@ -101,9 +103,12 @@ from tokenmizer.graph_memory.patterns import (
     _TASK_DONE,
     _TASK_DONE_CHECK,
     _TASK_DONE_GOT,
+    _TASK_DONE_MANAGED,
     _TASK_DONE_PASSIVE,
     _TASK_DONE_PHRASAL,
+    _TASK_DONE_POSTFIX,
     _TASK_DONE_STATE,
+    _TASK_DONE_WENT,
     _TASK_TODO,
     _TASK_TODO_CHECK,
     _TASK_TODO_DEFER,
@@ -111,6 +116,7 @@ from tokenmizer.graph_memory.patterns import (
     _TASK_TODO_HEADER,
     _TASK_TODO_INTENT,
     _TASK_TODO_NOT_DONE,
+    _TASK_TODO_OWED,
     _TASK_TODO_STATE,
     _TASK_WIP,
     _WIP_LEAD,
@@ -198,7 +204,12 @@ def _word_bounded(content: str, start: int, end: int) -> tuple[int, int]:
         while start > 0 and (content[start - 1].isalnum() or content[start - 1] in "-_"):
             start -= 1
     if 0 < end < len(content) and content[end - 1].isalnum():
-        while end < len(content) and (content[end].isalnum() or content[end] == "_"):
+        # Through the rest of the word — and through a `.`, `/` or `-` that
+        # sits INSIDE a name (`ci/lint.yml`), never a sentence-ending one.
+        while end < len(content) and (
+                content[end].isalnum() or content[end] == "_" or (
+                    content[end] in "./-" and end + 1 < len(content)
+                    and content[end + 1].isalnum())):
             end += 1
     return start, max(start, end)
 
@@ -238,6 +249,22 @@ def _strip_emphasis(text: str) -> str:
     return _EMPHASIS.sub(r"\1", text) if "**" in text else text
 
 
+# A failure whose subject is a negative quantifier did not happen: "Nothing
+# failed on the last run", "No tests failed", "None of the jobs errored".
+# Measured on held-out v2 that one distractor alone was 27 false errors.
+_NEGATIVE_SUBJECT = re.compile(
+    r"(?:nothing|none|no one|nobody|zero|neither|no\s+\w+(?:\s+\w+)?\s+"
+    r"(?:failed|fails|errored|crashed|broke))\b",
+    re.IGNORECASE,
+)
+
+_FIX_DESCRIPTION = re.compile(
+    r"(?:(?:fixed|resolved|solved|mitigated|worked around|patched)\s+)?(?:it\s+)?by\s+"
+    r"(?:adding|introducing|setting|configuring|enabling|applying|using|switching|"
+    r"raising|lowering|increasing|bumping|wrapping)\b",
+    re.IGNORECASE,
+)
+
 # An observed object that denies there is anything wrong.
 _NONE_LEAD = re.compile(r"(?:no|not|none|nothing|zero|never|0)\b", re.IGNORECASE)
 
@@ -255,8 +282,11 @@ _GERUND_INITIAL = re.compile(r"^\s*\w+ing\b(?!\s+(?:is|are|was|were)\b)", re.IGN
 
 
 def _is_work_subject(label: str) -> bool:
+    # "There's a breaking change shipped in a minor version": an
+    # existential introduces something, it does not name finished work.
     return (_is_subject_label(label) and not _PERSON_FINAL.search(label)
-            and not _GERUND_INITIAL.match(label))
+            and not _GERUND_INITIAL.match(label)
+            and not re.match(r"there(?:'s| is| are| was| were)\b", label, re.IGNORECASE))
 
 
 def _is_subject_label(label: str) -> bool:
@@ -275,6 +305,7 @@ def _is_subject_label(label: str) -> bool:
 # could carry. "Everything is in place" is not a task called "Everything".
 _NOT_A_SUBJECT = frozenset({
     "it", "this", "that", "these", "those", "they", "them", "there", "which",
+    "we", "i", "you", "he", "she", "everyone", "nobody", "no one",
     "everything", "anything", "something", "nothing", "all", "all of it",
     "all of this", "the rest", "that part", "this part", "the first part",
     "each", "both", "either", "neither", "one", "the other", "the latter",
@@ -297,7 +328,7 @@ _NOT_A_SUBJECT = frozenset({
 # where _ERROR_SYMPTOM's subject window, reading backwards from a symptom
 # word, took "seeing a flaky" out of "We're seeing a flaky test failing".
 _ALL_ERROR_PATTERNS = (
-    _ERROR_HEADER, _ERROR_ENCOUNTER, _ERROR_OBSERVED,
+    _ERROR_HEADER, _ERROR_ENCOUNTER, _ERROR_OBSERVED, _ERROR_ALERT, _ERROR_CAUSE,
     _ERROR_TYPED, _ERROR_STATUS, _ERROR_STATUS_NAMED,
     _ERROR_VULN, _ERROR_INTEGRITY,
     _ERROR_DAMAGE, _ERROR_ABSENCE, _ERROR_INERT,
@@ -306,6 +337,51 @@ _ALL_ERROR_PATTERNS = (
     _ERROR_FAILED_SUBJECT, _ERROR_COUNT, _ERROR_SLOWER,
     _ERROR_CANNOT_INITIAL,
 )
+
+# Keyword prefilter for the patterns that cost the most.
+#
+# The subject-window patterns read up to forty characters behind every word
+# boundary before they test their keyword, so they pay that price on every
+# message whether or not the message contains the keyword at all. Profiled
+# over ~490 KB of corpus and real-session text, five of them were half the
+# extraction time. Each entry lists substrings at least one of which every
+# match must contain (the pattern's own keywords, lower-cased and cut to a
+# common stem); a message containing none of them cannot match and the
+# pattern is skipped. A superset by construction — and checked: extraction
+# output is identical with and without this table on every corpus, a real
+# 900-message session and the fuzz inputs (tests/unit/test_agentic_robustness.py).
+_PREFILTER: dict = {
+    id(_ERROR_FAILED_SUBJECT): (
+        "fail", "errored", "crash", "died", "stopped", "stuck", "hung", "wedged",
+        "unresponsive", "exit", "down", "offline", "unreachable", "keep", "can",
+        "could not", "couldn"),
+    id(_ERROR_SYMPTOM): (
+        "memory", "oom", "segfault", "segmentation", "overflow", "deadlock", "race",
+        "collision", "timing out", "timed out", "times out", "timeout", "hang", "flaky",
+        "panic", "crash", "regression", "pointer", "infinite loop", "not triggering",
+        "borrow checker", "intermittently", "pressure", "poison", "lag", "drift", "skew",
+        "goroutine", "churn", "thundering", "stale", "blank", "white screen", "spinner",
+        "never", "silently", "dropped under load"),
+    id(_ERROR_SLOWER): ("tak", "took", "jumped", "regressed", "climbed", "slowed", "went"),
+    id(_ERROR_DAMAGE): (
+        "delet", "discard", "dropped", "lose", "lost", "overwr", "clobber", "wipe",
+        "resurrect", "reinstat", "corrupt", "silently"),
+    id(_ERROR_FALSE_HEALTH): ("report", "return", "show", "said", "says", "stayed",
+                              "remained", "still"),
+    id(_ERROR_FAILING): ("fail", "broke", "errored", "erroring", "blew up", "fell over",
+                         "went red"),
+    id(_ERROR_INERT): ("unreachable", "unreliable", "dead code", "silently ignored",
+                       "never", "not reached", "not called", "not persisted",
+                       "not applied", "not enforced"),
+    id(_TASK_DONE_PASSIVE): ("working", "ready", "done", "complete", "live", "passing",
+                             "implemented", "deployed", "fixed", "resolved", "running"),
+}
+
+
+def _may_match(pattern, low: str) -> bool:
+    keys = _PREFILTER.get(id(pattern))
+    return keys is None or any(k in low for k in keys)
+
 
 # The patterns that key on a name rather than on English prose: an
 # exception class, a status code, a vulnerability class, a "Bug:" header.
@@ -370,13 +446,26 @@ class HybridExtractor:
         self, messages: list[dict], provider_fn
     ) -> Optional[ExtractedData]:
         """Call provider to extract structured data. Returns None on failure."""
-        # Format messages as readable text for the LLM
+        # Format messages as readable text for the LLM.
+        #
+        # Every message shape the heuristic pass reads, the model reads too:
+        # the text of content-block lists (Anthropic, multimodal) — which
+        # were dropped whole when only a plain-string content counted — and
+        # the tool calls and failed tool results an agent's work is mostly
+        # made of, summarised as one line each so the model sees WHAT was
+        # edited and WHAT failed without the payloads.
+        from tokenmizer.graph_memory.graph import _content_to_text
         parts = []
         for m in messages[-20:]:  # last 20 messages max
-            role = m.get("role", "user")
-            content = m.get("content", "")
-            if isinstance(content, str) and content.strip():
-                parts.append(f"[{role.upper()}]: {content[:500]}")
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "user")
+            text = _content_to_text(m.get("content", "")).strip()
+            files, errors = tool_signals(m)
+            extra = [f"[edited {f}]" for f in files[:10]] + [f"[tool error: {e}]" for e in errors[:5]]
+            if text or extra:
+                body = (text[:500] + (" " if text and extra else "") + " ".join(extra)).strip()
+                parts.append(f"[{role.upper()}]: {body}")
 
         if not parts:
             return None
@@ -569,7 +658,8 @@ class HybridExtractor:
                 seen_tasks.add(norm)
 
         # Passive completion: full history
-        for m in _TASK_DONE_PASSIVE.finditer(content):
+        for m in (_TASK_DONE_PASSIVE.finditer(content)
+                  if _may_match(_TASK_DONE_PASSIVE, content.lower()) else ()):
             # was r'...\\s+' — a raw string, so \\s is a
             # literal backslash-s, not the whitespace escape \s. Since no
             # real text contains a literal backslash there, this prefix
@@ -603,7 +693,8 @@ class HybridExtractor:
                 result.tasks_done.append(task)
                 seen_tasks.add(norm)
 
-        for pattern in (_TASK_DONE_CHECK, _TASK_DONE_PHRASAL, _TASK_DONE_GOT):
+        for pattern in (_TASK_DONE_CHECK, _TASK_DONE_PHRASAL, _TASK_DONE_GOT,
+                        _TASK_DONE_MANAGED, _TASK_DONE_POSTFIX):
             for m in pattern.finditer(content):
                 if pattern is not _TASK_DONE_CHECK and (
                         _is_negated_context(content, m.start())
@@ -621,6 +712,14 @@ class HybridExtractor:
                     verb = re.match(r"\w+(?: \w+)?", m.group(0))
                     task = restore_verb(verb.group(0) if verb else "", task)
                 _add_done(task)
+        for m in _TASK_DONE_WENT.finditer(content):
+            if _is_question_context(content, m.start()):
+                continue
+            subject = clause_subject(content, m.start())
+            if _CONDITIONAL_LEAD.match(subject) or _NEGATION_WORDS.search(subject) \
+                    or not _is_work_subject(subject):
+                continue
+            _add_done(_clip(subject))
         for m in _TASK_DONE_STATE.finditer(content):
             if _is_question_context(content, m.start()):
                 continue
@@ -687,7 +786,8 @@ class HybridExtractor:
         # extraction calls — GraphMemory.add_node merges a completed task into
         # the pending node it finishes.
         for pattern in (_TASK_TODO, _TASK_TODO_HEADER, _TASK_TODO_CHECK,
-                        _TASK_TODO_NOT_DONE, _TASK_TODO_DEFER, _TASK_TODO_FRONTED):
+                        _TASK_TODO_NOT_DONE, _TASK_TODO_DEFER, _TASK_TODO_FRONTED,
+                        _TASK_TODO_OWED):
             for m in pattern.finditer(content):
                 todo = _clip(_todo_label(m.group(1)))
                 if _outstanding(todo, m.start(1), result.tasks_todo):
@@ -1024,7 +1124,10 @@ class HybridExtractor:
         # a session that diagnosed three failures early and spent the rest
         # of its turns fixing them carried none of them forward.
         sentence_claims: dict[tuple[int, int], tuple[str, int]] = {}
+        low = content.lower()
         for pattern in patterns:
+            if not _may_match(pattern, low):
+                continue
             for m in pattern.finditer(content):
                 if pattern is _ERROR_HEADER and _NO_DEFECT.match(m.group(1).strip(" *_")):
                     continue   # "Errors: none"
@@ -1034,11 +1137,19 @@ class HybridExtractor:
                     continue   # "there's no error", "seeing zero failures"
                 if _NOT_A_DEFECT.search(m.group(1)):
                     continue   # "logistic regression" is a model
+                if pattern not in _STRUCTURAL_ERROR_PATTERNS and "    " in m.group(1):
+                    # The span runs across a blanked mention (mask_mentions
+                    # leaves spaces where a quote was): the sentence is ABOUT
+                    # the quoted text — "I found earlier: "…" read as an error".
+                    continue
                 if m.group(1).lstrip().startswith("Traceback (most recent"):
                     continue   # the header; the exception line below it names the failure
                 if pattern not in _STRUCTURAL_ERROR_PATTERNS and _HYPOTHETICAL_FAILURE.search(
                         content[max(0, m.start(1) - 20):m.end(1)]):
                     continue   # "…unless it would fail on the old code"
+                if pattern not in _STRUCTURAL_ERROR_PATTERNS and _NEGATIVE_SUBJECT.match(
+                        content[_clause_start(content, m.start(1)):m.end(1)].lstrip(" -*\t")):
+                    continue   # "Nothing failed on the last run"
                 before = content[max(0, m.start(1) - 60):m.start(1)]
                 if _SOLUTION_VERB.search(before):
                     continue   # the symptom names the fix, not the failure
@@ -1054,6 +1165,12 @@ class HybridExtractor:
                 span_start, span_end = _word_bounded(content, m.start(1), m.end(1))
                 raw = content[span_start:span_end]
                 err = _drop_leading_sentence(raw)
+                # "Fixed by adding a 5 second context timeout" describes the
+                # fix; the timeout is the solution, not the failure. The
+                # solution-verb check above only sees text BEFORE the match,
+                # and a subject window can start at the fix clause itself.
+                if _FIX_DESCRIPTION.match(err):
+                    continue
                 # Where the label really starts. The subject window may open
                 # on the PREVIOUS sentence's full stop — `[\w./\- ]` has to
                 # allow dots for `moment.js` — so `m.start(1)` can sit one
@@ -1068,6 +1185,11 @@ class HybridExtractor:
                 # `IDOR`, `XSS`, `RCE` are four and three characters. A flat
                 # minimum length rejected the entire vulnerability vocabulary,
                 # which is the highest-signal thing an error label can carry.
+                # The label, not the clause: the subject window can open in
+                # the previous sentence, so the clause test above can miss
+                # "…deploy. Nothing failed on the last run".
+                if pattern not in _STRUCTURAL_ERROR_PATTERNS and _NEGATIVE_SUBJECT.match(err):
+                    continue
                 floor = 3 if pattern is _ERROR_VULN else 5
                 if len(err) < floor or err.lower() in _ERROR_STOPWORDS:
                     continue
