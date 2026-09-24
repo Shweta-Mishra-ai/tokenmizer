@@ -71,8 +71,20 @@ _FILE_PATH = re.compile(
 # It previously omitted .txt, .mod, .lock and .cfg, so `requirements.txt`,
 # `go.mod` and `Cargo.lock` — three of the most-mentioned files in any
 # Python, Go or Rust session — were never extracted at all.
+#
+# The stem may itself contain dots: `vite.config.ts`, `tailwind.config.js`,
+# `docker-compose.override.yml`, `jest.setup.ts`. A single-segment stem
+# matched only the last two parts, so the file was recorded as `config.ts`
+# — a name that exists in almost every frontend repo and identifies none.
+#
+# The extra segments are capped at three, and the cap is load-bearing. An
+# unbounded `(?:\.[\w-]+)*` reads the whole of `word.word.word…` from every
+# starting position before backtracking to look for an extension: 3.5
+# seconds on the 15 KB adversarial payload the scan-cost tests use, on the
+# hot path of a proxy that scans whatever a caller sends. Bounded, each
+# position costs at most four segments. No real filename has more.
 _FILE_COMMON = re.compile(
-    r'\b((?:[\w\-]+\.(?:'
+    r'\b((?:[\w\-]+(?:\.[\w\-]+){0,3}\.(?:'
     r'py|pyi|js|mjs|cjs|ts|tsx|jsx|vue|svelte|'
     r'go|mod|sum|rs|java|kt|swift|scala|rb|php|cs|cpp|cc|c|h|hpp|ex|exs|'
     r'yaml|yml|json|toml|ini|cfg|conf|env|lock|txt|md|rst|'
@@ -87,10 +99,39 @@ _FILE_COMMON = re.compile(
 # keys on a dot, so `Dockerfile` and `Makefile` — named in almost every infra
 # session — could not be extracted by any of them. Case-sensitive on purpose:
 # lowercase "makefile" in prose is usually the noun, not the file.
+#
+# The directory is part of the name when one is given: `fastlane/Fastfile`
+# and `deploy/Dockerfile` are specific files, and a bare `Fastfile` does not
+# say which. The Ruby/iOS toolchain's files (Fastfile, Podfile, …) are named
+# as often in a mobile session as Dockerfile is in an infra one.
 _FILE_EXTENSIONLESS = re.compile(
-    r'\b(Dockerfile|Makefile|Procfile|Jenkinsfile|Gemfile|Rakefile|Vagrantfile|'
-    r'Brewfile|Justfile|Caddyfile|CODEOWNERS|MANIFEST\.in)\b'
+    r'(?<![\w/.\-])((?:\.?[\w\-]+/){0,6}'
+    r'(?:Dockerfile|Makefile|Procfile|Jenkinsfile|Gemfile|Rakefile|Vagrantfile|'
+    r'Brewfile|Justfile|Caddyfile|Containerfile|Tiltfile|Earthfile|Pipfile|'
+    r'Fastfile|Appfile|Matchfile|Snapfile|Podfile|Cartfile|Dangerfile|'
+    r'Berksfile|Guardfile|Capfile|CODEOWNERS|MANIFEST\.in))\b'
 )
+
+# JavaScript libraries are named `<name>.js` in prose — "switched from
+# moment.js to date-fns" — and read exactly like a file to the patterns
+# above. Only the bare name is excluded; `src/lib/moment.js` has a directory
+# and is a file whatever it is called.
+_LIBRARY_NOT_FILE = frozenset({
+    "moment.js", "node.js", "next.js", "nuxt.js", "vue.js", "react.js",
+    "angular.js", "ember.js", "backbone.js", "three.js", "chart.js", "d3.js",
+    "express.js", "day.js", "p5.js", "paper.js", "anime.js", "video.js",
+    "highlight.js", "marked.js", "alpine.js", "solid.js", "knockout.js",
+    "handlebars.js", "socket.io.js", "pdf.js", "fabric.js", "leaflet.js",
+    "mapbox-gl.js", "hammer.js", "lodash.js", "underscore.js", "jquery.js",
+    "require.js", "ext.js", "meteor.js", "sails.js", "koa.js", "hapi.js",
+    "nest.js", "gatsby.js", "remix.js", "svelte.js", "preact.js", "deno.js",
+    "bun.js", "tone.js", "matter.js", "pixi.js", "babylon.js", "phaser.js",
+})
+
+
+def is_library_name(name: str) -> bool:
+    """True if `name` is a JavaScript library written as `<name>.js`, not a file."""
+    return "/" not in name and name.lower() in _LIBRARY_NOT_FILE
 
 # ── Decision patterns — 5 passes ─────────────────────────────────────────────
 
@@ -117,9 +158,25 @@ _SPAN_CHAR = r'(?:(?![.!?](?=\s|$))[^\n])'
 _CLAUSE_SPAN = r'(' + _SPAN_CHAR + r'{5,80}(?!\w)|' + _SPAN_CHAR + r'{5,80})'
 
 # Pass 1: explicit verb ("decided:", "going with", "will use")
+#
+# `picked(?! up)`: "picked up" is a different verb. "Somewhere in there we
+# picked up duplicate rows from a non-unique key" reports a bug the session
+# acquired, and reading it as a choice filed that bug as the DECISION "up
+# duplicate rows … and it's been a pain" — wrong type and a broken label.
+#
+# The leading `\b` is load-bearing. Without it the verbs matched inside
+# other words: "excessive allocations cAUSING GC pressure" recorded the
+# decision "GC pressure" (`using`), and "TODO: watCHOS companion app"
+# recorded "companion app" (`chose?`).
 _DECISION = re.compile(
-    r'(?:decided?|going with|will use|chose?|switching? to|opted for|settled on|'
-    r'picked|sticking with|selected?|using|went with|we.ll use|let.s use|'
+    r'\b(?:decided?|going with|will use|chose?|switching? to|opted for|settled on|'
+    r'picked(?!\s+up\b)|sticking with|selected?|using|went with|we.ll use|let.s use|'
+    # A proposal is how a choice is usually put in conversation: "I think we
+    # should use sqlc for type-safe database access". Pass 3 caught only the
+    # bare name ("Use sqlc") and dropped the purpose that makes it a
+    # decision. Questions ("Should we use X?") are excluded by the question
+    # guard every decision pass applies.
+    r'should (?:use|go with|adopt|switch to|stick with|standardi[sz]e on)|'
     r'leaning toward|recommends?|recommended|'
     # Probed against phrasings the corpus does not use: "standardise on",
     # "let's do", "moving (everything) to", "consolidate on" are how people
@@ -201,8 +258,10 @@ _DECISION_FOR = re.compile(
 #   - a purpose clause right after it ("Redis FOR refresh tokens"), which
 #     is the shape a decision takes when stated without a verb.
 _DECISION_CONTEXT_BEFORE = re.compile(
-    r"(?:decided?|decision|going with|will use|we'?ll use|let'?s use|chose|"
-    r"choosing|opted for|settled on|picked|sticking with|selected|switch(?:ing)? to|"
+    # `\b` for the same reason as _DECISION: "because" ends in "use", which
+    # made every technology named after it look chosen.
+    r"\b(?:decided?|decision|going with|will use|we'?ll use|let'?s use|chose|"
+    r"choosing|opted for|settled on|picked(?! up)|sticking with|selected|switch(?:ing)? to|"
     r"moved? to|migrat\w+ to|adopt(?:ed|ing)?|use|using|with|"
     r"leaning toward|recommends?|recommended|"
     # "Should talk gRPC to the inventory service" states a choice without a
@@ -236,6 +295,19 @@ _TASK_HEADER_AT_CLAUSE_START = re.compile(
     r'^\s*(?:completed|finished|done|implemented|fixed|added|built|shipped|'
     r'created|wrote|updated|deployed|working on|implementing|building|'
     r'currently|in progress|todo|next|pending|wip)\s*[:\-]',
+    re.IGNORECASE,
+)
+
+
+# A clause that opens by reporting work, with or without a header colon —
+# "Finished up dark mode using CSS custom properties". The `using` names how
+# the work was done, not a choice; see _TASK_HEADER_AT_CLAUSE_START for the
+# header form of the same guard.
+_WORK_CLAUSE_START = re.compile(
+    r"^\s*(?:(?:i|we)(?:'ve| have)?\s+)?(?:just\s+|also\s+)?(?:re-?)?"
+    r"(?:completed|finished|done|implemented|fixed|added|built|shipped|wired up|"
+    r"set up|created|wrote|written|updated|deployed|refactored|migrated|"
+    r"wrapped up|got|working on|implementing|building|adding|writing)\b",
     re.IGNORECASE,
 )
 
@@ -534,6 +606,17 @@ _FIX_PREFIX = re.compile(
     re.IGNORECASE,
 )
 
+# "Let's work on a memory leak", "still chasing down the flaky upload test":
+# the verb says what the session is DOING about the failure, and it is not
+# part of the failure's name. Kept apart from _FIX_PREFIX on purpose — that
+# prefix also marks the error resolved, and investigating is not fixing.
+_INVESTIGATION_PREFIX = re.compile(
+    r"^(?:(?:start(?:ed|ing)?|keep|kept)\s+)?(?:work(?:ing|ed)?\s+on|"
+    r"look(?:ing|ed)?\s+(?:at|into)|investigat\w+|debugg?\w*|dig(?:ging)?\s+into|"
+    r"chas(?:e|ed|ing)\s+down|track(?:ed|ing)?\s+down|on)\s+",
+    re.IGNORECASE,
+)
+
 # A symptom word can also name part of the SOLUTION rather than the
 # problem: "Fixed by adding a 5 second context timeout" is a timeout
 # being introduced on purpose. An additive verb immediately before the
@@ -680,10 +763,17 @@ _TASK_DONE = re.compile(
     # reliable signal that something has not happened yet, and spending it to
     # save four characters cost precision on every session that opens by
     # describing the goal.
-    r'(?:completed|finished|done|implemented|fixed|added|built|shipped|'
+    #
+    # Anchored at a word start, with `re-` allowed: "UNfinished work" and
+    # "UNdone" are the opposite of completion and matched as it, while
+    # "rebuilt the index" and "redeployed" are completions.
+    #
+    # The particle after a phrasal verb belongs to the verb: "finished UP
+    # dark mode", "cleaned UP the fixtures" were recorded as "up dark mode".
+    r'\b(?:re-?)?(?:completed|finished|done|implemented|fixed|added|built|shipped|'
     r'wired up|set up|created|wrote|written|updated|deployed|resolved|'
     r'merged|refactored|cleaned|migrated|restructured|removed|'
-    r'switched|replaced)'
+    r'switched|replaced)(?:\s+(?:up|out|off)\b)?'
     r'[\s:\-]+' + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
@@ -754,11 +844,262 @@ _TASK_WIP = re.compile(
 # Only an unqualified "missing X" is a TODO.
 _TASK_TODO = re.compile(
     r'(?:will add|will implement|next:|todo:|will do|need to add|planning to|'
-    r'should add|still need|not yet|(?<!was )(?<!were )(?<!is )(?<!are )missing|'
+    r'should add|still need|not yet|'
+    # "a crash from a missing Info.plist key", "Bug: a missing statistical
+    # test" — after an article or a preposition, `missing` describes the
+    # CAUSE of a defect, and reading it as a to-do sent the next session off
+    # to add a statistical test as if it were planned work.
+    r'(?<!was )(?<!were )(?<!is )(?<!are )(?<!\bfrom )(?<!\ba )(?<!\ban )'
+    r'(?<!\bthe )(?<!\bby )(?<!\bof )(?<!\bwith )(?<!\bto )missing|'
     r'pending|next step)'
     r'[\s:\-]+' + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
+
+# ── Conversational forms ─────────────────────────────────────────────────────
+#
+# Everything above keys on a marker: a header ("Done:", "TODO:"), a verb
+# that opens the clause ("implemented", "going with"). That is how a status
+# report is written, and it is not how most of a working session is. The
+# same facts arrive as a subject followed by what happened to it — "the
+# retry wrapper is in and working", "rate limiting is next on the list",
+# "Postgres felt like the right call" — or as the object of a phrasal verb
+# ("wrapped up X", "got X working", "haven't started X"). Measured on the
+# 100-session external benchmark, these shapes were most of what the
+# heuristic pass missed in every category but files.
+#
+# Every capture here is either the object of a verb (read forwards to the
+# end of the clause) or the subject of a predicate (read backwards with
+# clause_subject() below). Subject captures are bounded to one clause, so
+# a sentence can never contribute more than its own subject.
+
+# A clause starts after a sentence boundary, a comma-like break, or a
+# conjunction that opens a new clause ("…, but X won out").
+_CLAUSE_BREAK = re.compile(
+    r"[.!?](?=\s)|[,;:\n(]|\s[—–-]\s|\b(?:but|while|because|though|although|"
+    r"whereas|unless|and then|so)\b",
+    re.IGNORECASE,
+)
+
+# Discourse openers and stance frames that sit in front of a subject but are
+# not part of it: "In the end Postgres was simpler", "I think Redis makes
+# more sense". Removed repeatedly, since they stack ("so honestly maybe").
+_SUBJECT_LEAD = re.compile(
+    r"^(?:and|but|so|then|also|now|well|ok(?:ay)?|yeah|yes|honestly|frankly|"
+    r"overall|ultimately|eventually|finally|in the end|at this point|for now|"
+    r"maybe|perhaps|probably|possibly|i guess|it seems|"
+    r"(?:i|we|the team|everyone|they) (?:think|thinks|thought|feel|feels|felt|"
+    r"agree|agreed|decided|reckon|believe|figured)(?: that)?"
+    r")\b[,\s]*",
+    re.IGNORECASE,
+)
+
+
+def clause_subject(content: str, end: int, max_chars: int = 110) -> str:
+    """The subject of the clause that ends at `end` — the text between the
+    nearest clause break before it and `end`, minus discourse openers.
+
+    Bounded backwards to `max_chars` and to one clause, so it cannot pull a
+    previous sentence (or the first half of a compound one) into the label.
+    """
+    start = max(0, end - max_chars)
+    seg = content[start:end]
+    last = None
+    for m in _CLAUSE_BREAK.finditer(seg):
+        last = m
+    if last is not None:
+        seg = seg[last.end():]
+    elif start > 0:
+        # The window cut into the middle of a long clause; its first word
+        # may be partial and the subject is not reliably recoverable.
+        seg = seg.split(" ", 1)[1] if " " in seg else ""
+    seg = seg.strip(" \t\"'`*_")
+    prev = None
+    while prev != seg:
+        prev = seg
+        seg = _SUBJECT_LEAD.sub("", seg, count=1).strip()
+    return seg
+
+
+# ── Completed ────────────────────────────────────────────────────────────────
+
+# Phrasal completion verbs. "Wrapped up the OpenAPI schema" and "knocked out
+# the pagination endpoints" are how completion is narrated in conversation;
+# none of them is in _TASK_DONE's list of past participles.
+_TASK_DONE_PHRASAL = re.compile(
+    r'\b(?:wrapped up|finished up|knocked out|tidied up|sorted out|squared away|'
+    r'landed|nailed down|closed out|crossed off|checked off|ticked off)'
+    r'[\s:\-]+' + _CLAUSE_SPAN,
+    re.IGNORECASE,
+)
+
+# "got X working", "got the migration merged": completion stated as the
+# RESULT state of the object. The state list is what "finished" looks like
+# for software. The object is lazy and bounded to one clause.
+_TASK_DONE_GOT = re.compile(
+    r"\bgot\s+((?:(?![.!?](?=\s|$))[^\n,;]){4,80}?)\s+"
+    r"(?:working|done|handled|sorted(?: out)?|fixed|merged|passing|running|"
+    r"deployed|landed|finished|shipped|wired up|set up|in place|squared away|"
+    r"green|over the line|across the line)\b",
+    re.IGNORECASE,
+)
+
+# The subject form: "<X> is in and working", "<X> is now in place",
+# "<X> has been merged". The predicate list is the state of finished work;
+# the subject is read backwards with clause_subject(). `in` alone is only a
+# completion when nothing locational follows it ("the fix is in." / "is in
+# and working") — "most of it is in tailwind.config.js" is a location.
+_TASK_DONE_STATE = re.compile(
+    r"(?:\s(?:is|are|was|were|has been|have been|got)|'s)\s+(?:now\s+|finally\s+|all\s+)?"
+    r"(?:done|finished|complete|completed|in place|sorted|handled|merged|landed|"
+    r"shipped|live|taken care of|out of the way|behind us|wired up|set up|"
+    r"in and working|in and tested|in(?=\s*(?:[.,;!]|$|now\b)))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Checklist markers. A checked box or a check mark is the most explicit
+# completion marker there is, and it is how an assistant renders a task
+# list (Claude Code's own todo list prints a ballot box, checked or not).
+_TASK_DONE_CHECK = re.compile(
+    r'(?:^|\n)[ \t]*(?:[-*\u2022][ \t]+)?(?:\[[xX]\]|\u2612|\u2705|\u2714\ufe0f?|\u2713)[ \t]*'
+    r'((?:(?![.!?](?=\s|$))[^\n]){4,100})',
+    re.MULTILINE,
+)
+_TASK_TODO_CHECK = re.compile(
+    r'(?:^|\n)[ \t]*(?:[-*\u2022][ \t]+)?(?:\[ \]|\u2610|\u2b1c)[ \t]*'
+    r'((?:(?![.!?](?=\s|$))[^\n]){4,100})',
+    re.MULTILINE,
+)
+
+# ── Pending ──────────────────────────────────────────────────────────────────
+
+# Section headers for outstanding work, at the start of a line or sentence.
+# _TASK_TODO carries "todo:"/"next:" already; these are the rest of the
+# vocabulary people use for the same list.
+_TASK_TODO_HEADER = re.compile(
+    r'(?:^|(?<=[.!?])\s+|\n)[ \t]*(?:[-*\u2022][ \t]+)?(?:\*\*|__)?'
+    r'(?:to[ -]?do|next steps?|next up|up next|remaining|still to do|left to do|'
+    r'open items?|follow[- ]?ups?|backlog|outstanding|not (?:yet )?started|'
+    r'action items?|still needed|deferred)'
+    r'(?:\*\*|__)?[ \t]*:[ \t]*(?:\*\*|__)?[ \t]*'
+    r'((?:(?![.!?](?=\s|$))[^\n]){4,100})',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Negated completion: the work is named as not yet done. "Haven't started
+# the audit log yet", "didn't get to the backfill".
+_TASK_TODO_NOT_DONE = re.compile(
+    r"\b(?:haven'?t|have not|hasn'?t|has not|didn'?t|did not|never)\s+(?:yet\s+)?"
+    r"(?:started(?:\s+on)?|begun(?:\s+on)?|touched|gotten (?:to|around to)|got (?:to|around to)|"
+    r"done|tackled|looked at|picked up|written|added|implemented|finished|"
+    r"addressed|dealt with)\s+" + _CLAUSE_SPAN,
+    re.IGNORECASE,
+)
+
+# Deferral: "we'll circle back to X", "I keep meaning to get to X",
+# "we still have to do X". The work is named as put off, which stays true
+# until it is done — the extractor reads these over the whole session.
+_TASK_TODO_DEFER = re.compile(
+    r"\b(?:(?:circle|come|get) back to|revisit(?:ing)?|"
+    r"(?:keep|kept|been|am|was) meaning to(?: get to)?|"
+    r"(?:we|i) still (?:need|have) to(?: do| get to)?)\s+" + _CLAUSE_SPAN,
+    re.IGNORECASE,
+)
+
+# Intent: "I'll tackle X tomorrow", "next I'll pick up X". Unlike deferral,
+# this is also how an assistant narrates the step it is about to take ("I'll
+# add logging here"), which is done a turn later and rarely reported as
+# done — so the extractor reads these from the recent window only, like
+# WIP. The verb list is work verbs only: "I'll explain the reasoning" is
+# not a task.
+_TASK_TODO_INTENT = re.compile(
+    r"\b(?:(?:i'?ll|we'?ll|i will|we will|i'?m going to|we'?re going to|"
+    r"(?:i|we) (?:plan|intend|need|have) to|next,? (?:i'?ll|we'?ll|we|i)|"
+    r"(?:we|i) should)\s+(?:also\s+|still\s+|then\s+)?"
+    r"(?:tackle|pick up|handle|look (?:at|into)|get (?:to|around to)|work on|"
+    r"implement|write|build|set up|wire up|finish|do|start(?: on)?|address|"
+    r"migrate|split|refactor|clean up|backfill|document|add|move|port|"
+    r"replace|introduce|investigate|profile|benchmark|audit|review))"
+    r"\s+" + _CLAUSE_SPAN,
+    re.IGNORECASE,
+)
+
+# The subject form: "<X> is next on the list", "<X> is still outstanding",
+# "<X> can wait until after the demo", "<X> hasn't been done yet".
+_TASK_TODO_STATE = re.compile(
+    r"\s(?:is|are)\s+(?:still\s+|also\s+)?(?:next(?: on the list| up)?(?=\s*[.,;!]|\s+on\b|\s+up\b|\s*$)|"
+    r"up next|outstanding|still open|pending|not (?:yet )?(?:started|done)|"
+    r"on the (?:list|backlog|to-?do list|roadmap|radar|plate)|"
+    r"(?:the )?next (?:thing|step|task|item)|left to do|still to do)"
+    r"|\s(?:hasn'?t|has not|haven'?t|have not) been (?:started|done|touched|"
+    r"implemented|written|added|addressed|picked up)"
+    r"|\s(?:can|will|should) wait\b"
+    r"|\s(?:still )?needs? (?:doing|to be done|to happen|work)\b"
+    r"|\s(?:has|have) to happen\b"
+    r"|\sremains? (?:open|to be done|outstanding|pending)\b",
+    re.IGNORECASE,
+)
+
+# ── Decisions ────────────────────────────────────────────────────────────────
+
+# A user's imperative is a decision when it opens a sentence: "Use Postgres
+# for the orders store.", "Build it with Alembic for migrations." — the user
+# is directing the work. The same sentence in an ASSISTANT turn is usually
+# an instruction to the reader ("Use `npm run dev` to start the server"),
+# so the extractor applies this to user turns only.
+_DECISION_IMPERATIVE = re.compile(
+    r"(?:^|(?<=[.!?\n])\s*)[ \t]*(?:please\s+|ok(?:ay)?,?\s+|yes,?\s+|then\s+)?"
+    r"(?:use|go with|stick with|switch to|adopt|pick(?!\s+up\b)|choose|prefer|"
+    r"build (?:it|this|them|that) (?:with|on|using)|do (?:it|this|that) (?:with|using))"
+    r"\s+" + _CLAUSE_SPAN,
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Evaluative choice: the option is the subject and the choosing is done by
+# the predicate — "<X> felt like the right call", "<X> won out in the end",
+# "<X> made the most sense here". The adjective and noun lists are the
+# ordinary vocabulary of preferring one option over another.
+_DECISION_EVALUATIVE = re.compile(
+    r"\s(?:(?:felt|feels|seemed|seems|looked|looks|sounded|sounds)\s+like|"
+    r"is|was|would be|will be|ended up being|turned out to be|remains)\s+"
+    r"(?:the|a|our)\s+(?:right|best|better|obvious|safer|safest|sensible|"
+    r"pragmatic|simplest|cleanest|natural|correct|clear|winning|preferred)\s+"
+    r"(?:call|choice|option|bet|fit|approach|move|pick|winner|way forward|way to go|answer)\b"
+    r"|\s(?:won out|wins out|made the most sense|makes the most sense|makes more sense|"
+    r"made more sense|is the way forward|is the way to go|is worth (?:trying|a shot|a try|considering)|"
+    r"would (?:probably |likely )?(?:fit|work) better|fits better|works better)\b"
+    r"|\s(?:was|is|would be)\s+(?:simpler|cleaner|cheaper|safer|easier|faster|better)"
+    r"\s+than\s+(?:the\s+)?(?:alternatives?|other options?|the rest|anything else)\b",
+    re.IGNORECASE,
+)
+
+# A proposal put as a question: "Can we do this with Celery?", "How about
+# Redis for the queue?". Not a decision by itself — see
+# HybridExtractor._accepted_proposals, which takes it as one only when the
+# next assistant turn opens by agreeing.
+_PROPOSAL = re.compile(
+    r"(?:^|(?<=[.!?\n])\s*)[ \t]*(?:(?:can|could|shall|should) (?:we|i|you) "
+    r"(?:(?:do|build|handle|implement|write|run|approach|solve) (?:this|it|that|them) "
+    r"(?:with|using|on|in|via)|use|go with|try|switch to|adopt|move to)|"
+    r"how about|what about|why not(?: just)?(?: use)?)\s+"
+    r"((?:(?![.!?](?=\s|$))[^\n]){3,90})\?",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# The next assistant turn opening by agreeing. A reply that agrees and then
+# qualifies ("Sure, but I'd use X instead") is not acceptance of the
+# proposal, so a contrastive word in the first sentence voids it.
+_ACCEPTANCE = re.compile(
+    r"^\s*(?:yes|yep|yeah|sure|sounds good|agreed|agree|ok(?:ay)?|makes sense|"
+    r"good (?:call|idea|point|choice)|will do|fine by me|perfect|great|absolutely|"
+    r"definitely|let'?s do (?:it|that)|going with (?:that|it)|running with (?:it|that)|"
+    r"that works|works for me|on it|done)\b",
+    re.IGNORECASE,
+)
+_ACCEPTANCE_VOID = re.compile(
+    r"\b(?:but|however|instead|rather|although|though|actually)\b", re.IGNORECASE,
+)
+
 
 # Errors are matched two ways, because they are stated two ways.
 #
@@ -1038,9 +1379,17 @@ _ERROR_MISCLASSIFIED = re.compile(
 # a condition rather than a defect.
 #
 # The thing missing must be a noun: `(?!\w*ly\b)` rejects "absent entirely".
+#
+# The missing thing is a short noun phrase, not one word: "missing readiness
+# gates", "a missing statistical test". Stopping at one token recorded
+# "missing readiness" and "missing statistical", which name nothing. Up to
+# two more words are taken, never a function word — so "missing email
+# validation in LoginRequest" still ends its phrase at "in".
+_ABSENCE_WORD = (r'(?:\s+(?!(?:in|on|from|for|and|or|but|is|are|was|were|so|to|'
+                 r'the|a|an|when|after|because|which|that)\b)' + _TOKEN + r')')
 _ERROR_ABSENCE = re.compile(
     r'\b((?:missing|lacks|lacking|never set|unset)'
-    r'\s+(?:a|an|the)?\s*(?!\w*ly\b)' + _TOKEN +
+    r'\s+(?:a|an|the)?\s*(?!\w*ly\b)' + _TOKEN + _ABSENCE_WORD + r'{0,2}'
     r'(?:\s+(?:in|on|from|for)\s+' + _TOKEN + r')?)',
     re.IGNORECASE,
 )
@@ -1091,6 +1440,33 @@ _ERROR_FAILING = re.compile(
     re.IGNORECASE,
 )
 
+# "failed" in front of a noun is an adjective, not a report: "background
+# retry for failed webhook deliveries" is a FEATURE that handles failures,
+# and "Haven't started a rollback job for failed deploys yet" is a to-do.
+# _ERROR_FAILED_SUBJECT read both as the failure "…failed deploys yet".
+# The word before the verb decides it: a preposition, a quantifier or a verb
+# that takes failures as its object ("retries failed requests") makes it
+# attributive. "The failed deploy from last night" is deliberately NOT in
+# the list — a definite article usually points at one real incident.
+_ATTRIBUTIVE_BEFORE_FAILED = frozenset({
+    "for", "of", "on", "with", "to", "from", "into", "about", "against",
+    "all", "any", "every", "each", "some", "no", "many", "few", "several",
+    "retry", "retries", "retrying", "rerun", "reruns", "re-run", "replay",
+    "replays", "requeue", "requeues", "resend", "resends", "skip", "skips",
+    "handle", "handles", "handling", "log", "logs", "logging", "count",
+    "counts", "track", "tracks", "tracking", "clean", "cleans", "clear",
+    "clears", "drop", "drops", "collect", "collects", "reprocess",
+    "reprocesses", "surface", "surfaces", "alert", "alerts", "list", "lists",
+})
+
+
+# One fixed-width negative lookbehind per word, so the check costs nothing
+# unless the engine is already standing on a candidate verb.
+_NOT_ATTRIBUTIVE = "".join(
+    r"(?<!\b" + re.escape(w) + r" )" for w in sorted(_ATTRIBUTIVE_BEFORE_FAILED)
+)
+
+
 # The past-tense forms with a named subject — "Deploy failed, rolled back",
 # "The migration errored out halfway", "the cron job stopped running" —
 # are complete reports on their own; the object clause _ERROR_FAILING
@@ -1108,7 +1484,7 @@ _ERROR_FAILING = re.compile(
 # _drop_leading_sentence already cleans up for the other patterns.
 _ERROR_FAILED_SUBJECT = re.compile(
     r'\b([\w./\- ]{1,40}\s'
-    r'(?:failed|errored(?: out)?|crashed|died|'
+    r'(?:' + _NOT_ATTRIBUTIVE + r'failed|errored(?: out)?|crashed|died|'
     r'stopped (?:running|working|responding|processing)|'
     r'(?:is|are|got|gets|was|were) (?:stuck|hung|wedged|unresponsive)|'
     r'exits? (?:with )?(?:code )?[1-9]\d{0,2}|exit code [1-9]\d{0,2}|'
@@ -1118,6 +1494,101 @@ _ERROR_FAILED_SUBJECT = re.compile(
     r'(?:can.?t|cannot|could not|couldn.?t|fails? to) (?:find|locate|resolve|connect|open|load|reach))'
     r'(?:\s+[^.!?,;\n]{0,40})?)',
     re.IGNORECASE,
+)
+
+# Defect words that are also the names of ordinary things. "baseline
+# logistic regression at 0.71 AUC" is a model, "the regression suite" is a
+# test suite; neither is a regression anyone has to fix.
+_NOT_A_DEFECT = re.compile(
+    r'\b(?:(?:logistic|linear|ridge|lasso|polynomial|poisson|quantile|'
+    r'isotonic|kernel|bayesian|stepwise|multivariate|ordinal)\s+regression|'
+    r'regression\s+(?:tests?|suites?|testing|models?|coefficients?|analysis)|'
+    # A soft delete is a feature — a row marked deleted instead of removed —
+    # and "soft deletes on the tenant table" reads to _ERROR_DAMAGE as data
+    # being deleted.
+    r'soft[- ]delet\w*)\b',
+    re.IGNORECASE,
+)
+
+# The explicit header form: "Bug: X", "Error: X", "Issue: X". It is the
+# plainest way anyone labels a defect — in a status update, a commit
+# message, a test report or tool output — and no pattern keyed on it: a
+# header whose description happened to contain no exception name, status
+# code or symptom word ("Bug: the evaluation set overlapping the training
+# window") produced nothing. The header is the evidence, so the
+# description needs none of its own.
+#
+# Anchored to the start of a line or sentence so an inline mention ("the
+# issue: we never retried") is left to the other patterns. Bullets, bold
+# and a leading emoji are accepted because that is how an assistant writes
+# a status list. Plural headers ("Errors:") are lists, and the first item
+# is taken the same way.
+_ERROR_HEADER = re.compile(
+    r'(?:^|(?<=[.!?])\s+|\n)[ \t]*(?:[-*\u2022][ \t]+)?(?:\*\*|__)?'
+    r'(?:bugs?|issues?|errors?|problems?|exceptions?|failures?|blockers?|'
+    r'regressions?|incidents?|defects?|root cause|symptoms?|known issues?|'
+    r'hit a snag|snag)'
+    r'(?:\*\*|__)?[ \t]*:[ \t]*(?:\*\*|__)?[ \t]*'
+    r'((?:(?![.!?](?=\s|$))[^\n]){5,120})',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# A header whose "description" says there is nothing to report.
+_NO_DEFECT = re.compile(
+    r'^(?:none|n/?a|nil|nothing|no (?:errors?|issues?|problems?|bugs?)|'
+    r'0|zero|not (?:yet )?known|tbd|unknown)\b',
+    re.IGNORECASE,
+)
+
+# Verbs that introduce a problem as their object. "Ran into connection pool
+# exhaustion", "hit a snag with the token refresh", "we tripped over a race
+# in the fixture" — the verb says the object went wrong, so the object needs
+# no failure vocabulary of its own. "picked up" and "came across" are not
+# here: both are as often about finding a ticket or a library.
+_ERROR_ENCOUNTER = re.compile(
+    r'\b(?:ran into|run(?:ning)? into|runs into|'
+    r'hit (?:a|an|another) (?:snag|problem|issue|bug|wall|error|edge case)'
+    r'(?:\s*(?::|with|in|on|—|-))?|'
+    r'hitting (?:a|an|another) (?:snag|problem|issue|bug|wall|error)(?:\s*(?::|with|in|on))?|'
+    r'encounter(?:ed|ing|s)?|tripped (?:over|on)|stumbled (?:on|onto|across|over))'
+    r'\s+((?:(?![.!?](?=\s|$))[^\n,;]){4,90})',
+    re.IGNORECASE,
+)
+
+# "We're seeing X", "getting X", "noticed X": verbs of observation. Unlike
+# the encounter verbs, what is observed is as often good news ("we're
+# seeing a 20% speedup", "getting 200 OK now") as a defect, so the object
+# must itself name something wrong. The vocabulary is the ordinary English
+# of defects — not a list of this corpus's bugs — and deliberately broad,
+# because the verb has already narrowed the sentence to an observation.
+_DEFECT_WORD = re.compile(
+    r'\b(?:errors?|fail\w*|crash\w*|timeouts?|timing out|leak\w*|races?|flak\w*|'
+    r'duplicat\w+|missing|stale|drift\w*|skew\w*|spikes?|spiking|growth|growing|'
+    r'loss|lost|lag\w*|nan|exceptions?|panics?|deadlocks?|slow\w*|latency|'
+    r'regress\w*|bias\w*|corrupt\w*|mismatch\w*|overlap\w*|contaminat\w+|'
+    r'inconsisten\w+|non-?determinis\w+|unbounded|blocking|blocked|churn|thrash\w*|'
+    r'warnings?|oom\w*|[45]\d\d|[45]xx|denied|refused|reject\w*|invalid|broken|'
+    r'wrong|incorrect|cycles?|traversal|injection|vulnerab\w+|off-by-one|'
+    r'overflow\w*|underflow|hang\w*|stuck|freez\w+|jank\w*|flicker\w*|drop\w*|'
+    r'zombie|orphan\w*|conflicts?|collisions?|contention|starv\w+|throttl\w+|'
+    r'dangling|use-after-free|segfault\w*|violations?|unhandled|uncaught|'
+    r'exhaust\w*|saturat\w+|backlog|retry storms?|dupes?|bugs?|issues?|problems?)\b',
+    re.IGNORECASE,
+)
+#
+# Two more shapes share the gate. "There's a race in the fixture teardown" —
+# the existential is how a defect is most often introduced in speech, and
+# as often introduces anything else ("there's a helper for that"). And
+# "we picked up X" in the sense of acquiring it: "picked up a memory leak
+# somewhere in the refactor" versus "picked up the ticket".
+_ERROR_OBSERVED = re.compile(
+    r"(?:\b(?:we|i|users|customers|they|people|everyone)(?:'re|'m| are| am)?\s+"
+    r"(?:still\s+|now\s+|also\s+)?(?:seeing|getting|hitting|noticing|observing)|"
+    r"(?:^|(?<=[.!?\n]))[ \t]*(?:seeing|getting|noticed|noticing|observed)|"
+    r"\b(?:we|i|they|users)\s+(?:noticed|observed|saw|got|hit|picked up)|"
+    r"\b(?:there'?s|there is|there are|there was|there were)(?:\s+(?:now|still|also))?)"
+    r"\s+((?:(?![.!?](?=\s|$))[^\n,;]){4,90})",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # The same inability reported with no subject at all — "Can't connect to

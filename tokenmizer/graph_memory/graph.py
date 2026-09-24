@@ -35,6 +35,7 @@ import logging
 import re
 import sqlite3
 import time
+from collections import Counter
 from pathlib import Path
 
 from tokenmizer.graph_memory.helpers import (
@@ -114,6 +115,25 @@ def _next_status(node_type: NodeType, current: NodeStatus, incoming: NodeStatus)
     if node_type == NodeType.ERROR:
         return incoming
     return incoming if _STATUS_RANK.get(incoming, 0) > _STATUS_RANK.get(current, 0) else current
+
+
+def _task_words(label: str) -> Counter:
+    """Words of a task label for the fuzzy same-task merge: every token
+    (numbers and short identifiers included), counted, minus function words
+    and the verbs that only say what state the task is in."""
+    return Counter(w for w in re.findall(r"[a-z0-9]+", label.lower())
+                   if w not in _TASK_STATE_WORDS)
+
+
+_TASK_STATE_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "for", "with", "on", "in", "of", "to", "at",
+    "by", "is", "it", "as", "be", "we", "i", "our", "this", "that", "yet",
+    "added", "add", "adding", "done", "finished",
+    "finish", "completed", "complete", "implemented", "implement", "wrapped",
+    "still", "need", "needs", "next", "todo", "pending", "started", "start",
+    "working", "work", "shipped", "merged", "fixed", "fix", "wrote", "write",
+    "written", "built", "build", "created", "create", "updated", "update",
+})
 
 
 # ── Graph ────────────────────────────────────────────────────────────────────
@@ -357,6 +377,57 @@ class GraphMemory:
                     ex.status = _next_status(node_type, ex.status, status)
                     if len(stored_label) > len(ex.label) and status == ex.status:
                         ex.label = stored_label
+                    if stored_summary and not ex.summary:
+                        ex.summary = stored_summary
+                    return ex_id
+
+        # Fuzzy same-task merge. A to-do and the completion that finishes it
+        # are one piece of work stated twice — "Still need: rate limiting on
+        # the auth routes", then later "Added rate limiting on the auth
+        # routes" — and only an identical label reached the exact dedup
+        # above. Left apart, the resume listed the work as both done and
+        # outstanding, and told the next session to redo it. The merge
+        # upgrades status only (see _next_status), so a completed task is
+        # never reopened by a later mention of the plan.
+        #
+        # The test is containment, not overlap: every word of the shorter
+        # label must appear in the longer one, numbers and short identifiers
+        # included. An overlap ratio merged "Implemented POST /api/auth/login"
+        # into ".../logout" (three words of four in common) and "task 1" into
+        # "task 2" (the digits were too short to count) — different work,
+        # collapsed into one node. The shorter label needs two words of its
+        # own, so a bare "Add tests" does not absorb every test task. Words
+        # are counted, not just collected: "Worker 0 implemented feature 0"
+        # is not contained in "Worker 0 implemented feature 1", though its
+        # set of words is.
+        #
+        # Only a plan and its completion are merged — one side outstanding,
+        # the other completed. Two completed tasks worded alike are left to
+        # the exact dedup above: that is the case this merge exists for, and
+        # nothing else needs the risk of collapsing distinct work.
+        if node_type == NodeType.TASK:
+            words = _task_words(label)
+            if sum(words.values()) >= 2:
+                for ex_id, ex in self._nodes.items():
+                    if ex.type != NodeType.TASK or ex._evicted:
+                        continue
+                    if (ex.status == NodeStatus.COMPLETED) == (status == NodeStatus.COMPLETED):
+                        continue
+                    ex_words = _task_words(ex.label)
+                    if sum(ex_words.values()) < 2:
+                        continue
+                    small, large = sorted((words, ex_words), key=lambda c: sum(c.values()))
+                    if small - large:
+                        continue
+                    ex.touch()
+                    self._dirty = True
+                    upgraded = _next_status(node_type, ex.status, status)
+                    if upgraded != ex.status and len(stored_label) >= len(ex.label):
+                        # The completion's wording describes what was done;
+                        # the plan's described what was intended. Only when
+                        # it is at least as specific.
+                        ex.label = stored_label
+                    ex.status = upgraded
                     if stored_summary and not ex.summary:
                         ex.summary = stored_summary
                     return ex_id
@@ -705,11 +776,18 @@ class GraphMemory:
                     f"'content' keys, got {type(m).__name__}"
                 )
 
+        prior_message = None
         if incremental:
-            new_messages = [m for m in messages
-                           if self._msg_hash(m) not in self._processed_hashes]
-            if not new_messages:
+            new_idx = [i for i, m in enumerate(messages)
+                       if self._msg_hash(m) not in self._processed_hashes]
+            if not new_idx:
                 return
+            new_messages = [messages[i] for i in new_idx]
+            # The turn just before the first new one: a proposal made in the
+            # user's turn is accepted (or not) by the reply, and the proxy
+            # routinely sees the two in different calls.
+            if new_idx[0] > 0:
+                prior_message = messages[new_idx[0] - 1]
         else:
             new_messages = messages
 
@@ -720,7 +798,8 @@ class GraphMemory:
         if extracted_data is None:
             from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
             _he = get_hybrid_extractor(self._domain)
-            extracted_data = _he.heuristic_extract(new_messages, window_size=window_size)
+            extracted_data = _he.heuristic_extract(new_messages, window_size=window_size,
+                                                   prior_message=prior_message)
         data = extracted_data if isinstance(extracted_data, dict) \
             else self._extracted_to_dict(extracted_data)
         self._apply_extracted(data, new_messages)
