@@ -31,6 +31,7 @@ continues to work unchanged.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -42,6 +43,7 @@ from tokenmizer.graph_memory.helpers import (
     _content_to_text,
     _extract_evidence_from_text,
     _infer_trigger,
+    scrub_surrogates,
 )
 from tokenmizer.graph_memory.types import (
     INACTIVE_STATUSES,
@@ -257,7 +259,7 @@ class GraphMemory:
 
     def _node_id(self, node_type: str, label: str) -> str:
         normalized = f"{node_type}:{label.lower().strip()}"
-        return hashlib.sha1(normalized.encode()).hexdigest()[:12]
+        return hashlib.sha1(normalized.encode("utf-8", "surrogatepass")).hexdigest()[:12]
 
     def _normalize_label(self, label: str) -> str:
         return label.lower().strip().rstrip(".,!?")
@@ -379,6 +381,26 @@ class GraphMemory:
                         ex.label = stored_label
                     if stored_summary and not ex.summary:
                         ex.summary = stored_summary
+                    return ex_id
+
+        # One file, two spellings. An agent's tool calls name files by
+        # absolute path (`/home/dev/app/src/api/orders.py`) and its prose by
+        # the path it would show a person (`src/api/orders.py`); both
+        # reached the graph as separate FILE nodes. They are one file when
+        # one path ends with the other at a directory boundary and the
+        # shorter still has a directory in it — a bare `README.md` could be
+        # any repository's. The shorter spelling is kept: it is the one the
+        # resume should show.
+        if node_type == NodeType.FILE and "/" in stored_label:
+            for ex_id, ex in self._nodes.items():
+                if ex.type != NodeType.FILE or ex._evicted or "/" not in ex.label:
+                    continue
+                short, long_ = sorted((stored_label, ex.label), key=len)
+                if short.count("/") >= 1 and (short == long_ or long_.endswith("/" + short)):
+                    ex.touch()
+                    self._dirty = True
+                    if len(stored_label) < len(ex.label):
+                        ex.label = stored_label
                     return ex_id
 
         # Fuzzy same-task merge. A to-do and the completion that finishes it
@@ -709,10 +731,35 @@ class GraphMemory:
         duplicates — one layer down, in the extractor rather than the
         compressor. SHA-1 over a few KB is not a cost worth a silent
         drop; nothing here was measured to need the prefix.
+
+        Tool calls and tool results are part of the message. The hash used
+        to cover the TEXT only, and a tool-only turn — an agent's
+        `Edit(file_path=...)`, or the result it got back — has none, so
+        every one of them hashed to sha1(""): after the first, each later
+        tool turn was "already processed" and never reached extraction. For
+        an agent, whose work is mostly tool calls, that was most of the
+        session. A message with any non-text part is hashed over its whole
+        canonical JSON; a plain-text message keeps the text-only hash it
+        always had, so sessions persisted before this change do not re-scan.
         """
         content = msg.get("content", "")
         text = _content_to_text(content)
-        return hashlib.sha1(text.encode()).hexdigest()[:16]
+        has_structure = (
+            msg.get("tool_calls") or msg.get("tool_call_id") or msg.get("function_call")
+            or (isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") not in (None, "text") for b in content))
+        )
+        if has_structure:
+            try:
+                payload = json.dumps(
+                    {k: msg.get(k) for k in ("role", "content", "tool_calls",
+                                              "tool_call_id", "function_call", "name")},
+                    sort_keys=True, default=str,
+                )
+            except (TypeError, ValueError):
+                payload = repr(msg)
+            return hashlib.sha1(payload.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        return hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
     @staticmethod
     def _extracted_to_dict(extracted) -> dict:
@@ -787,9 +834,15 @@ class GraphMemory:
             # user's turn is accepted (or not) by the reply, and the proxy
             # routinely sees the two in different calls.
             if new_idx[0] > 0:
-                prior_message = messages[new_idx[0] - 1]
+                prior_message = scrub_surrogates(messages[new_idx[0] - 1])
         else:
             new_messages = messages
+        # Lone surrogates would reach node labels and from there SQLite — see
+        # helpers.scrub_surrogates. Only the messages about to be extracted
+        # are scrubbed: _msg_hash is surrogate-safe on its own, and copying
+        # the whole history on every request cost more than extracting it.
+        raw_new_messages = new_messages
+        new_messages = scrub_surrogates(new_messages)
 
         # Auto-select sliding window for long sessions
         # For sessions > 30 messages: only extract WIP/errors from last 20
@@ -804,7 +857,9 @@ class GraphMemory:
             else self._extracted_to_dict(extracted_data)
         self._apply_extracted(data, new_messages)
 
-        for m in new_messages:
+        # Hashed as sent, not as scrubbed: the next call compares against the
+        # raw messages.
+        for m in raw_new_messages:
             self._processed_hashes.add(self._msg_hash(m))
         if new_messages:
             self._dirty = True  # processed_hashes changed even if no nodes did

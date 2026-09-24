@@ -84,7 +84,9 @@ _FILE_PATH = re.compile(
 # hot path of a proxy that scans whatever a caller sends. Bounded, each
 # position costs at most four segments. No real filename has more.
 _FILE_COMMON = re.compile(
-    r'\b((?:[\w\-]+(?:\.[\w\-]+){0,3}\.(?:'
+    # Starts only where a token starts: `\b` also holds after every `-`,
+    # so `a-a-a-…` was re-read from each of its 2,000 hyphens.
+    r'(?<![\w\-])((?:[\w\-]+(?:\.[\w\-]+){0,3}\.(?:'
     r'py|pyi|js|mjs|cjs|ts|tsx|jsx|vue|svelte|'
     r'go|mod|sum|rs|java|kt|swift|scala|rb|php|cs|cpp|cc|c|h|hpp|ex|exs|'
     r'yaml|yml|json|toml|ini|cfg|conf|env|lock|txt|md|rst|'
@@ -157,6 +159,13 @@ def is_library_name(name: str) -> bool:
 _SPAN_CHAR = r'(?:(?![.!?](?=\s|$))[^\n])'
 _CLAUSE_SPAN = r'(' + _SPAN_CHAR + r'{5,80}(?!\w)|' + _SPAN_CHAR + r'{5,80})'
 
+# What separates a keyword from its capture: a colon or dash header ("Done:
+# X", "Done — X", "Done - X") or whitespace. NOT a bare hyphen: `[\s:\-]+`
+# read the first half of a hyphenated compound as the keyword — "a
+# FIXED-width lookbehind" became the completed task "width lookbehind",
+# "PENDING-task recall is 19%" a to-do, "BUILT-in" a completion.
+_SEP = r'(?:\s*[:\u2014\u2013]\s*|\s+-\s+|\s+)'
+
 # Pass 1: explicit verb ("decided:", "going with", "will use")
 #
 # `picked(?! up)`: "picked up" is a different verb. "Somewhere in there we
@@ -193,13 +202,16 @@ _DECISION = re.compile(
     r'standardi[sz](?:e|ing) on|let.s (?:do|go)|consensus is|committing to|'
     r'went ahead with|locked in(?: on)?|'
     r'mov(?:e|ing) (?:(?:everything|all|it|over) )?to|consolidat(?:e|ing) on)'
-    r'[\s:\-]+' + _CLAUSE_SPAN,
+    + _SEP + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
 # Pass 2: header format ("Decision: X", "Tech choice: X")
 _DECISION_HEADER = re.compile(
-    r'(?:^|\n)\s*(?:decision|tech choice|architecture choice|approach|stack|'
+    # `[ \t]*`, not `\s*`, after the line start: `\s*` also eats newlines,
+    # so from every one of 4,000 blank lines it ran to the end of the run
+    # and back — 1.3 s on a message of blank lines.
+    r'(?:^|\n)[ \t]*(?:decision|tech choice|architecture choice|approach|stack|'
     # The word people type when closing a discussion is rarely "decision".
     r'agreed|final call|final choice|final decision|verdict|conclusion|'
     r'going with|settled|locked in|going forward|consensus)\s*[:\-]\s*'
@@ -462,7 +474,7 @@ _SUPERSEDED_REPLACE = re.compile(
 # SEO", "moment.js because it ships every locale". Everything from the
 # first connective on is rationale, not the name of the thing chosen.
 _OPERAND_TAIL = re.compile(
-    r'\s+(?:for|because|since|so|as|which|that|and|but|due|given|after|'
+    r'(?<!\s)\s+(?:for|because|since|so|as|which|that|and|but|due|given|after|'
     r'when|while|to)\b.*$',
     re.IGNORECASE | re.DOTALL,
 )
@@ -498,6 +510,20 @@ def _supersede_operand(text: str) -> str:
     return s.strip(" ,;:.\u2014-")
 
 
+_COMMON_PHRASE = re.compile(
+    r"^\s*(?:a|an|the|this|that|our|my|its|their|each|every)\s+[a-z][a-z \-]*$")
+
+
+def _is_common_phrase(span: str) -> bool:
+    """An article-led, all-lowercase phrase with no identifier in it:
+    no capital, digit, dot, slash or `@` — "the longer label", not "the
+    Redis cache" or "a v2 client"."""
+    head = _OPERAND_TAIL.sub("", " ".join((span or "").split()))
+    cut = _OPERAND_SENTENCE.search(head)
+    head = head[:cut.start()] if cut else head
+    return bool(_COMMON_PHRASE.match(head.strip(" ,;:.\u2014-")))
+
+
 def find_supersessions(content: str) -> list[tuple[str, str, int, int]]:
     """Every "X was replaced by Y" the text states, as
     (old, new, match_start, match_end).
@@ -513,6 +539,14 @@ def find_supersessions(content: str) -> list[tuple[str, str, int, int]]:
             new = _supersede_operand(m.group(2))
             if len(old) < 2 or len(new) < 2 or old.lower() == new.lower():
                 continue
+            # Neither side names anything: "replacing an error fragment
+            # with the longer label" describes an edit, not a change of
+            # technology or approach, and recording it made the resume
+            # report "Changes: 'Use error fragment' -> 'Use longer label'".
+            # One named side is enough to keep it ("switching from
+            # cenkalti/backoff to a hand-rolled retry loop").
+            if _is_common_phrase(m.group(1)) and _is_common_phrase(m.group(2)):
+                continue
             key = (old.lower(), new.lower())
             if key in seen:
                 continue
@@ -525,7 +559,9 @@ def find_supersessions(content: str) -> list[tuple[str, str, int, int]]:
 
 # Numeric metrics with context — "latency 340ms", "score was 61"
 _EVIDENCE_NUMBER = re.compile(
-    r'(\d+(?:\.\d+)?\s*(?:ms|s|seconds?|minutes?|hours?|'
+    # `(?<![\d.])`: a match may only start where a number starts. Without
+    # it, a 4,000-digit run was re-scanned from every digit (1.3 s).
+    r'(?<![\d.])(\d+(?:\.\d+)?\s*(?:ms|s|seconds?|minutes?|hours?|'
     r'%|percent|'
     r'mb|gb|tb|kb|'
     r'rpm|rps|req/s|'
@@ -566,7 +602,7 @@ _EVIDENCE_STANDARD = re.compile(
 # Trailing fragments that mean a capture was cut where a clause
 # continued, so the label ends on a dangling connective.
 _DANGLING_TAIL = re.compile(
-    r"[\s,;:—-]+(?:and|or|but|with|for|to|in|on|at|by|from|the|a|an|of|"
+    r"(?<![\s,;:—-])[\s,;:—-]+(?:and|or|but|with|for|to|in|on|at|by|from|the|a|an|of|"
     r"that|which|when|while|so|then|using|via)\s*$",
     re.IGNORECASE,
 )
@@ -781,7 +817,7 @@ _TASK_DONE = re.compile(
     r'wired up|set up|created|wrote|written|updated|deployed|resolved|'
     r'merged|refactored|cleaned|migrated|restructured|removed|'
     r'switched|replaced)(?:\s+(?:up|out|off)\b)?'
-    r'[\s:\-]+' + _CLAUSE_SPAN,
+    + _SEP + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
@@ -796,6 +832,27 @@ _TASK_DONE = re.compile(
 # dropped from 77 to 75". Talking ABOUT the categories is exactly what a
 # session reviewing its own extraction does, and it was the largest single
 # source of spurious completed tasks on the real-transcript corpus.
+# A capture that opens on a preposition or an auxiliary is the tail of a
+# clause whose verb was consumed, not a task: "I'll start |by checking what
+# is available|", "the numbers I'd written |were from round 2|", "the
+# pattern I just wrote |(a leading \\b …)|".
+_NOT_A_TASK_START = re.compile(
+    r"^\s*(?:[(\[{]|(?:by|with|to|from|for|on|in|at|of|as|than|about|"
+    r"is|are|was|were|be|been|being|has|have|had|will|would|can|could|should|"
+    r"may|might|must|do|does|did)\b)",
+    re.IGNORECASE,
+)
+
+# The same category nouns followed by a figure or a colon: a line of a
+# status report ("tasks: 2% -> 32%", "task recall 19%"), not work. Narrower
+# than _CATEGORY_NOUN on purpose — "error boundaries around each route" is
+# a to-do that happens to start with one of the words.
+_CATEGORY_STAT = re.compile(
+    r'^(?:tasks?|decisions?|errors?|files?|items?|goals?|endpoints?|schemas?|'
+    r'nodes?|labels?)\b\s*(?:[:|]|\d|recall\b|precision\b|f1\b)',
+    re.IGNORECASE,
+)
+
 _CATEGORY_NOUN = re.compile(
     r'^(?:tasks?|decisions?|errors?|files?|items?|goals?|endpoints?|'
     r'schemas?|nodes?|labels?)\b',
@@ -831,8 +888,14 @@ _LEADING_CONNECTIVE = re.compile(
 )
 
 # Passive completion — "rate limiting is implemented", "tests are passing"
+#
+# The subject must END on a non-space. As `[^\n]{5,50}?\s+`, a run of
+# whitespace could be split between the subject and the `\s+` in every way
+# at every starting position: a message holding 5,000 spaces took 16.5
+# seconds in this one pattern — any caller could stall the proxy with
+# padding. Ending the subject on `\S` leaves exactly one split.
 _TASK_DONE_PASSIVE = re.compile(
-    r'((?:(?![.!?](?=\s|$))[^\n]){5,50}?)\s+(?:is|are)\s+'
+    r'((?:(?![.!?](?=\s|$))[^\n]){4,49}?\S)\s+(?:is|are)\s+'
     r'(?:working|ready|done|complete|live|passing|'
     r'implemented|deployed|fixed|resolved|working now|up and running)',
     re.IGNORECASE,
@@ -844,7 +907,7 @@ _TASK_DONE_PASSIVE = re.compile(
 _TASK_WIP = re.compile(
     r'\b(?:re-?)?(?:working on|implementing|building|currently\s+\w+ing|adding|integrating|'
     r'setting up|configuring|writing|debugging|investigating)'
-    r'[\s:\-]+' + _CLAUSE_SPAN,
+    + _SEP + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
@@ -879,8 +942,11 @@ _TASK_TODO = re.compile(
     # to add a statistical test as if it were planned work.
     r'(?<!was )(?<!were )(?<!is )(?<!are )(?<!\bfrom )(?<!\ba )(?<!\ban )'
     r'(?<!\bthe )(?<!\bby )(?<!\bof )(?<!\bwith )(?<!\bto )missing|'
-    r'pending|next step)'
-    r'[\s:\-]+' + _CLAUSE_SPAN,
+    # `pending` only as a header ("Pending: X"). As a plain word it is an
+    # adjective as often as not — "pending recall dropped 3 items",
+    # "pending requests" — and each of those became a to-do.
+    r'pending(?=\s*:)|next step)'
+    + _SEP + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
@@ -957,7 +1023,7 @@ def clause_subject(content: str, end: int, max_chars: int = 110) -> str:
 _TASK_DONE_PHRASAL = re.compile(
     r'\b(?:wrapped up|finished up|knocked out|tidied up|sorted out|squared away|'
     r'landed|nailed down|closed out|crossed off|checked off|ticked off)'
-    r'[\s:\-]+' + _CLAUSE_SPAN,
+    + _SEP + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
 
@@ -1005,7 +1071,7 @@ _TASK_TODO_CHECK = re.compile(
 # _TASK_TODO carries "todo:"/"next:" already; these are the rest of the
 # vocabulary people use for the same list.
 _TASK_TODO_HEADER = re.compile(
-    r'(?:^|(?<=[.!?])\s+|\n)[ \t]*(?:[-*\u2022][ \t]+)?(?:\*\*|__)?'
+    r'(?:^|\n|(?<=[.!?]))[ \t]*(?:[-*\u2022][ \t]+)?(?:\*\*|__)?'
     r'(?:to[ -]?do|next steps?|next up|up next|remaining|still to do|left to do|'
     r'open items?|follow[- ]?ups?|backlog|outstanding|not (?:yet )?started|'
     r'action items?|still needed|deferred)'
@@ -1018,7 +1084,7 @@ _TASK_TODO_HEADER = re.compile(
 # the list is rotating the keys" — the inverse of the subject form in
 # _TASK_TODO_STATE below.
 _TASK_TODO_FRONTED = re.compile(
-    r"(?:^|(?<=[.!?])\s+|\n)[ \t]*(?:up next|next up|next on (?:the|my|our) list)"
+    r"(?:^|\n|(?<=[.!?]))[ \t]*(?:up next|next up|next on (?:the|my|our) list)"
     r"\s+(?:is|are)\s+" + _CLAUSE_SPAN,
     re.IGNORECASE | re.MULTILINE,
 )
@@ -1085,7 +1151,7 @@ _TASK_TODO_STATE = re.compile(
 # an instruction to the reader ("Use `npm run dev` to start the server"),
 # so the extractor applies this to user turns only.
 _DECISION_IMPERATIVE = re.compile(
-    r"(?:^|(?<=[.!?\n])\s*)[ \t]*(?:please\s+|ok(?:ay)?,?\s+|yes,?\s+|then\s+)?"
+    r"(?:^|(?<=[.!?\n]))[ \t]*(?:please\s+|ok(?:ay)?,?\s+|yes,?\s+|then\s+)?"
     r"(?:use|go with|stick with|switch to|adopt|pick(?!\s+up\b)|choose|prefer|"
     r"build (?:it|this|them|that) (?:with|on|using)|do (?:it|this|that) (?:with|using))"
     r"\s+" + _CLAUSE_SPAN,
@@ -1115,7 +1181,7 @@ _DECISION_EVALUATIVE = re.compile(
 # HybridExtractor._accepted_proposals, which takes it as one only when the
 # next assistant turn opens by agreeing.
 _PROPOSAL = re.compile(
-    r"(?:^|(?<=[.!?\n])\s*)[ \t]*(?:(?:can|could|shall|should) (?:we|i|you) "
+    r"(?:^|(?<=[.!?\n]))[ \t]*(?:(?:can|could|shall|should) (?:we|i|you) "
     r"(?:(?:do|build|handle|implement|write|run|approach|solve) (?:this|it|that|them) "
     r"(?:with|using|on|in|via)|use|go with|try|switch to|adopt|move to)|"
     r"how about|what about|why not(?: just)?(?: use)?)\s+"
@@ -1560,8 +1626,13 @@ _NOT_A_DEFECT = re.compile(
 # and a leading emoji are accepted because that is how an assistant writes
 # a status list. Plural headers ("Errors:") are lists, and the first item
 # is taken the same way.
+# The line/sentence start is `(?:^|\n|(?<=[.!?]))[ \t]*` — ONE quantifier over
+# the whitespace. `(?<=[.!?])\s+` followed by `[ \t]*` could split a run of
+# spaces between the two in every possible way, and mask_mentions leaves
+# exactly such runs where it blanks a quote: 0.85 s on a 79 KB fuzz input
+# in this pattern alone.
 _ERROR_HEADER = re.compile(
-    r'(?:^|(?<=[.!?])\s+|\n)[ \t]*(?:[-*\u2022][ \t]+)?(?:\*\*|__)?'
+    r'(?:^|\n|(?<=[.!?]))[ \t]*(?:[-*\u2022][ \t]+)?(?:\*\*|__)?'
     r'(?:bugs?|issues?|errors?|problems?|exceptions?|failures?|blockers?|'
     r'regressions?|incidents?|defects?|root cause|symptoms?|known issues?|'
     r'hit a snag|snag)'
@@ -1634,7 +1705,7 @@ _ERROR_OBSERVED = re.compile(
 # start of a sentence instead, which is its own guarantee that it is a
 # report and not a clause of something else.
 _ERROR_CANNOT_INITIAL = re.compile(
-    r'(?:^|[.!?\n]\s+)((?:can.?t|cannot|could not|couldn.?t|unable to|failed to)\s+'
+    r'(?:^|[.!?][ \t]+|\n[ \t]*)((?:can.?t|cannot|could not|couldn.?t|unable to|failed to)\s+'
     r'(?:find|locate|resolve|connect|open|load|reach|start|bind|write|read|parse)'
     r'\s+[^.!?,;\n]{3,50})',
     re.IGNORECASE,
@@ -1690,11 +1761,14 @@ _ERROR_SYMPTOM = re.compile(
     re.IGNORECASE,
 )
 
+#
+# "adding" counts only in the header form ("Adding: redis"). As a plain verb
+# it adds anything — "adding agentic tool-call support" recorded the
+# dependency "agentic".
 _DEPENDENCY = re.compile(
-    r'(?:pip install|pip add|npm install|npm add|yarn add|pnpm add|poetry add|'
-    r'cargo add|go get|adding|installed?)'
-    # "Adding: redis" — the header form the task patterns already accept.
-    r'\s*[:\-]?\s+([a-zA-Z][a-zA-Z0-9_\-]{2,40})',
+    r'(?:(?:pip install|pip add|npm install|npm add|yarn add|pnpm add|poetry add|'
+    r'cargo add|go get|installed?)\s*[:\-]?|adding\s*:)'
+    r'\s+([a-zA-Z][a-zA-Z0-9_\-]{2,40})',
     re.IGNORECASE,
 )
 
@@ -1739,7 +1813,7 @@ _ENDPOINT_ONLY = re.compile(
 
 # Header format: "Schema: users table — id (UUID PK), email (unique)..."
 _SCHEMA_HEADER = re.compile(
-    r'(?:^|\n)\s*schema\s*[:\-]\s*(.{5,120})',
+    r'(?:^|\n)[ \t]*schema[ \t]*[:\-][ \t]*(.{5,120})',
     re.IGNORECASE,
 )
 
@@ -1757,6 +1831,121 @@ _SCHEMA_STOP_WORDS = frozenset({
     "the", "a", "an", "this", "that", "data", "lookup", "routing",
     "truth", "below", "above", "following", "same", "new",
 })
+
+
+# ── Language ─────────────────────────────────────────────────────────────────
+#
+# Every prose pattern in this module is English. Run on another language —
+# or on the Hindi-English mix a lot of developers actually type — they do
+# not fail quietly, they misfire: "paisa ni bada key add karogi paid but
+# pending all task and task recall" became the pending task "all task and
+# task recall and all hidden bugs…", because `pending` is an English word
+# in a sentence that is not English. What does carry across languages is
+# structure: file paths, exception names, status codes, checkboxes, a
+# "TODO:" header. looks_english() decides which of the two a message gets.
+#
+# The test is the PRESENCE of another language's function words, not the
+# absence of English ones: terse English status lines ("Created: db.py.
+# Files: api/orders.py.") contain no English function words at all, while
+# Hinglish carries plenty of them ("I want", "and", "all"). Calibrated on
+# 6,162 English messages across four labelled corpora: none misclassified.
+_ENGLISH_FW = frozenset("""the a an and or but of to in on at for with from by as is are was
+were be been being it its this that these those we i you he she they them our my your their
+us me not no do does did done have has had will would can could should so if then than there
+here what which who when where why how all any some more most other into over after before just
+also now up out about via per each both only very""".split())
+
+# Function words of the languages developers most often mix with English
+# or write in instead: Hindi/Urdu in Latin script, Spanish, Portuguese,
+# French, German, Italian. Each is chosen to be rare as an English word or
+# identifier — "die", "man", "come", "de" are left out for that reason.
+_FOREIGN_FW = frozenset("""hai hain ka ki ke ko mein karo karna kar nahi nahin aur bhi abhi kya
+sab chahiye chaiye hona hua mujhe mujha humko tumko bahut bhut lekin agar toh kuch sirf jaise
+wala wali raha rahi liye yeh ye woh hum tum aap kiya karogi karoge dena lena hoga hogi sakta
+sakti apna apni hota hoti tha thi jo ma ab itna kaise kyun
+el los las del que por para con una está necesitamos pero como más también después porque
+não uma com os das dos mas você
+la les des est une pour avec pas nous vous dans sur mais être devons avons sommes vers avant
+der das und ist nicht mit für auf wir müssen sind oder auch noch
+il gli della sono anche questo""".split())
+
+_FENCE_OR_INLINE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
+_WORD = re.compile(r"[^\W\d_]+")
+
+
+def looks_english(text: str) -> bool:
+    """True unless `text` reads as another language (see "Language" above).
+
+    Code, inline or fenced, is ignored: identifiers are not prose in any
+    language. A message that is mostly non-Latin script is not English.
+    """
+    t = _FENCE_OR_INLINE.sub(" ", text or "")
+    letters = [c for c in t if c.isalpha()]
+    if letters and sum(1 for c in letters if ord(c) > 0x24F) / len(letters) > 0.3:
+        return False
+    toks = _WORD.findall(t.lower())
+    if not toks:
+        return True
+    foreign = sum(w in _FOREIGN_FW for w in toks)
+    english = sum(w in _ENGLISH_FW for w in toks)
+    if foreign >= 2 and foreign * 2 >= english:
+        return False
+    return not (len(toks) >= 6 and foreign / len(toks) >= 0.15)
+
+
+# ── Mentions ─────────────────────────────────────────────────────────────────
+#
+# A quoted phrase, a table row and a code block are MENTIONS: an assistant
+# explaining a bug quotes the sentence that triggers it ("retry for failed
+# deliveries" read as an error), a status table restates numbers ("tasks |
+# 53% | same"), a code block is source. Run on a real 612-message agent
+# session, most of what the prose patterns extracted came from exactly
+# these three places. mask_mentions() blanks them to spaces — keeping every
+# offset valid for the passes that read context around a match — before
+# the prose patterns run. File patterns still read the original text.
+#
+# Two exceptions keep real errors reachable. A code block often holds a
+# pasted log, so a line in it that reads as an error line — a traceback's
+# exception, `FAILED tests/…`, `error: …` — is left visible. And a quoted
+# span naming an exception or a status code is the error message itself
+# ('I get "TypeError: x is undefined"'), so it is left visible too.
+_FENCED = re.compile(r"(```|~~~)[^\n]*\n.*?(?:\1|\Z)", re.DOTALL)
+_TABLE_ROW = re.compile(r"^[ \t]*\|.*\|[ \t]*$", re.MULTILINE)
+_QUOTED = re.compile(r'"[^"\n]{1,300}"|“[^”\n]{1,300}”')
+_LOG_ERROR_LINE = re.compile(
+    r"^\s*(?:[\w.]*(?:Error|Exception)\b\s*:|FAILED\s|ERROR\s|E\s{2,}|"
+    r"error(?:\[\w+\])?:|fatal:|panic:|npm ERR!|Uncaught\s)",
+    re.IGNORECASE,
+)
+_QUOTED_ERROR = re.compile(r"\b[A-Z]\w*(?:Error|Exception)\b|\b[45]\d{2}\b|\bE[A-Z]{4,14}\b")
+
+
+def _spaces(m: re.Match) -> str:
+    return re.sub(r"[^\n]", " ", m.group(0))
+
+
+def _fence_keep_log_lines(m: re.Match) -> str:
+    return "\n".join(ln if _LOG_ERROR_LINE.match(ln) else " " * len(ln)
+                     for ln in m.group(0).split("\n"))
+
+
+def _quote_unless_error(m: re.Match) -> str:
+    return m.group(0) if _QUOTED_ERROR.search(m.group(0)) else " " * len(m.group(0))
+
+
+def mask_mentions(text: str) -> str:
+    """`text` with quoted spans, table rows and code blocks blanked to
+    spaces (same length, newlines kept). See "Mentions" above. Each kind
+    is one linear substitution pass."""
+    if not text:
+        return text
+    if "```" in text or "~~~" in text:
+        text = _FENCED.sub(_fence_keep_log_lines, text)
+    if "|" in text:
+        text = _TABLE_ROW.sub(_spaces, text)
+    if '"' in text or "\u201c" in text:
+        text = _QUOTED.sub(_quote_unless_error, text)
+    return text
 
 
 # ── Shared technology vocabulary ──────────────────────────────────────────────

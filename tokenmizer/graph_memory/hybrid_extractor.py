@@ -29,11 +29,13 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from tokenmizer.graph_memory.domains import get_pack, normalize_domain
+from tokenmizer.graph_memory.helpers import tool_signals
 from tokenmizer.graph_memory.patterns import (
     _ACCEPTANCE,
     _ACCEPTANCE_VOID,
     _ALREADY_FIXED,
     _CATEGORY_NOUN,
+    _CATEGORY_STAT,
     _CAUSAL_LINK,
     _CLAUSE_END,
     _COMPLETION_LEAD,
@@ -88,6 +90,7 @@ from tokenmizer.graph_memory.patterns import (
     _NEGATION_WORDS,
     _NO_DEFECT,
     _NOT_A_DEFECT,
+    _NOT_A_TASK_START,
     _PAST_ASPECT_LEAD,
     _PROPOSAL,
     _SCHEMA_HEADER,
@@ -125,6 +128,8 @@ from tokenmizer.graph_memory.patterns import (
     clause_subject,
     find_supersessions,
     is_library_name,
+    looks_english,
+    mask_mentions,
     restore_verb,
 )
 
@@ -183,6 +188,14 @@ def _word_bounded(content: str, start: int, end: int) -> tuple[int, int]:
         tail = _CONTRACTION_TAIL.match(content, start, end)
         if tail:
             start = tail.end()
+    elif start > 0 and (content[start - 1].isalnum() or (
+            content[start - 1] == "-" and start > 1 and content[start - 2].isalnum())):
+        # The span opens inside a word — usually the second half of a
+        # hyphenated one, since the subject windows accept `-`: "To|-dos
+        # from early …" was labelled "dos from early …". Take the whole
+        # word back.
+        while start > 0 and (content[start - 1].isalnum() or content[start - 1] in "-_"):
+            start -= 1
     if 0 < end < len(content) and content[end - 1].isalnum():
         while end < len(content) and (content[end].isalnum() or content[end] == "_"):
             end += 1
@@ -205,7 +218,7 @@ _CONDITIONAL_LEAD = re.compile(
 # queue". Stripped for the label; the task is what is left.
 _TODO_LEAD = re.compile(r"^(?:to\s+)?(?:get (?:around )?to\s+|do\s+)?", re.IGNORECASE)
 _TODO_TAIL = re.compile(
-    r"\s+(?:yet|once|until|but|tomorrow|today|tonight|later|soon|eventually|"
+    r"(?<!\s)\s+(?:yet|once|until|but|tomorrow|today|tonight|later|soon|eventually|"
     r"next (?:week|sprint)|this (?:week|afternoon|evening))\b.*$",
     re.IGNORECASE,
 )
@@ -225,11 +238,24 @@ def _strip_emphasis(text: str) -> str:
 
 
 # An observed object that denies there is anything wrong.
-_NONE_LEAD = re.compile(r"\s*(?:no|not|none|nothing|zero|never|0)\b", re.IGNORECASE)
+_NONE_LEAD = re.compile(r"(?:no|not|none|nothing|zero|never|0)\b", re.IGNORECASE)
 
 
 def _todo_label(text: str) -> str:
     return _TODO_TAIL.sub("", _TODO_LEAD.sub("", text.strip())).strip(" ,;:—-")
+
+
+# The subject of an intransitive completion verb has to be the WORK: "the
+# retry fix landed in the last commit". A person ("…attribution I wrote in
+# the report") or a clause opening on a gerund ("Verifying the commit
+# attribution I wrote…") is not something that got done.
+_PERSON_FINAL = re.compile(r"\b(?:i|we|you|he|she|they|someone|somebody|me|us)\s*$", re.IGNORECASE)
+_GERUND_INITIAL = re.compile(r"^\s*\w+ing\b(?!\s+(?:is|are|was|were)\b)", re.IGNORECASE)
+
+
+def _is_work_subject(label: str) -> bool:
+    return (_is_subject_label(label) and not _PERSON_FINAL.search(label)
+            and not _GERUND_INITIAL.match(label))
 
 
 def _is_subject_label(label: str) -> bool:
@@ -253,6 +279,39 @@ _NOT_A_SUBJECT = frozenset({
     "each", "both", "either", "neither", "one", "the other", "the latter",
     "the former", "things", "stuff", "so far so good", "that one", "this one",
 })
+
+
+# Order is precedence: the first pattern to claim a span keeps it.
+# _ERROR_STATUS / _ERROR_STATUS_NAMED sit directly after _ERROR_TYPED
+# because they were split out of it — moving them to the end of the tuple
+# let _ERROR_SYMPTOM claim status-code spans first and cost 7 points of
+# error F1 on the corpus.
+#
+# _ERROR_HEADER goes first of all: "Bug: <description>" states both that
+# this is a defect and exactly where its description starts and ends, so no
+# pattern that guesses a subject window should get to claim a shorter,
+# vaguer slice of the same sentence first. _ERROR_ENCOUNTER and
+# _ERROR_OBSERVED follow it for the same reason: their capture starts
+# exactly where the problem does ("ran into |X|", "we're seeing |X|"),
+# where _ERROR_SYMPTOM's subject window, reading backwards from a symptom
+# word, took "seeing a flaky" out of "We're seeing a flaky test failing".
+_ALL_ERROR_PATTERNS = (
+    _ERROR_HEADER, _ERROR_ENCOUNTER, _ERROR_OBSERVED,
+    _ERROR_TYPED, _ERROR_STATUS, _ERROR_STATUS_NAMED,
+    _ERROR_VULN, _ERROR_INTEGRITY,
+    _ERROR_DAMAGE, _ERROR_ABSENCE, _ERROR_INERT,
+    _ERROR_FALSE_HEALTH, _ERROR_MISCLASSIFIED,
+    _ERROR_SYMPTOM, _ERROR_FAILING,
+    _ERROR_FAILED_SUBJECT, _ERROR_COUNT, _ERROR_SLOWER,
+    _ERROR_CANNOT_INITIAL,
+)
+
+# The patterns that key on a name rather than on English prose: an
+# exception class, a status code, a vulnerability class, a "Bug:" header.
+# These are what a message in another language still carries.
+_STRUCTURAL_ERROR_PATTERNS = (
+    _ERROR_HEADER, _ERROR_TYPED, _ERROR_STATUS_NAMED, _ERROR_VULN,
+)
 
 
 @dataclass
@@ -389,6 +448,8 @@ class HybridExtractor:
         seen_endpoints: set,
         seen_schemas: set,
         proposals: list | None = None,
+        original: str | None = None,
+        english: bool = True,
     ) -> None:
         """
         Apply all 5 extraction passes to a single message.
@@ -402,6 +463,16 @@ class HybridExtractor:
         Extracted into a helper to keep heuristic_extract() readable
         (was 194L — loop body alone was 166L).
         """
+        # `content` is what the prose patterns read (mentions masked — see
+        # patterns.mask_mentions); `original` is the text as sent, which
+        # file, endpoint and schema names are read from.
+        original = content if original is None else original
+        if not english:
+            self._extract_language_neutral(content, original, result, seen_tasks,
+                                           seen_decisions, seen_files,
+                                           seen_endpoints, seen_schemas, role)
+            return
+
         # Goals: first 4 messages only (session intent captured early)
         if role == "user" and turn_idx < 4:
             # The domain pack's openers run FIRST and claim their sentence.
@@ -464,11 +535,15 @@ class HybridExtractor:
             if _ERROR_HEADER.match(content, _clause_start(content, m.start())):
                 continue
             verb = re.match(r"\w+", m.group(0))
+            if raw_task.lstrip()[:1] in "([{" or re.match(
+                    r"\s*(?:is|are|was|were|be|been|has|have|had|will|would|can|"
+                    r"could|should|may|might|must)\b", raw_task, re.IGNORECASE):
+                continue   # "the pattern I just wrote (a leading …)", "written were from"
             if _INTRANSITIVE_TAIL.match(raw_task.strip()):
                 # "The retry fix landed in the last commit": the task is the
                 # subject, not the prepositional phrase after the verb.
                 subject = clause_subject(content, m.start())
-                if not _is_subject_label(subject) or _CONDITIONAL_LEAD.match(subject) \
+                if not _is_work_subject(subject) or _CONDITIONAL_LEAD.match(subject) \
                         or _NEGATION_WORDS.search(subject):
                     continue
                 task = _clip(subject)
@@ -538,7 +613,7 @@ class HybridExtractor:
                     if _INTRANSITIVE_TAIL.match(task):
                         # Intransitive, as in _TASK_DONE: the subject is the task.
                         subject = clause_subject(content, m.start())
-                        if _is_subject_label(subject) and not _CONDITIONAL_LEAD.match(subject) \
+                        if _is_work_subject(subject) and not _CONDITIONAL_LEAD.match(subject) \
                                 and not _NEGATION_WORDS.search(subject):
                             _add_done(_clip(subject))
                         continue
@@ -572,6 +647,10 @@ class HybridExtractor:
         #   dashboard"), and the goal is already a node of its own.
         def _outstanding(text: str, start: int, seen: list[str]) -> bool:
             if len(text) < 5 or _is_only_paths(text):
+                return False
+            # "Pending tasks: 2% -> 32%" talks ABOUT the category; "I'll
+            # start by checking …" has no task in it.
+            if _CATEGORY_STAT.match(text) or _NOT_A_TASK_START.match(text):
                 return False
             if _COMPLETION_LEAD.search(content[max(0, start - 40):start]):
                 return False
@@ -809,29 +888,97 @@ class HybridExtractor:
                                              "evidence": surrounding[:120], "source_role": role})
                     seen_decisions.add(norm)
 
+        self._extract_structure(original, result, seen_files, seen_endpoints, seen_schemas)
+        self._extract_errors(content, result, _ALL_ERROR_PATTERNS)
+
+        # Dependencies
+        for m in _DEPENDENCY.finditer(content):
+            dep = m.group(1).strip()
+            if len(dep) > 2 and dep.lower() not in {"the", "a", "an", "it", "this", "that"}:
+                result.dependencies.append(dep)
+
+        # Environments
+        for m in _ENV.finditer(content):
+            result.environments.append(m.group(0).strip())
+
+        # Evidence
+        for m in _EVIDENCE_NUMBER.finditer(content):
+            text = m.group(1).strip()
+            if len(text) > 5:
+                result.evidence.append({"text": text, "type": "metric", "turn": turn_idx})
+        for m in _EVIDENCE_SCORE.finditer(content):
+            text = m.group(0).strip()
+            if len(text) > 5:
+                result.evidence.append({"text": text, "type": "metric", "turn": turn_idx})
+        for m in _EVIDENCE_COST.finditer(content):
+            text = m.group(1).strip()
+            if len(text) > 1:
+                result.evidence.append({"text": text, "type": "metric", "turn": turn_idx})
+        for m in _EVIDENCE_QUOTE.finditer(content):
+            text = m.group(1).strip()
+            if len(text) > 10:
+                result.evidence.append({"text": text, "type": "quote", "turn": turn_idx})
+        for m in _EVIDENCE_STANDARD.finditer(content):
+            text = m.group(0).strip()
+            if len(text) > 8:
+                result.evidence.append({"text": text, "type": "standard", "turn": turn_idx})
+
+
+    def _extract_language_neutral(self, content: str, original: str, result: "ExtractedData",
+                                  seen_tasks: set, seen_decisions: set, seen_files: set,
+                                  seen_endpoints: set, seen_schemas: set, role: str) -> None:
+        """What a message in another language still says in a form these
+        patterns can read: checkboxes, "TODO:"/"Decision:" headers, file and
+        route names, exception names and status codes. See
+        patterns.looks_english for why nothing else is attempted."""
+        for m in _TASK_DONE_CHECK.finditer(content):
+            task = _clip(m.group(1))
+            norm = self._normalize(task)
+            if len(task) >= 5 and norm not in seen_tasks:
+                result.tasks_done.append(task)
+                seen_tasks.add(norm)
+        for pattern in (_TASK_TODO_CHECK, _TASK_TODO_HEADER):
+            for m in pattern.finditer(content):
+                todo = _clip(m.group(1))
+                if len(todo) >= 5 and not any(self._subsumes(todo, t) for t in result.tasks_todo):
+                    result.tasks_todo.append(todo)
+        for m in _DECISION_HEADER.finditer(content):
+            label = _clip(m.group(1))
+            norm = self._normalize(label)
+            if norm not in seen_decisions and len(norm) > 4:
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
+                seen_decisions.add(norm)
+        self._extract_structure(original, result, seen_files, seen_endpoints, seen_schemas)
+        self._extract_errors(content, result, _STRUCTURAL_ERROR_PATTERNS)
+
+    def _extract_structure(self, original: str, result: "ExtractedData",
+                           seen_files: set, seen_endpoints: set, seen_schemas: set) -> None:
+        """Files, endpoints and schemas. These are names, not prose, so they
+        are read from the original text — quotes and code blocks included —
+        and in any language."""
         # Files
-        for m in _FILE_COMMON.finditer(content):
+        for m in _FILE_COMMON.finditer(original):
             if is_library_name(m.group(1).strip()):
                 seen_files.add(m.group(1).strip())   # never a file; see _LIBRARY_NOT_FILE
-        for m in _FILE_PATH.finditer(content):
+        for m in _FILE_PATH.finditer(original):
             f = m.group(1).strip()
             if f not in seen_files and len(f) > 4:
                 result.files.append(f)
                 seen_files.add(f)
-        for m in _FILE_COMMON.finditer(content):
+        for m in _FILE_COMMON.finditer(original):
             f = m.group(1).strip()
             if f not in seen_files:
                 result.files.append(f)
                 seen_files.add(f)
-        for m in _FILE_EXTENSIONLESS.finditer(content):
+        for m in _FILE_EXTENSIONLESS.finditer(original):
             f = m.group(1).strip()
             if f not in seen_files:
                 result.files.append(f)
                 seen_files.add(f)
 
         # Endpoints — "POST /api/auth/login"
-        for m in _ENDPOINT.finditer(content):
-            if _is_negated_context(content, m.start()):
+        for m in _ENDPOINT.finditer(original):
+            if _is_negated_context(original, m.start()):
                 continue
             ep = m.group(0).strip().rstrip(".")
             norm = self._normalize(ep)
@@ -840,8 +987,8 @@ class HybridExtractor:
                 seen_endpoints.add(norm)
 
         # Schemas — header format ("Schema: users table — ...")
-        for m in _SCHEMA_HEADER.finditer(content):
-            if _is_negated_context(content, m.start()):
+        for m in _SCHEMA_HEADER.finditer(original):
+            if _is_negated_context(original, m.start()):
                 continue
             schema = _clip(m.group(1), 100)
             norm = self._normalize(schema)
@@ -852,11 +999,11 @@ class HybridExtractor:
         # Schemas — inline "X table" mention, excluding generic non-
         # identifier words immediately before "table" and negated
         # mentions ("No refresh_tokens table needed").
-        for m in _SCHEMA_TABLE.finditer(content):
+        for m in _SCHEMA_TABLE.finditer(original):
             word = m.group(1).lower()
             if word in _SCHEMA_STOP_WORDS:
                 continue
-            if _is_negated_context(content, m.start()):
+            if _is_negated_context(original, m.start()):
                 continue
             schema = m.group(0).strip()
             norm = self._normalize(schema)
@@ -864,6 +1011,9 @@ class HybridExtractor:
                 result.schemas.append(schema)
                 seen_schemas.add(norm)
 
+    def _extract_errors(self, content: str, result: "ExtractedData", patterns) -> None:
+        """Run the error patterns over `content` in `patterns` order, which
+        is precedence (see _ALL_ERROR_PATTERNS)."""
         # Errors: full history, NOT the recent window.
         #
         # An error is a permanent fact about the session in the same way a
@@ -873,39 +1023,18 @@ class HybridExtractor:
         # a session that diagnosed three failures early and spent the rest
         # of its turns fixing them carried none of them forward.
         sentence_claims: dict[tuple[int, int], tuple[str, int]] = {}
-        # Order is precedence: the first pattern to claim a span keeps it.
-        # _ERROR_STATUS / _ERROR_STATUS_NAMED sit directly after _ERROR_TYPED
-        # because they were split out of it — moving them to the end of the
-        # tuple let _ERROR_SYMPTOM claim status-code spans first and cost 7
-        # points of error F1 on the corpus.
-        #
-        # _ERROR_HEADER goes first of all: "Bug: <description>" states both
-        # that this is a defect and exactly where its description starts
-        # and ends, so no pattern that guesses a subject window should get
-        # to claim a shorter, vaguer slice of the same sentence first.
-        #
-        # _ERROR_ENCOUNTER and _ERROR_OBSERVED follow it for the same reason:
-        # their capture starts exactly where the problem does ("ran into |X|",
-        # "we're seeing |X|"), where _ERROR_SYMPTOM's subject window, reading
-        # backwards from a symptom word, took "seeing a flaky" out of "We're
-        # seeing a flaky test failing one run in twenty".
-        for pattern in (_ERROR_HEADER, _ERROR_ENCOUNTER, _ERROR_OBSERVED,
-                        _ERROR_TYPED, _ERROR_STATUS, _ERROR_STATUS_NAMED,
-                        _ERROR_VULN, _ERROR_INTEGRITY,
-                        _ERROR_DAMAGE, _ERROR_ABSENCE, _ERROR_INERT,
-                        _ERROR_FALSE_HEALTH, _ERROR_MISCLASSIFIED,
-                        _ERROR_SYMPTOM, _ERROR_FAILING,
-                        _ERROR_FAILED_SUBJECT, _ERROR_COUNT, _ERROR_SLOWER,
-                        _ERROR_CANNOT_INITIAL):
+        for pattern in patterns:
             for m in pattern.finditer(content):
                 if pattern is _ERROR_HEADER and _NO_DEFECT.match(m.group(1).strip(" *_")):
                     continue   # "Errors: none"
                 if pattern is _ERROR_OBSERVED and not _DEFECT_WORD.search(m.group(1)):
                     continue   # "we're seeing a 20% speedup" is good news
-                if pattern in (_ERROR_OBSERVED, _ERROR_ENCOUNTER) and _NONE_LEAD.match(m.group(1)):
+                if pattern in (_ERROR_OBSERVED, _ERROR_ENCOUNTER) and _NONE_LEAD.match(m.group(1).lstrip()):
                     continue   # "there's no error", "seeing zero failures"
                 if _NOT_A_DEFECT.search(m.group(1)):
                     continue   # "logistic regression" is a model
+                if m.group(1).lstrip().startswith("Traceback (most recent"):
+                    continue   # the header; the exception line below it names the failure
                 before = content[max(0, m.start(1) - 60):m.start(1)]
                 if _SOLUTION_VERB.search(before):
                     continue   # the symptom names the fix, not the failure
@@ -985,39 +1114,6 @@ class HybridExtractor:
                 sentence_claims[key] = (err, span_end)
                 result.errors.append(err)
 
-        # Dependencies
-        for m in _DEPENDENCY.finditer(content):
-            dep = m.group(1).strip()
-            if len(dep) > 2 and dep.lower() not in {"the", "a", "an", "it", "this", "that"}:
-                result.dependencies.append(dep)
-
-        # Environments
-        for m in _ENV.finditer(content):
-            result.environments.append(m.group(0).strip())
-
-        # Evidence
-        for m in _EVIDENCE_NUMBER.finditer(content):
-            text = m.group(1).strip()
-            if len(text) > 5:
-                result.evidence.append({"text": text, "type": "metric", "turn": turn_idx})
-        for m in _EVIDENCE_SCORE.finditer(content):
-            text = m.group(0).strip()
-            if len(text) > 5:
-                result.evidence.append({"text": text, "type": "metric", "turn": turn_idx})
-        for m in _EVIDENCE_COST.finditer(content):
-            text = m.group(1).strip()
-            if len(text) > 1:
-                result.evidence.append({"text": text, "type": "metric", "turn": turn_idx})
-        for m in _EVIDENCE_QUOTE.finditer(content):
-            text = m.group(1).strip()
-            if len(text) > 10:
-                result.evidence.append({"text": text, "type": "quote", "turn": turn_idx})
-        for m in _EVIDENCE_STANDARD.finditer(content):
-            text = m.group(0).strip()
-            if len(text) > 8:
-                result.evidence.append({"text": text, "type": "standard", "turn": turn_idx})
-
-
     def heuristic_extract(
         self,
         messages: list[dict],
@@ -1061,17 +1157,29 @@ class HybridExtractor:
         open_proposals: list[str] = []
         if prior_message and prior_message.get("role") == "user":
             prior_text = _strip_emphasis(_content_to_text(prior_message.get("content", "")))
-            if prior_text.strip():
+            if prior_text.strip() and looks_english(prior_text):
                 self._extract_one_message(
-                    prior_text, "user", -1, False, ExtractedData(), set(), set(),
-                    set(), set(), set(), proposals=open_proposals,
+                    mask_mentions(prior_text), "user", -1, False, ExtractedData(), set(),
+                    set(), set(), set(), set(), proposals=open_proposals,
+                    original=prior_text,
                 )
 
         for i, msg in enumerate(messages):
-            content = _strip_emphasis(_content_to_text(msg.get("content", "")))
-            if not content.strip():
-                continue
             role      = msg.get("role", "user")
+            # Tool calls and tool results first: an agent's tool-only turn
+            # has no text at all and still edited a file or hit an error.
+            tool_files, tool_errors = tool_signals(msg)
+            for f in tool_files:
+                if f not in seen_files:
+                    result.files.append(f)
+                    seen_files.add(f)
+            for e in tool_errors:
+                if not any(self._subsumes(e, x) for x in result.errors):
+                    result.errors.append(e)
+            original = _strip_emphasis(_content_to_text(msg.get("content", "")))
+            if not original.strip():
+                continue
+            content = mask_mentions(original)
             is_recent = i >= recent_start
 
             if role == "assistant" and open_proposals:
@@ -1089,6 +1197,7 @@ class HybridExtractor:
                 result, seen_decisions, seen_tasks, seen_files,
                 seen_endpoints, seen_schemas,
                 proposals=open_proposals if role == "user" else None,
+                original=original, english=looks_english(original),
             )
 
         # Cross-granularity dedup. Without this the heuristic path

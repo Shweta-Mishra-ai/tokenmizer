@@ -81,12 +81,23 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
         sections.append(words["goal"] + ": " + " | ".join(g.label for g in goals[:2]))
 
     # ── 2. In-progress tasks ──────────────────────────────────────────────
+    #
+    # Most recently mentioned first. These were sorted by importance, which
+    # every extracted task shares (0.6), so the order fell back to insertion
+    # order — OLDEST first — and a long session's resume said it was
+    # "working on" whatever it started 500 messages ago, never what it is
+    # doing now. Ties within one extraction keep the later mention first.
+    order = {nid: i for i, nid in enumerate(graph._nodes)}
+
+    def _recent_first(n):
+        return (n.importance, n.updated_at, order.get(n.id, 0))
+
     open_tasks = sorted(
         [n for n in graph._nodes.values()
          if n.type == NodeType.TASK
          and n.status == NodeStatus.IN_PROGRESS
          and not n._evicted],
-        key=lambda x: x.importance, reverse=True
+        key=_recent_first, reverse=True
     )
     # ── 3. Pending tasks (next steps) ─────────────────────────────────────
     pending_tasks = sorted(
@@ -94,7 +105,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
          if n.type == NodeType.TASK
          and n.status == NodeStatus.PENDING
          and not n._evicted],
-        key=lambda x: x.importance, reverse=True
+        key=_recent_first, reverse=True
     )
     current_work = open_tasks[:4] + pending_tasks[:2]
     if current_work:

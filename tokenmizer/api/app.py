@@ -29,7 +29,7 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tokenmizer import __version__
 from tokenmizer.analytics.engine import AnalyticsEngine
@@ -720,15 +720,19 @@ class ChatRequest(BaseModel):
 
     model: Optional[str] = None
     messages: list[ChatMessage]
-    max_tokens: Optional[int] = 4096
+    # Ranges every provider enforces anyway. Checked here so a bad value is
+    # a 422 naming the field, not an opaque upstream 400 after the request
+    # has been compressed, extracted and forwarded — `max_tokens: -5` went
+    # all the way to the provider.
+    max_tokens: Optional[int] = Field(default=4096, ge=1)
     # OpenAI's current name for the same limit; newer SDK defaults and the
     # o-series reject `max_tokens` and send this instead. Without it the
     # client's limit was silently replaced by the 4096 default above.
-    max_completion_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = Field(default=None, ge=1)
     stream: Optional[bool] = False
     session_id: Optional[str] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
     stop: Optional[str | list[str]] = None
     # Tool/function calling, OpenAI shape. Forwarded to providers that
     # support it (see BaseProvider.supports_tools); a 501 otherwise.
