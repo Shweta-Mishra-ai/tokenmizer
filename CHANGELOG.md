@@ -6,8 +6,29 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1648 tests; every published number below was
+remembering. Suite is now 1658 tests; every published number below was
 re-derived from a run.
+
+### Improved — more memory per token, and a graph that keeps its relations
+
+- **The resume block packs items, not sections.** Over budget it used to
+  drop whole sections from the bottom, so "Open issues" went first. Items
+  are now admitted in rounds by priority (open errors, warnings, current
+  and next work, decisions, then done, files, environment), with the
+  display order unchanged. Home directories are shortened (`~/…`), and a
+  decision's rationale appears only when it is short, whole and not a
+  restatement of the label. External benchmark, 180 sessions, share of
+  labelled facts carried: at 150 tokens 64.6% -> 71.7% (open errors
+  41% -> 70%); at 250/400 tokens 75.7% -> 77.7% for ~4 more tokens.
+  Larger per-section caps were tried and rejected: +0.8% facts for more
+  tokens on every request.
+- **Relations survive incremental extraction.** They were inferred only
+  between nodes of one extraction call, and the proxy extracts one
+  message per call: one-message-at-a-time extraction formed 124 edges
+  where whole-session extraction formed 395 (no task was ever PART_OF the
+  goal; a fix never closed an earlier error). New nodes now link against
+  the whole live graph: 394 of 395 shared. Per-request extraction cost is
+  unchanged (median 2.9 ms).
 
 ### Improved — agent sessions, noise on real text, and faster than before
 

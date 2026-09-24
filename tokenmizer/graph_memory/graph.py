@@ -906,10 +906,32 @@ class GraphMemory:
           - file → endpoint: only if endpoint label shares a path segment with file name
         """
         # Collect accepted node IDs by type for relationship inference
-        goal_ids: list[str] = []
-        task_ids: list[str] = []
-        file_ids: list[str] = []
-        decision_ids: list[str] = []
+        # Relations are inferred against the WHOLE graph, not only against
+        # what this call extracted. The proxy extracts one new message per
+        # request, so a batch almost never holds both ends of a relation:
+        # the error in message 10 and the file edited in message 8 were
+        # never linked, the fix and the failure it closed never met, and no
+        # task was ever PART_OF the goal from the opening turn. Measured on
+        # the 100-session external corpus, one-message-at-a-time extraction
+        # formed 68 edges where extracting the same sessions whole formed
+        # 262 — the incremental graph that why() and impact() walk in
+        # production had lost three relations in four.
+        #
+        # Each list starts with the live nodes of its type already in the
+        # graph; this call's nodes are appended as they are created. Every
+        # relation loop below pairs a node from THIS call with the list, so
+        # the cost is new x existing, not existing x existing.
+        def _live(node_type: NodeType) -> list[str]:
+            return [nid for nid, n in self._nodes.items()
+                    if n.type == node_type and not n._evicted
+                    and n.status not in INACTIVE_STATUSES]
+
+        goal_ids: list[str] = _live(NodeType.GOAL)
+        task_ids: list[str] = _live(NodeType.TASK)
+        file_ids: list[str] = _live(NodeType.FILE)
+        decision_ids: list[str] = _live(NodeType.DECISION)
+        prior_error_ids: list[str] = _live(NodeType.ERROR)
+        new_task_ids: list[str] = []
 
         # Goals
         for goal in data.get("goals", []):
@@ -928,8 +950,10 @@ class GraphMemory:
                 # tier: good evidence, not corroborated.
                 nid = self.add_node(NodeType.GOAL, goal, NodeStatus.IN_PROGRESS,
                                     importance=1.0, confidence=0.8)
-                if nid:
+                if nid and nid not in goal_ids:
                     goal_ids.append(nid)
+                    for tid in task_ids:
+                        self.add_edge(tid, nid, EdgeType.PART_OF)
 
         # Tasks
         status_map = {
@@ -945,7 +969,26 @@ class GraphMemory:
             importance = 0.8 if status == NodeStatus.COMPLETED else 0.6
             nid = self.add_node(NodeType.TASK, label, status, importance=importance)
             if nid:
-                task_ids.append(nid)
+                if nid not in task_ids:
+                    task_ids.append(nid)
+                new_task_ids.append(nid)
+                # The other direction of the decision and file links below,
+                # which only ever look from a NEW decision or file: a task
+                # arriving after them was never linked to either.
+                task_node = self._nodes.get(nid)
+                if task_node is not None:
+                    task_words = self._expand_with_aliases(self._meaningful_words(task_node.label))
+                    task_lower = task_node.label.lower()
+                    for did in decision_ids:
+                        dec = self._nodes.get(did)
+                        if dec is not None and self._expand_with_aliases(
+                                self._meaningful_words(dec.label)) & task_words:
+                            self.add_edge(did, nid, EdgeType.RELATED_TO)
+                    for fid in file_ids:
+                        fnode = self._nodes.get(fid)
+                        stem = fnode.label.split("/")[-1].split(".")[0].lower() if fnode else ""
+                        if stem and len(stem) > 2 and stem in task_lower:
+                            self.add_edge(nid, fid, EdgeType.IMPLEMENTS)
                 # Tasks are part of the session goal
                 for gid in goal_ids:
                     self.add_edge(nid, gid, EdgeType.PART_OF)
@@ -973,6 +1016,13 @@ class GraphMemory:
                                 source_role=d.get("source_role") or "assistant")
             if nid:
                 decision_ids.append(nid)
+                # A decision naming a file that was already in the graph.
+                dec_lower = label.lower()
+                for fid in file_ids:
+                    fnode = self._nodes.get(fid)
+                    stem = fnode.label.split("/")[-1].split(".")[0].lower() if fnode else ""
+                    if stem and len(stem) > 2 and stem in dec_lower:
+                        self.add_edge(nid, fid, EdgeType.RELATED_TO)
                 # Link to tasks if they share meaningful vocabulary (with alias expansion)
                 decision_words = self._expand_with_aliases(
                     self._meaningful_words(label)
@@ -1024,6 +1074,12 @@ class GraphMemory:
             nid = self.add_node(NodeType.FILE, f, NodeStatus.IN_PROGRESS, importance=0.7)
             if nid:
                 file_ids.append(nid)
+                # An error recorded earlier that names this file.
+                base = f.split("/")[-1]
+                for eid in prior_error_ids:
+                    enode = self._nodes.get(eid)
+                    if enode is not None and base and base in enode.label:
+                        self.add_edge(eid, nid, EdgeType.RELATED_TO)
                 file_stem = f.split("/")[-1].split(".")[0].lower()
                 if file_stem and len(file_stem) > 2:
                     for tid in task_ids:
@@ -1064,12 +1120,17 @@ class GraphMemory:
         # error and an in-progress task about the same thing are the other
         # relation a resume needs: the error BLOCKS the task. Both require
         # real vocabulary overlap, not one shared word.
-        for eid in error_ids:
+        # New errors against every task; errors already in the graph against
+        # this call's tasks only — the fix that closes an old failure
+        # usually arrives turns after it.
+        pairs = [(eid, task_ids) for eid in error_ids]
+        pairs += [(eid, new_task_ids) for eid in prior_error_ids if eid not in error_ids]
+        for eid, candidate_tasks in pairs:
             err = self._nodes.get(eid)
             if err is None:
                 continue
             err_words = self._meaningful_words(err.label)
-            for tid in task_ids:
+            for tid in candidate_tasks:
                 task = self._nodes.get(tid)
                 if task is None:
                     continue
