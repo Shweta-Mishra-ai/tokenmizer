@@ -177,6 +177,13 @@ _DECISION = re.compile(
     # decision. Questions ("Should we use X?") are excluded by the question
     # guard every decision pass applies.
     r'should (?:use|go with|adopt|switch to|stick with|standardi[sz]e on)|'
+    # The base form of "go with" needs a subject or a modal in front of it —
+    # "we'll go with Postgres" chooses, "go with the flow" does not. "Opting
+    # for" is the progressive of "opted for", and a stated preference is a
+    # choice put mildly: "I'd prefer bcrypt", "we'd rather use Redis".
+    r"(?:we'?ll|i'?ll|we'?d|i'?d|we will|i will|we should|i would|we would) go with|"
+    r'opt(?:ing|s)? for|'
+    r"(?:i'?d|we'?d|i|we) (?:prefer|would prefer|rather (?:have|use|go with))|"
     r'leaning toward|recommends?|recommended|'
     # Probed against phrasings the corpus does not use: "standardise on",
     # "let's do", "moving (everything) to", "consolidate on" are how people
@@ -194,8 +201,8 @@ _DECISION = re.compile(
 _DECISION_HEADER = re.compile(
     r'(?:^|\n)\s*(?:decision|tech choice|architecture choice|approach|stack|'
     # The word people type when closing a discussion is rarely "decision".
-    r'agreed|final call|verdict|conclusion|going with|settled|locked in|'
-    r'going forward|consensus)\s*[:\-]\s*'
+    r'agreed|final call|final choice|final decision|verdict|conclusion|'
+    r'going with|settled|locked in|going forward|consensus)\s*[:\-]\s*'
     + _CLAUSE_SPAN,
     re.IGNORECASE,
 )
@@ -831,10 +838,31 @@ _TASK_DONE_PASSIVE = re.compile(
     re.IGNORECASE,
 )
 
+# Anchored at a word start, `re-` allowed, as _TASK_DONE is: without the
+# anchor "reWRITING half of conftest.py along the way" matched `writing`
+# and recorded "half of conftest.py along the way" as work in progress.
 _TASK_WIP = re.compile(
-    r'(?:working on|implementing|building|currently\s+\w+ing|adding|integrating|'
+    r'\b(?:re-?)?(?:working on|implementing|building|currently\s+\w+ing|adding|integrating|'
     r'setting up|configuring|writing|debugging|investigating)'
     r'[\s:\-]+' + _CLAUSE_SPAN,
+    re.IGNORECASE,
+)
+
+# A gerund after an aspectual verb is finished, not ongoing: "ended up
+# rewriting half the module", "spent the afternoon debugging the parser".
+_PAST_ASPECT_LEAD = re.compile(
+    r"\b(?:ended up|wound up|finished|stopped|quit|gave up|spent\s+[\w ]{0,30}?)\s+$",
+    re.IGNORECASE,
+)
+
+# A completion verb followed straight by a preposition is intransitive —
+# "the retry fix LANDED IN the last commit", "a breaking change SHIPPED IN a
+# minor version" — and what follows is where or when, not what was done.
+# Read as a transitive verb it produced labels like "Landed in in the last
+# commit". `to` is not here: "Deployed to staging" is a whole report.
+_INTRANSITIVE_TAIL = re.compile(
+    r"^(?:in|on|at|into|with|from|off|over|during|after|before|last|yesterday|"
+    r"earlier|today|this morning|this afternoon|already|successfully|fine|cleanly)\b",
     re.IGNORECASE,
 )
 
@@ -983,6 +1011,15 @@ _TASK_TODO_HEADER = re.compile(
     r'action items?|still needed|deferred)'
     r'(?:\*\*|__)?[ \t]*:[ \t]*(?:\*\*|__)?[ \t]*'
     r'((?:(?![.!?](?=\s|$))[^\n]){4,100})',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# The same list fronted as a clause: "Up next is the GDPR export", "Next on
+# the list is rotating the keys" — the inverse of the subject form in
+# _TASK_TODO_STATE below.
+_TASK_TODO_FRONTED = re.compile(
+    r"(?:^|(?<=[.!?])\s+|\n)[ \t]*(?:up next|next up|next on (?:the|my|our) list)"
+    r"\s+(?:is|are)\s+" + _CLAUSE_SPAN,
     re.IGNORECASE | re.MULTILINE,
 )
 

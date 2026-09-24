@@ -82,11 +82,13 @@ from tokenmizer.graph_memory.patterns import (
     _FIX_LEAD,
     _FIX_PREFIX,
     _GOAL_OPENERS,
+    _INTRANSITIVE_TAIL,
     _INVESTIGATION_PREFIX,
     _LEADING_CONNECTIVE,
     _NEGATION_WORDS,
     _NO_DEFECT,
     _NOT_A_DEFECT,
+    _PAST_ASPECT_LEAD,
     _PROPOSAL,
     _SCHEMA_HEADER,
     _SCHEMA_STOP_WORDS,
@@ -101,6 +103,7 @@ from tokenmizer.graph_memory.patterns import (
     _TASK_TODO,
     _TASK_TODO_CHECK,
     _TASK_TODO_DEFER,
+    _TASK_TODO_FRONTED,
     _TASK_TODO_HEADER,
     _TASK_TODO_INTENT,
     _TASK_TODO_NOT_DONE,
@@ -206,6 +209,19 @@ _TODO_TAIL = re.compile(
     r"next (?:week|sprint)|this (?:week|afternoon|evening))\b.*$",
     re.IGNORECASE,
 )
+
+
+# Markdown bold around a label: "**Decision:** Postgres", "**TODO:** the
+# backfill". It is how an assistant formats a status list, and every header
+# pattern anchors on the keyword being at the start of the line — the `**`
+# in front of it defeated all of them at once. Only `**` is removed, not
+# `__`, which is part of Python names (`__init__.py`). The inner text must
+# start and end on a non-space, so `f(**a, **b)` is left alone.
+_EMPHASIS = re.compile(r"\*\*(?=\S)([^*\n]{1,120}?)(?<=\S)\*\*")
+
+
+def _strip_emphasis(text: str) -> str:
+    return _EMPHASIS.sub(r"\1", text) if "**" in text else text
 
 
 # An observed object that denies there is anything wrong.
@@ -443,8 +459,21 @@ class HybridExtractor:
             if _CONDITIONAL_LEAD.match(
                     content[_clause_start(content, m.start()):m.start()].strip()):
                 continue
+            # A defect report is not finished work: "Bug: a breaking change
+            # shipped in a minor version".
+            if _ERROR_HEADER.match(content, _clause_start(content, m.start())):
+                continue
             verb = re.match(r"\w+", m.group(0))
-            task = restore_verb(verb.group(0) if verb else "", _clip(raw_task))
+            if _INTRANSITIVE_TAIL.match(raw_task.strip()):
+                # "The retry fix landed in the last commit": the task is the
+                # subject, not the prepositional phrase after the verb.
+                subject = clause_subject(content, m.start())
+                if not _is_subject_label(subject) or _CONDITIONAL_LEAD.match(subject) \
+                        or _NEGATION_WORDS.search(subject):
+                    continue
+                task = _clip(subject)
+            else:
+                task = restore_verb(verb.group(0) if verb else "", _clip(raw_task))
             if len(task) < 5 or _is_only_paths(task) or _LEADING_CONNECTIVE.match(task):
                 continue
             norm = self._normalize(task)
@@ -506,6 +535,13 @@ class HybridExtractor:
                     continue
                 task = _clip(m.group(1))
                 if pattern is _TASK_DONE_PHRASAL:
+                    if _INTRANSITIVE_TAIL.match(task):
+                        # Intransitive, as in _TASK_DONE: the subject is the task.
+                        subject = clause_subject(content, m.start())
+                        if _is_subject_label(subject) and not _CONDITIONAL_LEAD.match(subject) \
+                                and not _NEGATION_WORDS.search(subject):
+                            _add_done(_clip(subject))
+                        continue
                     verb = re.match(r"\w+(?: \w+)?", m.group(0))
                     task = restore_verb(verb.group(0) if verb else "", task)
                 _add_done(task)
@@ -545,6 +581,8 @@ class HybridExtractor:
 
         if is_recent:
             for m in _TASK_WIP.finditer(content):
+                if _PAST_ASPECT_LEAD.search(content[max(0, m.start() - 40):m.start()]):
+                    continue
                 wip = _clip(m.group(1))
                 if _outstanding(wip, m.start(1), result.tasks_wip):
                     result.tasks_wip.append(wip)
@@ -569,7 +607,7 @@ class HybridExtractor:
         # extraction calls — GraphMemory.add_node merges a completed task into
         # the pending node it finishes.
         for pattern in (_TASK_TODO, _TASK_TODO_HEADER, _TASK_TODO_CHECK,
-                        _TASK_TODO_NOT_DONE, _TASK_TODO_DEFER):
+                        _TASK_TODO_NOT_DONE, _TASK_TODO_DEFER, _TASK_TODO_FRONTED):
             for m in pattern.finditer(content):
                 todo = _clip(_todo_label(m.group(1)))
                 if _outstanding(todo, m.start(1), result.tasks_todo):
@@ -1022,7 +1060,7 @@ class HybridExtractor:
         # assistant turn to accept or ignore them.
         open_proposals: list[str] = []
         if prior_message and prior_message.get("role") == "user":
-            prior_text = _content_to_text(prior_message.get("content", ""))
+            prior_text = _strip_emphasis(_content_to_text(prior_message.get("content", "")))
             if prior_text.strip():
                 self._extract_one_message(
                     prior_text, "user", -1, False, ExtractedData(), set(), set(),
@@ -1030,7 +1068,7 @@ class HybridExtractor:
                 )
 
         for i, msg in enumerate(messages):
-            content = _content_to_text(msg.get("content", ""))
+            content = _strip_emphasis(_content_to_text(msg.get("content", "")))
             if not content.strip():
                 continue
             role      = msg.get("role", "user")

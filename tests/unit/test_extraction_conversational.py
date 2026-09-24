@@ -299,3 +299,53 @@ def test_multi_dot_file_pattern_stays_linear():
     started = time.monotonic()
     _x("word." * 3000)
     assert time.monotonic() - started < 2.0
+
+
+# ── Second round: found on held-out v1, fixed before held-out v2 was scored ──
+
+@pytest.mark.parametrize("text,kind,needle", [
+    ("**Decision:** Postgres for the orders store.", "decision", "postgres for the orders store"),
+    ("**TODO:** backfill the legacy rows.", "todo", "backfill the legacy rows"),
+    ("**Bug:** duplicate emails on retry.", "error", "duplicate emails on retry"),
+])
+def test_markdown_bold_headers(text, kind, needle):
+    """`**` in front of the keyword defeated every header pattern."""
+    got = {"decision": _decisions, "todo": _todo, "error": _errors}[kind](text)
+    assert _hit(got, needle), got
+
+
+def test_python_dunder_names_survive_emphasis_stripping():
+    assert "src/pkg/__init__.py" in _x("Edited src/pkg/__init__.py.").files
+
+
+def test_intransitive_completion_takes_the_subject():
+    """"landed in the last commit" was labelled "Landed in in the last commit"."""
+    assert _done("The retry fix landed in the last commit.") == ["The retry fix"]
+
+
+def test_a_defect_report_is_not_finished_work():
+    assert _done("Bug: a breaking change shipped in a minor version.") == []
+
+
+def test_wip_verb_does_not_match_inside_another_word():
+    """`rewriting` matched `writing`; the aspect verb says it is finished."""
+    assert _todo("Ended up rewriting half of conftest.py along the way.") == []
+    assert _hit(_todo("Rewriting the parser for streaming input."), "parser")
+
+
+@pytest.mark.parametrize("text,role,needle", [
+    ("We'll go with Litestream for replication.", "assistant", "litestream"),
+    ("Opting for a monorepo.", "assistant", "monorepo"),
+    ("I'd prefer argon2 over bcrypt.", "user", "argon2"),
+    ("Final choice: Tailwind for styling.", "assistant", "tailwind"),
+])
+def test_more_choosing_verbs(text, role, needle):
+    assert _hit(_decisions(text, role), needle), _decisions(text, role)
+
+
+def test_go_with_needs_a_subject_or_modal():
+    assert _decisions("Just go with the flow on naming for now.") == []
+
+
+def test_fronted_up_next():
+    assert _hit(_todo("Up next is the GDPR export."), "gdpr export")
