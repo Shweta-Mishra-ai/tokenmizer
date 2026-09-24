@@ -323,3 +323,36 @@ def test_hostile_bodies_never_produce_a_server_error(client, body):
                     content=body.encode("utf-8", "surrogatepass"),
                     headers={"content-type": "application/json"})
     assert r.status_code < 500, r.text
+
+
+@pytest.mark.parametrize("text", [
+    "A test that passes immediately proves nothing unless it would fail on the old code.",
+    "This could break under load.",
+    "The job is expected to fail on Windows.",
+])
+def test_a_possible_failure_is_not_an_error(text):
+    assert _x([{"role": "assistant", "content": text}]).errors == []
+
+
+def test_a_real_failure_still_is():
+    assert _x([{"role": "assistant", "content": "The build fails with exit code 1 on the linter step."}]).errors
+
+
+def test_pytest_error_line_stays_an_error(tmp_path):
+    """The validator retyped any two-word label ending in a path as a FILE,
+    which filed "ERROR tests/unit/test_api.py" as a file being worked on."""
+    g = _graph(tmp_path, [{"role": "user", "content": [{
+        "type": "tool_result", "is_error": True,
+        "content": "ERROR tests/unit/test_api.py"}]}])
+    assert _labels(g, NodeType.ERROR) == ["ERROR tests/unit/test_api.py"]
+    assert _labels(g, NodeType.FILE) == []
+
+
+def test_pronoun_object_is_not_a_task():
+    assert _x([{"role": "assistant", "content": "Adding them properly and rescanning."}]).tasks_wip == []
+
+
+def test_label_does_not_end_on_a_contraction_apostrophe():
+    labels = _x([{"role": "assistant", "content":
+                  "Now adding a retry wrapper so that the result doesn't get lost."}]).tasks_wip
+    assert labels and not labels[0].endswith("doesn"), labels

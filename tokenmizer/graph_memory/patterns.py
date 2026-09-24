@@ -157,7 +157,10 @@ def is_library_name(name: str) -> bool:
 # span with no boundary inside the budget at all (one very long token, like
 # a URL), where a hard cut is better than dropping the fact entirely.
 _SPAN_CHAR = r'(?:(?![.!?](?=\s|$))[^\n])'
-_CLAUSE_SPAN = r'(' + _SPAN_CHAR + r'{5,80}(?!\w)|' + _SPAN_CHAR + r'{5,80})'
+#
+# A contraction is one word: the boundary is not allowed to fall on its
+# apostrophe, which ended labels on "…so that result doesn".
+_CLAUSE_SPAN = (r'(' + _SPAN_CHAR + r"{5,80}(?!\w|['\u2019]\w)|" + _SPAN_CHAR + r'{5,80})')
 
 # What separates a keyword from its capture: a colon or dash header ("Done:
 # X", "Done — X", "Done - X") or whitespace. NOT a bare hyphen: `[\s:\-]+`
@@ -837,7 +840,7 @@ _TASK_DONE = re.compile(
 # is available|", "the numbers I'd written |were from round 2|", "the
 # pattern I just wrote |(a leading \\b …)|".
 _NOT_A_TASK_START = re.compile(
-    r"^\s*(?:[(\[{]|(?:by|with|to|from|for|on|in|at|of|as|than|about|"
+    r"^\s*(?:[(\[{]|(?:by|with|to|from|for|on|in|at|of|as|than|about|them|it|"
     r"is|are|was|were|be|been|being|has|have|had|will|would|can|could|should|"
     r"may|might|must|do|does|did)\b)",
     re.IGNORECASE,
@@ -1610,6 +1613,14 @@ _NOT_A_DEFECT = re.compile(
     # and "soft deletes on the tenant table" reads to _ERROR_DAMAGE as data
     # being deleted.
     r'soft[- ]delet\w*)\b',
+    re.IGNORECASE,
+)
+
+# A failure stated as a possibility: "…unless it would fail on the old
+# code", "this could break under load", "expected to fail". Nothing failed.
+_HYPOTHETICAL_FAILURE = re.compile(
+    r"\b(?:would|could|might|may|should|will|can|to|won'?t|wouldn'?t|couldn'?t)\s+"
+    r"(?:not\s+|also\s+|still\s+|ever\s+)?(?:fail|break|crash|error|time out|hang|leak)\w*\b",
     re.IGNORECASE,
 )
 

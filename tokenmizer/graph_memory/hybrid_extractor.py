@@ -84,6 +84,7 @@ from tokenmizer.graph_memory.patterns import (
     _FIX_LEAD,
     _FIX_PREFIX,
     _GOAL_OPENERS,
+    _HYPOTHETICAL_FAILURE,
     _INTRANSITIVE_TAIL,
     _INVESTIGATION_PREFIX,
     _LEADING_CONNECTIVE,
@@ -1035,6 +1036,9 @@ class HybridExtractor:
                     continue   # "logistic regression" is a model
                 if m.group(1).lstrip().startswith("Traceback (most recent"):
                     continue   # the header; the exception line below it names the failure
+                if pattern not in _STRUCTURAL_ERROR_PATTERNS and _HYPOTHETICAL_FAILURE.search(
+                        content[max(0, m.start(1) - 20):m.end(1)]):
+                    continue   # "…unless it would fail on the old code"
                 before = content[max(0, m.start(1) - 60):m.start(1)]
                 if _SOLUTION_VERB.search(before):
                     continue   # the symptom names the fix, not the failure
