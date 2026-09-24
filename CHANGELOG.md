@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1615 tests; every published number below was
+remembering. Suite is now 1616 tests; every published number below was
 re-derived from a run.
 
 ### Improved — extraction of how sessions actually talk, measured on text it was not tuned on

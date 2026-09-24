@@ -984,6 +984,8 @@ _CLAUSE_BREAK = re.compile(
 _SUBJECT_LEAD = re.compile(
     r"^(?:and|but|so|then|also|now|well|ok(?:ay)?|yeah|yes|honestly|frankly|"
     r"overall|ultimately|eventually|finally|in the end|at this point|for now|"
+    r"at some point|some ?day|sooner or later|in the long run|longer term|"
+    r"later on|down the line|after that|next week|tomorrow|today|"
     r"maybe|perhaps|probably|possibly|i guess|it seems|"
     r"(?:i|we|the team|everyone|they) (?:think|thinks|thought|feel|feels|felt|"
     r"agree|agreed|decided|reckon|believe|figured)(?: that)?"

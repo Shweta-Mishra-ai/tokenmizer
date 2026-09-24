@@ -356,3 +356,9 @@ def test_label_does_not_end_on_a_contraction_apostrophe():
     labels = _x([{"role": "assistant", "content":
                   "Now adding a retry wrapper so that the result doesn't get lost."}]).tasks_wip
     assert labels and not labels[0].endswith("doesn"), labels
+
+
+def test_a_time_adverbial_before_the_subject_is_not_part_of_it():
+    todo = _x([{"role": "assistant", "content":
+                "At some point documenting the model card has to happen too."}]).tasks_todo
+    assert todo == ["documenting the model card"], todo
