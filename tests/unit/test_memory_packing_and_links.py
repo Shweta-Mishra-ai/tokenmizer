@@ -5,14 +5,14 @@ Two measured defects:
 
 - The resume block built every section in full and, while over budget,
   dropped WHOLE sections from the bottom — so under a tight budget the
-  first casualty was "Open issues". On the external benchmark at 150
-  tokens, open errors survived in 41% of sessions; per-item packing
-  keeps 70%, and the share of labelled facts the block carries went from
-  65% to 72% for the same budget.
+  first casualty was "Open issues". On the external benchmark (340
+  sessions) at 150 tokens, open errors survived in 40% of sessions;
+  per-item packing keeps 73%, and the share of labelled facts the block
+  carries went from 67% to 74% for the same budget.
 - Relations were only inferred between nodes of the same extraction
   call, and the proxy extracts one new message per request. Extracting
-  the external corpus one message at a time formed 124 edges where
-  extracting it whole formed 395; they now agree on 394 of 395.
+  the external corpora one message at a time shared 177 of the 707 edges
+  that extracting each session whole formed; it now shares 706.
 """
 from __future__ import annotations
 

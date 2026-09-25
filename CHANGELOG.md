@@ -17,18 +17,19 @@ re-derived from a run.
   and next work, decisions, then done, files, environment), with the
   display order unchanged. Home directories are shortened (`~/…`), and a
   decision's rationale appears only when it is short, whole and not a
-  restatement of the label. External benchmark, 180 sessions, share of
-  labelled facts carried: at 150 tokens 64.6% -> 71.7% (open errors
-  41% -> 70%); at 250/400 tokens 75.7% -> 77.7% for ~4 more tokens.
-  Larger per-section caps were tried and rejected: +0.8% facts for more
-  tokens on every request.
+  restatement of the label. External benchmark, all 340 sessions of its
+  four corpora, share of labelled facts carried: at 150 tokens
+  66.8% -> 73.5% (open errors 40% -> 73%, pending 70% -> 82%; completed
+  tasks, ranked last among work items, 67% -> 59%); at 250/400 tokens
+  77.1% -> 79.8%.
 - **Relations survive incremental extraction.** They were inferred only
   between nodes of one extraction call, and the proxy extracts one
-  message per call: one-message-at-a-time extraction formed 124 edges
-  where whole-session extraction formed 395 (no task was ever PART_OF the
-  goal; a fix never closed an earlier error). New nodes now link against
-  the whole live graph: 394 of 395 shared. Per-request extraction cost is
-  unchanged (median 2.9 ms).
+  message per call: on the same 340 sessions, one-message-at-a-time
+  extraction formed 183 edges (177 shared) where whole-session extraction
+  formed 707 (no task was ever PART_OF the goal, and 47 of 392
+  RELATED_TO links formed). New nodes now link against the whole live
+  graph: 706 of 707 shared. Per-request extraction cost is unchanged
+  (median 2.9 ms).
 
 ### Improved — agent sessions, noise on real text, and faster than before
 
