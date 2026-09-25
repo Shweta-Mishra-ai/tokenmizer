@@ -6,8 +6,48 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1682 tests; every published number below was
+remembering. Suite is now 1733 tests; every published number below was
 re-derived from a run.
+
+### Marker-free phrasing, per-request cost, and real-session noise
+
+- **Marker-free statements of work.** New constructions read completed,
+  pending and failed work reported without a state word. Examples: "no more
+  worrying about X", "crossed X off", "with X sorted, …", "let's not forget
+  about X", "parking X for now", "…, the managed Postgres it is.",
+  "tracked X down to Y". Each has false-positive tests beside it.
+  - On the development corpora, held-out v1 went from 80% to 92% macro F1.
+  - **Held-out v3 and v4 are exactly unchanged**, at 64% and 58%. v4 was
+    frozen before this work.
+  - Pattern matching has reached its limit on marker-free phrasing; the
+    LLM extraction path is the route there.
+  - The new constructions cost nothing measurable: precision is unchanged
+    on every corpus, and the internal eval output is identical.
+- **Per-request hashing reuses unchanged history.** A structured message
+  whose cheap fingerprint matches the one at the same position last call
+  reuses that position's hash. Positional, never a lookup, so a new message
+  can never take an old one's hash.
+  - On a real 914-message agent session, the late-session median fell from
+    21 ms to 7.3 ms, with the same graph.
+  - An in-place edit that keeps every block's length and ends unchanged
+    would reuse a stale hash.
+- **Startup warm-up.** The first request after a start paid about 600 ms
+  (extractor build and tokenizer load). Startup now pays it, and a failed
+  warm-up does not stop the server.
+- **Fixed bugs are resolved, not open.** Errors listed under a heading
+  that says they were fixed ("**Bugs fixed along the way:**") are stored as
+  resolved. Items under "Known issues:" or "Still broken:" are now read;
+  under a generic "Issues:" or "Problems:" heading, an item must name
+  something wrong.
+- **File names given as examples** ("names (`vite.config.ts`)", "such as",
+  "like", "e.g.") are no longer stored as files.
+- **Two false positives on `main` fixed.** "Whatever it is" was the
+  decision "Use Whatever". "Resolved within an hour" was the finished task
+  "within an hour".
+- **Regex DoS caught before commit.** Two patterns added in this round
+  were quadratic: 199 s on 17 KB of tabs, and 25 s on 20 KB of spaces.
+  Both are fixed. A new test runs every compiled extraction pattern directly
+  on whitespace payloads.
 
 ### Fixed — long agent sessions, false links and false tasks
 
