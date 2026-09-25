@@ -279,6 +279,8 @@ _PAYLOADS = {
     "digits": "1" * 15000,
     "hyphens": "a-" * 7500,
     "dot then long space": (". " + " " * 300) * 50,
+    "tab run": "\t" * 15000,
+    "short words then it is": "a " * 5000 + "it is.",
     "quoted runs": ('a "' + "x" * 250 + '" . ') * 55,
     "bullets": ("- " + " " * 200 + "\n") * 70,
 }

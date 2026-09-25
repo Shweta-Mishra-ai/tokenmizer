@@ -45,6 +45,7 @@ from tokenmizer.graph_memory.patterns import (
     _DECISION_HEADER,
     _DECISION_IMPERATIVE,
     _DECISION_IT_IS,
+    _DECISION_IT_IS_PHRASE,
     _DECISION_PASSIVE,
     _DEFECT_WORD,
     _DEPENDENCY,
@@ -64,15 +65,19 @@ from tokenmizer.graph_memory.patterns import (
     _ERROR_FALSE_HEALTH,
     _ERROR_HANDLED,
     _ERROR_HEADER,
+    _ERROR_INCIDENT_WAS,
     _ERROR_INERT,
     _ERROR_INTEGRITY,
     _ERROR_MISCLASSIFIED,
     _ERROR_OBSERVED,
+    _ERROR_RECURRED,
+    _ERROR_RED_STATE,
     _ERROR_SLOWER,
     _ERROR_STATUS,
     _ERROR_STATUS_NAMED,
     _ERROR_STOPWORDS,
     _ERROR_SYMPTOM,
+    _ERROR_TRACED,
     _ERROR_TYPED,
     _ERROR_VULN,
     _EVIDENCE_COST,
@@ -92,6 +97,7 @@ from tokenmizer.graph_memory.patterns import (
     _LEADING_CONNECTIVE,
     _NEGATION_WORDS,
     _NO_DEFECT,
+    _NOT_A_CHOICE_BEFORE_IT_IS,
     _NOT_A_DEFECT,
     _NOT_A_TASK_START,
     _PAST_ASPECT_LEAD,
@@ -101,12 +107,16 @@ from tokenmizer.graph_memory.patterns import (
     _SCHEMA_TABLE,
     _SOLUTION_VERB,
     _TASK_DONE,
+    _TASK_DONE_BEHIND_US,
     _TASK_DONE_CHECK,
+    _TASK_DONE_CROSSED_OFF,
     _TASK_DONE_GOT,
     _TASK_DONE_MANAGED,
+    _TASK_DONE_NO_WORRY,
     _TASK_DONE_PASSIVE,
     _TASK_DONE_PHRASAL,
     _TASK_DONE_POSTFIX,
+    _TASK_DONE_PREMISE,
     _TASK_DONE_STATE,
     _TASK_DONE_WENT,
     _TASK_TODO,
@@ -117,6 +127,8 @@ from tokenmizer.graph_memory.patterns import (
     _TASK_TODO_INTENT,
     _TASK_TODO_NOT_DONE,
     _TASK_TODO_OWED,
+    _TASK_TODO_PARKED,
+    _TASK_TODO_REMIND,
     _TASK_TODO_STATE,
     _TASK_WIP,
     _WIP_LEAD,
@@ -292,6 +304,12 @@ def _gerund_is_subject(obj: str) -> bool:
     return _NEGATED_VERB.search(obj[:cut.start()] if cut else obj) is not None
 
 
+_TRAILING_AUX = re.compile(
+    r"\s+(?:was|were|is|are|has been|have been|had been|got|been|just|finally)$",
+    re.IGNORECASE,
+)
+
+
 def _todo_label(text: str) -> str:
     return _TODO_TAIL.sub("", _TODO_LEAD.sub("", text.strip())).strip(" ,;:—-")
 
@@ -359,6 +377,7 @@ _ALL_ERROR_PATTERNS = (
     _ERROR_SYMPTOM, _ERROR_FAILING,
     _ERROR_FAILED_SUBJECT, _ERROR_COUNT, _ERROR_SLOWER,
     _ERROR_CANNOT_INITIAL,
+    _ERROR_TRACED, _ERROR_RED_STATE, _ERROR_INCIDENT_WAS, _ERROR_RECURRED,
 )
 
 # Keyword prefilter for the patterns that cost the most.
@@ -659,8 +678,10 @@ class HybridExtractor:
                 continue
             if _INTRANSITIVE_TAIL.match(raw_task.strip()):
                 # "The retry fix landed in the last commit": the task is the
-                # subject, not the prepositional phrase after the verb.
-                subject = clause_subject(content, m.start())
+                # subject, not the prepositional phrase after the verb. A
+                # passive leaves its auxiliary in the window: "The incident
+                # was | resolved within an hour".
+                subject = _TRAILING_AUX.sub("", clause_subject(content, m.start()))
                 if not _is_work_subject(subject) or _CONDITIONAL_LEAD.match(subject) \
                         or _NEGATION_WORDS.search(subject):
                     continue
@@ -722,7 +743,8 @@ class HybridExtractor:
                 seen_tasks.add(norm)
 
         for pattern in (_TASK_DONE_CHECK, _TASK_DONE_PHRASAL, _TASK_DONE_GOT,
-                        _TASK_DONE_MANAGED, _TASK_DONE_POSTFIX):
+                        _TASK_DONE_MANAGED, _TASK_DONE_POSTFIX, _TASK_DONE_NO_WORRY,
+                        _TASK_DONE_CROSSED_OFF, _TASK_DONE_BEHIND_US):
             for m in pattern.finditer(content):
                 if pattern is not _TASK_DONE_CHECK and (
                         _is_negated_context(content, m.start())
@@ -740,6 +762,13 @@ class HybridExtractor:
                     verb = re.match(r"\w+(?: \w+)?", m.group(0))
                     task = restore_verb(verb.group(0) if verb else "", task)
                 _add_done(task)
+        # "With X sorted, …", "Once X was in, …": the premise is finished work.
+        for m in _TASK_DONE_PREMISE.finditer(content):
+            if _is_question_context(content, m.start()):
+                continue
+            premise = m.group(1) or m.group(2)
+            if premise and _is_subject_label(premise) and not _NEGATION_WORDS.search(premise):
+                _add_done(_clip(premise))
         for m in _TASK_DONE_WENT.finditer(content):
             if _is_question_context(content, m.start()):
                 continue
@@ -817,6 +846,7 @@ class HybridExtractor:
         # the pending node it finishes.
         for pattern in (_TASK_TODO, _TASK_TODO_HEADER, _TASK_TODO_CHECK,
                         _TASK_TODO_NOT_DONE, _TASK_TODO_DEFER, _TASK_TODO_FRONTED,
+                        _TASK_TODO_REMIND, _TASK_TODO_PARKED,
                         _TASK_TODO_OWED):
             for m in pattern.finditer(content):
                 todo = _clip(_todo_label(m.group(1)))
@@ -901,6 +931,22 @@ class HybridExtractor:
             label = _clip(subject)
             # A one-word subject is a bare name ("SQS made the most sense"),
             # labelled the way every other pass labels one: "Use SQS".
+            if len(label.split()) == 1:
+                label = "Use " + label
+            if role == "user":
+                if proposals is not None:
+                    proposals.append(label)
+            else:
+                _add_decision(label, role)
+
+        # Decision Pass 2e: "…, the managed Postgres it is." The noun-phrase
+        # form of Pass 2b; same roles as 2d.
+        for m in _DECISION_IT_IS_PHRASE.finditer(content):
+            option = m.group(1).strip()
+            if _NOT_A_CHOICE_BEFORE_IT_IS.search(option) or _NEGATION_WORDS.search(option) \
+                    or not _is_subject_label(option):
+                continue
+            label = _clip(option)
             if len(label.split()) == 1:
                 label = "Use " + label
             if role == "user":
@@ -1163,6 +1209,11 @@ class HybridExtractor:
                     continue   # "Errors: none"
                 if pattern is _ERROR_OBSERVED and not _DEFECT_WORD.search(m.group(1)):
                     continue   # "we're seeing a 20% speedup" is good news
+                if pattern in (_ERROR_RED_STATE, _ERROR_INCIDENT_WAS, _ERROR_RECURRED) \
+                        and not _DEFECT_WORD.search(m.group(1)):
+                    continue   # "CI is red — rerunning", "then run it again"
+                if pattern is _ERROR_TRACED and not _DEFECT_WORD.search(m.group(0)):
+                    continue   # "tracked the ticket down to the billing team"
                 if pattern in (_ERROR_OBSERVED, _ERROR_ENCOUNTER) and _NONE_LEAD.match(m.group(1).lstrip()):
                     continue   # "there's no error", "seeing zero failures"
                 if _NOT_A_DEFECT.search(m.group(1)):
