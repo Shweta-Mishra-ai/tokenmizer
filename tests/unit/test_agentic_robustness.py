@@ -587,3 +587,24 @@ def test_no_source_string_holds_a_lone_surrogate():
                     0xD800 <= ord(c) <= 0xDFFF for c in node.value):
                 bad.append(f"{path.name}:{node.lineno}")
     assert not bad, bad
+
+
+def test_startup_warms_the_extractor_and_a_failed_warm_up_still_starts(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import tokenmizer.api.app as app_module
+    from tokenmizer.graph_memory import hybrid_extractor
+
+    calls = []
+    real = hybrid_extractor.get_hybrid_extractor
+    monkeypatch.setattr(hybrid_extractor, "get_hybrid_extractor",
+                        lambda d=None: (calls.append(d), real(d))[1])
+    with TestClient(app_module.app) as c:
+        assert c.get("/health").status_code == 200
+    assert calls, "the extractor was not warmed at startup"
+
+    def boom(d=None):
+        raise RuntimeError("no extractor")
+    monkeypatch.setattr(hybrid_extractor, "get_hybrid_extractor", boom)
+    with TestClient(app_module.app) as c:
+        assert c.get("/health").status_code == 200
