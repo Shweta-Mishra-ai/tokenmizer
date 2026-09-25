@@ -568,3 +568,20 @@ def test_postfix_status_must_end_its_clause():
 def test_observation_verb_is_not_part_of_the_error_label():
     assert _x([{"role": "assistant", "content": "We found a race in the fixture teardown."}]).errors == [
         "race in the fixture teardown"]
+
+
+def test_no_source_string_holds_a_lone_surrogate():
+    # A non-raw docstring containing the text "\ud800" is a real lone
+    # surrogate; on Python 3.13 importing the app then failed for every API
+    # test. Write such examples as raw strings.
+    import ast
+    import pathlib
+
+    import tokenmizer
+    bad = []
+    for path in pathlib.Path(tokenmizer.__file__).parent.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and any(
+                    0xD800 <= ord(c) <= 0xDFFF for c in node.value):
+                bad.append(f"{path.name}:{node.lineno}")
+    assert not bad, bad

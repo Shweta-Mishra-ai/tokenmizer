@@ -302,7 +302,7 @@ def tool_signals(message: dict) -> tuple[list[str], list[str]]:
 # accepts it, so any client can send one; the first .encode() that meets it
 # raises, and extraction for the whole conversation failed with it. Replaced
 # with U+FFFD, the character Unicode reserves for exactly this.
-_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+_LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
 
 
 def scrub_surrogates(obj):

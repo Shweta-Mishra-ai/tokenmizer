@@ -668,7 +668,7 @@ app = FastAPI(
 
 @app.exception_handler(RequestValidationError)
 async def _validation_error(request: Request, exc: RequestValidationError) -> Response:
-    """FastAPI's own 422 body, serialised so it cannot fail.
+    r"""FastAPI's own 422 body, serialised so it cannot fail.
 
     The default handler echoes the rejected input, and JSON accepts a lone
     surrogate ("\ud800") that UTF-8 cannot encode — so any 422 carrying one
