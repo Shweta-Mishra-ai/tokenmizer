@@ -239,7 +239,7 @@ class SemanticCache:
         prompt asked in a different conversation state never collides
         with an earlier answer (see CacheEntry.context)."""
         data = f"{scope}:{context}:{prompt}"
-        return hashlib.sha256(data.encode()).hexdigest()[:24]
+        return hashlib.sha256(data.encode("utf-8", "surrogatepass")).hexdigest()[:24]
 
     @staticmethod
     def conversation_fingerprint(messages: list[dict]) -> str:
@@ -257,10 +257,10 @@ class SemanticCache:
             return ""
         h = hashlib.sha256()
         for m in prior:
-            h.update(str(m.get("role", "")).encode())
+            h.update(str(m.get("role", "")).encode("utf-8", "surrogatepass"))
             h.update(b"\x1f")
             content = m.get("content", "")
-            h.update((content if isinstance(content, str) else str(content)).encode())
+            h.update((content if isinstance(content, str) else str(content)).encode("utf-8", "surrogatepass"))
             h.update(b"\x1e")
         return h.hexdigest()[:24]
 

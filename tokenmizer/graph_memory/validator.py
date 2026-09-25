@@ -397,7 +397,10 @@ class GraphValidator:
 
     def _check_type_mismatch(self, label: str, node_type: str) -> Optional[str]:
         """Return corrected type if we detect a mismatch, else None."""
-        if (node_type != "file"
+        # Never an ERROR: "ERROR tests/unit/test_api.py" is pytest reporting
+        # a failure in that file, and retyping it filed the failure as a
+        # file that is merely being worked on.
+        if (node_type not in ("file", "error")
                 and self._FILE_PATTERN.search(label)
                 and "/" in label
                 and len(label.split()) <= self._MAX_PATH_LABEL_WORDS):

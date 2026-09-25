@@ -160,7 +160,7 @@ class CSVExtractor:
             logger.warning(f"CSV parse failed for {filename}: {e}")
             truncated, was_cut = _truncate_to_budget(content, token_budget)
             return FileExtractionResult(
-                file_type="csv", original_size_bytes=len(content.encode()),
+                file_type="csv", original_size_bytes=len(content.encode("utf-8", "surrogatepass")),
                 original_tokens=original_tokens,
                 extracted_tokens=count_tokens(truncated),
                 tokens_saved=original_tokens - count_tokens(truncated),
@@ -214,7 +214,7 @@ class CSVExtractor:
 
         return FileExtractionResult(
             file_type="csv",
-            original_size_bytes=len(content.encode()),
+            original_size_bytes=len(content.encode("utf-8", "surrogatepass")),
             original_tokens=original_tokens,
             extracted_tokens=extracted_tokens,
             tokens_saved=original_tokens - extracted_tokens,
@@ -382,7 +382,7 @@ class CSVExtractor:
 
     def _empty_result(self, filename, content, original_tokens):
         return FileExtractionResult(
-            file_type="csv", original_size_bytes=len(content.encode()),
+            file_type="csv", original_size_bytes=len(content.encode("utf-8", "surrogatepass")),
             original_tokens=original_tokens, extracted_tokens=0,
             tokens_saved=original_tokens, savings_pct=100.0,
             content=f"File: {filename} (empty or unreadable)",
@@ -432,7 +432,7 @@ class JSONExtractor:
                 )
                 truncated, was_cut = _truncate_to_budget(content, token_budget)
                 return FileExtractionResult(
-                    file_type="json", original_size_bytes=len(content.encode()),
+                    file_type="json", original_size_bytes=len(content.encode("utf-8", "surrogatepass")),
                     original_tokens=original_tokens,
                     extracted_tokens=count_tokens(truncated),
                     tokens_saved=original_tokens - count_tokens(truncated),
@@ -458,7 +458,7 @@ class JSONExtractor:
 
         return FileExtractionResult(
             file_type="json",
-            original_size_bytes=len(content.encode()),
+            original_size_bytes=len(content.encode("utf-8", "surrogatepass")),
             original_tokens=original_tokens,
             extracted_tokens=extracted_tokens,
             tokens_saved=original_tokens - extracted_tokens,
@@ -755,7 +755,7 @@ class TextExtractor:
 
         if original_tokens <= token_budget:
             return FileExtractionResult(
-                file_type=file_type, original_size_bytes=len(content.encode()),
+                file_type=file_type, original_size_bytes=len(content.encode("utf-8", "surrogatepass")),
                 original_tokens=original_tokens, extracted_tokens=original_tokens,
                 tokens_saved=0, savings_pct=0.0, content=content,
                 summary=f"Text: fits in budget ({original_tokens} tokens)",
@@ -771,7 +771,7 @@ class TextExtractor:
         extracted_tokens = count_tokens(extracted)
 
         return FileExtractionResult(
-            file_type=file_type, original_size_bytes=len(content.encode()),
+            file_type=file_type, original_size_bytes=len(content.encode("utf-8", "surrogatepass")),
             original_tokens=original_tokens, extracted_tokens=extracted_tokens,
             tokens_saved=original_tokens - extracted_tokens,
             savings_pct=round((1 - extracted_tokens / max(1, original_tokens)) * 100, 1),
@@ -868,7 +868,11 @@ class FileIntelligence:
             token_budget: max tokens to use for this file's content
             query: current user query (used for relevance-based extraction)
         """
-        content_bytes = content if isinstance(content, bytes) else content.encode("utf-8")
+        # surrogatepass: a lone surrogate is legal in the JSON a file arrives
+        # in, and a plain encode raised on it before any extractor ran. The
+        # decode below drops its bytes.
+        content_bytes = (content if isinstance(content, bytes)
+                         else content.encode("utf-8", "surrogatepass"))
         content_str = content_bytes.decode("utf-8", errors="ignore")
 
         file_type = detect_file_type(filename, content_bytes)

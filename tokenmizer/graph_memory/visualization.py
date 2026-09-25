@@ -369,6 +369,8 @@ def to_vis_json(graph: "GraphMemory") -> dict:
 
     analytics = _analytics(vis_nodes, vis_edges, vis_transitions)
 
+    from tokenmizer.graph_memory.graph import _HASHES_TRIMMED
+
     return {
         "session_id":  graph.session_id,
         "nodes":       vis_nodes,
@@ -388,7 +390,7 @@ def to_vis_json(graph: "GraphMemory") -> dict:
             "type_order":         [t for t in _TYPE_ORDER
                                    if any(n["type"] == t for n in vis_nodes)],
             # Why the graph may be empty — the page's only data path.
-            "processed_messages": len(graph._processed_hashes),
+            "processed_messages": len(graph._processed_hashes - {_HASHES_TRIMMED}),
             "load_failed":        graph._load_failed,
             "persistence_broken": graph._persistence_broken,
             "data_loss_detected": graph._data_loss_detected,

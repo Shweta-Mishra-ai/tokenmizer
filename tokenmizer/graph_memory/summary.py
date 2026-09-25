@@ -81,7 +81,9 @@ _MAX_CHARS = 120
 # the demo is that morning — and nothing ships without the on-call
 # engineer approving it". Clipping that to one clause keeps the deadline
 # and loses the approval gate, so each clause is weighed on its own.
-_CLAUSE = re.compile(r'\s*(?:[—;]|,\s+(?:and|but|so)\s+)\s*')
+# `(?<!\s)`: start only at the beginning of a whitespace run, or the leading
+# `\s*` re-reads the whole run from each of its characters.
+_CLAUSE = re.compile(r'(?<!\s)\s*(?:[—;]|,\s+(?:and|but|so)\s+)\s*')
 
 
 def _sentences(messages: list[dict]) -> list[str]:

@@ -6,8 +6,212 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1466 tests; every published number below was
+remembering. Suite is now 1682 tests; every published number below was
 re-derived from a run.
+
+### Fixed — long agent sessions, false links and false tasks
+
+- **Past 500 messages, every request re-extracted the whole old history.**
+  The processed-message set is capped by keeping the hashes of the most
+  recent 500 messages, and every message older than that then looked new
+  again, on every request. The bug is on `main` too, but there it only
+  fired on plain-text chats over 500 messages: the text-only hash made
+  every tool turn look identical. With tool turns hashed properly, it
+  fired on every long agent session. On a real 914-message agent
+  session, each late request re-extracted 414 messages. A marker entry
+  now records that the set was trimmed; it is persisted with the hashes,
+  so no schema change. Messages older than the oldest one still
+  recognised count as processed. Each message is also hashed once per
+  call instead of up to three times. Late in that session the median per
+  request fell from 115 ms to 22 ms, with the same graph.
+- **Files were linked by substring.** `api.py` was linked to "the rapid
+  rollout", `app.py` to "the happy path", and an error in `data.py` to
+  `lib/a.py`. A file now links only when its name starts a word.
+  Common inflections still count, so `backfill.py` links to
+  "backfilling", `parse.rs` to "the parser", `postgres.py` to
+  "PostgreSQL" and `order.py` to "orders". Underscores and hyphens count
+  as spaces, so `rate_limiter.py` links to "rate limiter". This applies to
+  every task, decision and error link, both the new cross-call ones and
+  the ones on `main`. On the 340 external sessions, 31 substring links
+  are gone; nearly all were false. Three were debatable: `train` in
+  "retraining", `mod` in "module" and `env` in "environment". Incremental
+  extraction shares 675 of the 676 links that whole-session extraction
+  forms.
+- **Two false tasks found on a real session.**
+  - "My edit adding X didn't apply" was stored as work in progress. The
+    gerund phrase was the subject of a clause about something else.
+  - "A test set written by someone other than me" was stored as finished
+    work. "by" plus a noun phrase names who did it; "Fixed by adding a
+    timeout" (the method) is still read as finished work.
+  - A label cut inside a code span is closed, not left with an unmatched
+    backtick.
+  - Extraction F1 is unchanged on the internal eval (97%) and on all four
+    external corpora, category by category.
+- **Hostile or non-English input at the HTTP boundary.**
+  - A lone surrogate in `session_id` came back as a 503 "ownership state
+    unavailable", reporting a client's bad input as a server outage. It is
+    now a 422 naming the field.
+  - Any 422 that echoed a lone surrogate failed while its body was
+    rendered, so the client got a 500. The validation handler now escapes
+    the body to ASCII, so it can't fail to encode.
+  - The Obsidian export put the raw session id into the
+    `Content-Disposition` header, which must be Latin-1. A Hindi or emoji
+    session id was a 500, and quotes or semicolons reached the header. The
+    file name now keeps only letters, digits, `-` and `_`.
+  - `FileIntelligence.process` encoded text strictly before any
+    extractor ran, so a lone surrogate in an attached file raised.
+
+### Improved — more memory per token, and a graph that keeps its relations
+
+- **The resume block packs items, not sections.** Over budget it used to
+  drop whole sections from the bottom, so "Open issues" went first. Items
+  are now admitted in rounds by priority (open errors, warnings, current
+  and next work, decisions, then done, files, environment), with the
+  display order unchanged. Home directories are shortened (`~/…`), and a
+  decision's rationale appears only when it is short, whole and not a
+  restatement of the label. External benchmark, all 340 sessions of its
+  four corpora, share of labelled facts carried: at 150 tokens
+  66.8% -> 73.5% (open errors 40% -> 73%, pending 70% -> 82%; completed
+  tasks, ranked last among work items, 67% -> 59%); at 250/400 tokens
+  77.1% -> 79.8%.
+- **Relations survive incremental extraction.** They were inferred only
+  between nodes of one extraction call, and the proxy extracts one
+  message per call: on the same 340 sessions, one-message-at-a-time
+  extraction formed 183 edges (177 shared) where whole-session extraction
+  formed 707 (no task was ever PART_OF the goal, and 47 of 392
+  RELATED_TO links formed). New nodes now link against the whole live
+  graph: 706 of 707 shared (675 of 676 after the whole-word file
+  matching below). Per-request extraction cost is unchanged
+  (median 2.9 ms).
+
+### Improved — agent sessions, noise on real text, and faster than before
+
+Measured on a real 900-message agent session, a fuzzer, a scan of every
+regex in the package and a concurrent load test — not only on labelled
+corpora.
+
+- **Agents.** Tool calls and tool results are read (`helpers.tool_signals`:
+  OpenAI `tool_calls`, Anthropic `tool_use`/`tool_result`, Gemini
+  `functionCall`): files from the arguments of tools that change files,
+  errors from failed results. `_msg_hash` hashed text only, so every
+  text-less tool turn after the first was skipped as already processed.
+  The LLM extraction prompt now sees content-block messages (dropped
+  whole before), tool edits and tool errors, and is told the conversation
+  may be in any language.
+- **Noise.** Quoted examples, table rows and code blocks are masked before
+  the prose patterns run. Messages that are not English get
+  language-neutral extraction only (paths, exception names, checkboxes,
+  headers — including `Pendiente:`, `Fehler:`, `Erreur:`, `Decisión:`).
+  On the real session, judged node by node: about 45% of stored facts
+  were genuine before, about 87% after.
+- **Hostile input.** A message of `"x"` + 4,000 spaces + `"x"` took 10
+  seconds in `_TASK_DONE_PASSIVE`; seven more patterns were quadratic on
+  blank lines, digit runs or hyphens. All linear now, pinned by tests. A
+  lone surrogate (`"\ud800"`, legal JSON) crashed extraction; it no longer
+  can. `max_tokens`, `temperature` and `top_p` are range-checked (422).
+- **Speed.** A keyword prefilter skips the expensive subject-window
+  patterns on messages that cannot match them — output identical with and
+  without it on 530 sessions. Extraction is now faster than before this
+  release despite everything added: median 15.3 → 13.5 ms per session,
+  p95 23.9 → 19.7 ms.
+- **More general constructions** ("X: done", "[done] X", "X keeps
+  slipping", "has to get done", "we landed on X", "X came out ahead",
+  "the pager went off for X", "the root cause was X"), and fixes for
+  "Nothing failed on the last run" (was an error), "…went into app.py"
+  (was a completed task) and "Fixed by adding a timeout" (was an error).
+  Held-out v3, written before this round and never tuned against, is the
+  measurement: see tokenmizer-research.
+
+### Improved — extraction of how sessions actually talk, measured on text it was not tuned on
+
+The external benchmark in `tokenmizer-research` (memorybench) measured the
+heuristic pass at 53% completed-task recall, 37% pending, 54% decisions
+and 39% errors. Nearly every pattern keyed on a marker ("Done:", "TODO:",
+"Decided:"), and most of a working session states facts without one:
+"wrapped up the CSV export", "the GDPR export is next on the list",
+"Caddy felt like the right call", "ran into pool exhaustion".
+
+Added, per category (`patterns.py`, "Conversational forms"):
+
+- **Completed.** Phrasal verbs, "got X working", a subject with a
+  finished-state predicate ("X is in and working", "the PR's merged"),
+  and checkboxes.
+- **Pending.** To-do headers, negated completion ("haven't started X"),
+  deferral ("circle back to X"), narrated intent (recent window only), a
+  subject with an outstanding-state predicate, "up next is X", and
+  unchecked boxes. To-dos are read over the whole session. They were
+  windowed to the last 20 messages, so one stated early in a session over
+  30 messages never reached the graph.
+- **Decisions.** User imperatives ("Use X", "Build it with X"), "should
+  use X", "we'll go with X", "opting for", "I'd prefer X", and evaluative
+  predicates ("X won out"). A user's proposal ("Can we do this with
+  Celery?") counts only when the next assistant turn accepts it, including
+  when the two arrive in different extraction calls
+  (`heuristic_extract(prior_message=...)`).
+- **Errors.** "Bug:/Error:/Issue:" headers, "ran into X", and observation
+  verbs and "there's X", gated on defect vocabulary so "we're seeing a 20%
+  speedup" stays out.
+- **Files.** Multi-dot names (`vite.config.ts` was recorded as
+  `config.ts`), and extensionless build files with their directory
+  (`fastlane/Fastfile`). `moment.js` and other library names are no longer
+  files.
+- **Graph.** `add_node` merges a completion into the pending task it
+  finishes: containment on counted words, applied to plan/completion pairs
+  only. A task is no longer listed as both done and outstanding.
+
+**Measured** (macro F1, 95% bootstrap CI over sessions):
+
+| Corpus | Before | After |
+|---|---:|---:|
+| memorybench main (n=100) — tuned against | 61% | 92% |
+| held-out v1 (n=80) — used to find the second round | 40% | 79% |
+| **held-out v2 (n=80) — never tuned against** | **33%** | **51%** |
+
+The last row is the one to quote: +17.4 points [+14.6, +20.4] on phrasing
+the fixes never saw, with precision up in every category. The first row is
+fit, not generalisation. The second round of fixes gained 7 points on the
+set it was read from and 2 on v2. Pending recall (19%) and errors (45% F1)
+on v2 are still weak, and marker-free phrasing is out of reach of pattern
+matching. See `tokenmizer-research/benchmarks/results/REPORT_extraction_rounds.md`.
+
+**Cost.** Extraction is about 22% slower (median 15.3 → 18.6 ms per session,
+p95 24 → 31 ms), and the resume block carries about 47% more tokens on the
+main corpus (102 → 150), because it carries more facts. The internal eval
+(`python -m benchmarks.eval`) is unchanged at 97% macro F1.
+
+### Fixed — extraction bugs found on the way, most of them precision
+
+Each was reproduced before it was fixed, and each has a test in
+`tests/unit/test_extraction_conversational.py`. Several predate this
+release.
+
+- Adjectival "failed" was read as a failure. "Background retry for failed
+  webhook deliveries" is a feature, and "haven't started a rollback job
+  for failed deploys" is a to-do.
+- Error labels opened on a contraction's tail ("t started a rollback
+  job", "s work on a memory leak") and closed mid-word ("…missing
+  NSMotionUsageDescrip").
+- Decision verbs matched inside other words. "Excessive allocations
+  c**using** GC pressure" recorded the decision "GC pressure", "TODO:
+  wat**chOS** companion app" recorded "companion app", and "be**cause**"
+  made the next technology look chosen.
+- "Picked up duplicate rows" was read as a choice. "Logistic regression"
+  and "soft deletes" were read as defects.
+- Conditions were read as completions: "once the migration is merged we can
+  deploy" recorded the completed task "we can deploy", and "when the
+  backfill is done…" recorded "When the backfill".
+- A negation after a technology name was ignored: "Kafka wasn't the right
+  call" became "Use Kafka wasn't the right call".
+- "The retry fix landed in the last commit" became "Landed in in the last
+  commit". An intransitive completion verb now takes its subject.
+- `_TASK_WIP` had no word anchor: "re**writing** half of conftest.py"
+  was work in progress.
+- Markdown bold in front of a header (`**Decision:**`) defeated every
+  header pattern.
+- "Use sqlc" was kept beside "sqlc for type-safe database access".
+- A multi-dot filename pattern with an unbounded repeat took 3.5 s on the
+  15 KB adversarial payload. It was bounded before it shipped, and it is
+  pinned.
 
 ### Fixed — two places TokenMizer dropped information, not just tokens
 

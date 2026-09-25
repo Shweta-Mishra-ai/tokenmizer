@@ -31,16 +31,19 @@ continues to work unchanged.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import sqlite3
 import time
+from collections import Counter
 from pathlib import Path
 
 from tokenmizer.graph_memory.helpers import (
     _content_to_text,
     _extract_evidence_from_text,
     _infer_trigger,
+    scrub_surrogates,
 )
 from tokenmizer.graph_memory.types import (
     INACTIVE_STATUSES,
@@ -114,6 +117,55 @@ def _next_status(node_type: NodeType, current: NodeStatus, incoming: NodeStatus)
     if node_type == NodeType.ERROR:
         return incoming
     return incoming if _STATUS_RANK.get(incoming, 0) > _STATUS_RANK.get(current, 0) else current
+
+
+def _task_words(label: str) -> Counter:
+    """Words of a task label for the fuzzy same-task merge: every token
+    (numbers and short identifiers included), counted, minus function words
+    and the verbs that only say what state the task is in."""
+    return Counter(w for w in re.findall(r"[a-z0-9]+", label.lower())
+                   if w not in _TASK_STATE_WORDS)
+
+
+_TASK_STATE_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "for", "with", "on", "in", "of", "to", "at",
+    "by", "is", "it", "as", "be", "we", "i", "our", "this", "that", "yet",
+    "added", "add", "adding", "done", "finished",
+    "finish", "completed", "complete", "implemented", "implement", "wrapped",
+    "still", "need", "needs", "next", "todo", "pending", "started", "start",
+    "working", "work", "shipped", "merged", "fixed", "fix", "wrote", "write",
+    "written", "built", "build", "created", "create", "updated", "update",
+})
+
+
+# processed_hashes cap, and the entry that marks the set as trimmed. Not a
+# hex digest, so it can never equal a message hash.
+_MAX_PROCESSED_HASHES = 500
+_HASHES_TRIMMED = "#trimmed"
+
+
+def _names_file(name: str, text: str) -> bool:
+    """Does `text` mention the file `name` (a stem like "orders", or a base
+    name like "orders.py") as a whole word?
+
+    A bare substring test linked `api.py` to "the rapid rollout", `app.py`
+    to "the happy path" and an error in `data.py` to `lib/a.py`. The match
+    now needs a word start before the name, which is what rejects every
+    false case measured ("OAuth", "protobuf", "domain", "trapping"). The end
+    may carry a common inflection, so `backfill.py` still links to
+    "backfilling", `parse.rs` to "the parser", `order.py` to "orders" and
+    `postgres.py` to "PostgreSQL". Underscores and hyphens count as spaces
+    on both sides, so `rate_limiter` matches "rate limiter".
+    """
+    name = re.sub(r"[_\-]+", " ", name.lower()).strip()
+    if len(name) <= 2:
+        return False
+    text = re.sub(r"[_\-]+", " ", text.lower())
+    return re.search(r"(?<![a-z0-9])" + re.escape(name) + _INFLECTION + r"(?![a-z0-9])",
+                     text) is not None
+
+
+_INFLECTION = r"(?:s|es|d|ed|r|er|ers|ing|ment|ql)?"
 
 
 # ── Graph ────────────────────────────────────────────────────────────────────
@@ -237,7 +289,7 @@ class GraphMemory:
 
     def _node_id(self, node_type: str, label: str) -> str:
         normalized = f"{node_type}:{label.lower().strip()}"
-        return hashlib.sha1(normalized.encode()).hexdigest()[:12]
+        return hashlib.sha1(normalized.encode("utf-8", "surrogatepass")).hexdigest()[:12]
 
     def _normalize_label(self, label: str) -> str:
         return label.lower().strip().rstrip(".,!?")
@@ -304,9 +356,9 @@ class GraphMemory:
                 # NOTE: inactive (SUPERSEDED/INVALIDATED) nodes are
                 # deliberately still eligible to absorb a match here.
                 # Re-adding a *genuine restatement* of a dead decision
-                # must be a no-op, not a revival: extraction re-scans old
-                # messages whenever _processed_hashes is capped (see
-                # extract_from_messages), so a stale "Use React" resurfacing
+                # must be a no-op, not a revival: extraction can re-scan old
+                # messages (a client that rewrites its history, or a full
+                # re-extraction), so a stale "Use React" resurfacing
                 # after the team moved to Next.js must not flip the choice
                 # back. test_merge_does_not_resurrect_superseded covers this.
                 #
@@ -357,6 +409,77 @@ class GraphMemory:
                     ex.status = _next_status(node_type, ex.status, status)
                     if len(stored_label) > len(ex.label) and status == ex.status:
                         ex.label = stored_label
+                    if stored_summary and not ex.summary:
+                        ex.summary = stored_summary
+                    return ex_id
+
+        # One file, two spellings. An agent's tool calls name files by
+        # absolute path (`/home/dev/app/src/api/orders.py`) and its prose by
+        # the path it would show a person (`src/api/orders.py`); both
+        # reached the graph as separate FILE nodes. They are one file when
+        # one path ends with the other at a directory boundary and the
+        # shorter still has a directory in it — a bare `README.md` could be
+        # any repository's. The shorter spelling is kept: it is the one the
+        # resume should show.
+        if node_type == NodeType.FILE and "/" in stored_label:
+            for ex_id, ex in self._nodes.items():
+                if ex.type != NodeType.FILE or ex._evicted or "/" not in ex.label:
+                    continue
+                short, long_ = sorted((stored_label, ex.label), key=len)
+                if short.count("/") >= 1 and (short == long_ or long_.endswith("/" + short)):
+                    ex.touch()
+                    self._dirty = True
+                    if len(stored_label) < len(ex.label):
+                        ex.label = stored_label
+                    return ex_id
+
+        # Fuzzy same-task merge. A to-do and the completion that finishes it
+        # are one piece of work stated twice — "Still need: rate limiting on
+        # the auth routes", then later "Added rate limiting on the auth
+        # routes" — and only an identical label reached the exact dedup
+        # above. Left apart, the resume listed the work as both done and
+        # outstanding, and told the next session to redo it. The merge
+        # upgrades status only (see _next_status), so a completed task is
+        # never reopened by a later mention of the plan.
+        #
+        # The test is containment, not overlap: every word of the shorter
+        # label must appear in the longer one, numbers and short identifiers
+        # included. An overlap ratio merged "Implemented POST /api/auth/login"
+        # into ".../logout" (three words of four in common) and "task 1" into
+        # "task 2" (the digits were too short to count) — different work,
+        # collapsed into one node. The shorter label needs two words of its
+        # own, so a bare "Add tests" does not absorb every test task. Words
+        # are counted, not just collected: "Worker 0 implemented feature 0"
+        # is not contained in "Worker 0 implemented feature 1", though its
+        # set of words is.
+        #
+        # Only a plan and its completion are merged — one side outstanding,
+        # the other completed. Two completed tasks worded alike are left to
+        # the exact dedup above: that is the case this merge exists for, and
+        # nothing else needs the risk of collapsing distinct work.
+        if node_type == NodeType.TASK:
+            words = _task_words(label)
+            if sum(words.values()) >= 2:
+                for ex_id, ex in self._nodes.items():
+                    if ex.type != NodeType.TASK or ex._evicted:
+                        continue
+                    if (ex.status == NodeStatus.COMPLETED) == (status == NodeStatus.COMPLETED):
+                        continue
+                    ex_words = _task_words(ex.label)
+                    if sum(ex_words.values()) < 2:
+                        continue
+                    small, large = sorted((words, ex_words), key=lambda c: sum(c.values()))
+                    if small - large:
+                        continue
+                    ex.touch()
+                    self._dirty = True
+                    upgraded = _next_status(node_type, ex.status, status)
+                    if upgraded != ex.status and len(stored_label) >= len(ex.label):
+                        # The completion's wording describes what was done;
+                        # the plan's described what was intended. Only when
+                        # it is at least as specific.
+                        ex.label = stored_label
+                    ex.status = upgraded
                     if stored_summary and not ex.summary:
                         ex.summary = stored_summary
                     return ex_id
@@ -638,10 +761,35 @@ class GraphMemory:
         duplicates — one layer down, in the extractor rather than the
         compressor. SHA-1 over a few KB is not a cost worth a silent
         drop; nothing here was measured to need the prefix.
+
+        Tool calls and tool results are part of the message. The hash used
+        to cover the TEXT only, and a tool-only turn — an agent's
+        `Edit(file_path=...)`, or the result it got back — has none, so
+        every one of them hashed to sha1(""): after the first, each later
+        tool turn was "already processed" and never reached extraction. For
+        an agent, whose work is mostly tool calls, that was most of the
+        session. A message with any non-text part is hashed over its whole
+        canonical JSON; a plain-text message keeps the text-only hash it
+        always had, so sessions persisted before this change do not re-scan.
         """
         content = msg.get("content", "")
         text = _content_to_text(content)
-        return hashlib.sha1(text.encode()).hexdigest()[:16]
+        has_structure = (
+            msg.get("tool_calls") or msg.get("tool_call_id") or msg.get("function_call")
+            or (isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") not in (None, "text") for b in content))
+        )
+        if has_structure:
+            try:
+                payload = json.dumps(
+                    {k: msg.get(k) for k in ("role", "content", "tool_calls",
+                                              "tool_call_id", "function_call", "name")},
+                    sort_keys=True, default=str,
+                )
+            except (TypeError, ValueError):
+                payload = repr(msg)
+            return hashlib.sha1(payload.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        return hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
     @staticmethod
     def _extracted_to_dict(extracted) -> dict:
@@ -705,13 +853,43 @@ class GraphMemory:
                     f"'content' keys, got {type(m).__name__}"
                 )
 
+        prior_message = None
+        # Each message is hashed once per call and the hashes reused below:
+        # over a long agent session the hashing, not the extraction, is most
+        # of the per-request cost.
+        hashes: list[str] | None = None
         if incremental:
-            new_messages = [m for m in messages
-                           if self._msg_hash(m) not in self._processed_hashes]
-            if not new_messages:
+            hashes = [self._msg_hash(m) for m in messages]
+            known = [h in self._processed_hashes for h in hashes]
+            new_idx = [i for i, k in enumerate(known) if not k]
+            if new_idx and _HASHES_TRIMMED in self._processed_hashes:
+                # The set holds only the most recent messages (see the cap
+                # below), so everything older than the oldest one it still
+                # recognises was processed before it was trimmed. Without
+                # this, once a session passed the cap every request
+                # re-extracted every message older than the window: on a
+                # real 914-message agent session, 414 messages per request
+                # and ~115 ms instead of ~15.
+                first_known = known.index(True) if True in known else None
+                if first_known is not None:
+                    new_idx = [i for i in new_idx if i > first_known]
+            if not new_idx:
                 return
+            new_messages = [messages[i] for i in new_idx]
+            new_hashes = [hashes[i] for i in new_idx]
+            # The turn just before the first new one: a proposal made in the
+            # user's turn is accepted (or not) by the reply, and the proxy
+            # routinely sees the two in different calls.
+            if new_idx[0] > 0:
+                prior_message = scrub_surrogates(messages[new_idx[0] - 1])
         else:
             new_messages = messages
+            new_hashes = [self._msg_hash(m) for m in messages]
+        # Lone surrogates would reach node labels and from there SQLite — see
+        # helpers.scrub_surrogates. Only the messages about to be extracted
+        # are scrubbed: _msg_hash is surrogate-safe on its own, and copying
+        # the whole history on every request cost more than extracting it.
+        new_messages = scrub_surrogates(new_messages)
 
         # Auto-select sliding window for long sessions
         # For sessions > 30 messages: only extract WIP/errors from last 20
@@ -720,27 +898,28 @@ class GraphMemory:
         if extracted_data is None:
             from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
             _he = get_hybrid_extractor(self._domain)
-            extracted_data = _he.heuristic_extract(new_messages, window_size=window_size)
+            extracted_data = _he.heuristic_extract(new_messages, window_size=window_size,
+                                                   prior_message=prior_message)
         data = extracted_data if isinstance(extracted_data, dict) \
             else self._extracted_to_dict(extracted_data)
         self._apply_extracted(data, new_messages)
 
-        for m in new_messages:
-            self._processed_hashes.add(self._msg_hash(m))
+        # Hashed as sent, not as scrubbed: the next call compares against the
+        # raw messages.
+        self._processed_hashes.update(new_hashes)
         if new_messages:
             self._dirty = True  # processed_hashes changed even if no nodes did
 
-        # Cap processed_hashes — for very long sessions (1000+ turns), this set
-        # would otherwise grow unbounded (each hash ~16 bytes, but still).
-        # When over cap, rebuild from the most recent messages only.
-        # Effect: very old messages may be re-scanned on restart, but since
-        # their content is already in the graph, add_node() dedup makes
-        # re-extraction a safe no-op.
-        _MAX_PROCESSED_HASHES = 500
-        if len(self._processed_hashes) > _MAX_PROCESSED_HASHES:
-            self._processed_hashes = {
-                self._msg_hash(m) for m in messages[-_MAX_PROCESSED_HASHES:]
-            }
+        # Cap processed_hashes — for very long sessions this set would
+        # otherwise grow unbounded, and it is rewritten with the graph on
+        # every change. When over cap, keep the most recent messages only,
+        # plus a marker that the set was trimmed: the marker is persisted
+        # with the hashes (no schema change) and tells the check above to
+        # treat messages older than the window as processed rather than new.
+        if len(self._processed_hashes - {_HASHES_TRIMMED}) > _MAX_PROCESSED_HASHES:
+            recent = (hashes[-_MAX_PROCESSED_HASHES:] if hashes is not None
+                      else [self._msg_hash(m) for m in messages[-_MAX_PROCESSED_HASHES:]])
+            self._processed_hashes = set(recent) | {_HASHES_TRIMMED}
             self._dirty = True  # processed_hashes is part of the persisted row
 
         # Apply importance decay — completed tasks fade, superseded decisions fade
@@ -772,10 +951,32 @@ class GraphMemory:
           - file → endpoint: only if endpoint label shares a path segment with file name
         """
         # Collect accepted node IDs by type for relationship inference
-        goal_ids: list[str] = []
-        task_ids: list[str] = []
-        file_ids: list[str] = []
-        decision_ids: list[str] = []
+        # Relations are inferred against the WHOLE graph, not only against
+        # what this call extracted. The proxy extracts one new message per
+        # request, so a batch almost never holds both ends of a relation:
+        # the error in message 10 and the file edited in message 8 were
+        # never linked, the fix and the failure it closed never met, and no
+        # task was ever PART_OF the goal from the opening turn. Measured on
+        # the 100-session external corpus, one-message-at-a-time extraction
+        # formed 68 edges where extracting the same sessions whole formed
+        # 262 — the incremental graph that why() and impact() walk in
+        # production had lost three relations in four.
+        #
+        # Each list starts with the live nodes of its type already in the
+        # graph; this call's nodes are appended as they are created. Every
+        # relation loop below pairs a node from THIS call with the list, so
+        # the cost is new x existing, not existing x existing.
+        def _live(node_type: NodeType) -> list[str]:
+            return [nid for nid, n in self._nodes.items()
+                    if n.type == node_type and not n._evicted
+                    and n.status not in INACTIVE_STATUSES]
+
+        goal_ids: list[str] = _live(NodeType.GOAL)
+        task_ids: list[str] = _live(NodeType.TASK)
+        file_ids: list[str] = _live(NodeType.FILE)
+        decision_ids: list[str] = _live(NodeType.DECISION)
+        prior_error_ids: list[str] = _live(NodeType.ERROR)
+        new_task_ids: list[str] = []
 
         # Goals
         for goal in data.get("goals", []):
@@ -794,8 +995,10 @@ class GraphMemory:
                 # tier: good evidence, not corroborated.
                 nid = self.add_node(NodeType.GOAL, goal, NodeStatus.IN_PROGRESS,
                                     importance=1.0, confidence=0.8)
-                if nid:
+                if nid and nid not in goal_ids:
                     goal_ids.append(nid)
+                    for tid in task_ids:
+                        self.add_edge(tid, nid, EdgeType.PART_OF)
 
         # Tasks
         status_map = {
@@ -811,7 +1014,26 @@ class GraphMemory:
             importance = 0.8 if status == NodeStatus.COMPLETED else 0.6
             nid = self.add_node(NodeType.TASK, label, status, importance=importance)
             if nid:
-                task_ids.append(nid)
+                if nid not in task_ids:
+                    task_ids.append(nid)
+                new_task_ids.append(nid)
+                # The other direction of the decision and file links below,
+                # which only ever look from a NEW decision or file: a task
+                # arriving after them was never linked to either.
+                task_node = self._nodes.get(nid)
+                if task_node is not None:
+                    task_words = self._expand_with_aliases(self._meaningful_words(task_node.label))
+                    task_lower = task_node.label.lower()
+                    for did in decision_ids:
+                        dec = self._nodes.get(did)
+                        if dec is not None and self._expand_with_aliases(
+                                self._meaningful_words(dec.label)) & task_words:
+                            self.add_edge(did, nid, EdgeType.RELATED_TO)
+                    for fid in file_ids:
+                        fnode = self._nodes.get(fid)
+                        stem = fnode.label.split("/")[-1].split(".")[0] if fnode else ""
+                        if _names_file(stem, task_lower):
+                            self.add_edge(nid, fid, EdgeType.IMPLEMENTS)
                 # Tasks are part of the session goal
                 for gid in goal_ids:
                     self.add_edge(nid, gid, EdgeType.PART_OF)
@@ -839,6 +1061,13 @@ class GraphMemory:
                                 source_role=d.get("source_role") or "assistant")
             if nid:
                 decision_ids.append(nid)
+                # A decision naming a file that was already in the graph.
+                dec_lower = label.lower()
+                for fid in file_ids:
+                    fnode = self._nodes.get(fid)
+                    stem = fnode.label.split("/")[-1].split(".")[0] if fnode else ""
+                    if _names_file(stem, dec_lower):
+                        self.add_edge(nid, fid, EdgeType.RELATED_TO)
                 # Link to tasks if they share meaningful vocabulary (with alias expansion)
                 decision_words = self._expand_with_aliases(
                     self._meaningful_words(label)
@@ -890,18 +1119,23 @@ class GraphMemory:
             nid = self.add_node(NodeType.FILE, f, NodeStatus.IN_PROGRESS, importance=0.7)
             if nid:
                 file_ids.append(nid)
-                file_stem = f.split("/")[-1].split(".")[0].lower()
-                if file_stem and len(file_stem) > 2:
-                    for tid in task_ids:
-                        task_node = self._nodes.get(tid)
-                        if task_node and file_stem in task_node.label.lower():
-                            self.add_edge(tid, nid, EdgeType.IMPLEMENTS)
-                    # "Redis for sessions (see config.py)": the file a
-                    # decision names is where it lives.
-                    for did in decision_ids:
-                        dec = self._nodes.get(did)
-                        if dec and file_stem in dec.label.lower():
-                            self.add_edge(did, nid, EdgeType.RELATED_TO)
+                # An error recorded earlier that names this file.
+                base = f.split("/")[-1]
+                for eid in prior_error_ids:
+                    enode = self._nodes.get(eid)
+                    if enode is not None and _names_file(base, enode.label):
+                        self.add_edge(eid, nid, EdgeType.RELATED_TO)
+                file_stem = f.split("/")[-1].split(".")[0]
+                for tid in task_ids:
+                    task_node = self._nodes.get(tid)
+                    if task_node and _names_file(file_stem, task_node.label):
+                        self.add_edge(tid, nid, EdgeType.IMPLEMENTS)
+                # "Redis for sessions (see config.py)": the file a
+                # decision names is where it lives.
+                for did in decision_ids:
+                    dec = self._nodes.get(did)
+                    if dec and _names_file(file_stem, dec.label):
+                        self.add_edge(did, nid, EdgeType.RELATED_TO)
 
         # Errors — handle both str and dict formats
         error_ids: list[str] = []
@@ -930,12 +1164,17 @@ class GraphMemory:
         # error and an in-progress task about the same thing are the other
         # relation a resume needs: the error BLOCKS the task. Both require
         # real vocabulary overlap, not one shared word.
-        for eid in error_ids:
+        # New errors against every task; errors already in the graph against
+        # this call's tasks only — the fix that closes an old failure
+        # usually arrives turns after it.
+        pairs = [(eid, task_ids) for eid in error_ids]
+        pairs += [(eid, new_task_ids) for eid in prior_error_ids if eid not in error_ids]
+        for eid, candidate_tasks in pairs:
             err = self._nodes.get(eid)
             if err is None:
                 continue
             err_words = self._meaningful_words(err.label)
-            for tid in task_ids:
+            for tid in candidate_tasks:
                 task = self._nodes.get(tid)
                 if task is None:
                     continue
@@ -1441,7 +1680,7 @@ class GraphMemory:
             edge_count=len(live_edges),
             by_type=by_type,
             by_status=by_status,
-            processed_messages=len(self._processed_hashes),
+            processed_messages=len(self._processed_hashes - {_HASHES_TRIMMED}),
             avg_confidence=avg_confidence,
             decision_tracking_failures=self._decision_tracking_failures,
             persistence_broken=self._persistence_broken,
