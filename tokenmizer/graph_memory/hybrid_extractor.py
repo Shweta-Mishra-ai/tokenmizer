@@ -305,9 +305,118 @@ def _gerund_is_subject(obj: str) -> bool:
 
 
 _TRAILING_AUX = re.compile(
-    r"\s+(?:was|were|is|are|has been|have been|had been|got|been|just|finally)$",
+    # (?<!\s): a whitespace run is entered at its start only. Without it
+    # every position in a long run re-scanned the rest of it (25 s on 20 KB);
+    # subjects are short, but a pattern should not rely on that.
+    r"(?<!\s)\s+(?:was|were|is|are|has been|have been|had been|got|been|just|finally)$",
     re.IGNORECASE,
 )
+
+
+_LIST_ITEM = re.compile(r"^[ \t]*(?:[-*\u2022]|\d+[.)])[ \t]+")
+_FIXED_HEADING = re.compile(
+    r"\b(?:fixed|resolved|solved|patched|closed|addressed)\b[^\n]*:[ \t*_]*$",
+    re.IGNORECASE,
+)
+
+
+def _under_fixed_heading(content: str, pos: int) -> bool:
+    """Is `pos` in a list item under a heading that says the items were
+    fixed? "**Bugs fixed along the way:**" followed by a bullet list of
+    bugs: each was a real failure, and each is over. Stored as open errors,
+    they told the next session to go fix what was already fixed."""
+    line_start = content.rfind("\n", 0, pos) + 1
+    line_end = content.find("\n", pos)
+    if not _LIST_ITEM.match(content[line_start:line_end if line_end != -1 else len(content)]):
+        return False
+    # Walk up past the rest of the list to the line that introduces it.
+    end = line_start - 1
+    while end > 0:
+        start = content.rfind("\n", 0, end) + 1
+        line = content[start:end]
+        if line.strip() and not _LIST_ITEM.match(line):
+            return _FIXED_HEADING.search(line.strip()) is not None
+        end = start - 1
+    return False
+
+
+_PROBLEM_HEADING = re.compile(
+    r"^[ \t#*_]*(?:(?:still|known|open|remaining|outstanding|current)\s+)?"
+    r"(?:bugs?|errors?|issues?|problems?|failures?|regressions?|incidents?|defects?|"
+    r"broken|failing)\b[^\n:]{0,40}:[ \t*_]*$",
+    re.IGNORECASE,
+)
+# "Issues" and "problems" also head lists of concerns ("Problems I found:
+# your changelog's figure can't be compared with this"): under those, an
+# item must itself name something wrong.
+_GENERIC_PROBLEM_HEADING = re.compile(
+    r"^[ \t#*_]*(?:(?:still|known|open|remaining|outstanding|current)\s+)?"
+    r"(?:issues?|problems?)\b",
+    re.IGNORECASE,
+)
+
+
+def _problem_list_items(content: str) -> list[tuple[str, bool]]:
+    """(label, fixed) for each list item under a heading line that names
+    problems, or under one that says they were fixed (_FIXED_HEADING)."""
+    items: list[tuple[str, bool]] = []
+    heading: str | None = None
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = _LIST_ITEM.match(line)
+        if m is None:
+            heading = stripped
+            continue
+        if heading is None:
+            continue
+        fixed = _FIXED_HEADING.search(heading) is not None
+        if not fixed and not _PROBLEM_HEADING.match(heading):
+            continue
+        raw = line[m.end():].strip(" *_`")
+        if raw.endswith("?"):
+            continue   # "Open issues:" also lists open questions
+        if not fixed and _GENERIC_PROBLEM_HEADING.match(heading) \
+                and not _DEFECT_WORD.search(raw):
+            continue
+        label = _clip(_strip_emphasis(raw))
+        if len(label) >= 8:
+            items.append((label, fixed))
+    return items
+
+
+# A file named as an example of a kind of file, not one that was worked on:
+# "Multi-dot names (`vite.config.ts`)", "build files with a directory
+# (`fastlane/Fastfile`)", "config files such as `tsconfig.json`".
+_EXAMPLE_LEAD = re.compile(
+    r"\b(?:e\.g\.?|i\.e\.?|such as|for example|for instance|like|say)[\s,:(`'\"]*$",
+    re.IGNORECASE,
+)
+_CATEGORY_BEFORE_PAREN = re.compile(
+    r"\b(?:names|files|filenames|paths|extensions|patterns|examples|cases|kinds|types)\b"
+    r"(?:\s+[^\s(]+){0,5}\s*\([\s`'\"]*(?:[^()]*,\s*[`'\"]?)?$",
+    re.IGNORECASE,
+)
+_WORK_VERB = re.compile(
+    r"\b(?:edit(?:ed|ing)?|updat(?:ed|ing)|chang(?:ed|ing)|modif(?:ied|ying)|touch(?:ed|ing)|"
+    r"add(?:ed|ing)|creat(?:ed|ing)|wr(?:ote|itten|iting)|fix(?:ed|ing)|refactor(?:ed|ing)?|"
+    r"mov(?:ed|ing)|renam(?:ed|ing)|delet(?:ed|ing)|remov(?:ed|ing)|patch(?:ed|ing)|"
+    r"rewr(?:ote|itten|iting)|implement(?:ed|ing))\b",
+    re.IGNORECASE,
+)
+
+
+def _is_example_mention(text: str, pos: int) -> bool:
+    # From the start of the whole token: a name matched inside a longer path
+    # ("index.md" in "docs/index.md") is judged by what precedes the path.
+    while pos > 0 and not text[pos - 1].isspace() and text[pos - 1] not in "(`'\"":
+        pos -= 1
+    start = max(text.rfind(c, 0, pos) for c in ".!?\n") + 1
+    clause = text[max(start, pos - 160):pos]
+    if _EXAMPLE_LEAD.search(clause):
+        return True
+    return bool(_CATEGORY_BEFORE_PAREN.search(clause)) and not _WORK_VERB.search(clause)
 
 
 def _todo_label(text: str) -> str:
@@ -1066,7 +1175,7 @@ class HybridExtractor:
                     seen_decisions.add(norm)
 
         self._extract_structure(original, result, seen_files, seen_endpoints, seen_schemas)
-        self._extract_errors(content, result, _ALL_ERROR_PATTERNS)
+        self._extract_errors(content, result, _ALL_ERROR_PATTERNS, original=original)
 
         # Dependencies
         for m in _DEPENDENCY.finditer(content):
@@ -1139,17 +1248,17 @@ class HybridExtractor:
                 seen_files.add(m.group(1).strip())   # never a file; see _LIBRARY_NOT_FILE
         for m in _FILE_PATH.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files and len(f) > 4:
+            if f not in seen_files and len(f) > 4 and not _is_example_mention(original, m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)
         for m in _FILE_COMMON.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files:
+            if f not in seen_files and not _is_example_mention(original, m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)
         for m in _FILE_EXTENSIONLESS.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files:
+            if f not in seen_files and not _is_example_mention(original, m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)
 
@@ -1188,7 +1297,8 @@ class HybridExtractor:
                 result.schemas.append(schema)
                 seen_schemas.add(norm)
 
-    def _extract_errors(self, content: str, result: "ExtractedData", patterns) -> None:
+    def _extract_errors(self, content: str, result: "ExtractedData", patterns,
+                        original: str | None = None) -> None:
         """Run the error patterns over `content` in `patterns` order, which
         is precedence (see _ALL_ERROR_PATTERNS)."""
         # Errors: full history, NOT the recent window.
@@ -1304,7 +1414,8 @@ class HybridExtractor:
                 # resolved instead of carrying it into every resume as an
                 # open bug. The fix prefix stripped from the label above is
                 # the same signal when it sat inside the captured span.
-                if _FIX_LEAD.search(before) or _FIX_PREFIX.match(raw.strip()):
+                if _FIX_LEAD.search(before) or _FIX_PREFIX.match(raw.strip()) \
+                        or _under_fixed_heading(content, span_start):
                     result.resolved_errors.append(err)
                 key = (id(pattern), _sentence_index(content, label_start))
                 prior = sentence_claims.get(key)
@@ -1320,6 +1431,22 @@ class HybridExtractor:
                         result.errors.remove(prior[0])
                 sentence_claims[key] = (err, span_end)
                 result.errors.append(err)
+
+        # A list under a heading that names problems: "**Still broken:**",
+        # "Known issues:" followed by bullets. Each item is a failure even
+        # when it is a bare noun phrase that no sentence pattern reads. Under
+        # a heading that says they were fixed, each is a resolved one.
+        # Read from the original text: the item is itself the statement, and
+        # the masked copy blanks its quotes and bold ("The one I found
+        # earlier:     read as an error").
+        if patterns is _ALL_ERROR_PATTERNS:
+            for label, fixed in _problem_list_items(original if original is not None else content):
+                if _NO_DEFECT.match(label) or any(self._subsumes(e, label) or self._subsumes(label, e)
+                               for e in result.errors):
+                    continue
+                result.errors.append(label)
+                if fixed:
+                    result.resolved_errors.append(label)
 
     def heuristic_extract(
         self,

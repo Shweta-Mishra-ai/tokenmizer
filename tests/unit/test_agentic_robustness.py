@@ -280,6 +280,7 @@ _PAYLOADS = {
     "hyphens": "a-" * 7500,
     "dot then long space": (". " + " " * 300) * 50,
     "tab run": "\t" * 15000,
+    "blank run": "\n" * 15000,
     "short words then it is": "a " * 5000 + "it is.",
     "quoted runs": ('a "' + "x" * 250 + '" . ') * 55,
     "bullets": ("- " + " " * 200 + "\n") * 70,
@@ -608,3 +609,75 @@ def test_startup_warms_the_extractor_and_a_failed_warm_up_still_starts(monkeypat
     monkeypatch.setattr(hybrid_extractor, "get_hybrid_extractor", boom)
     with TestClient(app_module.app) as c:
         assert c.get("/health").status_code == 200
+
+
+# ── Lists under headings, and files named as examples ────────────────────────
+
+def test_errors_listed_under_a_fixed_heading_are_resolved():
+    # "**Bugs fixed along the way:**" then bullets: each was a real failure
+    # and each is over. Stored as open errors, they told the next session to
+    # fix what was already fixed.
+    r = _x([{"role": "assistant", "content":
+             "**Bugs fixed along the way:**\n"
+             "- A race condition in the cache warmer.\n"
+             "- To-dos from early in long sessions being silently dropped.\n"}])
+    assert len(r.errors) == 2 and sorted(r.resolved_errors) == sorted(r.errors)
+
+
+def test_items_under_a_problem_heading_are_errors():
+    r = _x([{"role": "assistant", "content":
+             "Known issues:\n- Pagination returns duplicate rows on page 2\n"
+             "- None\n- Should we shard the orders table?\n"}])
+    assert r.errors == ["Pagination returns duplicate rows on page 2"]
+    assert r.resolved_errors == []
+
+
+def test_a_generic_problems_heading_needs_a_defect_in_the_item():
+    # "Problems I found:" also lists concerns that are not failures.
+    r = _x([{"role": "assistant", "content":
+             "**Problems I found:**\n"
+             "1. **New bug in the product.** It stores adjectives as errors.\n"
+             "2. **Your changelog's figure can't be compared with this.**\n"}])
+    assert r.errors == ["New bug in the product"], r.errors
+
+
+def test_non_problem_lists_are_not_errors():
+    r = _x([{"role": "assistant", "content":
+             "Next steps:\n- Add pagination to the orders endpoint\n- Write the runbook\n"}])
+    assert r.errors == []
+
+
+@pytest.mark.parametrize("text", [
+    "Multi-dot names (`vite.config.ts`) and build files with a directory (`fastlane/Fastfile`).",
+    "Config files such as `tsconfig.json` are skipped.",
+    "Paths like docs/index.md are ignored by the linter.",
+])
+def test_files_named_as_examples_are_not_files(text):
+    assert _x([{"role": "assistant", "content": text}]).files == []
+
+
+@pytest.mark.parametrize("text,files", [
+    ("Updated two files (`src/a.py`, `src/b.py`).", ["src/a.py", "src/b.py"]),
+    ("I edited the settings module (config/settings.py).", ["config/settings.py"]),
+    ("The fix lives in src/api/orders.py.", ["src/api/orders.py"]),
+])
+def test_files_that_were_worked_on_are_still_files(text, files):
+    assert _x([{"role": "assistant", "content": text}]).files == files
+
+
+@pytest.mark.parametrize("payload", ["\t" * 8000, "\n" * 8000, " " * 8000, ". " * 4000],
+                         ids=["tabs", "blank-lines", "spaces", "dot-space"])
+def test_every_extraction_regex_is_linear_on_whitespace(payload):
+    """Every compiled pattern in the extraction modules, run directly. The
+    full-extraction payload test cannot see a pattern that only ever gets
+    short input there (_TRAILING_AUX took 25 s on 20 KB of spaces, and a
+    decision pattern 199 s on 17 KB of tabs, before each was fixed)."""
+    import re as _re
+
+    from tokenmizer.graph_memory import hybrid_extractor, patterns
+    for module in (patterns, hybrid_extractor):
+        for name, value in vars(module).items():
+            if isinstance(value, _re.Pattern):
+                started = time.monotonic()
+                list(value.finditer(payload))
+                assert time.monotonic() - started < 1.0, name
