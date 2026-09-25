@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 import uuid
@@ -27,9 +28,11 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field, field_validator
 
 from tokenmizer import __version__
 from tokenmizer.analytics.engine import AnalyticsEngine
@@ -662,6 +665,19 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError) -> Response:
+    """FastAPI's own 422 body, serialised so it cannot fail.
+
+    The default handler echoes the rejected input, and JSON accepts a lone
+    surrogate ("\ud800") that UTF-8 cannot encode — so any 422 carrying one
+    raised while rendering and reached the client as a 500. Escaping to
+    ASCII writes it back as the same `\ud800` escape the client sent.
+    """
+    body = json.dumps({"detail": jsonable_encoder(exc.errors())}, ensure_ascii=True)
+    return Response(content=body, status_code=422, media_type="application/json")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,  # defaults: localhost:3000, localhost:8000
@@ -739,6 +755,20 @@ class ChatRequest(BaseModel):
     tools: Optional[list[dict]] = None
     tool_choice: Optional[str | dict] = None
     parallel_tool_calls: Optional[bool] = None
+
+    @field_validator("session_id")
+    @classmethod
+    def _session_id_is_text(cls, v: Optional[str]) -> Optional[str]:
+        # JSON accepts a lone surrogate ("\ud800"), and the id is used as a
+        # key in SQLite and hashed for lock names. Unchecked it failed deep
+        # in the ownership store and came back as a 503 "state unavailable"
+        # — a client's bad input reported as the server's outage.
+        if v is not None:
+            try:
+                v.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("session_id must be valid Unicode text") from None
+        return v
 
 
 def _max_tokens(req: "ChatRequest") -> int:

@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1673 tests; every published number below was
+remembering. Suite is now 1681 tests; every published number below was
 re-derived from a run.
 
 ### Fixed — long agent sessions, false links and false tasks
@@ -47,6 +47,19 @@ re-derived from a run.
     backtick.
   - Extraction F1 is unchanged on the internal eval (97%) and on all four
     external corpora, category by category.
+- **Hostile or non-English input at the HTTP boundary.**
+  - A lone surrogate in `session_id` came back as a 503 "ownership state
+    unavailable", reporting a client's bad input as a server outage. It is
+    now a 422 naming the field.
+  - Any 422 that echoed a lone surrogate failed while its body was
+    rendered, so the client got a 500. The validation handler now escapes
+    the body to ASCII, so it can't fail to encode.
+  - The Obsidian export put the raw session id into the
+    `Content-Disposition` header, which must be Latin-1. A Hindi or emoji
+    session id was a 500, and quotes or semicolons reached the header. The
+    file name now keeps only letters, digits, `-` and `_`.
+  - `FileIntelligence.process` encoded text strictly before any
+    extractor ran, so a lone surrogate in an attached file raised.
 
 ### Improved — more memory per token, and a graph that keeps its relations
 

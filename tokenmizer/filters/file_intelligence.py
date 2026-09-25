@@ -868,7 +868,11 @@ class FileIntelligence:
             token_budget: max tokens to use for this file's content
             query: current user query (used for relevance-based extraction)
         """
-        content_bytes = content if isinstance(content, bytes) else content.encode("utf-8")
+        # surrogatepass: a lone surrogate is legal in the JSON a file arrives
+        # in, and a plain encode raised on it before any extractor ran. The
+        # decode below drops its bytes.
+        content_bytes = (content if isinstance(content, bytes)
+                         else content.encode("utf-8", "surrogatepass"))
         content_str = content_bytes.decode("utf-8", errors="ignore")
 
         file_type = detect_file_type(filename, content_bytes)

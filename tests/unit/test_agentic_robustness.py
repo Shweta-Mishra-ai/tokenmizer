@@ -341,6 +341,38 @@ def test_out_of_range_sampling_values_are_rejected_up_front(client, field, value
     assert r.status_code == 422, r.text
 
 
+@pytest.mark.parametrize("name,content", [
+    ("a.csv", "id,name\n1,x\ud800y\n"),
+    ("a.json", '{"k": "x\ud800"}'),
+    ("a.txt", "hello \ud800 world\n"),
+])
+def test_file_intelligence_accepts_a_lone_surrogate(name, content):
+    from tokenmizer.filters.file_intelligence import FileIntelligence
+    result = FileIntelligence().process(content, name)
+    assert result.original_size_bytes > 0
+
+
+@pytest.mark.parametrize("session_id", ["सत्र-एक", "%F0%9F%9A%80run", "a%22%3B b"])
+def test_obsidian_export_accepts_any_session_id(client, session_id):
+    # The raw id went into the Content-Disposition header, which must be
+    # Latin-1: a non-English id was a 500.
+    r = client.get(f"/api/graph/{session_id}/obsidian")
+    assert r.status_code == 200, r.text
+    disposition = r.headers["content-disposition"]
+    assert disposition.isascii() and '"' not in disposition and disposition.count(";") == 1
+
+
+def test_a_session_id_that_is_not_text_is_a_422_not_a_503(client):
+    # It failed inside the ownership store and was reported as the
+    # server's outage ("ownership state unavailable").
+    r = client.post("/v1/chat/completions", content=(
+        '{"model":"m","session_id":"s\\ud800x",'
+        '"messages":[{"role":"user","content":"hi"}]}'),
+        headers={"Content-Type": "application/json"})
+    assert r.status_code == 422, r.text
+    assert "session_id" in r.text
+
+
 @pytest.mark.parametrize("body", [
     '{"model":"m","messages":[{"role":"user","content":"\\ud800 hi"}]}',
     '{"model":"m","messages":[{"role":"user","content":"a\\u0000b"}]}',
@@ -348,9 +380,11 @@ def test_out_of_range_sampling_values_are_rejected_up_front(client, field, value
     '{"model":"m","messages":[{"role":"assistant","content":null,"tool_calls":'
     '[{"id":"1","type":"function","function":{"name":"edit","arguments":"{\\"path\\": 5}"}}]},'
     '{"role":"tool","tool_call_id":"1","content":"Error: boom"}]}',
+    '{"model":"m","session_id":"s\\ud800x","messages":[{"role":"user","content":"hi"}]}',
 # Explicit ids: pytest copies the test id into the PYTEST_CURRENT_TEST
 # environment variable, and Windows rejects one over 32,767 characters.
-], ids=["lone-surrogate", "nul-byte", "50k-whitespace", "bad-tool-args"])
+], ids=["lone-surrogate", "nul-byte", "50k-whitespace", "bad-tool-args",
+        "surrogate-session-id"])
 def test_hostile_bodies_never_produce_a_server_error(client, body):
     r = client.post("/v1/chat/completions",
                     content=body.encode("utf-8", "surrogatepass"),

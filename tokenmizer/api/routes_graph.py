@@ -319,7 +319,13 @@ async def get_graph_obsidian(session_id: str):
 
     graph = await app_module._get_graph_async(session_id)
     canvas = graph.to_obsidian_canvas()
-    filename = f"tokenmizer-{session_id[:12]}.canvas"
+    # The header is Latin-1 by the HTTP spec, and the id is client-supplied:
+    # a Hindi or emoji session id raised while the response was built (a
+    # 500), and quotes or semicolons would reach the header. Same allowlist
+    # as the lock-file name.
+    safe = "".join(c if (c.isascii() and (c.isalnum() or c in "-_")) else "_"
+                   for c in session_id[:12])
+    filename = f"tokenmizer-{safe}.canvas"
     return Response(
         content=_json.dumps(canvas, indent=2),
         media_type="application/json",
