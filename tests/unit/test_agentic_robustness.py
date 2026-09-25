@@ -317,7 +317,9 @@ def test_out_of_range_sampling_values_are_rejected_up_front(client, field, value
     '{"model":"m","messages":[{"role":"assistant","content":null,"tool_calls":'
     '[{"id":"1","type":"function","function":{"name":"edit","arguments":"{\\"path\\": 5}"}}]},'
     '{"role":"tool","tool_call_id":"1","content":"Error: boom"}]}',
-])
+# Explicit ids: pytest copies the test id into the PYTEST_CURRENT_TEST
+# environment variable, and Windows rejects one over 32,767 characters.
+], ids=["lone-surrogate", "nul-byte", "50k-whitespace", "bad-tool-args"])
 def test_hostile_bodies_never_produce_a_server_error(client, body):
     r = client.post("/v1/chat/completions",
                     content=body.encode("utf-8", "surrogatepass"),
