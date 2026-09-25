@@ -134,3 +134,65 @@ def test_incremental_and_whole_extraction_form_the_same_relations(tmp_path):
             return {(e.type, lab.get(e.source_id), lab.get(e.target_id)) for e in g._edges}
         missing = rel(whole) - rel(inc)
         assert len(missing) <= max(1, len(rel(whole)) // 10), (path, missing)
+
+
+def test_a_file_is_linked_only_when_named_as_a_whole_word(tmp_path):
+    # A substring test linked api.py to "rapid", app.py to "happy" and an
+    # error in data.py to lib/a.py.
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    _feed(g, [
+        {"role": "assistant", "content": "I edited src/api.py and src/app.py."},
+        {"role": "assistant", "content": "Next step: plan the rapid rollout for the happy path."},
+        {"role": "assistant", "content": "TypeError in data.py: bad value"},
+        {"role": "assistant", "content": "Also touched lib/a.py and src/orders.py."},
+        {"role": "assistant", "content": "Next step: add pagination to the orders endpoint."},
+    ])
+    implements = _edges(g, EdgeType.IMPLEMENTS)
+    related = _edges(g, EdgeType.RELATED_TO)
+    assert not any(f in ("src/api.py", "src/app.py") for _, f in implements), implements
+    assert ("TypeError in data.py", "lib/a.py") not in related, related
+    assert any(f == "src/orders.py" for _, f in implements), implements
+
+
+# ── Long sessions: the processed-hash cap ────────────────────────────────────
+
+def test_messages_older_than_the_hash_window_are_not_re_extracted(tmp_path, monkeypatch):
+    # Past the cap the set is trimmed to the most recent messages. Every
+    # older message used to look new again, so each later request re-ran
+    # extraction over all of them: on a real 914-message agent session,
+    # 414 messages per request.
+    from tokenmizer.graph_memory import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "_MAX_PROCESSED_HASHES", 20)
+    msgs = [{"role": "user" if i % 2 else "assistant", "content": f"note number {i}"}
+            for i in range(40)]
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    for k in range(1, 31):
+        g.extract_from_messages(msgs[:k])
+
+    seen = []
+    real = g._apply_extracted
+    monkeypatch.setattr(g, "_apply_extracted",
+                        lambda data, new: (seen.append(len(new)), real(data, new))[1])
+    for k in range(31, 41):
+        g.extract_from_messages(msgs[:k])
+    assert seen == [1] * 10, seen
+
+
+def test_the_trimmed_window_survives_a_restart(tmp_path, monkeypatch):
+    from tokenmizer.graph_memory import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "_MAX_PROCESSED_HASHES", 20)
+    msgs = [{"role": "assistant", "content": f"message {i}"} for i in range(30)]
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    for k in range(1, 31):
+        g.extract_from_messages(msgs[:k])
+    g._persist(force=True)
+
+    reloaded = GraphMemory("s", storage_dir=str(tmp_path))
+    assert graph_mod._HASHES_TRIMMED in reloaded._processed_hashes
+    seen = []
+    real = reloaded._apply_extracted
+    monkeypatch.setattr(reloaded, "_apply_extracted",
+                        lambda data, new: (seen.append(len(new)), real(data, new))[1])
+    reloaded.extract_from_messages(msgs + [{"role": "assistant", "content": "OSError: [Errno 28] No space left on device"}])
+    assert seen == [1], seen
+    assert any(n.type == NodeType.ERROR for n in reloaded._nodes.values())

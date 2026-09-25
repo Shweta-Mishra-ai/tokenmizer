@@ -138,6 +138,30 @@ _TASK_STATE_WORDS = frozenset({
 })
 
 
+# processed_hashes cap, and the entry that marks the set as trimmed. Not a
+# hex digest, so it can never equal a message hash.
+_MAX_PROCESSED_HASHES = 500
+_HASHES_TRIMMED = "#trimmed"
+
+
+def _names_file(name: str, text: str) -> bool:
+    """Does `text` mention the file `name` (a stem like "orders", or a base
+    name like "orders.py") as a whole word?
+
+    A bare substring test linked `api.py` to "the rapid rollout", `app.py`
+    to "the happy path" and an error in `data.py` to `lib/a.py`. The match
+    now needs a non-alphanumeric character on both sides. Underscores and
+    hyphens count as spaces on both sides, so `rate_limiter` still matches
+    "rate limiter", and a trailing plural "s" is allowed ("orders" for
+    `order.py`).
+    """
+    name = re.sub(r"[_\-]+", " ", name.lower()).strip()
+    if len(name) <= 2:
+        return False
+    text = re.sub(r"[_\-]+", " ", text.lower())
+    return re.search(r"(?<![a-z0-9])" + re.escape(name) + r"s?(?![a-z0-9])", text) is not None
+
+
 # ── Graph ────────────────────────────────────────────────────────────────────
 
 class GraphMemory:
@@ -326,9 +350,9 @@ class GraphMemory:
                 # NOTE: inactive (SUPERSEDED/INVALIDATED) nodes are
                 # deliberately still eligible to absorb a match here.
                 # Re-adding a *genuine restatement* of a dead decision
-                # must be a no-op, not a revival: extraction re-scans old
-                # messages whenever _processed_hashes is capped (see
-                # extract_from_messages), so a stale "Use React" resurfacing
+                # must be a no-op, not a revival: extraction can re-scan old
+                # messages (a client that rewrites its history, or a full
+                # re-extraction), so a stale "Use React" resurfacing
                 # after the team moved to Next.js must not flip the choice
                 # back. test_merge_does_not_resurrect_superseded covers this.
                 #
@@ -824,12 +848,29 @@ class GraphMemory:
                 )
 
         prior_message = None
+        # Each message is hashed once per call and the hashes reused below:
+        # over a long agent session the hashing, not the extraction, is most
+        # of the per-request cost.
+        hashes: list[str] | None = None
         if incremental:
-            new_idx = [i for i, m in enumerate(messages)
-                       if self._msg_hash(m) not in self._processed_hashes]
+            hashes = [self._msg_hash(m) for m in messages]
+            known = [h in self._processed_hashes for h in hashes]
+            new_idx = [i for i, k in enumerate(known) if not k]
+            if new_idx and _HASHES_TRIMMED in self._processed_hashes:
+                # The set holds only the most recent messages (see the cap
+                # below), so everything older than the oldest one it still
+                # recognises was processed before it was trimmed. Without
+                # this, once a session passed the cap every request
+                # re-extracted every message older than the window: on a
+                # real 914-message agent session, 414 messages per request
+                # and ~115 ms instead of ~15.
+                first_known = known.index(True) if True in known else None
+                if first_known is not None:
+                    new_idx = [i for i in new_idx if i > first_known]
             if not new_idx:
                 return
             new_messages = [messages[i] for i in new_idx]
+            new_hashes = [hashes[i] for i in new_idx]
             # The turn just before the first new one: a proposal made in the
             # user's turn is accepted (or not) by the reply, and the proxy
             # routinely sees the two in different calls.
@@ -837,11 +878,11 @@ class GraphMemory:
                 prior_message = scrub_surrogates(messages[new_idx[0] - 1])
         else:
             new_messages = messages
+            new_hashes = [self._msg_hash(m) for m in messages]
         # Lone surrogates would reach node labels and from there SQLite — see
         # helpers.scrub_surrogates. Only the messages about to be extracted
         # are scrubbed: _msg_hash is surrogate-safe on its own, and copying
         # the whole history on every request cost more than extracting it.
-        raw_new_messages = new_messages
         new_messages = scrub_surrogates(new_messages)
 
         # Auto-select sliding window for long sessions
@@ -859,22 +900,20 @@ class GraphMemory:
 
         # Hashed as sent, not as scrubbed: the next call compares against the
         # raw messages.
-        for m in raw_new_messages:
-            self._processed_hashes.add(self._msg_hash(m))
+        self._processed_hashes.update(new_hashes)
         if new_messages:
             self._dirty = True  # processed_hashes changed even if no nodes did
 
-        # Cap processed_hashes — for very long sessions (1000+ turns), this set
-        # would otherwise grow unbounded (each hash ~16 bytes, but still).
-        # When over cap, rebuild from the most recent messages only.
-        # Effect: very old messages may be re-scanned on restart, but since
-        # their content is already in the graph, add_node() dedup makes
-        # re-extraction a safe no-op.
-        _MAX_PROCESSED_HASHES = 500
-        if len(self._processed_hashes) > _MAX_PROCESSED_HASHES:
-            self._processed_hashes = {
-                self._msg_hash(m) for m in messages[-_MAX_PROCESSED_HASHES:]
-            }
+        # Cap processed_hashes — for very long sessions this set would
+        # otherwise grow unbounded, and it is rewritten with the graph on
+        # every change. When over cap, keep the most recent messages only,
+        # plus a marker that the set was trimmed: the marker is persisted
+        # with the hashes (no schema change) and tells the check above to
+        # treat messages older than the window as processed rather than new.
+        if len(self._processed_hashes - {_HASHES_TRIMMED}) > _MAX_PROCESSED_HASHES:
+            recent = (hashes[-_MAX_PROCESSED_HASHES:] if hashes is not None
+                      else [self._msg_hash(m) for m in messages[-_MAX_PROCESSED_HASHES:]])
+            self._processed_hashes = set(recent) | {_HASHES_TRIMMED}
             self._dirty = True  # processed_hashes is part of the persisted row
 
         # Apply importance decay — completed tasks fade, superseded decisions fade
@@ -986,8 +1025,8 @@ class GraphMemory:
                             self.add_edge(did, nid, EdgeType.RELATED_TO)
                     for fid in file_ids:
                         fnode = self._nodes.get(fid)
-                        stem = fnode.label.split("/")[-1].split(".")[0].lower() if fnode else ""
-                        if stem and len(stem) > 2 and stem in task_lower:
+                        stem = fnode.label.split("/")[-1].split(".")[0] if fnode else ""
+                        if _names_file(stem, task_lower):
                             self.add_edge(nid, fid, EdgeType.IMPLEMENTS)
                 # Tasks are part of the session goal
                 for gid in goal_ids:
@@ -1020,8 +1059,8 @@ class GraphMemory:
                 dec_lower = label.lower()
                 for fid in file_ids:
                     fnode = self._nodes.get(fid)
-                    stem = fnode.label.split("/")[-1].split(".")[0].lower() if fnode else ""
-                    if stem and len(stem) > 2 and stem in dec_lower:
+                    stem = fnode.label.split("/")[-1].split(".")[0] if fnode else ""
+                    if _names_file(stem, dec_lower):
                         self.add_edge(nid, fid, EdgeType.RELATED_TO)
                 # Link to tasks if they share meaningful vocabulary (with alias expansion)
                 decision_words = self._expand_with_aliases(
@@ -1078,20 +1117,19 @@ class GraphMemory:
                 base = f.split("/")[-1]
                 for eid in prior_error_ids:
                     enode = self._nodes.get(eid)
-                    if enode is not None and base and base in enode.label:
+                    if enode is not None and _names_file(base, enode.label):
                         self.add_edge(eid, nid, EdgeType.RELATED_TO)
-                file_stem = f.split("/")[-1].split(".")[0].lower()
-                if file_stem and len(file_stem) > 2:
-                    for tid in task_ids:
-                        task_node = self._nodes.get(tid)
-                        if task_node and file_stem in task_node.label.lower():
-                            self.add_edge(tid, nid, EdgeType.IMPLEMENTS)
-                    # "Redis for sessions (see config.py)": the file a
-                    # decision names is where it lives.
-                    for did in decision_ids:
-                        dec = self._nodes.get(did)
-                        if dec and file_stem in dec.label.lower():
-                            self.add_edge(did, nid, EdgeType.RELATED_TO)
+                file_stem = f.split("/")[-1].split(".")[0]
+                for tid in task_ids:
+                    task_node = self._nodes.get(tid)
+                    if task_node and _names_file(file_stem, task_node.label):
+                        self.add_edge(tid, nid, EdgeType.IMPLEMENTS)
+                # "Redis for sessions (see config.py)": the file a
+                # decision names is where it lives.
+                for did in decision_ids:
+                    dec = self._nodes.get(did)
+                    if dec and _names_file(file_stem, dec.label):
+                        self.add_edge(did, nid, EdgeType.RELATED_TO)
 
         # Errors — handle both str and dict formats
         error_ids: list[str] = []
@@ -1636,7 +1674,7 @@ class GraphMemory:
             edge_count=len(live_edges),
             by_type=by_type,
             by_status=by_status,
-            processed_messages=len(self._processed_hashes),
+            processed_messages=len(self._processed_hashes - {_HASHES_TRIMMED}),
             avg_confidence=avg_confidence,
             decision_tracking_failures=self._decision_tracking_failures,
             persistence_broken=self._persistence_broken,

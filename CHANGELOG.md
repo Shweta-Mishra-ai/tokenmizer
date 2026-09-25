@@ -6,8 +6,41 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1658 tests; every published number below was
+remembering. Suite is now 1664 tests; every published number below was
 re-derived from a run.
+
+### Fixed — long agent sessions, false links and false tasks
+
+- **Past 500 messages, every request re-extracted the whole old history.**
+  The processed-message set is capped by keeping the hashes of the most
+  recent 500 messages, and every message older than that then looked new
+  again, on every request. The bug is on `main` too, but there it only
+  fired on plain-text chats over 500 messages: the text-only hash made
+  every tool turn look identical. With tool turns hashed properly, it
+  fired on every long agent session. On a real 914-message agent
+  session, each late request re-extracted 414 messages. A marker entry
+  now records that the set was trimmed; it is persisted with the hashes,
+  so no schema change. Messages older than the oldest one still
+  recognised count as processed. Each message is also hashed once per
+  call instead of up to three times. Late in that session the median per
+  request fell from 115 ms to 22 ms, with the same graph.
+- **Files were linked by substring.** `api.py` was linked to "the rapid
+  rollout", `app.py` to "the happy path", and an error in `data.py` to
+  `lib/a.py`. A file now links only when its name appears as a whole word.
+  Underscores and hyphens count as spaces, and a plural counts, so
+  `rate_limiter.py` still links to "rate limiter" and `order.py` to
+  "orders". This applies to every task, decision and error link, both the
+  new cross-call ones and the ones on `main`.
+- **Two false tasks found on a real session.**
+  - "My edit adding X didn't apply" was stored as work in progress. The
+    gerund phrase was the subject of a clause about something else.
+  - "A test set written by someone other than me" was stored as finished
+    work. "by" plus a noun phrase names who did it; "Fixed by adding a
+    timeout" (the method) is still read as finished work.
+  - A label cut inside a code span is closed, not left with an unmatched
+    backtick.
+  - Extraction F1 is unchanged on the internal eval (97%) and on all four
+    external corpora, category by category.
 
 ### Improved — more memory per token, and a graph that keeps its relations
 

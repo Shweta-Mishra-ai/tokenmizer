@@ -813,6 +813,10 @@ def _clip(text: str, max_chars: int = 90) -> str:
     if s.count("(") > s.count(")"):
         head = s[:s.rfind("(")].rstrip(" ,;:—-")
         s = head if len(head) >= _MIN_CLAUSE_CHARS // 2 else s + ")"
+    # The same for a code span: "a new error pattern in `patterns.py" when
+    # the cut fell on the closing backtick. Closing it keeps the identifier.
+    if s.count("`") % 2:
+        s += "`"
     return s
 
 

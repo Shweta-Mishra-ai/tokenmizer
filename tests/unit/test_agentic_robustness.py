@@ -125,6 +125,37 @@ def test_quoted_examples_tables_and_code_are_not_extracted():
     assert x.errors == [] and x.tasks_todo == [] and x.tasks_done == []
 
 
+def test_a_gerund_phrase_that_is_a_subject_is_not_work_in_progress():
+    # Found on the real session: "my edit adding X didn't apply" was stored
+    # as the task "X didn't apply (count 0), so that result".
+    r = _x([{"role": "assistant", "content":
+             "The scan is clean, but my edit adding the new input shapes to "
+             "the scanner didn't apply (count 0)."}])
+    assert r.tasks_wip == []
+    r = _x([{"role": "assistant", "content":
+             "Now adding retries that didn't exist before to the webhook client."}])
+    assert r.tasks_wip == ["retries that didn't exist before to the webhook client"]
+
+
+def test_a_passive_agent_is_not_finished_work():
+    # "A test set written by someone other than me" became the completed
+    # task "Written by someone other than me".
+    r = _x([{"role": "assistant", "content":
+             "We still want a test set written by someone other than me."}])
+    assert r.tasks_done == []
+    # "by" + gerund is how the work was done, and is kept.
+    r = _x([{"role": "assistant", "content":
+             "Fixed by adding a 5 second context timeout in the order client."}])
+    assert r.tasks_done, r
+
+
+def test_a_label_cut_inside_a_code_span_is_closed():
+    from tokenmizer.graph_memory.patterns import _clip
+    assert _clip("a new error pattern in `graph_memory/patterns.py") == \
+        "a new error pattern in `graph_memory/patterns.py`"
+    assert _clip("use `uv` for installs") == "use `uv` for installs"
+
+
 def test_a_pasted_traceback_in_a_code_block_is_still_an_error():
     x = _x([{"role": "user", "content":
              "Getting this:\n```\nTraceback (most recent call last):\n  File \"app.py\", line 3\n"

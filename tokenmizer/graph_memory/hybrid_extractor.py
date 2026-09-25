@@ -269,6 +269,29 @@ _FIX_DESCRIPTION = re.compile(
 _NONE_LEAD = re.compile(r"(?:no|not|none|nothing|zero|never|0)\b", re.IGNORECASE)
 
 
+# "my edit adding the new shapes to the scanner didn't apply": the gerund
+# phrase is the subject of a sentence about something else, not a statement
+# of work in progress. Only the gerund's own clause is examined, up to the
+# first connector, so a negated verb in a clause of its own is still work:
+# "adding retries that didn't exist before", "adding a retry wrapper so
+# that the result doesn't get lost".
+_CLAUSE_CONNECTOR = re.compile(
+    r"[,;:(]|\b(?:so|that|which|who|whom|whose|because|since|when|where|if|unless|"
+    r"until|while|and|but|or|once|after|before)\b",
+    re.IGNORECASE,
+)
+_NEGATED_VERB = re.compile(
+    r"\b(?:didn't|doesn't|don't|wasn't|isn't|aren't|weren't|won't|can't|couldn't|"
+    r"did not|does not|do not|was not|is not)\b",
+    re.IGNORECASE,
+)
+
+
+def _gerund_is_subject(obj: str) -> bool:
+    cut = _CLAUSE_CONNECTOR.search(obj)
+    return _NEGATED_VERB.search(obj[:cut.start()] if cut else obj) is not None
+
+
 def _todo_label(text: str) -> str:
     return _TODO_TAIL.sub("", _TODO_LEAD.sub("", text.strip())).strip(" ,;:—-")
 
@@ -627,8 +650,13 @@ class HybridExtractor:
             verb = re.match(r"\w+", m.group(0))
             if raw_task.lstrip()[:1] in "([{" or re.match(
                     r"\s*(?:is|are|was|were|be|been|has|have|had|will|would|can|"
-                    r"could|should|may|might|must)\b", raw_task, re.IGNORECASE):
-                continue   # "the pattern I just wrote (a leading …)", "written were from"
+                    r"could|should|may|might|must|by(?!\s+\w+ing\b))\b", raw_task,
+                    re.IGNORECASE):
+                # "the pattern I just wrote (a leading …)", "written were
+                # from", and a passive agent: "a test set written by someone
+                # else" names who did it, not what was done. "Fixed by adding
+                # a timeout" is the method, and stays.
+                continue
             if _INTRANSITIVE_TAIL.match(raw_task.strip()):
                 # "The retry fix landed in the last commit": the task is the
                 # subject, not the prepositional phrase after the verb.
@@ -761,6 +789,8 @@ class HybridExtractor:
         if is_recent:
             for m in _TASK_WIP.finditer(content):
                 if _PAST_ASPECT_LEAD.search(content[max(0, m.start() - 40):m.start()]):
+                    continue
+                if _gerund_is_subject(m.group(1)):
                     continue
                 wip = _clip(m.group(1))
                 if _outstanding(wip, m.start(1), result.tasks_wip):
