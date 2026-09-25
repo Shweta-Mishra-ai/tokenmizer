@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1664 tests; every published number below was
+remembering. Suite is now 1673 tests; every published number below was
 re-derived from a run.
 
 ### Fixed — long agent sessions, false links and false tasks
@@ -26,11 +26,17 @@ re-derived from a run.
   request fell from 115 ms to 22 ms, with the same graph.
 - **Files were linked by substring.** `api.py` was linked to "the rapid
   rollout", `app.py` to "the happy path", and an error in `data.py` to
-  `lib/a.py`. A file now links only when its name appears as a whole word.
-  Underscores and hyphens count as spaces, and a plural counts, so
-  `rate_limiter.py` still links to "rate limiter" and `order.py` to
-  "orders". This applies to every task, decision and error link, both the
-  new cross-call ones and the ones on `main`.
+  `lib/a.py`. A file now links only when its name starts a word.
+  Common inflections still count, so `backfill.py` links to
+  "backfilling", `parse.rs` to "the parser", `postgres.py` to
+  "PostgreSQL" and `order.py` to "orders". Underscores and hyphens count
+  as spaces, so `rate_limiter.py` links to "rate limiter". This applies to
+  every task, decision and error link, both the new cross-call ones and
+  the ones on `main`. On the 340 external sessions, 31 substring links
+  are gone; nearly all were false. Three were debatable: `train` in
+  "retraining", `mod` in "module" and `env` in "environment". Incremental
+  extraction shares 675 of the 676 links that whole-session extraction
+  forms.
 - **Two false tasks found on a real session.**
   - "My edit adding X didn't apply" was stored as work in progress. The
     gerund phrase was the subject of a clause about something else.
@@ -61,7 +67,8 @@ re-derived from a run.
   extraction formed 183 edges (177 shared) where whole-session extraction
   formed 707 (no task was ever PART_OF the goal, and 47 of 392
   RELATED_TO links formed). New nodes now link against the whole live
-  graph: 706 of 707 shared. Per-request extraction cost is unchanged
+  graph: 706 of 707 shared (675 of 676 after the whole-word file
+  matching below). Per-request extraction cost is unchanged
   (median 2.9 ms).
 
 ### Improved — agent sessions, noise on real text, and faster than before

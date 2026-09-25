@@ -150,16 +150,22 @@ def _names_file(name: str, text: str) -> bool:
 
     A bare substring test linked `api.py` to "the rapid rollout", `app.py`
     to "the happy path" and an error in `data.py` to `lib/a.py`. The match
-    now needs a non-alphanumeric character on both sides. Underscores and
-    hyphens count as spaces on both sides, so `rate_limiter` still matches
-    "rate limiter", and a trailing plural "s" is allowed ("orders" for
-    `order.py`).
+    now needs a word start before the name, which is what rejects every
+    false case measured ("OAuth", "protobuf", "domain", "trapping"). The end
+    may carry a common inflection, so `backfill.py` still links to
+    "backfilling", `parse.rs` to "the parser", `order.py` to "orders" and
+    `postgres.py` to "PostgreSQL". Underscores and hyphens count as spaces
+    on both sides, so `rate_limiter` matches "rate limiter".
     """
     name = re.sub(r"[_\-]+", " ", name.lower()).strip()
     if len(name) <= 2:
         return False
     text = re.sub(r"[_\-]+", " ", text.lower())
-    return re.search(r"(?<![a-z0-9])" + re.escape(name) + r"s?(?![a-z0-9])", text) is not None
+    return re.search(r"(?<![a-z0-9])" + re.escape(name) + _INFLECTION + r"(?![a-z0-9])",
+                     text) is not None
+
+
+_INFLECTION = r"(?:s|es|d|ed|r|er|ers|ing|ment|ql)?"
 
 
 # ── Graph ────────────────────────────────────────────────────────────────────

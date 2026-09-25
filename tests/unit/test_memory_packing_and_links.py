@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tokenmizer.graph_memory.context_block import _pack, _rationale, _short_path
 from tokenmizer.graph_memory.graph import EdgeType, GraphMemory, NodeStatus, NodeType
 
@@ -196,3 +198,19 @@ def test_the_trimmed_window_survives_a_restart(tmp_path, monkeypatch):
     reloaded.extract_from_messages(msgs + [{"role": "assistant", "content": "OSError: [Errno 28] No space left on device"}])
     assert seen == [1], seen
     assert any(n.type == NodeType.ERROR for n in reloaded._nodes.values())
+
+
+@pytest.mark.parametrize("name,text,expected", [
+    ("app", "Wrapped up a virtualised list", False),
+    ("auth", "OAuth 2.0 client credentials", False),
+    ("buf", "Protobuf schema versioning", False),
+    ("main", "per-domain breakdowns in the appendix", False),
+    ("lib", "a compression library", False),
+    ("backfill", "Backfilling six months of revenue", True),
+    ("parse", "the streaming parser over a bounded buffer", True),
+    ("postgres", "PostgreSQL for order storage", True),
+    ("rate_limiter", "add a rate limiter to login", True),
+])
+def test_file_name_matching_is_by_word_start_with_inflections(name, text, expected):
+    from tokenmizer.graph_memory.graph import _names_file
+    assert _names_file(name, text) is expected
