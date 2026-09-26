@@ -22,10 +22,12 @@ holds around `_update_graph`, NOT the older argument that GraphMemory's
 mutators contain no `await`. That argument is about coroutines and says
 nothing about threads; the comment making it has been corrected.
 
-These tests measure loop lateness, which is the thing that matters and is
-also the thing that is robust: the ceiling is set well above the observed
-value and far below the pre-fix one, so only a return to inline execution
-trips it.
+These tests measure loop lateness, which is the thing that matters. They
+compare the two dispatches on the same machine rather than against a
+fixed millisecond ceiling: the figures above are Linux, and the Windows
+runner stalls ~37 ms threaded where it would stall far more inline. A
+ceiling calibrated on one platform fails on another for reasons that have
+nothing to do with the behaviour under test.
 """
 from __future__ import annotations
 
@@ -77,37 +79,47 @@ async def _worst_stall_while(coro) -> float:
 
 
 class TestExtractionDoesNotHoldTheEventLoop:
-    @pytest.mark.parametrize("multiplier,ceiling_ms", [
-        (24, 20.0),      # ~3 KB turn: was 33 ms
-        (96, 25.0),      # ~12 KB pasted log: was 86 ms
-    ])
-    async def test_a_large_turn_does_not_stall_the_loop(
-            self, multiplier, ceiling_ms):
-        graph = GraphMemory("stall", storage_dir=tempfile.mkdtemp())
+    """Compares the two dispatches ON THE SAME MACHINE, in the same run.
+
+    An absolute ceiling was the first attempt and it was wrong: calibrated
+    from Linux (3 ms threaded, 86 ms inline), it failed on the Windows
+    runner at 37 ms threaded — where the inline figure is proportionally
+    higher too, so the fix was working and only the yardstick was
+    provincial. Scheduler granularity, `to_thread` overhead and runner
+    contention all differ per platform, and none of them is what this test
+    is about.
+
+    The claim is relative and so is the measurement: dispatching to a
+    thread must stall the loop materially less than running inline. That
+    holds on any machine without a number baked in from one of them.
+    """
+
+    @pytest.mark.parametrize("multiplier", [24, 96])   # ~3 KB and ~12 KB turns
+    async def test_the_thread_stalls_the_loop_far_less_than_inline(
+            self, multiplier):
         messages = [{"role": "assistant", "content": _TURN * multiplier}]
 
-        stall = await _worst_stall_while(
-            app_module._extract_heuristic(graph, messages))
-
-        assert graph._nodes, "the extraction must still have done its work"
-        assert stall < ceiling_ms, (
-            f"the loop was held for {stall:.1f} ms by a "
-            f"{len(_TURN) * multiplier / 1000:.0f} KB turn — every "
-            f"concurrent request pays that as latency"
-        )
-
-    async def test_the_inline_call_is_what_used_to_stall(self):
-        """The same work, called inline, still blocks — so the test above
-        is measuring the dispatch and not something incidental."""
-        graph = GraphMemory("inline", storage_dir=tempfile.mkdtemp())
-        messages = [{"role": "assistant", "content": _TURN * 96}]
+        inline_graph = GraphMemory("inline", storage_dir=tempfile.mkdtemp())
 
         async def inline():
-            graph.extract_from_messages(messages, incremental=True)
+            inline_graph.extract_from_messages(messages, incremental=True)
 
-        assert await _worst_stall_while(inline()) > 20.0, (
-            "the inline call no longer stalls the loop, so this file is "
-            "measuring the wrong thing — re-derive the numbers"
+        inline_stall = await _worst_stall_while(inline())
+
+        threaded_graph = GraphMemory("threaded", storage_dir=tempfile.mkdtemp())
+        threaded_stall = await _worst_stall_while(
+            app_module._extract_heuristic(threaded_graph, messages))
+
+        assert threaded_graph._nodes, "the extraction must still do its work"
+        assert inline_stall > 5.0, (
+            f"inline extraction only stalled {inline_stall:.1f} ms, so this "
+            f"payload is too small to measure a difference — raise the "
+            f"multiplier rather than trusting the comparison below"
+        )
+        assert threaded_stall < inline_stall / 3, (
+            f"dispatching to a thread stalled the loop {threaded_stall:.1f} ms "
+            f"against {inline_stall:.1f} ms inline — not the order-of-"
+            f"magnitude difference the thread exists for"
         )
 
 
