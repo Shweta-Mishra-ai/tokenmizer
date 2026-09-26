@@ -28,6 +28,91 @@ from tokenmizer.core.tokenizer import count_tokens
 logger = logging.getLogger(__name__)
 
 
+# ── Decisive tokens: the second test a semantic hit must pass ────────────────
+#
+# A semantic hit serves ANOTHER prompt's answer. That makes a false
+# positive here worse than a miss: a miss costs one upstream call, a false
+# positive returns a confident, fluent answer to a question nobody asked.
+#
+# Cosine similarity over sentence embeddings cannot carry that decision
+# alone, for two reasons that are properties of the method rather than of
+# any threshold:
+#
+#   - Negation and polarity barely move the vector. "How do I enable the
+#     cache?" and "How do I disable the cache?" differ in one token, share
+#     every other, and land close together — the answers are opposites.
+#   - Decisive literals are a small part of a long sentence. "roll back
+#     migration 003" and "roll back migration 004" differ in one digit.
+#
+# There is a third, local reason: embed() truncates to text[:1000], so two
+# long prompts that differ only after the thousandth character embed
+# IDENTICALLY — cosine 1.0, whatever the threshold is set to.
+#
+# So similarity decides that two prompts are ABOUT the same thing, and
+# this decides whether they are the same QUESTION about it. Same shape as
+# the output trimmer's content check: a match on form is confirmed
+# against substance before anything is deleted or reused.
+#
+# Being too strict costs a cache hit — one upstream call. Being too loose
+# costs a wrong answer. This errs strict on purpose.
+
+# Polarity is compared by CLASS, not by token, so a genuine paraphrase
+# still hits: "enable the cache" and "turn the cache on" are both
+# positive, while "enable" and "disable" are not.
+_POLARITY = {
+    "enable": 1, "enabled": 1, "on": 1, "add": 1, "adding": 1, "create": 1,
+    "start": 1, "starting": 1, "include": 1, "including": 1, "allow": 1,
+    "turn on": 1, "switch on": 1, "keep": 1, "show": 1,
+    "disable": -1, "disabled": -1, "off": -1, "remove": -1, "removing": -1,
+    "delete": -1, "deleting": -1, "stop": -1, "stopping": -1,
+    "exclude": -1, "excluding": -1, "deny": -1, "drop": -1, "revert": -1,
+    "undo": -1, "roll back": -1, "rollback": -1, "hide": -1,
+    "not": -1, "no": -1, "never": -1, "without": -1, "cannot": -1,
+    "don't": -1, "doesn't": -1, "isn't": -1, "won't": -1,
+}
+_MULTIWORD_POLARITY = [w for w in _POLARITY if " " in w]
+
+# A number, a version, a code span, a path, a dotted or snake_cased
+# identifier, a flag. These must match EXACTLY — a paraphrase keeps its
+# literals, so requiring them costs nothing a paraphrase would want.
+_LITERAL = re.compile(
+    r"""
+      `[^`]+`
+    | \b\d[\w.]*                          # 003, 1.2.3, 5xx, 120ms
+    | \b[\w-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|sql|ya?ml|json|toml|md|sh|txt|csv)\b
+    | (?:^|[\s(])[/~][\w./-]+             # /etc/hosts, ~/.config
+    | (?:^|\s)--?[a-z][\w-]*              # --force, -v
+    | \b\w+(?:_\w+)+\b                    # snake_case identifiers
+    """,
+    re.IGNORECASE | re.VERBOSE | re.MULTILINE,
+)
+
+
+def _decisive_profile(prompt: str) -> tuple:
+    """The part of a prompt that similarity is not allowed to smooth over.
+
+    Returns (net polarity, frozenset of literals). Two prompts may only
+    share a cached answer when both agree.
+    """
+    lowered = prompt.lower()
+    polarity = 0
+    for phrase in _MULTIWORD_POLARITY:
+        hits = lowered.count(phrase)
+        if hits:
+            polarity += _POLARITY[phrase] * hits
+            lowered = lowered.replace(phrase, " ")
+    for word in re.findall(r"[a-z']+", lowered):
+        polarity += _POLARITY.get(word, 0)
+    literals = frozenset(m.group(0).strip().lower()
+                         for m in _LITERAL.finditer(prompt))
+    return polarity, literals
+
+
+def _same_question(a: str, b: str) -> bool:
+    """True when a semantic match is safe to serve."""
+    return _decisive_profile(a) == _decisive_profile(b)
+
+
 @dataclass
 class CacheEntry:
     key: str
@@ -231,6 +316,10 @@ class SemanticCache:
         self._sets_since_sweep = 0
         self._hit_exact = 0
         self._hit_semantic = 0
+        # Semantic candidates cleared for similarity but refused by
+        # the decisive-token check. An operator watching this climb
+        # is watching wrong answers NOT being served.
+        self._rejected_unsafe = 0
         self._miss = 0
 
     def _key(self, prompt: str, scope: str = "__shared__", context: str = "") -> str:
@@ -388,6 +477,14 @@ class SemanticCache:
                     continue
                 emb = self._embeddings.get(k)
                 if emb is None:
+                    continue
+                # Similarity says these are ABOUT the same thing; this says
+                # whether they are the same QUESTION about it. See
+                # _decisive_profile: polarity and literals are exactly what
+                # cosine smooths over, and serving the wrong answer costs
+                # more than the extra upstream call a rejection costs.
+                if not _same_question(prompt, entry.prompt):
+                    self._rejected_unsafe += 1
                     continue
                 score = EmbeddingEngine.cosine(query_emb, emb)
                 if score > best_score:
@@ -582,6 +679,7 @@ class SemanticCache:
             "hit_rate": round(hit_rate, 3),
             "hit_exact": self._hit_exact,
             "hit_semantic": self._hit_semantic,
+            "rejected_unsafe": self._rejected_unsafe,
             "miss": self._miss,
             "semantic_available": self._embedder.available,
         }
