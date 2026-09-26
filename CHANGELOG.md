@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1813 tests; every published number below was
+remembering. Suite is now 1812 tests; every published number below was
 re-derived from a run.
 
 ### Real agent sessions: error loss, false errors and file noise
@@ -328,6 +328,12 @@ event-loop stall, against a 0.25 ms idle floor:
 |---|---|---|
 | ~3 KB | 33 ms | 3.2 ms |
 | ~12 KB pasted log | 86 ms | 2.9 ms |
+
+Those are Linux figures. The Windows runner stalls ~37 ms threaded, where
+inline is proportionally higher again — the improvement holds, the
+absolute numbers are per-platform, and the test asserts the ratio between
+the two dispatches on whatever machine it runs on rather than a
+millisecond ceiling calibrated on one of them.
 
 Sequential end-to-end latency dropped from ~7 ms to ~2.4 ms per request
 in the same harness, because a turn no longer waits behind the previous
