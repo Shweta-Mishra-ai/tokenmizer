@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1801 tests; every published number below was
+remembering. Suite is now 1808 tests; every published number below was
 re-derived from a run.
 
 ### Real agent sessions: error loss, false errors and file noise
@@ -313,6 +313,65 @@ release.
 - A multi-dot filename pattern with an unbounded repeat took 3.5 s on the
   15 KB adversarial payload. It was bounded before it shipped, and it is
   pinned.
+
+### Fixed — the cache guard was a way to make the proxy slow
+
+A fresh audit of the guard shipped one release earlier, measured rather
+than reasoned about. One cache miss with a 1 KB prompt and 2000 cached
+entries cost **0.421 s of blocking CPU inside the event loop**. Two
+independent causes, both on the path a request takes when the cache did
+not help it.
+
+**The query was re-profiled on every candidate.** `_decisive_profile`
+was called inside the scan loop, so a lookup repeated identical work up
+to `max_semantic_scan` (2000) times. Each candidate was also re-profiled
+on every lookup that reached it, although a stored prompt never changes.
+The query is now profiled once per lookup, and a candidate's profile is
+memoised on the entry.
+
+**`_LITERAL` was quadratic** — 4x the time for 2x the input, measured;
+0.79 s on a 16 KB prompt. Unbounded repeats in front of a required
+literal (`[\w-]+\.` then an extension) make the engine rescan the run
+from every start position, and `\w+(?:_\w+)+` nests two repeats over
+overlapping sets — `\w` already contains `_` — which is the textbook
+catastrophic shape. Every repeat is now bounded and the inner class
+excludes `_`. `output_trimmer._INFORMATION` carried the same shapes and
+got the same treatment: its inputs are usually short, but a
+closing-filler match carries `[^.!?]*` and a response need not contain
+sentence punctuation, so "usually short" is not a bound.
+
+Both patterns are linear now (2.0x for 2x input), `_LITERAL` runs 16 KB
+in 7.9 ms rather than 791 ms, and the same cache miss costs 0.001 s.
+Behaviour is unchanged: every pre-existing cache test still passes, and
+the guard still refuses an opposite question on a warm cache.
+
+Pinned by call-counting rather than by the clock, so the tests state the
+algorithm instead of flaking on a loaded runner; the one timing
+assertion has a margin only a return to quadratic can trip.
+
+#### Checked and found clean
+
+Recorded because a search that found nothing is worth as much as one
+that did, and repeating it is waste:
+
+- **Identity from a truncated prefix**, the class behind three earlier
+  bugs (`RepetitiveHistoryPruner` 60 chars, `_msg_hash` 500,
+  `embed()` 1000): an AST sweep for hashes, comparisons and keys built
+  from a slice found no remaining instance. `hybrid_extractor`'s
+  `_ASSIGNED_BEFORE` looked quadratic in isolation but is called with a
+  40-character window, so it is not reachable; `filelock` truncates a
+  digest it *appends* to a sanitised name, which prevents collisions
+  rather than causing them.
+- **The other 395 compiled patterns** in the package, timed against
+  adversarial input at three sizes across nineteen seeds: none
+  super-linear.
+- **The extraction pipeline**, fuzzed at 8/16/32 KB across nine
+  alphabets (code, paths, punctuation, digits, CJK, RTL overrides, lone
+  surrogates, CRLF, tabs): linear in every one, no crashes, 32 KB in
+  0.18 s.
+- **Long-session growth**: over 1200 turns the node count stays at its
+  cap, `_processed_hashes` cycles under its own, and the resident graph
+  stays flat at ~150-185 KB.
 
 ### Fixed — a semantic cache hit could answer a question nobody asked
 
