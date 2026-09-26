@@ -45,6 +45,7 @@ from tokenmizer.graph_memory.patterns import (
     _DECISION_HEADER,
     _DECISION_IMPERATIVE,
     _DECISION_IT_IS,
+    _DECISION_IT_IS_PHRASE,
     _DECISION_PASSIVE,
     _DEFECT_WORD,
     _DEPENDENCY,
@@ -64,15 +65,19 @@ from tokenmizer.graph_memory.patterns import (
     _ERROR_FALSE_HEALTH,
     _ERROR_HANDLED,
     _ERROR_HEADER,
+    _ERROR_INCIDENT_WAS,
     _ERROR_INERT,
     _ERROR_INTEGRITY,
     _ERROR_MISCLASSIFIED,
     _ERROR_OBSERVED,
+    _ERROR_RECURRED,
+    _ERROR_RED_STATE,
     _ERROR_SLOWER,
     _ERROR_STATUS,
     _ERROR_STATUS_NAMED,
     _ERROR_STOPWORDS,
     _ERROR_SYMPTOM,
+    _ERROR_TRACED,
     _ERROR_TYPED,
     _ERROR_VULN,
     _EVIDENCE_COST,
@@ -92,6 +97,7 @@ from tokenmizer.graph_memory.patterns import (
     _LEADING_CONNECTIVE,
     _NEGATION_WORDS,
     _NO_DEFECT,
+    _NOT_A_CHOICE_BEFORE_IT_IS,
     _NOT_A_DEFECT,
     _NOT_A_TASK_START,
     _PAST_ASPECT_LEAD,
@@ -101,12 +107,16 @@ from tokenmizer.graph_memory.patterns import (
     _SCHEMA_TABLE,
     _SOLUTION_VERB,
     _TASK_DONE,
+    _TASK_DONE_BEHIND_US,
     _TASK_DONE_CHECK,
+    _TASK_DONE_CROSSED_OFF,
     _TASK_DONE_GOT,
     _TASK_DONE_MANAGED,
+    _TASK_DONE_NO_WORRY,
     _TASK_DONE_PASSIVE,
     _TASK_DONE_PHRASAL,
     _TASK_DONE_POSTFIX,
+    _TASK_DONE_PREMISE,
     _TASK_DONE_STATE,
     _TASK_DONE_WENT,
     _TASK_TODO,
@@ -117,6 +127,8 @@ from tokenmizer.graph_memory.patterns import (
     _TASK_TODO_INTENT,
     _TASK_TODO_NOT_DONE,
     _TASK_TODO_OWED,
+    _TASK_TODO_PARKED,
+    _TASK_TODO_REMIND,
     _TASK_TODO_STATE,
     _TASK_WIP,
     _WIP_LEAD,
@@ -292,6 +304,121 @@ def _gerund_is_subject(obj: str) -> bool:
     return _NEGATED_VERB.search(obj[:cut.start()] if cut else obj) is not None
 
 
+_TRAILING_AUX = re.compile(
+    # (?<!\s): a whitespace run is entered at its start only. Without it
+    # every position in a long run re-scanned the rest of it (25 s on 20 KB);
+    # subjects are short, but a pattern should not rely on that.
+    r"(?<!\s)\s+(?:was|were|is|are|has been|have been|had been|got|been|just|finally)$",
+    re.IGNORECASE,
+)
+
+
+_LIST_ITEM = re.compile(r"^[ \t]*(?:[-*\u2022]|\d+[.)])[ \t]+")
+_FIXED_HEADING = re.compile(
+    r"\b(?:fixed|resolved|solved|patched|closed|addressed)\b[^\n]*:[ \t*_]*$",
+    re.IGNORECASE,
+)
+
+
+def _under_fixed_heading(content: str, pos: int) -> bool:
+    """Is `pos` in a list item under a heading that says the items were
+    fixed? "**Bugs fixed along the way:**" followed by a bullet list of
+    bugs: each was a real failure, and each is over. Stored as open errors,
+    they told the next session to go fix what was already fixed."""
+    line_start = content.rfind("\n", 0, pos) + 1
+    line_end = content.find("\n", pos)
+    if not _LIST_ITEM.match(content[line_start:line_end if line_end != -1 else len(content)]):
+        return False
+    # Walk up past the rest of the list to the line that introduces it.
+    end = line_start - 1
+    while end > 0:
+        start = content.rfind("\n", 0, end) + 1
+        line = content[start:end]
+        if line.strip() and not _LIST_ITEM.match(line):
+            return _FIXED_HEADING.search(line.strip()) is not None
+        end = start - 1
+    return False
+
+
+_PROBLEM_HEADING = re.compile(
+    r"^[ \t#*_]*(?:(?:still|known|open|remaining|outstanding|current)\s+)?"
+    r"(?:bugs?|errors?|issues?|problems?|failures?|regressions?|incidents?|defects?|"
+    r"broken|failing)\b[^\n:]{0,40}:[ \t*_]*$",
+    re.IGNORECASE,
+)
+# "Issues" and "problems" also head lists of concerns ("Problems I found:
+# your changelog's figure can't be compared with this"): under those, an
+# item must itself name something wrong.
+_GENERIC_PROBLEM_HEADING = re.compile(
+    r"^[ \t#*_]*(?:(?:still|known|open|remaining|outstanding|current)\s+)?"
+    r"(?:issues?|problems?)\b",
+    re.IGNORECASE,
+)
+
+
+def _problem_list_items(content: str) -> list[tuple[str, bool]]:
+    """(label, fixed) for each list item under a heading line that names
+    problems, or under one that says they were fixed (_FIXED_HEADING)."""
+    items: list[tuple[str, bool]] = []
+    heading: str | None = None
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = _LIST_ITEM.match(line)
+        if m is None:
+            heading = stripped
+            continue
+        if heading is None:
+            continue
+        fixed = _FIXED_HEADING.search(heading) is not None
+        if not fixed and not _PROBLEM_HEADING.match(heading):
+            continue
+        raw = line[m.end():].strip(" *_`")
+        if raw.endswith("?"):
+            continue   # "Open issues:" also lists open questions
+        if not fixed and _GENERIC_PROBLEM_HEADING.match(heading) \
+                and not _DEFECT_WORD.search(raw):
+            continue
+        label = _clip(_strip_emphasis(raw))
+        if len(label) >= 8:
+            items.append((label, fixed))
+    return items
+
+
+# A file named as an example of a kind of file, not one that was worked on:
+# "Multi-dot names (`vite.config.ts`)", "build files with a directory
+# (`fastlane/Fastfile`)", "config files such as `tsconfig.json`".
+_EXAMPLE_LEAD = re.compile(
+    r"\b(?:e\.g\.?|i\.e\.?|such as|for example|for instance|like|say)[\s,:(`'\"]*$",
+    re.IGNORECASE,
+)
+_CATEGORY_BEFORE_PAREN = re.compile(
+    r"\b(?:names|files|filenames|paths|extensions|patterns|examples|cases|kinds|types)\b"
+    r"(?:\s+[^\s(]+){0,5}\s*\([\s`'\"]*(?:[^()]*,\s*[`'\"]?)?$",
+    re.IGNORECASE,
+)
+_WORK_VERB = re.compile(
+    r"\b(?:edit(?:ed|ing)?|updat(?:ed|ing)|chang(?:ed|ing)|modif(?:ied|ying)|touch(?:ed|ing)|"
+    r"add(?:ed|ing)|creat(?:ed|ing)|wr(?:ote|itten|iting)|fix(?:ed|ing)|refactor(?:ed|ing)?|"
+    r"mov(?:ed|ing)|renam(?:ed|ing)|delet(?:ed|ing)|remov(?:ed|ing)|patch(?:ed|ing)|"
+    r"rewr(?:ote|itten|iting)|implement(?:ed|ing))\b",
+    re.IGNORECASE,
+)
+
+
+def _is_example_mention(text: str, pos: int) -> bool:
+    # From the start of the whole token: a name matched inside a longer path
+    # ("index.md" in "docs/index.md") is judged by what precedes the path.
+    while pos > 0 and not text[pos - 1].isspace() and text[pos - 1] not in "(`'\"":
+        pos -= 1
+    start = max(text.rfind(c, 0, pos) for c in ".!?\n") + 1
+    clause = text[max(start, pos - 160):pos]
+    if _EXAMPLE_LEAD.search(clause):
+        return True
+    return bool(_CATEGORY_BEFORE_PAREN.search(clause)) and not _WORK_VERB.search(clause)
+
+
 def _todo_label(text: str) -> str:
     return _TODO_TAIL.sub("", _TODO_LEAD.sub("", text.strip())).strip(" ,;:—-")
 
@@ -359,6 +486,7 @@ _ALL_ERROR_PATTERNS = (
     _ERROR_SYMPTOM, _ERROR_FAILING,
     _ERROR_FAILED_SUBJECT, _ERROR_COUNT, _ERROR_SLOWER,
     _ERROR_CANNOT_INITIAL,
+    _ERROR_TRACED, _ERROR_RED_STATE, _ERROR_INCIDENT_WAS, _ERROR_RECURRED,
 )
 
 # Keyword prefilter for the patterns that cost the most.
@@ -659,8 +787,10 @@ class HybridExtractor:
                 continue
             if _INTRANSITIVE_TAIL.match(raw_task.strip()):
                 # "The retry fix landed in the last commit": the task is the
-                # subject, not the prepositional phrase after the verb.
-                subject = clause_subject(content, m.start())
+                # subject, not the prepositional phrase after the verb. A
+                # passive leaves its auxiliary in the window: "The incident
+                # was | resolved within an hour".
+                subject = _TRAILING_AUX.sub("", clause_subject(content, m.start()))
                 if not _is_work_subject(subject) or _CONDITIONAL_LEAD.match(subject) \
                         or _NEGATION_WORDS.search(subject):
                     continue
@@ -722,7 +852,8 @@ class HybridExtractor:
                 seen_tasks.add(norm)
 
         for pattern in (_TASK_DONE_CHECK, _TASK_DONE_PHRASAL, _TASK_DONE_GOT,
-                        _TASK_DONE_MANAGED, _TASK_DONE_POSTFIX):
+                        _TASK_DONE_MANAGED, _TASK_DONE_POSTFIX, _TASK_DONE_NO_WORRY,
+                        _TASK_DONE_CROSSED_OFF, _TASK_DONE_BEHIND_US):
             for m in pattern.finditer(content):
                 if pattern is not _TASK_DONE_CHECK and (
                         _is_negated_context(content, m.start())
@@ -740,6 +871,13 @@ class HybridExtractor:
                     verb = re.match(r"\w+(?: \w+)?", m.group(0))
                     task = restore_verb(verb.group(0) if verb else "", task)
                 _add_done(task)
+        # "With X sorted, …", "Once X was in, …": the premise is finished work.
+        for m in _TASK_DONE_PREMISE.finditer(content):
+            if _is_question_context(content, m.start()):
+                continue
+            premise = m.group(1) or m.group(2)
+            if premise and _is_subject_label(premise) and not _NEGATION_WORDS.search(premise):
+                _add_done(_clip(premise))
         for m in _TASK_DONE_WENT.finditer(content):
             if _is_question_context(content, m.start()):
                 continue
@@ -817,6 +955,7 @@ class HybridExtractor:
         # the pending node it finishes.
         for pattern in (_TASK_TODO, _TASK_TODO_HEADER, _TASK_TODO_CHECK,
                         _TASK_TODO_NOT_DONE, _TASK_TODO_DEFER, _TASK_TODO_FRONTED,
+                        _TASK_TODO_REMIND, _TASK_TODO_PARKED,
                         _TASK_TODO_OWED):
             for m in pattern.finditer(content):
                 todo = _clip(_todo_label(m.group(1)))
@@ -901,6 +1040,22 @@ class HybridExtractor:
             label = _clip(subject)
             # A one-word subject is a bare name ("SQS made the most sense"),
             # labelled the way every other pass labels one: "Use SQS".
+            if len(label.split()) == 1:
+                label = "Use " + label
+            if role == "user":
+                if proposals is not None:
+                    proposals.append(label)
+            else:
+                _add_decision(label, role)
+
+        # Decision Pass 2e: "…, the managed Postgres it is." The noun-phrase
+        # form of Pass 2b; same roles as 2d.
+        for m in _DECISION_IT_IS_PHRASE.finditer(content):
+            option = m.group(1).strip()
+            if _NOT_A_CHOICE_BEFORE_IT_IS.search(option) or _NEGATION_WORDS.search(option) \
+                    or not _is_subject_label(option):
+                continue
+            label = _clip(option)
             if len(label.split()) == 1:
                 label = "Use " + label
             if role == "user":
@@ -1020,7 +1175,7 @@ class HybridExtractor:
                     seen_decisions.add(norm)
 
         self._extract_structure(original, result, seen_files, seen_endpoints, seen_schemas)
-        self._extract_errors(content, result, _ALL_ERROR_PATTERNS)
+        self._extract_errors(content, result, _ALL_ERROR_PATTERNS, original=original)
 
         # Dependencies
         for m in _DEPENDENCY.finditer(content):
@@ -1093,17 +1248,17 @@ class HybridExtractor:
                 seen_files.add(m.group(1).strip())   # never a file; see _LIBRARY_NOT_FILE
         for m in _FILE_PATH.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files and len(f) > 4:
+            if f not in seen_files and len(f) > 4 and not _is_example_mention(original, m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)
         for m in _FILE_COMMON.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files:
+            if f not in seen_files and not _is_example_mention(original, m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)
         for m in _FILE_EXTENSIONLESS.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files:
+            if f not in seen_files and not _is_example_mention(original, m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)
 
@@ -1142,7 +1297,8 @@ class HybridExtractor:
                 result.schemas.append(schema)
                 seen_schemas.add(norm)
 
-    def _extract_errors(self, content: str, result: "ExtractedData", patterns) -> None:
+    def _extract_errors(self, content: str, result: "ExtractedData", patterns,
+                        original: str | None = None) -> None:
         """Run the error patterns over `content` in `patterns` order, which
         is precedence (see _ALL_ERROR_PATTERNS)."""
         # Errors: full history, NOT the recent window.
@@ -1163,6 +1319,11 @@ class HybridExtractor:
                     continue   # "Errors: none"
                 if pattern is _ERROR_OBSERVED and not _DEFECT_WORD.search(m.group(1)):
                     continue   # "we're seeing a 20% speedup" is good news
+                if pattern in (_ERROR_RED_STATE, _ERROR_INCIDENT_WAS, _ERROR_RECURRED) \
+                        and not _DEFECT_WORD.search(m.group(1)):
+                    continue   # "CI is red — rerunning", "then run it again"
+                if pattern is _ERROR_TRACED and not _DEFECT_WORD.search(m.group(0)):
+                    continue   # "tracked the ticket down to the billing team"
                 if pattern in (_ERROR_OBSERVED, _ERROR_ENCOUNTER) and _NONE_LEAD.match(m.group(1).lstrip()):
                     continue   # "there's no error", "seeing zero failures"
                 if _NOT_A_DEFECT.search(m.group(1)):
@@ -1253,7 +1414,8 @@ class HybridExtractor:
                 # resolved instead of carrying it into every resume as an
                 # open bug. The fix prefix stripped from the label above is
                 # the same signal when it sat inside the captured span.
-                if _FIX_LEAD.search(before) or _FIX_PREFIX.match(raw.strip()):
+                if _FIX_LEAD.search(before) or _FIX_PREFIX.match(raw.strip()) \
+                        or _under_fixed_heading(content, span_start):
                     result.resolved_errors.append(err)
                 key = (id(pattern), _sentence_index(content, label_start))
                 prior = sentence_claims.get(key)
@@ -1269,6 +1431,22 @@ class HybridExtractor:
                         result.errors.remove(prior[0])
                 sentence_claims[key] = (err, span_end)
                 result.errors.append(err)
+
+        # A list under a heading that names problems: "**Still broken:**",
+        # "Known issues:" followed by bullets. Each item is a failure even
+        # when it is a bare noun phrase that no sentence pattern reads. Under
+        # a heading that says they were fixed, each is a resolved one.
+        # Read from the original text: the item is itself the statement, and
+        # the masked copy blanks its quotes and bold ("The one I found
+        # earlier:     read as an error").
+        if patterns is _ALL_ERROR_PATTERNS:
+            for label, fixed in _problem_list_items(original if original is not None else content):
+                if _NO_DEFECT.match(label) or any(self._subsumes(e, label) or self._subsumes(label, e)
+                               for e in result.errors):
+                    continue
+                result.errors.append(label)
+                if fixed:
+                    result.resolved_errors.append(label)
 
     def heuristic_extract(
         self,

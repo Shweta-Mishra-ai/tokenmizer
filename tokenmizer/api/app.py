@@ -626,9 +626,28 @@ async def _drain_background_tasks(timeout: float = 10.0) -> None:
         t.cancel()
 
 
+def _warm_up() -> None:
+    """Pay the one-time costs at startup instead of on the first request.
+
+    Measured: building the extractor (compiling its patterns) took about
+    200 ms and the tokenizer's first count about 330 ms, so the first
+    request after a start or restart ran some 600 ms slower than the rest.
+    Failure here is logged and ignored: a request would pay the same cost
+    later, and the server must start either way.
+    """
+    try:
+        from tokenmizer.core.tokenizer import count_tokens
+        from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
+        count_tokens("warm up")
+        get_hybrid_extractor(None).heuristic_extract([{"role": "user", "content": "warm up"}])
+    except Exception as e:
+        logger.warning("Startup warm-up failed (first request will be slower): %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("TokenMizer starting")
+    await asyncio.to_thread(_warm_up)
     flusher = asyncio.create_task(_periodic_flush())
     try:
         yield

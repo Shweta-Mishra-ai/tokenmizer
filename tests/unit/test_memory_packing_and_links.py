@@ -214,3 +214,50 @@ def test_the_trimmed_window_survives_a_restart(tmp_path, monkeypatch):
 def test_file_name_matching_is_by_word_start_with_inflections(name, text, expected):
     from tokenmizer.graph_memory.graph import _names_file
     assert _names_file(name, text) is expected
+
+
+# ── Per-request hashing: the positional cache ────────────────────────────────
+
+def _tool_turn(i, text):
+    return {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": f"toolu_{i}", "content": text}]}
+
+
+def test_cached_hashes_equal_full_hashes(tmp_path):
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    msgs = [_tool_turn(i, f"output {i} " * 50) for i in range(30)]
+    for k in range(1, 31):
+        assert g._history_hashes(msgs[:k]) == [g._msg_hash(m) for m in msgs[:k]]
+
+
+def test_an_edited_old_message_is_seen_again(tmp_path):
+    # A client that clears an old tool result (context editing) changes its
+    # length: the message must be re-hashed, not given its stale hash.
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    msgs = [_tool_turn(i, f"output {i} " * 50) for i in range(10)]
+    first = g._history_hashes(msgs)
+    edited = list(msgs)
+    edited[3] = _tool_turn(3, "[cleared]")
+    second = g._history_hashes(edited)
+    assert second[3] != first[3] and second[3] == g._msg_hash(edited[3])
+    assert second[:3] == first[:3] and second[4:] == first[4:]
+
+
+def test_a_history_trimmed_from_the_front_is_hashed_in_full(tmp_path):
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    msgs = [_tool_turn(i, "same length text") for i in range(10)]
+    g._history_hashes(msgs)
+    shifted = msgs[2:] + [_tool_turn(99, "same length text")]
+    assert g._history_hashes(shifted) == [g._msg_hash(m) for m in shifted]
+
+
+def test_a_new_tool_turn_is_extracted_after_many_cached_ones(tmp_path):
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    msgs = [_tool_turn(i, f"ok {i}") for i in range(20)]
+    for k in range(1, 21):
+        g.extract_from_messages(msgs[:k])
+    msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_x",
+                 "is_error": True, "content": "ModuleNotFoundError: No module named 'redis'"}]})
+    g.extract_from_messages(msgs)
+    assert any("ModuleNotFoundError" in n.label for n in g._nodes.values()
+               if n.type == NodeType.ERROR)

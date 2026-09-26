@@ -349,3 +349,84 @@ def test_go_with_needs_a_subject_or_modal():
 
 def test_fronted_up_next():
     assert _hit(_todo("Up next is the GDPR export."), "gdpr export")
+
+
+# ── Marker-free forms ────────────────────────────────────────────────────────
+#
+# Work reported without a state word: what no longer needs attention, what
+# it made possible, what to keep in mind. Every positive case has false
+# positives next to it that share its words.
+
+@pytest.mark.parametrize("text,needle", [
+    ("No more worrying about the rate limiter on the login route.", "rate limiter"),
+    ("Crossed the SSO integration off the list this morning.", "sso integration"),
+    ("That leaves the Stripe webhook retries behind us.", "stripe webhook retries"),
+    ("With the schema migration sorted, the rest should go quicker.", "schema migration"),
+    ("Once the connection pooling was in, the timeouts stopped.", "connection pooling"),
+    ("The audit log export is no longer on my plate.", "audit log export"),
+    ("The incident was resolved within an hour.", "the incident"),
+])
+def test_marker_free_completion(text, needle):
+    assert _hit(_done(text), needle), _done(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Once the migration is merged, we can deploy.",   # future condition
+    "I checked the logs off and on all morning.",
+    "That left the team behind us in the queue.",
+    "No more than three retries are allowed.",
+    "Since the cache was in, why is it slow?",
+])
+def test_marker_free_completion_false_positives(text):
+    assert _done(text) == [], _done(text)
+
+
+@pytest.mark.parametrize("text,needle", [
+    ("Let's not forget about the runbook for the payment service.", "runbook"),
+    ("Parking the dark-mode toggle for now, it's not urgent.", "dark-mode toggle"),
+    ("The GDPR export is on hold until legal signs off.", "gdpr export"),
+])
+def test_marker_free_pending(text, needle):
+    assert _hit(_todo(text), needle), _todo(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Don't forget that the API is rate limited.",
+    "Let's not forget why we did this in the first place.",
+    "The parking service handles reservations.",
+])
+def test_marker_free_pending_false_positives(text):
+    assert _todo(text) == [], _todo(text)
+
+
+def test_noun_phrase_it_is_is_a_decision():
+    assert _hit(_decisions("Rather than overthinking it, the managed Postgres it is."),
+                "managed postgres")
+
+
+@pytest.mark.parametrize("text", [
+    "The code is fine as it is.", "That's just how it is.",
+    "I don't know what it is.", "Whatever it is, we'll find it.",
+])
+def test_it_is_that_is_not_a_choice(text):
+    assert _decisions(text) == [], _decisions(text)
+
+
+@pytest.mark.parametrize("text,needle", [
+    ("Tracked the flakiness down to a connection pool exhaustion under load.",
+     "connection pool exhaustion"),
+    ("CI is unhappy — a connection pool exhaustion under load.", "connection pool exhaustion"),
+    ("Everything looked green, then a connection pool exhaustion again.",
+     "connection pool exhaustion"),
+])
+def test_marker_free_errors(text, needle):
+    assert _hit(_errors(text), needle), _errors(text)
+
+
+@pytest.mark.parametrize("text", [
+    "CI is red — rerunning the job now.",
+    "Then run it again.",
+    "We tracked the ticket down to the billing team.",
+])
+def test_marker_free_error_false_positives(text):
+    assert _errors(text) == [], _errors(text)

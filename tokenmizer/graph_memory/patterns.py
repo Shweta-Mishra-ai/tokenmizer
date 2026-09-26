@@ -239,7 +239,11 @@ _DECISION_HEADER = re.compile(
 # requirement keeps this to proper nouns; "it is" after a common word is
 # ordinary prose ("that's how it is").
 _DECISION_IT_IS = re.compile(
-    r'\b([A-Z][\w.+-]{1,30}(?:\s+[A-Z][\w.+-]{1,30})?)\s+it\s+is[.!,]',
+    # Not a question word or pronoun: "Whatever it is, we'll find it" was
+    # the decision "Use Whatever".
+    r'\b(?!(?:Whatever|What|That|This|It|How|Here|There|Which|Who|Where|When|Why|'
+    r'However|Whichever|Wherever|Whoever|As|So|Such)\b)'
+    r'([A-Z][\w.+-]{1,30}(?:\s+[A-Z][\w.+-]{1,30})?)\s+it\s+is[.!,]',
 )
 
 # Pass 3: known tech names — expanded (was missing bcrypt, slowapi, etc.)
@@ -951,7 +955,10 @@ _PAST_ASPECT_LEAD = re.compile(
 # commit". `to` is not here: "Deployed to staging" is a whole report.
 _INTRANSITIVE_TAIL = re.compile(
     r"^(?:in|on|at|into|with|from|off|over|during|after|before|last|yesterday|"
-    r"earlier|today|this morning|this afternoon|already|successfully|fine|cleanly)\b",
+    r"earlier|today|this morning|this afternoon|already|successfully|fine|cleanly|"
+    # "The incident was resolved within an hour": a time or manner adverbial,
+    # not the work. It was stored as the finished task "within an hour".
+    r"within|without|overnight|quickly|immediately|eventually|again)\b",
     re.IGNORECASE,
 )
 
@@ -1076,6 +1083,7 @@ _TASK_DONE_STATE = re.compile(
     r"(?:\s(?:is|are|was|were|has been|have been|got)|'s)\s+(?:now\s+|finally\s+|all\s+)?"
     r"(?:done|finished|complete|completed|in place|sorted|handled|merged|landed|"
     r"shipped|live|taken care of|out of the way|behind us|wired up|set up|"
+    r"no longer on (?:my|our|the) plate|"
     r"in and working|in and tested|in(?=\s*(?:[.,;!]|$|now\b)))",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -1181,6 +1189,7 @@ _TASK_TODO_STATE = re.compile(
     r"|\s(?:is|are) (?:still )?waiting (?:on|for) (?:me|us|someone|somebody|review|approval)\b"
     r"|\s(?:keeps?|kept) (?:slipping|getting (?:pushed|postponed|deferred|bumped))\b"
     r"|\s(?:is|are) on deck\b"
+    r"|\s(?:is|are) (?:parked|on hold|on the back ?burner|shelved)\b"
     r"|\sremains? (?:open|to be done|outstanding|pending)\b",
     re.IGNORECASE,
 )
@@ -1216,7 +1225,10 @@ _DECISION_EVALUATIVE = re.compile(
     r"is what we(?:'re| are) (?:using|going with|shipping)|"
     r"would (?:probably |likely )?(?:fit|work) better|fits better|works better)\b"
     r"|\s(?:was|is|would be)\s+(?:simpler|cleaner|cheaper|safer|easier|faster|better)"
-    r"\s+than\s+(?:the\s+)?(?:alternatives?|other options?|the rest|anything else)\b",
+    r"\s+than\s+(?:the\s+)?(?:alternatives?|other options?|the rest|anything else)\b"
+    r"|\s(?:felt|feels|seemed|seems|looked|looks|sounded|sounds)\s+like\s+less\s+"
+    r"(?:hassle|work|risk|effort|overhead|trouble|maintenance)\b"
+    r"|\s(?:is|was|would be)\s+less\s+(?:hassle|work|risk|effort|overhead|trouble|maintenance)\b",
     re.IGNORECASE,
 )
 
@@ -2112,3 +2124,120 @@ def canonical_word(word: str) -> str:
     elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
         w = w[:-1]
     return CANONICAL_TECH.get(w, w)
+
+
+# ── Marker-free forms ────────────────────────────────────────────────────────
+#
+# People often report work without a state word: they say what no longer
+# needs attention, what it made possible, or what to keep in mind. These
+# are the object forms of that: the work comes after the phrase, not
+# before a state verb (which _TASK_DONE_STATE / _TASK_TODO_STATE already
+# read). Each one was added for a construction seen failing on the
+# development corpora, with its direct grammatical variants and nothing
+# more.
+
+# Starts and ends on a non-space, so a run of spaces has exactly one way to
+# be split between it and the whitespace around it (see _TASK_DONE_POSTFIX).
+_SPAN_TO_CLAUSE_END = r"(\S(?:(?![.!?](?=\s|$))[^\n,;]){1,78}?(?<=\S))"
+
+# "No more worrying about X", "no longer need to worry about X".
+_TASK_DONE_NO_WORRY = re.compile(
+    r"\bno (?:more|longer)\s+(?:need(?:s|ing)?\s+to\s+)?worry(?:ing)?\s+about\s+"
+    + _SPAN_TO_CLAUSE_END + r"(?=\s*(?:[.,;!]|$|\s(?:now|anymore|any more)\b))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# "Crossed X off the list", "ticked X off".
+_TASK_DONE_CROSSED_OFF = re.compile(
+    r"\b(?:crossed|ticked|checked|struck)\s+" + _SPAN_TO_CLAUSE_END
+    + r"\s+off\b(?!\s+and\s+on\b)",
+    re.IGNORECASE,
+)
+
+# "That leaves X behind us", "puts X behind us".
+_TASK_DONE_BEHIND_US = re.compile(
+    r"\b(?:leaves|left|puts|put|gets|got)\s+" + _SPAN_TO_CLAUSE_END
+    # At the end of the clause: "left the team behind us in the queue" is
+    # a place, not finished work.
+    + r"\s+behind us\b(?=\s*(?:[.,;!]|$|now\b|for good\b))",
+    re.IGNORECASE,
+)
+
+# A finished piece of work as the premise of the next clause: "With X
+# sorted, the rest should go quicker", "Now that X is in, …", "Once X was
+# in, the flaky tests stopped". "Once"/"after" need the past tense: "once X
+# is merged we can deploy" is a condition on future work.
+_TASK_DONE_PREMISE = re.compile(
+    r"(?:^|(?<=[.!?]\s)|(?<=\n))[ \t]*(?:"
+    r"(?:with|now that)\s+" + _SPAN_TO_CLAUSE_END + r"\s+(?:(?:is|are)\s+)?(?:now\s+)?"
+    r"|(?:once|after|since)\s+" + _SPAN_TO_CLAUSE_END + r"\s+(?:was|were|had been|got)\s+"
+    r")(?:sorted|done|in place|finished|fixed|merged|landed|shipped|deployed|"
+    r"out of the way|taken care of|in)\s*,",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# "Let's not forget about X", "don't forget X", "remember to X".
+_TASK_TODO_REMIND = re.compile(
+    r"\b(?:let'?s not forget|let us not forget|don'?t forget|do not forget|"
+    r"mustn'?t forget|remember to)(?:\s+about)?\s+"
+    # "Don't forget that the API is rate limited" is a reminder of a fact.
+    r"(?!(?:that|why|how|what|when|where|who|whether|if|which)\b)" + _CLAUSE_SPAN,
+    re.IGNORECASE,
+)
+
+# "Parking X for now", "shelving X until the migration lands". Only at the
+# start of a clause: "parking" is also a noun ("the parking service").
+_TASK_TODO_PARKED = re.compile(
+    r"(?:^|(?<=[.!?]\s)|(?<=\n))[ \t]*(?:i'?m\s+|we'?re\s+)?(?:parking|shelving|deferring)\s+"
+    + _SPAN_TO_CLAUSE_END + r"(?=\s+(?:for now|for later|until|till)\b|\s*[.,;!]|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# "Rather than overthinking it, the managed Postgres it is." The noun-phrase
+# form of _DECISION_IT_IS, which takes a capitalised name only. The idiom
+# closes a sentence; "as it is", "what it is", "how it is" are not choices.
+_DECISION_IT_IS_PHRASE = re.compile(
+    r"(?:^|(?<=[.!?,;:—]\s)|(?<=\n))[ \t]*"
+    r"(?!(?:as|what|how|where|who|whatever|that|which|when|why|however|wherever|"
+    r"whichever|whoever|here|there|this|it)\b)"
+    # Non-space at both ends of the capture. With spaces allowed at its
+    # edges, a run of spaces or tabs could be split between the indent
+    # before, the capture and the \s+ after in quadratically many ways:
+    # 199 s on 17 KB.
+    r"([^\s.!?,;:—][^.!?\n,;:—]{0,58}?[^\s.!?,;:—])\s+it is(?=\s*[.!]|\s*$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_NOT_A_CHOICE_BEFORE_IT_IS = re.compile(
+    r"\b(?:as|what|how|where|who|whatever|that|which|when|why|however|wherever|"
+    r"whichever|whoever|so)\s*$",
+    re.IGNORECASE,
+)
+
+# The cause named after tracing it: "tracked the flakiness down to X",
+# "narrowed the outage down to X".
+_ERROR_TRACED = re.compile(
+    r"\b(?:tracked|traced|narrowed|pinned)\s+(?:\w+\s+){0,3}?down to\s+"
+    r"((?:(?![.!?](?=\s|$))[^\n,;]){4,90})",
+    re.IGNORECASE,
+)
+
+# A red build or an incident, then what it was: "CI is unhappy — X", "the
+# on-call page last night was X". The object must name something wrong.
+_ERROR_RED_STATE = re.compile(
+    r"\b(?:ci|the build|the pipeline|the tests?|staging|prod(?:uction)?)\s+"
+    r"(?:is|are|was|were|went|turned)\s+(?:unhappy|red|failing|broken|down)\s*"
+    r"(?:[—–:]|-\s|\bwith\b|\bbecause of\b|\bdue to\b)\s*"
+    r"((?:(?![.!?](?=\s|$))[^\n,;]){4,90})",
+    re.IGNORECASE,
+)
+_ERROR_INCIDENT_WAS = re.compile(
+    r"\b(?:page|pager|alert|alarm|incident|outage)(?:\s+\w+){0,3}?\s+(?:was|came from)\s+"
+    r"((?:(?![.!?](?=\s|$))[^\n,;]){4,90})",
+    re.IGNORECASE,
+)
+
+# A failure coming back: "everything looked green, then X again".
+_ERROR_RECURRED = re.compile(
+    r"\bthen\s+((?:(?![.!?](?=\s|$))[^\n,;]){4,90}?)\s+again\b",
+    re.IGNORECASE,
+)

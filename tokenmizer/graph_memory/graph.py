@@ -144,6 +144,61 @@ _MAX_PROCESSED_HASHES = 500
 _HASHES_TRIMMED = "#trimmed"
 
 
+def _size(value, depth: int = 3) -> int:
+    """Total length of the strings in a JSON-like value, three levels deep
+    (block -> tool-result content list -> text block), which is where a
+    message's text lives. Below that a container counts its entries: a
+    tool call's input tree was most of the fingerprint's cost."""
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, (list, dict)):
+        if depth == 0:
+            return len(value)
+        items = value.values() if isinstance(value, dict) else value
+        total = 0
+        for v in items:
+            total += _size(v, depth - 1)
+        return total
+    return 1
+
+
+def _edges_of(value) -> str:
+    """The first and last 16 characters of a block's main text, if any."""
+    text = value.get("text") if isinstance(value, dict) else None
+    if not isinstance(text, str):
+        text = value.get("content") if isinstance(value, dict) else None
+    return (text[:16] + text[-16:]) if isinstance(text, str) else ""
+
+
+def _fingerprint(msg) -> object:
+    """A cheap identity for a structured message at a fixed position; None
+    for a plain-text message, which is simply hashed. See
+    GraphMemory._history_hashes."""
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    tool_calls = msg.get("tool_calls")
+    if not isinstance(content, list) and not tool_calls and not msg.get("function_call"):
+        return None
+    parts: list = [msg.get("role"), msg.get("tool_call_id"), msg.get("name")]
+    if isinstance(content, list):
+        parts.append(len(content))
+        for block in content:
+            if isinstance(block, dict):
+                parts.append((block.get("type"), block.get("id") or block.get("tool_use_id"),
+                              _size(block), _edges_of(block)))
+            else:
+                parts.append(_size(block))
+    else:
+        parts.append(_size(content))
+    for call in (tool_calls or []):
+        if isinstance(call, dict):
+            parts.append((call.get("id"), _size(call)))
+    if msg.get("function_call"):
+        parts.append(_size(msg.get("function_call")))
+    return tuple(parts)
+
+
 def _names_file(name: str, text: str) -> bool:
     """Does `text` mention the file `name` (a stem like "orders", or a base
     name like "orders.py") as a whole word?
@@ -197,6 +252,9 @@ class GraphMemory:
         self._edges: list[MemoryEdge] = []
         self._transitions: list[DecisionTransition] = []   # full causal history
         self._processed_hashes: set[str] = set()
+        # (fingerprint, hash) per position of the last history hashed; see
+        # _history_hashes. In memory only: a fresh process hashes in full.
+        self._hash_cache: list[tuple[object, str]] = []
         self._schema_version = 1  # increment when storage format changes
         # Counts non-fatal decision-contradiction-check failures (see add_node).
         # Persistently non-zero means the supersede-tracking feature is
@@ -736,6 +794,38 @@ class GraphMemory:
 
     # ── Extraction ───────────────────────────────────────────────────────────
 
+    def _history_hashes(self, messages: list) -> list[str]:
+        """`_msg_hash` of every message, reusing the last call's hashes.
+
+        The proxy sends the whole history on every request, and hashing it
+        was most of the per-request cost on a long agent session: 12-17 ms
+        at 900 messages (1.8 MB, mostly tool results), against 2 ms to
+        fingerprint them.
+
+        A structured message whose fingerprint matches the one at the SAME
+        position last time reuses that position's hash. Positional, not a
+        lookup by fingerprint: fingerprints are not unique, and a new message
+        given an old one's hash would be skipped as already processed. A
+        history trimmed from the front shifts every position and is hashed
+        in full. Plain-text messages are always hashed; that is cheap. An
+        in-place edit that keeps the role, the block structure and every
+        block's length would reuse a stale hash; the fingerprint also keeps
+        each block's first and last characters to narrow that further.
+        """
+        prev = self._hash_cache
+        hashes: list[str] = []
+        cache: list[tuple[object, str]] = []
+        for i, m in enumerate(messages):
+            fp = _fingerprint(m)
+            if fp is not None and i < len(prev) and prev[i][0] == fp:
+                h = prev[i][1]
+            else:
+                h = self._msg_hash(m)
+            hashes.append(h)
+            cache.append((fp, h))
+        self._hash_cache = cache
+        return hashes
+
     def _msg_hash(self, msg: dict) -> str:
         """
         Hash a message for dedup tracking.
@@ -859,7 +949,7 @@ class GraphMemory:
         # of the per-request cost.
         hashes: list[str] | None = None
         if incremental:
-            hashes = [self._msg_hash(m) for m in messages]
+            hashes = self._history_hashes(messages)
             known = [h in self._processed_hashes for h in hashes]
             new_idx = [i for i, k in enumerate(known) if not k]
             if new_idx and _HASHES_TRIMMED in self._processed_hashes:
