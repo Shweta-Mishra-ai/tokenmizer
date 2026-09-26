@@ -455,8 +455,11 @@ def _is_module_reference(text: str, start: int, end: int) -> bool:
 _LISTING_LINE = re.compile(
     r"^[ \t]*(?:"
     # One name, or several in columns as plain `ls` prints them (separated by
-    # a tab or two or more spaces).
-    r"[\w.@+\-]+/?(?:(?:\t|[ ]{2,})[ \t]*[\w.@+\-]+/?)*"
+    # a tab or two or more spaces). The separator is exactly a tab or exactly
+    # two spaces, then any further blanks: written as `(?:\t|[ ]{2,})[ \t]*`
+    # a run of spaces could be split between the two parts in many ways, and
+    # a line of space-separated names that failed at its end took 8 s.
+    r"[\w.@+\-]+/?(?:(?:\t|[ ]{2})[ \t]*[\w.@+\-]+/?)*"
     r"|[\w.@+\-/]+:"
     r"|\.?/?[\w.@+\-]+(?:/[\w.@+\-]+)+/?"
     r"|[-dlcbps][rwxsStT\-]{9}[@+.]?\s+\d+\s+\S+\s+\S+\s+\d+\s+\w{3}\s+\d+\s+[\d:]+\s+\S+"

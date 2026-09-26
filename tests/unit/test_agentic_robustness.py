@@ -665,8 +665,12 @@ def test_files_that_were_worked_on_are_still_files(text, files):
     assert _x([{"role": "assistant", "content": text}]).files == files
 
 
-@pytest.mark.parametrize("payload", ["\t" * 8000, "\n" * 8000, " " * 8000, ". " * 4000],
-                         ids=["tabs", "blank-lines", "spaces", "dot-space"])
+@pytest.mark.parametrize("payload", ["\t" * 8000, "\n" * 8000, " " * 8000, ". " * 4000,
+                                     "  without" + " " * 400 + "x" * 300 + " " * 400 + "x" * 300
+                                     + ' it is./w/src/  File "x.py", line 1',
+                                     ("a.py\t" + " " * 300) * 8 + "!"],
+                         ids=["tabs", "blank-lines", "spaces", "dot-space",
+                              "names-then-failure", "tabbed-names-then-failure"])
 def test_every_extraction_regex_is_linear_on_whitespace(payload):
     """Every compiled pattern in the extraction modules, run directly. The
     full-extraction payload test cannot see a pattern that only ever gets
