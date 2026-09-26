@@ -204,10 +204,15 @@ class TestTheCounterComesBackDown:
                                   [dict(x) for x in raw], "llama3.1:8b", {},
                                   "orders")
 
-        for _ in range(200):
-            if not m._background_tasks:
-                break
-            await asyncio.sleep(0)
+        # Wait for the task itself rather than spinning on sleep(0).
+        # asyncio.sleep(0) only yields to the event loop, and the
+        # extraction pass now runs in a worker thread (see
+        # app._extract_heuristic — it was stalling the loop for as long as
+        # it ran), so a yield no longer implies the work is finished. A
+        # fixed number of yields was always a guess about scheduling; the
+        # tracked task is the thing that actually completes.
+        await asyncio.gather(*list(m._background_tasks),
+                             return_exceptions=True)
 
         assert m._extraction_pending == 0, (
             f"{m._extraction_pending} reservations never released — "

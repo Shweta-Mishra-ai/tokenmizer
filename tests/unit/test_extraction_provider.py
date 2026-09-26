@@ -131,10 +131,13 @@ async def test_llm_extraction_runs_end_to_end(tmp_path, monkeypatch):
     await app_module._update_graph(
         "llm-extract", graph, raw, [dict(m) for m in raw], "llama3.1:8b", {}, "orders",
     )
-    for _ in range(50):
-        if not app_module._background_tasks:
-            break
-        await asyncio.sleep(0)
+    # Await the task rather than spinning on sleep(0): the extraction pass
+    # now runs in a worker thread (app._extract_heuristic — it was stalling
+    # the event loop for as long as it ran), so yielding to the loop no
+    # longer implies the work is done. A fixed number of yields was always
+    # a guess about scheduling.
+    await asyncio.gather(*list(app_module._background_tasks),
+                         return_exceptions=True)
 
     assert calls, "the provider was never asked to extract"
     assert any("PostgreSQL" in n.label for n in graph._nodes.values())
