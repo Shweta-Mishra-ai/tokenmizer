@@ -756,3 +756,31 @@ def test_resume_lists_the_most_recent_open_errors(tmp_path):
             f"KeyError: 'field_{i}'"}], incremental=False)
     block = g.to_context_block(token_budget=400)
     assert "field_5" in block and "field_0" not in block, block
+
+
+def test_a_columnar_listing_with_crlf_is_not_a_list_of_files():
+    # Plain `ls` prints names in columns; tool output often ends lines with
+    # \r\n. One such `ls -R` in an OpenHands session gave 906 FILE nodes.
+    listing = ("ls -R /workspace/repo\r\n/workspace/repo:\r\n"
+               "CHANGES.rst\t    appveyor.yml      licenses\r\n"
+               "CITATION\t    astropy\t      pip-requirements\r\n"
+               "CODE_OF_CONDUCT.md  astropy.egg-info  setup.py\r\n"
+               "CONTRIBUTING.md     conftest.py       tox.ini\r\n"
+               "LICENSE.rst\t    docs\t      README.rst\r\n")
+    assert _x([{"role": "tool", "content": listing}]).files == []
+
+
+def test_a_file_changed_by_a_tool_call_leads_the_resume(tmp_path):
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    msgs = [
+        {"role": "user", "content": "Context: a.py b.py c.py d.py e.py f.py g.py h.py i.py j.py k.py."},
+        {"role": "assistant", "content": "Editing.", "tool_calls": [{
+            "id": "1", "type": "function", "function": {
+                "name": "str_replace_editor",
+                "arguments": json.dumps({"command": "str_replace", "path": "/w/src/core.py",
+                                         "old_str": "a", "new_str": "b"})}}]},
+    ]
+    for k in (1, 2):
+        g.extract_from_messages(msgs[:k])
+    files_line = next(ln for ln in g.to_context_block(400).splitlines() if ln.startswith("Files:"))
+    assert files_line.startswith("Files: /w/src/core.py"), files_line

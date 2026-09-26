@@ -238,10 +238,13 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
         _add("Noted", [notes[0].label], " | ", prio=6)
 
     # ── 8. Files ──────────────────────────────────────────────────────────
+    # Edited files first (higher importance), then the most recently
+    # touched: on importance alone every file tied and the section listed
+    # the files named EARLIEST in the session.
     files = sorted(
         [n for n in graph._nodes.values()
          if n.type == NodeType.FILE and not n._evicted],
-        key=lambda x: x.importance, reverse=True
+        key=_recent_first, reverse=True
     )
     if files:
         _add(words["files"], [_short_path(f.label) for f in files[:10]], ", ", prio=7)

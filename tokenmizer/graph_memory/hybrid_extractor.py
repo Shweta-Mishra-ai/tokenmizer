@@ -454,7 +454,9 @@ def _is_module_reference(text: str, start: int, end: int) -> bool:
 # per line as `find` prints them.
 _LISTING_LINE = re.compile(
     r"^[ \t]*(?:"
-    r"[\w.@+\-]+/?"
+    # One name, or several in columns as plain `ls` prints them (separated by
+    # a tab or two or more spaces).
+    r"[\w.@+\-]+/?(?:(?:\t|[ ]{2,})[ \t]*[\w.@+\-]+/?)*"
     r"|[\w.@+\-/]+:"
     r"|\.?/?[\w.@+\-]+(?:/[\w.@+\-]+)+/?"
     r"|[-dlcbps][rwxsStT\-]{9}[@+.]?\s+\d+\s+\S+\s+\S+\s+\d+\s+\w{3}\s+\d+\s+[\d:]+\s+\S+"
@@ -474,8 +476,9 @@ def _listing_spans(text: str, min_lines: int = 5) -> list[tuple[int, int]]:
     run_start = run_end = -1
     count = 0
     pos = 0
-    for line in text.split("\n"):
-        end = pos + len(line)
+    for raw in text.split("\n"):
+        end = pos + len(raw)
+        line = raw.rstrip("\r")   # tool output often ends lines with \r\n
         if _LISTING_LINE.match(line):
             if count == 0:
                 run_start = pos
@@ -634,6 +637,10 @@ class ExtractedData:
     tasks_todo: list[str] = field(default_factory=list)
     decisions: list[dict] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
+    # Files an agent's tool call changed (edit/create/write), a subset of
+    # `files`: the strongest evidence that a file was worked on, not just
+    # named. The graph ranks them above mentions.
+    edited_files: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     # Errors the transcript says were fixed, by label (a subset of
     # `errors`). Kept as a parallel list rather than a flag on each entry
@@ -1630,6 +1637,8 @@ class HybridExtractor:
                 if f not in seen_files:
                     result.files.append(f)
                     seen_files.add(f)
+                if f not in result.edited_files:
+                    result.edited_files.append(f)
             for e in tool_errors:
                 if not any(self._subsumes(e, x) for x in result.errors):
                     result.errors.append(e)
