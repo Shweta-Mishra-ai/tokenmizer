@@ -429,24 +429,75 @@ _TRACEBACK_LAST_LINE = re.compile(
 
 
 _IMPORT_BEFORE = re.compile(r"\bimport\s+$")
-_FROM_BEFORE = re.compile(r"\bfrom\s+$")
 _IMPORT_AFTER = re.compile(r"\s+import\b")
 _ATTRIBUTE_AFTER = re.compile(r"\.[A-Za-z_]")
+# Extensions that are also common attribute names in code: `self.db`,
+# `np.sum(...)`, `queryset.db`, `self.sql`, `self.env`, `np.less(...)`.
+_ATTRIBUTE_LIKE_EXT = frozenset({
+    "db", "sum", "sql", "xml", "env", "less", "conf", "mod", "lock",
+    "c", "h", "cs", "ex", "go", "rs", "sh", "md", "in",
+})
+_RECEIVER = frozenset({"self", "cls"})
+_ASSIGNED_BEFORE = re.compile(r"(?:=|\[)[ \t]*$")
 
 
 def _is_module_reference(text: str, start: int, end: int) -> bool:
     """A dotted Python module path, not a file: "from django.db import
     models", "import django.conf", "django.db.utils.OperationalError". The
     `.db` and `.conf` endings read as file extensions, and on SWE-bench
-    agent sessions "django.db" and "django.conf" were stored as files."""
-    # "from" only with "import" after the name: "removed the dependency from
-    # go.mod" is English, and go.mod is a file.
+    agent sessions "django.db" and "django.conf" were stored as files.
+
+    "from" alone is not evidence: "removed the dependency from go.mod" is
+    English, and go.mod is a file. A dotted continuation is: in "from
+    django.db.models import X" the name runs on past `.db`, and no file
+    name is followed by `.identifier`."""
     if _IMPORT_BEFORE.search(text, max(0, start - 12), start):
         return True
     if _IMPORT_AFTER.match(text, end):
         return True
-    return bool(_ATTRIBUTE_AFTER.match(text, end)) and not _FROM_BEFORE.search(
-        text, max(0, start - 12), start)
+    return bool(_ATTRIBUTE_AFTER.match(text, end))
+
+
+def _is_code_attribute(name: str, text: str, start: int, end: int) -> bool:
+    """An attribute or method in code whose last part happens to be a file
+    extension: `self.db`, `self.sql = sql`, `instance._state.db`,
+    `np.sum(weights)`, `db = queryset.db`, `connections[self.db]`. On
+    SWE-bench agent sessions these were about 4% of extracted file labels.
+
+    A real file keeps its name: `data.db`, `go.sum`, `pom.xml` and
+    `schema.sql` in prose are untouched. Only extensions that double as
+    attribute names are judged, and only by code context."""
+    if "/" in name:
+        return False
+    parts = name.split(".")
+    if len(parts) < 2 or parts[-1].lower() not in _ATTRIBUTE_LIKE_EXT:
+        return False
+    if parts[0] in _RECEIVER:
+        return True
+    # A private attribute in the chain: `instance._state.db`.
+    if any(p.startswith("_") for p in parts[1:-1]):
+        return True
+    # A call: `np.sum(weights)`.
+    if text[end:end + 1] == "(":
+        return True
+    # The right-hand side of an assignment or a subscript: `db =
+    # queryset.db`, `using=self.db`, `connections[self.db]`.
+    return bool(_ASSIGNED_BEFORE.search(text, max(0, start - 8), start))
+
+
+# A path in a unified-diff header carries git's `a/` or `b/` side prefix:
+# "diff --git a/pkg/mod.py b/pkg/mod.py", "--- a/pkg/mod.py", "+++ b/…".
+# Stored as written, one edited file became three nodes.
+_DIFF_HEADER_LINE = re.compile(r"^(?:diff --git |--- |\+\+\+ )", re.MULTILINE)
+
+
+def _strip_diff_side(name: str, text: str, start: int) -> str:
+    if name[:2] not in ("a/", "b/"):
+        return name
+    line_start = text.rfind("\n", 0, start) + 1
+    if _DIFF_HEADER_LINE.match(text, line_start):
+        return name[2:]
+    return name
 
 
 # One line of a directory listing: a bare name ("pylab.py", "src/"), an
@@ -1346,7 +1397,7 @@ class HybridExtractor:
             if is_library_name(m.group(1).strip()):
                 seen_files.add(m.group(1).strip())   # never a file; see _LIBRARY_NOT_FILE
         for m in _FILE_PATH.finditer(original):
-            f = m.group(1).strip()
+            f = _strip_diff_side(m.group(1).strip(), original, m.start(1))
             if f not in seen_files and len(f) > 4 and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
@@ -1356,6 +1407,7 @@ class HybridExtractor:
             f = m.group(1).strip()
             if f not in seen_files and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
+                    and not _is_code_attribute(f, original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)

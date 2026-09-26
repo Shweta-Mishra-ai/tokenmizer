@@ -119,7 +119,13 @@ _FILE_EXTENSIONLESS = re.compile(
     r'(?:Dockerfile|Makefile|Procfile|Jenkinsfile|Gemfile|Rakefile|Vagrantfile|'
     r'Brewfile|Justfile|Caddyfile|Containerfile|Tiltfile|Earthfile|Pipfile|'
     r'Fastfile|Appfile|Matchfile|Snapfile|Podfile|Cartfile|Dangerfile|'
-    r'Berksfile|Guardfile|Capfile|CODEOWNERS|MANIFEST\.in))\b'
+    r'Berksfile|Guardfile|Capfile|CODEOWNERS|MANIFEST\.in|'
+    # Dotfiles are named bare as often as with a directory ("added the key
+    # to .env", "ignored it in .gitignore"), and every pattern above needs a
+    # character before the dot. The lookbehind keeps `self.env` out.
+    r'\.env(?:\.[\w\-]+)?|\.gitignore|\.gitattributes|\.dockerignore|'
+    r'\.npmrc|\.nvmrc|\.editorconfig|\.bashrc|\.zshrc|\.babelrc|'
+    r'\.prettierrc|\.eslintrc))\b'
 )
 
 # JavaScript libraries are named `<name>.js` in prose — "switched from

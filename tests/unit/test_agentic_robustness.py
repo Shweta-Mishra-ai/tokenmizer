@@ -743,6 +743,8 @@ def test_a_directory_listing_is_not_a_list_of_worked_on_files():
 
 @pytest.mark.parametrize("text,files", [
     ("from django.db import models", []),
+    # The name runs on past `.db`: "from" does not make it a file.
+    ("from django.db.models import Q", []),
     ("import django.conf", []),
     ("django.db.utils.OperationalError: no such table", []),
     ("Removed the dependency from go.mod.", ["go.mod"]),
@@ -750,6 +752,63 @@ def test_a_directory_listing_is_not_a_list_of_worked_on_files():
 ])
 def test_module_paths_are_not_files(text, files):
     assert _x([{"role": "assistant", "content": text}]).files == files
+
+
+@pytest.mark.parametrize("text", [
+    # Attributes and methods whose last part is a file extension, as they
+    # appear in the code SWE-agent and OpenHands sessions display.
+    "obj.save(force_insert=True, using=self.db)",
+    "connection = connections[self.db]",
+    "        self.sql = sql",
+    "if not np.allclose(np.abs(1. - np.sum(weights)), 0.):",
+    "if (any(np.less(weights, 0.)) or",
+    "            if instance._state.db is None:",
+    "        db = queryset.db",
+])
+def test_code_attributes_are_not_files(text):
+    assert _x([{"role": "tool", "content": text}]).files == []
+
+
+@pytest.mark.parametrize("text,files", [
+    ("Copied data from test.db to prod.db.", ["test.db", "prod.db"]),
+    ("I updated go.sum and pom.xml, and the schema in schema.sql.",
+     ["go.sum", "pom.xml", "schema.sql"]),
+])
+def test_files_with_attribute_like_extensions_are_still_files(text, files):
+    assert _x([{"role": "assistant", "content": text}]).files == files
+
+
+def test_a_diff_header_names_the_file_once_without_its_side_prefix():
+    diff = ("diff --git a/sympy/solvers/polysys.py b/sympy/solvers/polysys.py\n"
+            "index b9809fd4e9..674322d4eb 100644\n"
+            "--- a/sympy/solvers/polysys.py\n+++ b/sympy/solvers/polysys.py\n"
+            "@@ -240,7 +240,7 @@ def _solve_reduced_system(system, gens, entry=False):\n")
+    assert _x([{"role": "assistant", "content": diff}]).files == ["sympy/solvers/polysys.py"]
+
+
+def test_a_path_that_starts_with_a_or_b_outside_a_diff_keeps_it():
+    assert _x([{"role": "assistant", "content": "The fix is in b/handlers.py."}]).files == ["b/handlers.py"]
+
+
+@pytest.mark.parametrize("text,files", [
+    ("Added the key to .env and .env.local, and ignored both in .gitignore.",
+     [".env", ".env.local", ".gitignore"]),
+    ("See config/.env.", ["config/.env"]),
+    ("pyobj_role = self.env.get_domain('py')", []),
+])
+def test_bare_dotfiles_are_files(text, files):
+    assert _x([{"role": "assistant", "content": text}]).files == files
+
+
+@pytest.mark.parametrize("name", ["Pipfile", "Podfile", "Containerfile", "Tiltfile", ".gitignore"])
+def test_every_file_the_extractor_emits_survives_validation(tmp_path, name):
+    # The validator kept its own copy of the extensionless names; it lacked
+    # these, and dropped them after the extractor had found them.
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    g.extract_from_messages([{"role": "user", "content": "x"},
+                             {"role": "assistant", "content": f"I updated the {name}."}],
+                            incremental=False)
+    assert name in [n.label for n in g._nodes.values() if n.type == NodeType.FILE]
 
 
 def test_resume_lists_the_most_recent_open_errors(tmp_path):
