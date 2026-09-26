@@ -255,12 +255,18 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
         _add("Env", [e.label for e in env_nodes[:4]], ", ", prio=8)
 
     # ── 10. Open errors ───────────────────────────────────────────────────
+    #
+    # Most recent first, like work in progress: every open error has the
+    # same importance, so sorting on importance alone fell back to insertion
+    # order and the resume listed the OLDEST three failures. On real
+    # SWE-bench sessions that is the first traceback of the session, not
+    # the one the agent was stuck on when it stopped.
     errors = sorted(
         [n for n in graph._nodes.values()
          if n.type == NodeType.ERROR
          and n.status == NodeStatus.FAILED
          and not n._evicted],
-        key=lambda x: x.importance, reverse=True
+        key=_recent_first, reverse=True
     )
     if errors:
         _add(words["errors"], [e.label for e in errors[:3]], " | ", prio=1)

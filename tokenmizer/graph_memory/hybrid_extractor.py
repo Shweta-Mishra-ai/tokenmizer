@@ -92,6 +92,7 @@ from tokenmizer.graph_memory.patterns import (
     _FIX_PREFIX,
     _GOAL_OPENERS,
     _HYPOTHETICAL_FAILURE,
+    _INSTRUCTION_LEAD,
     _INTRANSITIVE_TAIL,
     _INVESTIGATION_PREFIX,
     _LEADING_CONNECTIVE,
@@ -417,6 +418,89 @@ def _is_example_mention(text: str, pos: int) -> bool:
     if _EXAMPLE_LEAD.search(clause):
         return True
     return bool(_CATEGORY_BEFORE_PAREN.search(clause)) and not _WORK_VERB.search(clause)
+
+
+_MODULE_PATH = re.compile(r"(?:[A-Za-z_]\w*\.){1,6}")
+_TRACEBACK_LAST_LINE = re.compile(
+    r"(?:(?:[A-Za-z_]\w*\.){0,6}[A-Z]\w*(?:Error|Exception|Warning|Exit|Interrupt)\w*"
+    # A class under an exceptions module needs no suffix:
+    # "django.core.exceptions.ImproperlyConfigured: Requested setting ...".
+    r"|(?:[A-Za-z_]\w*\.){0,5}(?:exceptions?|errors?|exc)\.[A-Z]\w*): \S")
+
+
+_IMPORT_BEFORE = re.compile(r"\bimport\s+$")
+_FROM_BEFORE = re.compile(r"\bfrom\s+$")
+_IMPORT_AFTER = re.compile(r"\s+import\b")
+_ATTRIBUTE_AFTER = re.compile(r"\.[A-Za-z_]")
+
+
+def _is_module_reference(text: str, start: int, end: int) -> bool:
+    """A dotted Python module path, not a file: "from django.db import
+    models", "import django.conf", "django.db.utils.OperationalError". The
+    `.db` and `.conf` endings read as file extensions, and on SWE-bench
+    agent sessions "django.db" and "django.conf" were stored as files."""
+    # "from" only with "import" after the name: "removed the dependency from
+    # go.mod" is English, and go.mod is a file.
+    if _IMPORT_BEFORE.search(text, max(0, start - 12), start):
+        return True
+    if _IMPORT_AFTER.match(text, end):
+        return True
+    return bool(_ATTRIBUTE_AFTER.match(text, end)) and not _FROM_BEFORE.search(
+        text, max(0, start - 12), start)
+
+
+# One line of a directory listing: a bare name ("pylab.py", "src/"), an
+# `ls -l` row, an `ls -R` directory header ("lib/matplotlib:"), or one path
+# per line as `find` prints them.
+_LISTING_LINE = re.compile(
+    r"^[ \t]*(?:"
+    r"[\w.@+\-]+/?"
+    r"|[\w.@+\-/]+:"
+    r"|\.?/?[\w.@+\-]+(?:/[\w.@+\-]+)+/?"
+    r"|[-dlcbps][rwxsStT\-]{9}[@+.]?\s+\d+\s+\S+\s+\S+\s+\d+\s+\w{3}\s+\d+\s+[\d:]+\s+\S+"
+    r"|total \d+"
+    r")[ \t]*$"
+)
+
+
+def _listing_spans(text: str, min_lines: int = 5) -> list[tuple[int, int]]:
+    """Character spans of directory listings: runs of `min_lines` or more
+    listing lines. A listing says what exists in the repository, not what
+    was worked on. On a real SWE-bench session one `ls -R` added 290 FILE
+    nodes, the graph hit its 200-node cap, and the files the agent actually
+    edited were pruned. Blank lines inside a run are allowed (`ls -R`
+    separates directories with them)."""
+    spans: list[tuple[int, int]] = []
+    run_start = run_end = -1
+    count = 0
+    pos = 0
+    for line in text.split("\n"):
+        end = pos + len(line)
+        if _LISTING_LINE.match(line):
+            if count == 0:
+                run_start = pos
+            run_end = end
+            count += 1
+        elif line.strip() and count:
+            if count >= min_lines:
+                spans.append((run_start, run_end))
+            count = 0
+        pos = end + 1
+    if count >= min_lines:
+        spans.append((run_start, run_end))
+    return spans
+
+
+_WITHOUT_LEAD = re.compile(r"\bwithout\s+(?:\w+\s+)?$", re.IGNORECASE)
+# An exception class named as what code does, not as something that
+# happened: "to raise a ValueError", "raises TypeError", "catch the KeyError",
+# "handling IOError". The past tense ("it raised a ValueError") is an event
+# and is not matched here.
+_BEHAVIOUR_LEAD = re.compile(
+    r"\b(?:raises?|raising|throws?|throwing|catch(?:es|ing)?|handl(?:e|es|ing)|"
+    r"expect(?:s|ing)?)\s+(?:a|an|the|any)?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _todo_label(text: str) -> str:
@@ -1243,22 +1327,33 @@ class HybridExtractor:
         are read from the original text — quotes and code blocks included —
         and in any language."""
         # Files
+        listings = _listing_spans(original)
+
+        def in_listing(pos: int) -> bool:
+            return any(a <= pos < b for a, b in listings)
+
         for m in _FILE_COMMON.finditer(original):
             if is_library_name(m.group(1).strip()):
                 seen_files.add(m.group(1).strip())   # never a file; see _LIBRARY_NOT_FILE
         for m in _FILE_PATH.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files and len(f) > 4 and not _is_example_mention(original, m.start(1)):
+            if f not in seen_files and len(f) > 4 and not _is_example_mention(original, m.start(1)) \
+                    and not _is_module_reference(original, m.start(1), m.end(1)) \
+                    and not in_listing(m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)
         for m in _FILE_COMMON.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files and not _is_example_mention(original, m.start(1)):
+            if f not in seen_files and not _is_example_mention(original, m.start(1)) \
+                    and not _is_module_reference(original, m.start(1), m.end(1)) \
+                    and not in_listing(m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)
         for m in _FILE_EXTENSIONLESS.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files and not _is_example_mention(original, m.start(1)):
+            if f not in seen_files and not _is_example_mention(original, m.start(1)) \
+                    and not _is_module_reference(original, m.start(1), m.end(1)) \
+                    and not in_listing(m.start(1)):
                 result.files.append(f)
                 seen_files.add(f)
 
@@ -1341,6 +1436,14 @@ class HybridExtractor:
                 if pattern not in _STRUCTURAL_ERROR_PATTERNS and _NEGATIVE_SUBJECT.match(
                         content[_clause_start(content, m.start(1)):m.end(1)].lstrip(" -*\t")):
                     continue   # "Nothing failed on the last run"
+                if pattern not in _STRUCTURAL_ERROR_PATTERNS and _INSTRUCTION_LEAD.match(
+                        content[_clause_start(content, m.start(1)):m.end(1)]):
+                    continue   # "DO NOT re-run the same failed edit command"
+                if _WITHOUT_LEAD.search(content, max(0, m.start() - 30), m.start()):
+                    continue   # "without encountering any configuration errors"
+                if pattern is _ERROR_TYPED and _BEHAVIOUR_LEAD.search(
+                        content, max(0, m.start(1) - 40), m.start(1)):
+                    continue   # "modify it to raise a ValueError when ..."
                 before = content[max(0, m.start(1) - 60):m.start(1)]
                 if _SOLUTION_VERB.search(before):
                     continue   # the symptom names the fix, not the failure
@@ -1354,8 +1457,28 @@ class HybridExtractor:
                 if _ERROR_HANDLED.search(before):
                     continue   # the exception is being caught, not raised
                 span_start, span_end = _word_bounded(content, m.start(1), m.end(1))
+                # The last line of a traceback is one message to the end of
+                # the line: "RuntimeError: Model class __main__.B doesn't
+                # declare an explicit app_label". The typed pattern's capture
+                # stops at the first dot or comma and at 60 characters, which
+                # cut it to "Model class __main__".
+                exc_start = m.start(1)
+                if pattern is _ERROR_TYPED:
+                    # "django.db.utils.OperationalError: ..." — the match starts
+                    # at the class; the module path before it is part of the name.
+                    line_start = content.rfind("\n", 0, exc_start) + 1
+                    if _MODULE_PATH.fullmatch(content, line_start, exc_start):
+                        exc_start = line_start
+                traceback_line = pattern is _ERROR_TYPED and (
+                    exc_start == 0 or content[exc_start - 1] == "\n") \
+                    and _TRACEBACK_LAST_LINE.match(content, exc_start) is not None
+                if traceback_line:
+                    span_start = exc_start
+                    line_end = content.find("\n", exc_start)
+                    span_end = min(line_end if line_end != -1 else len(content),
+                                   exc_start + 160)
                 raw = content[span_start:span_end]
-                err = _drop_leading_sentence(raw)
+                err = _drop_leading_sentence(raw) if not traceback_line else raw
                 # "Fixed by adding a 5 second context timeout" describes the
                 # fix; the timeout is the solution, not the failure. The
                 # solution-verb check above only sees text BEFORE the match,
@@ -1370,7 +1493,7 @@ class HybridExtractor:
                 # defeat the dedup below.
                 label_start = span_start + raw.rfind(err) if err else span_start
                 err = _clip(_INVESTIGATION_PREFIX.sub(
-                    "", _FIX_PREFIX.sub("", err.strip())), 70)
+                    "", _FIX_PREFIX.sub("", err.strip())), 150 if traceback_line else 70)
                 err = _ERROR_DETERMINER.sub("", err).strip()
                 err = _LEADING_CONNECTIVE.sub("", err).strip()
                 # `IDOR`, `XSS`, `RCE` are four and three characters. A flat
@@ -1793,6 +1916,14 @@ class HybridExtractor:
 
         Keeps the label with the most content words, which is the one that
         says what actually broke rather than merely that something did.
+
+        But only when the two really are one failure: the less specific label
+        says little beyond the class name ("Login keeps returning 422"), or
+        the two overlap. This used to keep ONE label per exception class for
+        the whole extraction call, so a real agent session that hit several
+        different ValueErrors kept only the wordiest: on SWE-bench
+        trajectories, "ValueError: Imaginary coordinates are not permitted"
+        was deleted by a later, unrelated "ValueError: Error from parse_expr".
         """
         def key(label: str) -> str | None:
             m = re.search(r'\b[A-Z]\w*(?:Error|Exception)\b', label)
@@ -1807,15 +1938,28 @@ class HybridExtractor:
         # The LLM path can hand back non-strings; this runs on both paths.
         errors = [e for e in errors if isinstance(e, str) and e.strip()]
 
-        best: dict[str, str] = {}
+        def words(label: str) -> set[str]:
+            return {w for w in re.findall(r"[a-z0-9]+", label.lower()) if len(w) > 2}
+
+        def restates(a: str, b: str, k: str) -> bool:
+            """Is `a` a less specific statement of the failure `b` names?"""
+            wa, wb = words(a) - {k}, words(b) - {k}
+            if len(wa) <= 3:
+                return True
+            return bool(wa) and len(wa & wb) / len(wa) >= 0.5
+
+        groups: dict[str, list[str]] = {}
         for e in errors:
             k = key(e)
-            if k is None:
-                continue
-            if k not in best or weight(e) > weight(best[k]):
-                best[k] = e
-        kept = set(best.values())
-        return [e for e in errors if key(e) is None or e in kept]
+            if k is not None:
+                groups.setdefault(k, []).append(e)
+        dropped: set[str] = set()
+        for k, labels in groups.items():
+            for a in labels:
+                if any(b != a and b not in dropped and weight(b) > weight(a)
+                       and restates(a, b, k) for b in labels):
+                    dropped.add(a)
+        return [e for e in errors if e not in dropped]
 
     def _drop_vaguer_decisions(self, decisions: list) -> list:
         """Collapse "Use X" into a longer decision that also names X.

@@ -1379,7 +1379,15 @@ _ERROR_TYPED = re.compile(
     # EADDRINUSE), Node's ERR_* codes, a Go panic, an unhandled promise
     # rejection. Each is unambiguous on its own — nobody writes ECONNREFUSED
     # in prose about anything but a failure — so no context is required.
-    r'E[A-Z]{4,14}\b|ERR_[A-Z_]{3,30}\b|OOMKilled|'
+    # The errno names themselves, not "E + capitals": that also matched
+    # ENTER, EXAMPLE, ERRORS and EXPECTED in any all-caps instruction ("YOU
+    # CAN ONLY ENTER ONE COMMAND AT A TIME" was an error in every SWE-agent
+    # session).
+    r'(?:ECONNREFUSED|ECONNRESET|ECONNABORTED|ETIMEDOUT|ENOENT|EACCES|EPERM|'
+    r'EADDRINUSE|EADDRNOTAVAIL|EPIPE|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|ENOMEM|'
+    r'ENOSPC|EEXIST|EISDIR|ENOTDIR|EMFILE|ENFILE|EBADF|EINVAL|EAGAIN|EBUSY|EROFS|'
+    r'ENOTEMPTY|EDQUOT|EINTR|ENOTCONN|EPROTO|ENOTSUP|EOPNOTSUPP|ECANCELED|'
+    r'ENAMETOOLONG|ELOOP|EAI_AGAIN|EAI_NONAME)\b|ERR_[A-Z_]{3,30}\b|OOMKilled|'
     r'panic:|runtime error:|[Uu]nhandled (?:promise rejection|exception|error)|'
     r'[Uu]ncaught (?:exception|error|TypeError|ReferenceError))'
     r'(?:[\s:-]+[^.!?,;\n]{0,60})?)',
@@ -2085,7 +2093,20 @@ def mask_mentions(text: str) -> str:
         text = _TABLE_ROW.sub(_spaces, text)
     if '"' in text or "\u201c" in text:
         text = _QUOTED.sub(_quote_unless_error, text)
+    if "\n" in text:
+        text = _NUMBERED_LISTING.sub(_spaces, text)
     return text
+
+
+# A file shown with line numbers, the way agent tools print one
+# ("587:def _check_large_sparse(...)", "  12\tdef main():", "12 | x = 1"):
+# the file's contents, not the conversation. Docstrings in such listings
+# ("Raise a ValueError if X has 64bit indices") were read as errors. Three
+# or more consecutive numbered lines; one or two could be a numbered list.
+_NUMBERED_LISTING = re.compile(
+    r"(?:^[ \t]*\d{1,6}(?::|\t| \| )[^\n]*(?:\n|\Z)){3,}",
+    re.MULTILINE,
+)
 
 
 # ── Shared technology vocabulary ──────────────────────────────────────────────
@@ -2239,5 +2260,18 @@ _ERROR_INCIDENT_WAS = re.compile(
 # A failure coming back: "everything looked green, then X again".
 _ERROR_RECURRED = re.compile(
     r"\bthen\s+((?:(?![.!?](?=\s|$))[^\n,;]){4,90}?)\s+again\b",
+    re.IGNORECASE,
+)
+
+
+# A clause that gives an instruction rather than reporting something:
+# "DO NOT re-run the same failed edit command", "Please make sure the tests
+# pass", "Remember, you can only enter one command at a time". Agent
+# frameworks put these in every tool observation.
+_INSTRUCTION_LEAD = re.compile(
+    # "Please note X failed" and "note that X failed" report something, so
+    # "please" counts only when it is not followed by "note".
+    r"^[\s\-*>]*(?:do not|don'?t|never|please(?!\s+note)|make sure|remember|always|"
+    r"be sure|you (?:should|must|can only|need to|may))\b",
     re.IGNORECASE,
 )

@@ -681,3 +681,78 @@ def test_every_extraction_regex_is_linear_on_whitespace(payload):
                 started = time.monotonic()
                 list(value.finditer(payload))
                 assert time.monotonic() - started < 1.0, name
+
+
+# ── Found on real agent sessions (SWE-bench trajectories, dev split) ─────────
+
+def test_different_errors_of_one_class_are_both_kept():
+    # One label per exception class used to be kept for the whole call, so a
+    # later, unrelated ValueError deleted an earlier one.
+    errors = HybridExtractor()._drop_restated_errors([
+        "ValueError: Imaginary coordinates are not permitted",
+        "ValueError: Error from parse_expr with transformed code",
+    ])
+    assert len(errors) == 2
+    # A thin restatement of the same failure is still collapsed.
+    assert HybridExtractor()._drop_restated_errors([
+        "Login keeps returning 422",
+        "Fixed: 422 error — missing email validation in the LoginRequest model",
+    ]) == ["Fixed: 422 error — missing email validation in the LoginRequest model"]
+
+
+@pytest.mark.parametrize("text", [
+    "Remember, YOU CAN ONLY ENTER ONE COMMAND AT A TIME. Wait for feedback.",
+    "Your changes have NOT been applied.\nDO NOT re-run the same failed edit command.",
+    "Let's run it again without encountering any configuration errors.",
+    "Let's modify it to raise a ValueError when the left operand is not a matrix.",
+    "[File: /r/v.py (900 lines total)]\n587:def f(X):\n588:    \"\"\"Raise a ValueError if X has 64bit indices\n589:    \"\"\"\n",
+])
+def test_agent_framework_text_is_not_an_error(text):
+    assert _x([{"role": "user", "content": text}]).errors == []
+
+
+@pytest.mark.parametrize("text,label", [
+    ("Traceback (most recent call last):\n  File \"x.py\", line 1\n"
+     "RuntimeError: Model class __main__.B doesn't declare an explicit app_label",
+     "RuntimeError: Model class __main__.B doesn't declare an explicit app_label"),
+    ("Traceback (most recent call last):\n  File \"x.py\", line 1\n"
+     "django.db.utils.OperationalError: no such table: tests_parent",
+     "django.db.utils.OperationalError: no such table: tests_parent"),
+    ("Traceback (most recent call last):\n  File \"x.py\", line 1\n"
+     "django.core.exceptions.ImproperlyConfigured: Requested setting INSTALLED_APPS, but not set",
+     "django.core.exceptions.ImproperlyConfigured: Requested setting INSTALLED_APPS"),
+    ("connect ECONNREFUSED 127.0.0.1:5432", "ECONNREFUSED"),
+    ("Running it raised a ValueError: invalid literal for int().", "ValueError: invalid literal"),
+    ("Please note the build failed twice yesterday.", "build failed twice"),
+])
+def test_real_failures_keep_their_whole_message(text, label):
+    errors = _x([{"role": "user", "content": text}]).errors
+    assert any(label in e for e in errors), errors
+
+
+def test_a_directory_listing_is_not_a_list_of_worked_on_files():
+    listing = "lib/matplotlib:\n__init__.py\n_afm.py\n_cm.py\naxes\nfigure.py\ncolors.py\n"
+    r = _x([{"role": "user", "content": listing},
+            {"role": "assistant", "content": "The bug is in lib/matplotlib/figure.py."}])
+    assert r.files == ["lib/matplotlib/figure.py"], r.files
+
+
+@pytest.mark.parametrize("text,files", [
+    ("from django.db import models", []),
+    ("import django.conf", []),
+    ("django.db.utils.OperationalError: no such table", []),
+    ("Removed the dependency from go.mod.", ["go.mod"]),
+    ("Copied data from test.db to prod.db.", ["test.db", "prod.db"]),
+])
+def test_module_paths_are_not_files(text, files):
+    assert _x([{"role": "assistant", "content": text}]).files == files
+
+
+def test_resume_lists_the_most_recent_open_errors(tmp_path):
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    for i in range(6):
+        g.extract_from_messages([{"role": "user", "content":
+            f"Traceback (most recent call last):\n  File \"x.py\", line 1\n"
+            f"KeyError: 'field_{i}'"}], incremental=False)
+    block = g.to_context_block(token_budget=400)
+    assert "field_5" in block and "field_0" not in block, block
