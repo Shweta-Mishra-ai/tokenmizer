@@ -95,11 +95,15 @@ class TestBackgroundTaskReferenceRetention:
         )
 
         release.set()  # let the fake provider call return
-        # Give the event loop a turn to run the now-unblocked task to completion.
-        for _ in range(10):
-            if not app_module._background_tasks:
-                break
-            await asyncio.sleep(0)
+        # Wait for the task itself rather than spinning on sleep(0).
+        # asyncio.sleep(0) only yields to the event loop, and the
+        # extraction pass now runs in a worker thread (see
+        # app._extract_heuristic — it was stalling the loop for as long as
+        # it ran), so a yield no longer implies the work is finished. A
+        # fixed number of yields was always a guess about scheduling; the
+        # tracked task is the thing that actually completes.
+        await asyncio.gather(*list(app_module._background_tasks),
+                             return_exceptions=True)
 
         assert len(app_module._background_tasks) == 0, (
             "completed background task was never removed from the "

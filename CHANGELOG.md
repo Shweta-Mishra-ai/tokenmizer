@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1808 tests; every published number below was
+remembering. Suite is now 1813 tests; every published number below was
 re-derived from a run.
 
 ### Real agent sessions: error loss, false errors and file noise
@@ -313,6 +313,66 @@ release.
 - A multi-dot filename pattern with an unbounded repeat took 3.5 s on the
   15 KB adversarial payload. It was bounded before it shipped, and it is
   pinned.
+
+### Fixed — extraction held the event loop, so one big turn slowed every other request
+
+TokenMizer is a proxy: CPU it spends without yielding is latency every
+other in-flight request pays. The heuristic extraction pass is the most
+expensive thing it does per turn — regex over the whole message, no
+awaits — and it was called inline from the request handler.
+
+Measured with a 2 ms ticker recording its own lateness, which is exactly
+event-loop stall, against a 0.25 ms idle floor:
+
+| turn | stall before | stall after |
+|---|---|---|
+| ~3 KB | 33 ms | 3.2 ms |
+| ~12 KB pasted log | 86 ms | 2.9 ms |
+
+Sequential end-to-end latency dropped from ~7 ms to ~2.4 ms per request
+in the same harness, because a turn no longer waits behind the previous
+turn's extraction.
+
+The pass now runs in a worker thread. That does not make extraction
+faster — the GIL is held throughout — but it lets the loop be scheduled
+between bytecodes instead of waiting for the whole pass, so one caller
+pasting a log stops adding its full extraction time to everybody else.
+
+**What makes the thread safe** is the session lock the request path
+already holds around `_update_graph`, and `HybridExtractor` being
+stateless after construction (no method assigns to `self`), so the shared
+extractor and the read-only domain packs can be shared across threads.
+The concurrency note above the graph cache claimed the request path took
+no lock and rested the argument on GraphMemory's mutators containing no
+`await` — true of coroutines, silent about threads, and stale since the
+foreground lock was added. It has been corrected, because that argument
+would have made this change look safe for the wrong reason.
+
+There were **four identical inline copies** of the extraction call; they
+are one helper now, with a test that fails if a fifth appears.
+
+#### Three tests were waiting on a guess
+
+`await asyncio.sleep(0)` in a bounded loop only yields to the event loop,
+so it never waited for a thread — it worked because the old code happened
+to finish within loop steps. All three now await the tracked tasks, which
+is what actually completes. Verified the product releases its extraction
+slot correctly before touching them, rather than assuming the tests were
+at fault: `inflight`, `pending` and the task set all reach zero.
+
+#### Checked and found clean
+
+- **Per-layer cost**, timed directly: compression, terse injection, cache
+  lookup, `query()` and `to_context_block()` are all under 0.25 ms.
+  Extraction was the only layer worth moving.
+- **Latency does not grow with session length**: flat at ~10 ms
+  (harness-dominated) across 200 turns. An earlier reading suggesting a
+  5x degradation by turn 60 was an artifact of comparing cache hits with
+  misses.
+- **Cold start is already handled**: the first request is 3.1 ms with the
+  lifespan running, which is how it runs in production. A ~300 ms first
+  request appears only when a harness skips startup and `_warm_up` never
+  runs.
 
 ### Fixed — the cache guard was a way to make the proxy slow
 
