@@ -71,7 +71,7 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_GRAPH_CHECKPOINT__MAX_RESUME_TOKENS` | `400` | Budget for the injected resume block |
 | `TOKENMIZER_GRAPH_CHECKPOINT__USE_LLM_EXTRACTION` | `false` | Hybrid LLM + heuristic extraction (needs a key, ~$0.001/turn) |
 | `TOKENMIZER_CACHE__ENABLED` | `true` | Semantic cache |
-| `TOKENMIZER_CACHE__SIMILARITY_THRESHOLD` | `0.92` | How close a hit must be |
+| `TOKENMIZER_CACHE__SIMILARITY_THRESHOLD` | `0.92` | How close a hit must be. Similarity is necessary but not sufficient: a candidate that clears this bar is still refused when it disagrees with the query on polarity (enable/disable) or on a literal (a number, a filename, a flag, an identifier), because cosine barely moves on exactly those. `rejected_unsafe` in `/api/cache/stats` counts the refusals |
 | `TOKENMIZER_CACHE__MAX_SIZE` | `10000` | Cap on cached **entries** |
 | `TOKENMIZER_CACHE__MAX_BYTES` | `268435456` | Cap on cached **bytes** (256 MiB). An entry holds a whole response, so the entry cap alone is not a memory bound — 10,000 answers of 60 KB is 579 MiB measured. Whichever bound binds first wins |
 | `TOKENMIZER_CACHE__MAX_ENTRY_BYTES` | `1048576` | A single response larger than this is served but not cached, so one huge answer cannot evict the whole cache |

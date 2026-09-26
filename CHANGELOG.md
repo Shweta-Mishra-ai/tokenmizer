@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1780 tests; every published number below was
+remembering. Suite is now 1801 tests; every published number below was
 re-derived from a run.
 
 ### Real agent sessions: error loss, false errors and file noise
@@ -313,6 +313,55 @@ release.
 - A multi-dot filename pattern with an unbounded repeat took 3.5 s on the
   15 KB adversarial payload. It was bounded before it shipped, and it is
   pinned.
+
+### Fixed — a semantic cache hit could answer a question nobody asked
+
+A semantic hit serves **another prompt's answer**, which makes a false
+positive here worse than a miss: a miss costs one upstream call, a false
+positive returns a confident, fluent answer to a different question.
+Cosine similarity over sentence embeddings was the only thing deciding
+that, and it cannot carry the decision — not because 0.92 is mistuned,
+but because of what the method measures:
+
+- **Polarity barely moves the vector.** "How do I enable the cache?" and
+  "How do I disable the cache?" differ in one token and share every
+  other one. The answers are opposites.
+- **A decisive literal is a small part of a sentence.** "roll back
+  migration 003" and "roll back migration 004" differ in one digit.
+- **`embed()` truncates to `text[:1000]`** — the same prefix-identity
+  mistake as `_msg_hash` above — so two long prompts differing only
+  after the thousandth character embed *identically*. Cosine 1.0,
+  whatever the threshold is set to.
+
+Similarity now decides only that two prompts are *about* the same thing;
+a second check decides whether they are the same *question* about it. A
+candidate is refused when it disagrees with the query on polarity or on
+any literal — a number, a version, a filename, a path, a flag, a
+backticked span, a snake_cased identifier. Polarity is compared by
+**class**, not by token, so a genuine paraphrase still hits: "enable the
+cache" and "turn the cache on" are both positive. Refusals are counted
+as `rejected_unsafe` in `/api/cache/stats` — an operator watching that
+climb is watching wrong answers not being served.
+
+Erring strict is deliberate: too strict costs one upstream call, too
+loose costs a wrong answer.
+
+This is the same shape as the output-trimmer fix above — a match on
+**form**, confirmed against **substance** before anything is reused. The
+tests force cosine to 1.0 with a stub embedder, which is the point
+rather than a shortcut: the guard, not the score, is what must refuse
+these, and the suite must not depend on a 90 MB model download.
+
+### Fixed — JSON attachment filtering did not say which keys it removed
+
+`_clean_json` drops keys whose value is `null`, `[]` or `{}`. Every
+other cut in `FileContentFilter` announces itself in-band —
+`...[N rows omitted]`, `...[N lines omitted]...`, `...[depth limit 3]` —
+so the model can see it is reading a sample. This one was the exception,
+and it is the one where absence is itself the fact: `{"deleted_at":
+null}` and `{}` say different things about a record, and a model asked
+to explain an API response could not tell "the field is null" from
+"there is no such field". The removed keys are now named.
 
 ### Fixed — two places TokenMizer dropped information, not just tokens
 

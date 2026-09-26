@@ -202,3 +202,43 @@ class TestASharedPreambleDoesNotSwallowATurn:
         graph.extract_from_messages([message])
 
         assert len(graph._processed_hashes) == before == 1
+
+
+# ── Attached-file filtering ──────────────────────────────────────────────────
+
+class TestJsonCleaningNamesWhatItRemoved:
+    """Every other cut in FileContentFilter announces itself in-band —
+    "...[N rows omitted]", "...[N lines omitted]...", "...[depth limit
+    3]" — so the model can see that it is reading a sample. Dropping
+    empty keys was the one exception, and it is the one where absence
+    is itself the fact: `{"deleted_at": null}` and `{}` say different
+    things about a record."""
+
+    def _filter(self):
+        from tokenmizer.compression.engine import FileContentFilter
+        return FileContentFilter()
+
+    def test_the_dropped_keys_are_named(self):
+        cleaned = self._filter()._clean_json(
+            {"id": 7, "deleted_at": None, "tags": [], "name": "widget"}, 0)
+
+        assert cleaned["id"] == 7 and cleaned["name"] == "widget"
+        assert set(cleaned["...[empty, omitted]"]) == {"deleted_at", "tags"}
+
+    def test_a_dict_with_nothing_empty_gains_no_marker(self):
+        cleaned = self._filter()._clean_json({"id": 7, "name": "widget"}, 0)
+        assert cleaned == {"id": 7, "name": "widget"}
+
+    def test_nested_empties_are_named_at_their_own_level(self):
+        cleaned = self._filter()._clean_json(
+            {"outer": {"kept": 1, "gone": None}}, 0)
+        assert cleaned["outer"]["...[empty, omitted]"] == ["gone"]
+
+    def test_the_other_filters_still_announce_their_cuts(self):
+        """Pinning the behaviour the JSON path was made to match."""
+        f = self._filter()
+        csv = f.filter_csv("h\n" + "\n".join(str(i) for i in range(100)))
+        assert "rows omitted" in csv and "showing first" in csv
+
+        log = f.filter_log("\n".join(f"line {i}" for i in range(200)))
+        assert "lines omitted" in log
