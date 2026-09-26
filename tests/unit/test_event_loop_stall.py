@@ -46,11 +46,25 @@ _TURN = ("Add rate limiting to the API. Decided: use a token bucket in "
          "Error: TimeoutError when the pool is exhausted. ")
 
 
+async def _idle_floor() -> float:
+    """Worst tick lateness with nothing else running.
+
+    This is not zero and on some platforms it is not small. `sleep(0.002)`
+    is quantised to the system timer, which on Windows is about 15.6 ms,
+    so every tick is ~13 ms "late" on a completely idle loop. That floor
+    lands on BOTH readings and crushes the ratio between them: a true 4x
+    difference measured 30.3 ms against 74.1 ms, which is 2.4x, and the
+    test failed for a reason that had nothing to do with the code.
+    """
+    return await _worst_stall_while(asyncio.sleep(0.03))
+
+
 async def _worst_stall_while(coro) -> float:
     """Milliseconds the event loop was held while `coro` ran.
 
     A ticker wakes every 2 ms and records how late it was; lateness is
-    exactly time some other task held the thread without awaiting.
+    exactly time some other task held the thread without awaiting. Callers
+    subtract `_idle_floor()` to get the part attributable to `coro`.
     """
     late: list[float] = []
     running = True
@@ -62,7 +76,7 @@ async def _worst_stall_while(coro) -> float:
             late.append((time.perf_counter() - started - 0.002) * 1000)
 
     task = asyncio.create_task(ticker())
-    await asyncio.sleep(0.05)                    # settle, and prove the floor
+    await asyncio.sleep(0.05)                    # settle
     late.clear()
     try:
         await coro
@@ -94,32 +108,35 @@ class TestExtractionDoesNotHoldTheEventLoop:
     holds on any machine without a number baked in from one of them.
     """
 
-    @pytest.mark.parametrize("multiplier", [24, 96])   # ~3 KB and ~12 KB turns
+    @pytest.mark.parametrize("multiplier", [96, 240])   # ~12 KB and ~30 KB
     async def test_the_thread_stalls_the_loop_far_less_than_inline(
             self, multiplier):
         messages = [{"role": "assistant", "content": _TURN * multiplier}]
+        floor = await _idle_floor()
 
         inline_graph = GraphMemory("inline", storage_dir=tempfile.mkdtemp())
 
         async def inline():
             inline_graph.extract_from_messages(messages, incremental=True)
 
-        inline_stall = await _worst_stall_while(inline())
+        inline_stall = max(await _worst_stall_while(inline()) - floor, 0.01)
 
         threaded_graph = GraphMemory("threaded", storage_dir=tempfile.mkdtemp())
-        threaded_stall = await _worst_stall_while(
-            app_module._extract_heuristic(threaded_graph, messages))
+        threaded_stall = max(
+            await _worst_stall_while(
+                app_module._extract_heuristic(threaded_graph, messages)) - floor,
+            0.0)
 
         assert threaded_graph._nodes, "the extraction must still do its work"
-        assert inline_stall > 5.0, (
-            f"inline extraction only stalled {inline_stall:.1f} ms, so this "
-            f"payload is too small to measure a difference — raise the "
-            f"multiplier rather than trusting the comparison below"
+        assert inline_stall > 5 * max(floor, 1.0), (
+            f"inline extraction stalled {inline_stall:.1f} ms against a "
+            f"{floor:.1f} ms timer floor — too close to measure a ratio; "
+            f"raise the multiplier rather than trusting the comparison"
         )
         assert threaded_stall < inline_stall / 3, (
             f"dispatching to a thread stalled the loop {threaded_stall:.1f} ms "
-            f"against {inline_stall:.1f} ms inline — not the order-of-"
-            f"magnitude difference the thread exists for"
+            f"against {inline_stall:.1f} ms inline (floor {floor:.1f} ms) — "
+            f"not the order-of-magnitude difference the thread exists for"
         )
 
 
