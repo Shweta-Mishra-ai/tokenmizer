@@ -131,23 +131,37 @@ class TestTheProfilePatternIsNotQuadratic:
     ])
     def test_doubling_the_input_does_not_quadruple_the_time(
             self, pattern_name, module):
+        """Sized so the measurement survives a shared CI runner.
+
+        A ratio of two timings is only as stable as the smaller one. At
+        4 KB the linear pattern takes ~2 ms, where a scheduler hiccup is
+        a large fraction of the reading and the ratio can swing past any
+        threshold for no reason. 16 KB and 32 KB take ~8 ms and ~16 ms,
+        so the same absolute jitter is proportionally small — and the
+        quadratic version took 0.79 s at 16 KB, so the signal this is
+        looking for is three orders of magnitude clear of the noise.
+
+        min-of-5 rather than a mean: the fastest run is the one least
+        interrupted, and interruptions only ever add time.
+        """
         import importlib
 
         pattern = getattr(importlib.import_module(module), pattern_name)
 
         def took(n):
             text = "a-" * n
-            pattern.search(text)                    # warm
-            best = min(_timed(pattern, text) for _ in range(3))
-            return best
+            pattern.search(text)                    # warm the cache
+            return min(_timed(pattern, text) for _ in range(5))
 
-        small = took(4000)
-        large = took(8000)
+        small = took(8000)
+        large = took(16000)
 
-        # Linear is 2.0x. Quadratic is 4.0x and was measured at 4.0x.
+        # Linear is 2.0x. Quadratic is 4.0x, and was measured at 4.0x.
+        # 3.0 sits between them with room on both sides.
         assert large < small * 3.0, (
             f"doubling the input multiplied the time by {large / small:.1f} "
-            f"— {pattern_name} looks super-linear again"
+            f"({small * 1000:.1f} ms -> {large * 1000:.1f} ms) — "
+            f"{pattern_name} looks super-linear again"
         )
 
     def test_a_large_prompt_profiles_promptly(self):
