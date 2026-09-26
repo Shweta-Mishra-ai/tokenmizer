@@ -438,7 +438,12 @@ _ATTRIBUTE_LIKE_EXT = frozenset({
     "c", "h", "cs", "ex", "go", "rs", "sh", "md", "in",
 })
 _RECEIVER = frozenset({"self", "cls"})
-_ASSIGNED_BEFORE = re.compile(r"(?:=|\[)[ \t]*$")
+# The right-hand side of a Python assignment to a lowercase name (`db =
+# queryset.db`, `using=queryset.db`), or a subscript (`connections[x.db]`).
+# Not a shell or env assignment (`SCRIPT=build.sh`, `DB=app.db`), and not a
+# bracket that follows no name (`[notes.md]`, `[[design.md]]`): those name
+# files.
+_ASSIGNED_BEFORE = re.compile(r"(?:\b[a-z_][a-z0-9_.]*[ \t]*=(?!=)|\w\[)[ \t]*$")
 
 
 def _is_module_reference(text: str, start: int, end: int) -> bool:
@@ -481,8 +486,8 @@ def _is_code_attribute(name: str, text: str, start: int, end: int) -> bool:
     if text[end:end + 1] == "(":
         return True
     # The right-hand side of an assignment or a subscript: `db =
-    # queryset.db`, `using=self.db`, `connections[self.db]`.
-    return bool(_ASSIGNED_BEFORE.search(text, max(0, start - 8), start))
+    # queryset.db`, `using=queryset.db`, `connections[conn.db]`.
+    return bool(_ASSIGNED_BEFORE.search(text, max(0, start - 40), start))
 
 
 # A path in a unified-diff header carries git's `a/` or `b/` side prefix:

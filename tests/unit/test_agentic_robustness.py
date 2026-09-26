@@ -764,6 +764,7 @@ def test_module_paths_are_not_files(text, files):
     "if (any(np.less(weights, 0.)) or",
     "            if instance._state.db is None:",
     "        db = queryset.db",
+    "rows = cache[conn.db]",
 ])
 def test_code_attributes_are_not_files(text):
     assert _x([{"role": "tool", "content": text}]).files == []
@@ -773,6 +774,10 @@ def test_code_attributes_are_not_files(text):
     ("Copied data from test.db to prod.db.", ["test.db", "prod.db"]),
     ("I updated go.sum and pom.xml, and the schema in schema.sql.",
      ["go.sum", "pom.xml", "schema.sql"]),
+    # Brackets and shell assignments name files, not attributes.
+    ("See [notes.md] for details.", ["notes.md"]),
+    ("Linked it from [[design.md]].", ["design.md"]),
+    ("Set SCRIPT=build.sh and DB=app.db in the env.", ["build.sh", "app.db"]),
 ])
 def test_files_with_attribute_like_extensions_are_still_files(text, files):
     assert _x([{"role": "assistant", "content": text}]).files == files
