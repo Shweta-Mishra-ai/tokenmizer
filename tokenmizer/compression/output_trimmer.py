@@ -92,14 +92,20 @@ _INLINE_REDUNDANCIES = [
 # What makes a fragment worth keeping even though it matched a filler
 # pattern: a number, a code span, a path, a URL, or a flag. A sign-off
 # carrying any of these is not a sign-off.
+# Bounded repeats, for the same reason as semantic_cache._LITERAL: an
+# unbounded repeat in front of a required literal makes the engine
+# rescan the run from every start position, which is quadratic. The
+# fragments reaching this are usually short, but a closing-filler match
+# carries `[^.!?]*` and a response need not contain sentence
+# punctuation, so "usually short" is not a bound.
 _INFORMATION = re.compile(
     r"""
       \d                                  # any digit: 003, 2.1%, p99, 120ms
-    | `[^`]+`                             # an inline code span
+    | `[^`\n]{1,200}`                     # an inline code span
     | https?://                           # a URL
-    | (?:^|[\s(])[/~][\w./-]+             # an absolute or ~ path
-    | \b[\w-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|sql|ya?ml|json|toml|md|sh)\b
-    | (?:^|\s)--?[a-z][\w-]*              # a command-line flag
+    | (?:^|[\s(])[/~][\w./-]{1,120}       # an absolute or ~ path
+    | \b[\w-]{1,64}\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|sql|ya?ml|json|toml|md|sh)\b
+    | (?:^|\s)--?[a-z][\w-]{0,60}         # a command-line flag
     """,
     re.IGNORECASE | re.VERBOSE | re.MULTILINE,
 )
