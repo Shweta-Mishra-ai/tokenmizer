@@ -353,18 +353,18 @@ def _get_provider():
 
 # In-process graph cache — avoids SQLite reload on every request.
 #
-# Concurrency note (corrected — the previous comment here overstated its
-# own mechanism): concurrent asyncio coroutines mutating the SAME
-# GraphMemory object do not actually corrupt its dicts, but not because of
-# `_get_session_lock()` — that lock is only acquired by the background
-# LLM-extraction task, not by the request-handling path. The real reason
-# it's safe is that GraphMemory's mutation methods (add_node, add_edge,
-# extract_from_messages, etc.) contain no internal `await`, and CPython's
-# cooperative scheduler only switches between coroutines at await points —
-# so two coroutines' calls into the same object can never interleave
-# mid-method. This was verified empirically (not assumed) during the
-# audit: concurrent add_node() calls across 50 coroutines never dropped a
-# node. What IS a real risk — and what `_graph_cache_touch()` below
+# Concurrency note. Both paths that mutate a session's GraphMemory now
+# hold that session's lock: the background LLM-extraction task takes it in
+# `_run_extraction`, and the request path takes it around `_update_graph`
+# (see the comment at that call). An earlier version of this note said the
+# lock was "only acquired by the background LLM-extraction task, not by
+# the request-handling path" — that stopped being true when the foreground
+# lock was added, and it mattered, because the argument that replaced it
+# was that GraphMemory's mutators contain no internal `await` and so two
+# coroutines can never interleave mid-method. That argument is sound for
+# coroutines and says nothing about threads, and `_extract_heuristic` now
+# runs the extraction pass in one. The lock is what makes that safe; the
+# absence of awaits is not. What is ALSO a real risk — and what `_graph_cache_touch()` below
 # actually guards against — is EVICTING a GraphMemory instance (and force-
 # persisting its current state) while a request or the background task
 # still holds that session's lock, i.e. is actively using it. If that
@@ -968,6 +968,36 @@ async def _cross_session_query(
     )
 
 
+async def _extract_heuristic(graph, raw_messages) -> None:
+    """Run the heuristic extraction pass in a worker thread.
+
+    This is the single most expensive thing TokenMizer does per turn, and
+    it is pure CPU: regex passes over the whole message. Measured on the
+    request path, called inline, it stalled the event loop for as long as
+    it ran — 3.7 ms for a one-line turn, 33 ms for 3 KB, 86 ms for a 12 KB
+    pasted log, against a 0.23 ms idle floor. Every OTHER request in
+    flight paid that as latency, because a coroutine that never awaits
+    holds the loop thread outright.
+
+    A thread does not make it faster — the GIL is held throughout — but it
+    lets the loop be scheduled between bytecodes instead of waiting for
+    the whole pass, so one caller pasting a log stops adding its full
+    extraction time to everybody else's request.
+
+    Safety: the caller holds this session's lock for the whole of
+    `_update_graph` (see the block around it in chat_completions), so no
+    two threads ever touch one GraphMemory. Across sessions the graphs are
+    distinct objects and HybridExtractor is stateless after construction —
+    no method assigns to self — so the shared extractor and the read-only
+    domain packs are safe to share.
+
+    There were four identical copies of this call. One helper, so a change
+    to how extraction is dispatched cannot apply to three of them.
+    """
+    await asyncio.to_thread(graph.extract_from_messages, raw_messages,
+                            incremental=True)
+
+
 async def _update_graph(
     session_id: str,
     graph,
@@ -995,7 +1025,7 @@ async def _update_graph(
             new_msgs = [m for m in recent
                         if graph._msg_hash(m) not in graph._processed_hashes]
             if new_msgs:
-                graph.extract_from_messages(raw_messages, incremental=True)
+                await _extract_heuristic(graph, raw_messages)
                 _lock_ref = _get_session_lock(session_id)
 
                 async def _background_extract(
@@ -1039,8 +1069,12 @@ async def _update_graph(
                             # (regression-tested in test_hybrid_extractor).
                             ext = HybridExtractor()
                             extracted = await ext.extract(_msgs, provider_fn=_pfn)
-                            _g.extract_from_messages(_all, incremental=False,
-                                                     extracted_data=extracted)
+                            # Also off the loop: incremental=False
+                            # re-walks every message, so this is the
+                            # heavier pass of the two.
+                            await asyncio.to_thread(
+                                _g.extract_from_messages, _all,
+                                incremental=False, extracted_data=extracted)
                             logger.debug(f"HybridExtractor complete for {_sid}")
                         except Exception as e:
                             # Warning, not debug: this path can fail on
@@ -1073,11 +1107,11 @@ async def _update_graph(
                         _EXTRACTION_MAX_CONCURRENT,
                     )
             else:
-                graph.extract_from_messages(raw_messages, incremental=True)
+                await _extract_heuristic(graph, raw_messages)
         else:
-            graph.extract_from_messages(raw_messages, incremental=True)
+            await _extract_heuristic(graph, raw_messages)
     else:
-        graph.extract_from_messages(raw_messages, incremental=True)
+        await _extract_heuristic(graph, raw_messages)
 
     # Smart windowing. `memory.enabled` gates this — it is the switch for
     # the memory subsystem's summarisation behaviour, and until now
