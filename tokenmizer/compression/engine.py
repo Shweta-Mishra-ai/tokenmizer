@@ -366,11 +366,22 @@ class FileContentFilter:
         if depth > self.MAX_JSON_DEPTH:
             return f"...[depth limit {self.MAX_JSON_DEPTH}]"
         if isinstance(obj, dict):
-            return {
+            # Empty values are dropped for size, but WHICH ones is itself
+            # information: `{"deleted_at": null}` and `{}` say different
+            # things about a record, and a model asked to explain an API
+            # response cannot tell "the field is null" from "there is no
+            # such field". Every other cut in this class announces itself
+            # ("...[N rows omitted]", "...[depth limit 3]"); this one used
+            # to be the exception, so the keys it removed are now named.
+            cleaned = {
                 k: self._clean_json(v, depth + 1)
                 for k, v in obj.items()
                 if v is not None and v != [] and v != {}
             }
+            dropped = [k for k in obj if k not in cleaned]
+            if dropped:
+                cleaned["...[empty, omitted]"] = dropped
+            return cleaned
         if isinstance(obj, list):
             if len(obj) > 20:
                 trimmed = [self._clean_json(x, depth + 1) for x in obj[:5]]
