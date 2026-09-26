@@ -902,6 +902,7 @@ class GraphMemory:
             ),
             "decisions":    extracted.decisions,
             "files":        extracted.files,
+            "edited_files": getattr(extracted, "edited_files", []),
             "errors":       [
                 {"label": e, "resolved": e.lower().strip() in resolved}
                 for e in extracted.errors
@@ -1203,10 +1204,17 @@ class GraphMemory:
                 )
 
         # Files — linked to tasks and decisions that name them
+        edited = set(data.get("edited_files") or [])
         for f in data.get("files", []):
             if not f or len(f) < 3:
                 continue
             nid = self.add_node(NodeType.FILE, f, NodeStatus.IN_PROGRESS, importance=0.7)
+            if nid and f in edited and nid in self._nodes:
+                # Changed by a tool call: ranked above files only named.
+                node = self._nodes[nid]
+                if node.importance < 0.85:
+                    node.importance = 0.85
+                    self._dirty = True
             if nid:
                 file_ids.append(nid)
                 # An error recorded earlier that names this file.

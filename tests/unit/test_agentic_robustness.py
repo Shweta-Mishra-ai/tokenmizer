@@ -665,8 +665,12 @@ def test_files_that_were_worked_on_are_still_files(text, files):
     assert _x([{"role": "assistant", "content": text}]).files == files
 
 
-@pytest.mark.parametrize("payload", ["\t" * 8000, "\n" * 8000, " " * 8000, ". " * 4000],
-                         ids=["tabs", "blank-lines", "spaces", "dot-space"])
+@pytest.mark.parametrize("payload", ["\t" * 8000, "\n" * 8000, " " * 8000, ". " * 4000,
+                                     "  without" + " " * 400 + "x" * 300 + " " * 400 + "x" * 300
+                                     + ' it is./w/src/  File "x.py", line 1',
+                                     ("a.py\t" + " " * 300) * 8 + "!"],
+                         ids=["tabs", "blank-lines", "spaces", "dot-space",
+                              "names-then-failure", "tabbed-names-then-failure"])
 def test_every_extraction_regex_is_linear_on_whitespace(payload):
     """Every compiled pattern in the extraction modules, run directly. The
     full-extraction payload test cannot see a pattern that only ever gets
@@ -681,3 +685,170 @@ def test_every_extraction_regex_is_linear_on_whitespace(payload):
                 started = time.monotonic()
                 list(value.finditer(payload))
                 assert time.monotonic() - started < 1.0, name
+
+
+# ── Found on real agent sessions (SWE-bench trajectories, dev split) ─────────
+
+def test_different_errors_of_one_class_are_both_kept():
+    # One label per exception class used to be kept for the whole call, so a
+    # later, unrelated ValueError deleted an earlier one.
+    errors = HybridExtractor()._drop_restated_errors([
+        "ValueError: Imaginary coordinates are not permitted",
+        "ValueError: Error from parse_expr with transformed code",
+    ])
+    assert len(errors) == 2
+    # A thin restatement of the same failure is still collapsed.
+    assert HybridExtractor()._drop_restated_errors([
+        "Login keeps returning 422",
+        "Fixed: 422 error — missing email validation in the LoginRequest model",
+    ]) == ["Fixed: 422 error — missing email validation in the LoginRequest model"]
+
+
+@pytest.mark.parametrize("text", [
+    "Remember, YOU CAN ONLY ENTER ONE COMMAND AT A TIME. Wait for feedback.",
+    "Your changes have NOT been applied.\nDO NOT re-run the same failed edit command.",
+    "Let's run it again without encountering any configuration errors.",
+    "Let's modify it to raise a ValueError when the left operand is not a matrix.",
+    "[File: /r/v.py (900 lines total)]\n587:def f(X):\n588:    \"\"\"Raise a ValueError if X has 64bit indices\n589:    \"\"\"\n",
+])
+def test_agent_framework_text_is_not_an_error(text):
+    assert _x([{"role": "user", "content": text}]).errors == []
+
+
+@pytest.mark.parametrize("text,label", [
+    ("Traceback (most recent call last):\n  File \"x.py\", line 1\n"
+     "RuntimeError: Model class __main__.B doesn't declare an explicit app_label",
+     "RuntimeError: Model class __main__.B doesn't declare an explicit app_label"),
+    ("Traceback (most recent call last):\n  File \"x.py\", line 1\n"
+     "django.db.utils.OperationalError: no such table: tests_parent",
+     "django.db.utils.OperationalError: no such table: tests_parent"),
+    ("Traceback (most recent call last):\n  File \"x.py\", line 1\n"
+     "django.core.exceptions.ImproperlyConfigured: Requested setting INSTALLED_APPS, but not set",
+     "django.core.exceptions.ImproperlyConfigured: Requested setting INSTALLED_APPS"),
+    ("connect ECONNREFUSED 127.0.0.1:5432", "ECONNREFUSED"),
+    ("Running it raised a ValueError: invalid literal for int().", "ValueError: invalid literal"),
+    ("Please note the build failed twice yesterday.", "build failed twice"),
+])
+def test_real_failures_keep_their_whole_message(text, label):
+    errors = _x([{"role": "user", "content": text}]).errors
+    assert any(label in e for e in errors), errors
+
+
+def test_a_directory_listing_is_not_a_list_of_worked_on_files():
+    listing = "lib/matplotlib:\n__init__.py\n_afm.py\n_cm.py\naxes\nfigure.py\ncolors.py\n"
+    r = _x([{"role": "user", "content": listing},
+            {"role": "assistant", "content": "The bug is in lib/matplotlib/figure.py."}])
+    assert r.files == ["lib/matplotlib/figure.py"], r.files
+
+
+@pytest.mark.parametrize("text,files", [
+    ("from django.db import models", []),
+    # The name runs on past `.db`: "from" does not make it a file.
+    ("from django.db.models import Q", []),
+    ("import django.conf", []),
+    ("django.db.utils.OperationalError: no such table", []),
+    ("Removed the dependency from go.mod.", ["go.mod"]),
+    ("Copied data from test.db to prod.db.", ["test.db", "prod.db"]),
+])
+def test_module_paths_are_not_files(text, files):
+    assert _x([{"role": "assistant", "content": text}]).files == files
+
+
+@pytest.mark.parametrize("text", [
+    # Attributes and methods whose last part is a file extension, as they
+    # appear in the code SWE-agent and OpenHands sessions display.
+    "obj.save(force_insert=True, using=self.db)",
+    "connection = connections[self.db]",
+    "        self.sql = sql",
+    "if not np.allclose(np.abs(1. - np.sum(weights)), 0.):",
+    "if (any(np.less(weights, 0.)) or",
+    "            if instance._state.db is None:",
+    "        db = queryset.db",
+    "rows = cache[conn.db]",
+])
+def test_code_attributes_are_not_files(text):
+    assert _x([{"role": "tool", "content": text}]).files == []
+
+
+@pytest.mark.parametrize("text,files", [
+    ("Copied data from test.db to prod.db.", ["test.db", "prod.db"]),
+    ("I updated go.sum and pom.xml, and the schema in schema.sql.",
+     ["go.sum", "pom.xml", "schema.sql"]),
+    # Brackets and shell assignments name files, not attributes.
+    ("See [notes.md] for details.", ["notes.md"]),
+    ("Linked it from [[design.md]].", ["design.md"]),
+    ("Set SCRIPT=build.sh and DB=app.db in the env.", ["build.sh", "app.db"]),
+])
+def test_files_with_attribute_like_extensions_are_still_files(text, files):
+    assert _x([{"role": "assistant", "content": text}]).files == files
+
+
+def test_a_diff_header_names_the_file_once_without_its_side_prefix():
+    diff = ("diff --git a/sympy/solvers/polysys.py b/sympy/solvers/polysys.py\n"
+            "index b9809fd4e9..674322d4eb 100644\n"
+            "--- a/sympy/solvers/polysys.py\n+++ b/sympy/solvers/polysys.py\n"
+            "@@ -240,7 +240,7 @@ def _solve_reduced_system(system, gens, entry=False):\n")
+    assert _x([{"role": "assistant", "content": diff}]).files == ["sympy/solvers/polysys.py"]
+
+
+def test_a_path_that_starts_with_a_or_b_outside_a_diff_keeps_it():
+    assert _x([{"role": "assistant", "content": "The fix is in b/handlers.py."}]).files == ["b/handlers.py"]
+
+
+@pytest.mark.parametrize("text,files", [
+    ("Added the key to .env and .env.local, and ignored both in .gitignore.",
+     [".env", ".env.local", ".gitignore"]),
+    ("See config/.env.", ["config/.env"]),
+    ("pyobj_role = self.env.get_domain('py')", []),
+])
+def test_bare_dotfiles_are_files(text, files):
+    assert _x([{"role": "assistant", "content": text}]).files == files
+
+
+@pytest.mark.parametrize("name", ["Pipfile", "Podfile", "Containerfile", "Tiltfile", ".gitignore"])
+def test_every_file_the_extractor_emits_survives_validation(tmp_path, name):
+    # The validator kept its own copy of the extensionless names; it lacked
+    # these, and dropped them after the extractor had found them.
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    g.extract_from_messages([{"role": "user", "content": "x"},
+                             {"role": "assistant", "content": f"I updated the {name}."}],
+                            incremental=False)
+    assert name in [n.label for n in g._nodes.values() if n.type == NodeType.FILE]
+
+
+def test_resume_lists_the_most_recent_open_errors(tmp_path):
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    for i in range(6):
+        g.extract_from_messages([{"role": "user", "content":
+            f"Traceback (most recent call last):\n  File \"x.py\", line 1\n"
+            f"KeyError: 'field_{i}'"}], incremental=False)
+    block = g.to_context_block(token_budget=400)
+    assert "field_5" in block and "field_0" not in block, block
+
+
+def test_a_columnar_listing_with_crlf_is_not_a_list_of_files():
+    # Plain `ls` prints names in columns; tool output often ends lines with
+    # \r\n. One such `ls -R` in an OpenHands session gave 906 FILE nodes.
+    listing = ("ls -R /workspace/repo\r\n/workspace/repo:\r\n"
+               "CHANGES.rst\t    appveyor.yml      licenses\r\n"
+               "CITATION\t    astropy\t      pip-requirements\r\n"
+               "CODE_OF_CONDUCT.md  astropy.egg-info  setup.py\r\n"
+               "CONTRIBUTING.md     conftest.py       tox.ini\r\n"
+               "LICENSE.rst\t    docs\t      README.rst\r\n")
+    assert _x([{"role": "tool", "content": listing}]).files == []
+
+
+def test_a_file_changed_by_a_tool_call_leads_the_resume(tmp_path):
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    msgs = [
+        {"role": "user", "content": "Context: a.py b.py c.py d.py e.py f.py g.py h.py i.py j.py k.py."},
+        {"role": "assistant", "content": "Editing.", "tool_calls": [{
+            "id": "1", "type": "function", "function": {
+                "name": "str_replace_editor",
+                "arguments": json.dumps({"command": "str_replace", "path": "/w/src/core.py",
+                                         "old_str": "a", "new_str": "b"})}}]},
+    ]
+    for k in (1, 2):
+        g.extract_from_messages(msgs[:k])
+    files_line = next(ln for ln in g.to_context_block(400).splitlines() if ln.startswith("Files:"))
+    assert files_line.startswith("Files: /w/src/core.py"), files_line

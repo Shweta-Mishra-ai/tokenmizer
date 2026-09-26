@@ -24,6 +24,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from tokenmizer.graph_memory.patterns import _FILE_EXTENSIONLESS
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,13 +57,12 @@ _NOISE_PATTERNS = [
 
 _EXCEPTION_NAME = re.compile(r'\b[A-Z][A-Za-z0-9]*(?:Error|Exception|Fault)\b')
 
-# Build files with no extension — kept in step with hybrid_extractor's
-# _FILE_EXTENSIONLESS, so a file the extractor is willing to emit is one the
-# validator recognises as a filename.
-_EXTENSIONLESS_FILE = re.compile(
-    r'Dockerfile|Makefile|Procfile|Jenkinsfile|Gemfile|Rakefile|Vagrantfile|'
-    r'Brewfile|Justfile|Caddyfile|CODEOWNERS|MANIFEST\.in'
-)
+# Build files with no extension, and bare dotfiles: the extractor's own
+# pattern, so a file the extractor is willing to emit is one the validator
+# recognises as a filename. This was a hand-kept copy that drifted: it
+# lacked Pipfile, Podfile, Containerfile and eleven others, so the
+# extractor emitted them and the validator silently dropped every one.
+_EXTENSIONLESS_FILE = _FILE_EXTENSIONLESS
 
 # Vulnerability classes are named by acronym far more often than described.
 _VULN_CLASS = re.compile(

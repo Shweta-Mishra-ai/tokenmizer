@@ -443,6 +443,32 @@ a different corpus and scorer than the numbers above) ties TokenMizer
 and Graphiti-style (59%), ahead of GraphRAG-style (44%), MemGPT-style
 (35%), and every naive baseline (under 20%).
 
+**Measured on real agent traffic, not only on labelled corpora.** The
+same research repository runs the product on **1,467 public SWE-bench
+agent sessions**: SWE-agent with GPT-4, GPT-4o, Claude 3 Opus and
+Claude 3.5 Sonnet, and OpenHands with function calling, about 31 M
+tokens in total. No label is written by hand:
+- the files the agent edited come from its submitted patch;
+- its errors come from tracebacks and linter output in tool results.
+
+Sessions are split by issue. Bugs were found on one half only, and the
+other half (716 sessions) was scored once, before and after the fixes:
+
+| Test split, 716 sessions | Before | After |
+|---|---:|---:|
+| Runtime errors recalled | 63% | **92%** |
+| Runtime errors that reach the resume block | 20% | **50%** |
+| Edited files that reach the resume block | 51% | **67%** |
+| Extracted errors that match a real error (lower bound) | 16% | **31%** |
+| Edited-file recall | 75% | 78% |
+
+In the production condition, one message per call, runtime-error recall
+went from 72% to **96%**.
+
+The comparison methods recall 5–12% of those runtime errors. Full
+tables, confidence intervals and threats to validity:
+[`REPORT_real_agents.md`](https://github.com/Shweta-Mishra-ai/tokenmizer-research/blob/main/benchmarks/results/REPORT_real_agents.md).
+
 To [**Benchmarks**](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md) — memory quality against a
 plain-summary baseline, storage, and how to score your own sessions.
 
@@ -501,7 +527,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1733 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1780 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

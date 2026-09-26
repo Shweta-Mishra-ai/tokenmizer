@@ -6,8 +6,69 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1733 tests; every published number below was
+remembering. Suite is now 1780 tests; every published number below was
 re-derived from a run.
+
+### Real agent sessions: error loss, false errors and file noise
+
+Found by running the product on 1,467 public SWE-bench agent trajectories
+(SWE-agent with four models, and OpenHands with function calling), using
+automatic ground truth: the files changed by the submitted patch, and the
+errors in tool observations. The sessions are split by issue: bugs were
+found on the dev half only, and the test half was scored once before and
+once after (tokenmizer-research `REPORT_real_agents.md`).
+
+On the 716-session test split (paired bootstrap, 95% intervals):
+- runtime-error recall **63% → 92%** (+28.8 points [+25.3, +32.6]); in
+  the production condition, one message per call, **72% → 96%**;
+- error precision against the automatic labels **16% → 31%**;
+- runtime errors present in the 400-token resume **20% → 50%**, and
+  edited files present in it **51% → 67%**;
+- edited-file recall +2.2 points, an interval that crosses zero;
+  +3.7 points [+2.0, +5.5] with build artifacts removed. 13
+  sessions lost recalled files. On dev, every lost file was one the agent
+  never named, matched before only through a directory listing;
+- no session failed or timed out under either commit.
+
+- **Errors were lost.**
+  - One label was kept per exception class for a whole extraction call, so
+    a later, unrelated `ValueError` deleted an earlier one.
+  - A traceback's last line was cut at the first dot or comma, and
+    qualified exceptions lost their module path.
+- **False errors.**
+  - "E + capitals" was read as an errno name ("YOU CAN ONLY **ENTER** ONE
+    COMMAND AT A TIME" in every SWE-agent session).
+  - Instruction boilerplate, negated mentions ("without encountering any
+    errors") and code behaviour ("to raise a ValueError when …").
+  - Docstrings in line-numbered file views.
+- **Directory listings became files.** This includes columnar and `\r\n`
+  output. One `ls -R` added 906 FILE nodes, the graph hit its 200-node cap,
+  and the files the agent edited were pruned. Dotted module paths ("from
+  django.db import models") are no longer files.
+- **Resume ordering.** Open errors and files are ordered by importance and
+  then recency; they were oldest first. Files changed by a tool call rank
+  first.
+- **A quadratic listing regex** introduced during this work was found by
+  fuzzing and fixed; the linearity test carries the payload.
+- **Code attributes and diff prefixes are not files; dotfiles are.** Found
+  on dev after the test split was scored, so the numbers above do not
+  include it:
+  - `self.db`, `np.sum(weights)` and `instance._state.db` were stored as
+    files. They are now judged by code context, and only for extensions
+    that double as attribute names; `data.db` and `go.sum` in prose are
+    unchanged, and so are files in brackets or shell assignments
+    (`[notes.md]`, `SCRIPT=build.sh`). They made up about 4% of extracted
+    file labels on dev; removing them cost no recalled file there.
+  - "from django.db.models import Q" no longer stores `django.db`.
+  - A diff header's `a/` and `b/` prefixes no longer turn one file into
+    three.
+  - Bare `.env`, `.env.local` and `.gitignore` were never extracted.
+  - The validator's copy of the extensionless file names had drifted: it
+    silently dropped `Pipfile`, `Podfile`, `Containerfile` and eleven
+    others after the extractor had found them. It now uses the
+    extractor's pattern.
+- The internal eval output is identical, and the five labelled corpora are
+  unchanged.
 
 ### Marker-free phrasing, per-request cost, and real-session noise
 
