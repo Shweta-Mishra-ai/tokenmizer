@@ -75,14 +75,25 @@ _MULTIWORD_POLARITY = [w for w in _POLARITY if " " in w]
 # A number, a version, a code span, a path, a dotted or snake_cased
 # identifier, a flag. These must match EXACTLY — a paraphrase keeps its
 # literals, so requiring them costs nothing a paraphrase would want.
+# Every repeat here is BOUNDED, and the snake_case branch uses a class
+# that excludes "_" inside the inner repeat. Both matter: this runs on
+# the request path against a caller-supplied prompt.
+#
+# The first version was quadratic — measured 4x the time for 2x the
+# input, 0.79 s on a 16 KB prompt. Two causes. Unbounded repeats before
+# a required literal (`[\w-]+\.` then an extension) make the engine
+# rescan the whole run from every start position. And `\w+(?:_\w+)+`
+# nests two repeats over overlapping character sets — `\w` already
+# includes "_" — so the engine can split a single run between them in
+# exponentially many ways, the textbook catastrophic shape.
 _LITERAL = re.compile(
     r"""
-      `[^`]+`
-    | \b\d[\w.]*                          # 003, 1.2.3, 5xx, 120ms
-    | \b[\w-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|sql|ya?ml|json|toml|md|sh|txt|csv)\b
-    | (?:^|[\s(])[/~][\w./-]+             # /etc/hosts, ~/.config
-    | (?:^|\s)--?[a-z][\w-]*              # --force, -v
-    | \b\w+(?:_\w+)+\b                    # snake_case identifiers
+      `[^`\n]{1,200}`
+    | \b\d[\w.]{0,40}                     # 003, 1.2.3, 5xx, 120ms
+    | \b[\w-]{1,64}\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|sql|ya?ml|json|toml|md|sh|txt|csv)\b
+    | (?:^|[\s(])[/~][\w./-]{1,120}       # /etc/hosts, ~/.config
+    | (?:^|\s)--?[a-z][\w-]{0,60}         # --force, -v
+    | \b[^\W_]{1,40}(?:_[^\W_]{1,40}){1,8}\b   # snake_case identifiers
     """,
     re.IGNORECASE | re.VERBOSE | re.MULTILINE,
 )
@@ -108,8 +119,21 @@ def _decisive_profile(prompt: str) -> tuple:
     return polarity, literals
 
 
+def _profile_of(entry) -> tuple:
+    """The entry's decisive profile, computed once and kept."""
+    if entry._profile is None:
+        entry._profile = _decisive_profile(entry.prompt)
+    return entry._profile
+
+
 def _same_question(a: str, b: str) -> bool:
-    """True when a semantic match is safe to serve."""
+    """True when a semantic match is safe to serve.
+
+    Convenience for callers comparing a single pair. The scan loop in
+    get() does NOT use this: it profiles the query once and compares
+    each candidate against that, because profiling the query inside the
+    loop repeats identical work up to max_semantic_scan times.
+    """
     return _decisive_profile(a) == _decisive_profile(b)
 
 
@@ -142,6 +166,14 @@ class CacheEntry:
     # prompt with no prior conversation, which is where the cache earns
     # its keep.
     context: str = ""
+
+    # The decisive-token profile of `prompt`, memoised on first use. The
+    # semantic scan compares every surviving candidate against the query's
+    # profile, so without this the same candidate is re-profiled on every
+    # lookup that reaches it — max_semantic_scan of them per miss, all on
+    # the request path. A prompt never changes once stored, so this is
+    # computed at most once per entry for the life of the process.
+    _profile: tuple | None = None
 
     # Bytes this entry costs, measured once at construction. The cache is
     # bounded by this as well as by entry count; see SemanticCache.
@@ -450,6 +482,8 @@ class SemanticCache:
         # another session's private entry.
         if self._embedder.available:
             query_emb = self._embedder.embed(prompt)
+            # Once per lookup, not once per candidate — see the loop below.
+            query_profile = _decisive_profile(prompt)
             best_score = 0.0
             best_key = None
 
@@ -483,7 +517,13 @@ class SemanticCache:
                 # _decisive_profile: polarity and literals are exactly what
                 # cosine smooths over, and serving the wrong answer costs
                 # more than the extra upstream call a rejection costs.
-                if not _same_question(prompt, entry.prompt):
+                #
+                # query_profile is computed ONCE, above the loop. Calling
+                # _same_question(prompt, ...) here instead re-profiled the
+                # query on every candidate — up to max_semantic_scan
+                # times for one lookup, all of it identical work, all of
+                # it on the request path.
+                if _profile_of(entry) != query_profile:
                     self._rejected_unsafe += 1
                     continue
                 score = EmbeddingEngine.cosine(query_emb, emb)
