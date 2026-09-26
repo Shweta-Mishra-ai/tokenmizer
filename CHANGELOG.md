@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1776 tests; every published number below was
+remembering. Suite is now 1780 tests; every published number below was
 re-derived from a run.
 
 ### Real agent sessions: error loss, false errors and file noise
@@ -56,7 +56,9 @@ On the 716-session test split (paired bootstrap, 95% intervals):
   - `self.db`, `np.sum(weights)` and `instance._state.db` were stored as
     files. They are now judged by code context, and only for extensions
     that double as attribute names; `data.db` and `go.sum` in prose are
-    unchanged. They made up about 4% of extracted file labels on dev.
+    unchanged, and so are files in brackets or shell assignments
+    (`[notes.md]`, `SCRIPT=build.sh`). They made up about 4% of extracted
+    file labels on dev; removing them cost no recalled file there.
   - "from django.db.models import Q" no longer stores `django.db`.
   - A diff header's `a/` and `b/` prefixes no longer turn one file into
     three.
