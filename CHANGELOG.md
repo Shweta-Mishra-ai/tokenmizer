@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1861 tests; every published number below was
+remembering. Suite is now 1865 tests; every published number below was
 re-derived from a run.
 
 ### Input cost: the proxy no longer costs more than it saves
@@ -43,10 +43,12 @@ output saving is not measured. Details in `docs/benchmarks.md`.
 
 ### File summaries answer the question asked
 
-- Tables carry a per-group breakdown (count, sum, mean per group for
-  every text column with 2–12 values), query-named columns first. The
-  documented "which regions underperforming" example could not be
-  answered from global statistics.
+- Tables carry a per-group breakdown: count, sum and mean per group for
+  text columns with 2–12 values and at least three rows per group,
+  identifiers excluded. Query-named groupings come first, and the measure
+  the groups differ most on leads. It is held to 40% of the budget so the
+  sample rows survive. The documented "which regions underperforming"
+  example could not be answered from global statistics.
 - Excel sheets were cut to 1,000 rows and described as 1,000 rows. The
   cap is 100,000 and a larger sheet states its real size.
 - The file-savings table (99.9% CSV, 98.8% PDF, 99.7% Excel, 95% JSON)

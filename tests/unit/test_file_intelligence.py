@@ -439,14 +439,46 @@ class TestPerGroupBreakdown:
         assert len(rest) == 4
         assert all(east < 0.75 * other for other in rest.values())
 
-    def test_breakdown_survives_the_budget_before_the_samples_do(self):
-        result = CSVExtractor().extract(_sales_csv(), "sales.csv", token_budget=150,
+    def test_breakdown_and_samples_both_fit_the_budget(self):
+        """The breakdown is held to a share of the budget, so it cannot
+        crowd out the sample rows — the only raw data the model sees."""
+        result = CSVExtractor().extract(_sales_csv(), "sales.csv", token_budget=400,
                                         query="revenue by region")
         assert "By region" in result.content
+        assert "Sample rows" in result.content
+
+    def test_the_measure_that_separates_the_groups_leads(self):
+        """The query names the grouping ("regions"), not the measure. When
+        the budget forces measures out, the one kept must be the one the
+        groups differ on — revenue here, not units, which is flat."""
+        result = CSVExtractor().extract(_sales_csv(), "sales.csv", token_budget=500,
+                                        query="which regions are underperforming")
+        block = result.content[result.content.index("By region"):]
+        assert "highest revenue mean first" in block
+        if "units" in block:
+            assert block.index("revenue") < block.index("units")
+
+    def test_a_budget_too_small_for_it_drops_the_breakdown_not_the_samples(self):
+        result = CSVExtractor().extract(_sales_csv(), "sales.csv", token_budget=150)
+        assert "By region" not in result.content
+
+    def test_identifiers_are_not_summed(self):
+        csv_text = "order_id,id,region,amount\n" + "\n".join(
+            f"{1000 + i},{i},{('n', 's', 'e')[i % 3]},{(i * 37) % 101}" for i in range(60))
+        content = CSVExtractor().extract(csv_text, "o.csv").content
+        assert "By region" in content
+        assert "order_id sum" not in content and " id sum" not in content
+        assert "amount sum" in content
+
+    def test_a_group_per_row_is_not_a_breakdown(self):
+        """Five rows, five names: every group is one row the samples
+        already show."""
+        content = CSVExtractor().extract(SMALL_CSV, "data.csv").content
+        assert "By name" not in content and "By department" not in content
 
     def test_the_column_the_query_names_is_broken_down_first(self):
         csv_text = "team,tier,score\n" + "\n".join(
-            f"t{i % 3},{'gold' if i % 2 else 'silver'},{i}" for i in range(60))
+            f"t{i % 3},{'gold' if i % 2 else 'silver'},{(i * 7) % 23}" for i in range(60))
         content = CSVExtractor().extract(csv_text, "s.csv", query="score by tier").content
         assert content.index("By tier") < content.index("By team")
 

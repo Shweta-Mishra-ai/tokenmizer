@@ -204,7 +204,8 @@ class CSVExtractor:
         # while the overall mean looks ordinary — and that question is most
         # of what anyone asks of a table. Placed before the samples because
         # the budget truncates from the end.
-        breakdown, broken_down = self._compute_breakdown(rows, columns, type_map, query)
+        breakdown, broken_down = self._compute_breakdown(
+            rows, columns, type_map, query, token_budget=token_budget)
         if breakdown:
             parts.append(breakdown)
 
@@ -297,15 +298,38 @@ class CSVExtractor:
         except (ValueError, TypeError):
             return None
 
+    # Share of the token budget the breakdown may take. The rest keeps the
+    # sample rows, which are the only raw data the model sees.
+    BREAKDOWN_SHARE = 0.4
+
+    def _is_identifier(self, rows: list[dict], col: str) -> bool:
+        """A key, not a quantity: its sum and mean mean nothing.
+
+        Named like one, or a run of consecutive distinct integers — a row
+        number. Distinct integers alone are not enough: prices in cents or
+        scores can all differ and are still quantities.
+        """
+        if re.search(r"(^|[_\s-])id$", col.strip().lower()):
+            return True
+        nums = [self._number(r.get(col)) for r in rows if r.get(col)]
+        if len(nums) < 2 or any(n is None or not n.is_integer() for n in nums):
+            return False
+        distinct = set(nums)
+        return len(distinct) == len(nums) and max(nums) - min(nums) + 1 == len(nums)
+
     def _compute_breakdown(self, rows: list[dict], columns: list[str],
                            type_map: dict, query: str = "",
+                           token_budget: int = 400,
                            max_groups: int = 12, max_dims: int = 3,
                            max_measures: int = 4) -> tuple[str, set]:
         """Count, sum and mean of each numeric column per group.
 
-        Grouping columns are text columns with 2..max_groups distinct values
-        — few enough that every group gets a line. Columns the query names
-        come first, so they are the ones that survive the token budget.
+        A grouping column has 2..max_groups distinct values and at least
+        three rows per group on average: fewer, and each group is a row
+        the samples already show. Identifier columns are not measures.
+        Columns the query names come first, and the whole breakdown is
+        held to BREAKDOWN_SHARE of the budget — dropping measures, then
+        whole groupings, rather than crowding out the sample rows.
         """
         words = {w.rstrip("s") for w in re.findall(r"[a-z0-9]+", query.lower())}
 
@@ -313,21 +337,22 @@ class CSVExtractor:
             return any(w and w in words
                        for w in (p.rstrip("s") for p in re.findall(r"[a-z0-9]+", col.lower())))
 
+        total = len(rows)
         dims = []
         for col in columns:
             if type_map.get(col) != "text":
                 continue
             groups = {r.get(col) for r in rows if r.get(col)}
-            if 2 <= len(groups) <= max_groups:
+            if 2 <= len(groups) <= max_groups and total >= 3 * len(groups):
                 dims.append(col)
-        measures = [c for c in columns if type_map.get(c) == "number"]
+        measures = [c for c in columns
+                    if type_map.get(c) == "number" and not self._is_identifier(rows, c)]
         if not dims or not measures:
             return "", set()
         dims = sorted(dims, key=lambda c: not named(c))[:max_dims]
-        measures = sorted(measures, key=lambda c: not named(c))[:max_measures]
+        # Ranked per grouping below, by how far apart the groups are.
 
-        blocks = []
-        for dim in dims:
+        def tally(dim: str):
             acc: dict[str, dict[str, list[float]]] = {}
             count: dict[str, int] = {}
             for r in rows:
@@ -340,24 +365,56 @@ class CSVExtractor:
                     v = self._number(r.get(m))
                     if v is not None:
                         slot.setdefault(m, []).append(v)
-            lead = measures[0]
+            return acc, count
+
+        def spread(acc, m: str) -> float:
+            """How far apart the groups are on m, relative to its scale.
+            The measure that separates the groups is the one a question
+            about them is asking about, whether or not it names it."""
+            means = [sum(v) / len(v) for v in (acc[g].get(m) for g in acc) if v]
+            if len(means) < 2:
+                return 0.0
+            scale = abs(sum(means) / len(means)) or 1.0
+            return (max(means) - min(means)) / scale
+
+        def render(dim, acc, count, ms: list[str], with_sum: bool) -> str:
+            lead = ms[0]
 
             def mean(g, m):
                 vals = acc[g].get(m) or []
                 return sum(vals) / len(vals) if vals else float("-inf")
 
-            lines = [f"By {dim} (rows · sum and mean per column, highest {lead} mean first):"]
+            what = "sum and mean" if with_sum else "mean"
+            lines = [f"By {dim} (rows · {what} per column, highest {lead} mean first):"]
             for g in sorted(count, key=lambda g: -mean(g, lead)):
                 cells = []
-                for m in measures:
+                for m in ms:
                     vals = acc[g].get(m)
-                    if vals:
-                        total = sum(vals)
-                        shown = f"{total:,.0f}" if total.is_integer() else f"{total:,.2f}"
-                        cells.append(f"{m} sum={shown} mean={total / len(vals):,.2f}")
+                    if not vals:
+                        continue
+                    t = sum(vals)
+                    if with_sum:
+                        shown = f"{t:,.0f}" if t.is_integer() else f"{t:,.2f}"
+                        cells.append(f"{m} sum={shown} mean={t / len(vals):,.2f}")
+                    else:
+                        cells.append(f"{m} mean={t / len(vals):,.2f}")
                 lines.append(f"  {g}: n={count[g]:,} · " + " · ".join(cells))
-            blocks.append("\n".join(lines))
-        return "\n\n".join(blocks), set(dims)
+            return "\n".join(lines)
+
+        cap = int(token_budget * self.BREAKDOWN_SHARE)
+        blocks: list[str] = []
+        kept: set = set()
+        for dim in dims:
+            acc, count = tally(dim)
+            ranked = sorted(measures, key=lambda m: (not named(m), -spread(acc, m)))
+            for ms, with_sum in ((ranked[:max_measures], True), (ranked[:2], False),
+                                 (ranked[:1], False)):
+                block = render(dim, acc, count, ms, with_sum)
+                if count_tokens("\n\n".join(blocks + [block])) <= cap:
+                    blocks.append(block)
+                    kept.add(dim)
+                    break
+        return "\n\n".join(blocks), kept
 
     def _compute_categoricals(self, rows: list[dict], columns: list[str],
                               type_map: dict, max_unique: int = 10,

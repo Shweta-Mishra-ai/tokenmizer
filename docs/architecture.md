@@ -266,19 +266,23 @@ whatever the summary says. What matters is whether the question can still
 be answered from it.
 
 For a table that means the schema, per-column statistics, and a
-**per-group breakdown**: every text column with 2–12 distinct values
-against the numeric columns, count, sum and mean per group, with the
-columns the query names first so they survive the budget. Global
-statistics alone could not answer the example above — a 50,000-row sales
-file where one region's revenue averages 40% below the rest has an
-ordinary-looking overall mean. With the breakdown the same file summarises
-to about 240 tokens and the gap is on one line:
+**per-group breakdown**: every text column with 2–12 distinct values and
+at least three rows per group, against the numeric columns that are not
+identifiers, with count, sum and mean per group. Groupings the query
+names come first; within a grouping, the measure the groups differ most
+on leads, since that is what a question about the groups is asking even
+when it does not name it. The breakdown is held to 40% of the budget —
+dropping sums, then measures, then groupings — so the sample rows
+survive. Global statistics alone could not answer the example above: a
+50,000-row sales file where one region's revenue averages 40% below the
+rest has an ordinary-looking overall mean. With the breakdown the gap is
+on one line:
 
 ```
-By region (rows · sum and mean per column, highest units mean first):
-  east: n=10,002 · units sum=257,117 mean=25.71 · revenue sum=1,528,042.06 mean=152.77
-  north: n=10,126 · units sum=259,431 mean=25.62 · revenue sum=2,581,759.28 mean=254.96
+By region (rows · sum and mean per column, highest revenue mean first):
+  north: n=10,126 · revenue sum=2,581,759.28 mean=254.96 · units sum=259,431 mean=25.62
   ...
+  east: n=10,002 · revenue sum=1,528,042.06 mean=152.77 · units sum=257,117 mean=25.71
 ```
 
 PDFs keep the pages that share the most words with the query; JSON keeps
