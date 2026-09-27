@@ -243,7 +243,7 @@ if no node already covers it — restating a node spends resume budget on
 nothing. One node per session, rewritten as the dropped span grows.
 
 Measured in [benchmarks](benchmarks.md): out-of-ontology retention 0% to
-100% on the fixtures in `benchmarks/resume_quality`, at +23 tokens of
+100% on the fixtures in `benchmarks/resume_quality`, at +25 tokens of
 resume block per session, with no section lost on the captured
 transcripts in the eval corpus.
 

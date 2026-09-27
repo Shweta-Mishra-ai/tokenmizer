@@ -6,8 +6,59 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1812 tests; every published number below was
+remembering. Suite is now 1849 tests; every published number below was
 re-derived from a run.
+
+### Input cost: the proxy no longer costs more than it saves
+
+`benchmarks/savings` replays a conversation through the real proxy and
+Anthropic adapter against a stand-in applying the documented prompt
+caching rules. Before this release it showed the proxy sending more input
+than the client alone until the history passed the windowing threshold
+(81% more at 10 turns, 21% more at 40), and costing more than a client
+that caches its own history at every length.
+
+- **Context injection repeated the request.** Nodes extracted from turns
+  still in the payload were injected anyway. A node whose label and
+  summary are fully present in one message of the outgoing payload is now
+  skipped; anything paraphrased or split across messages is still sent.
+- **The prompt cache could never hit.** The per-turn context block was
+  appended to the system prompt, which providers render first, so every
+  request changed its first bytes. It now goes at the end of the turn
+  being asked. Anthropic requests carry a cache marker on the history,
+  not only the system prompt, and the per-model minimums are corrected.
+- **Windowing moved the prefix every request.** `memory.stable_window`
+  (default `auto`: on for `anthropic`) holds the cut and its bridge until
+  the verbatim tail outgrows the budget, and rebuilds them if the client
+  edits the turns they replaced. Nothing the sliding window kept is
+  dropped.
+- **Usage reports the whole prompt.** Anthropic's `input_tokens` excludes
+  cached tokens; `prompt_tokens` is now the full prompt, with
+  `prompt_tokens_details.cached_tokens` and `tokenmizer.provider_cache`.
+
+After, `claude-sonnet-5`, input cost against a client with no caching:
+61% lower at 40 turns, 87% at 150, 93% at 300. A ten-turn session is
+still 21% higher: under the cache minimum, and the brevity instruction's
+output saving is not measured. Details in `docs/benchmarks.md`.
+
+### File summaries answer the question asked
+
+- Tables carry a per-group breakdown (count, sum, mean per group for
+  every text column with 2–12 values), query-named columns first. The
+  documented "which regions underperforming" example could not be
+  answered from global statistics.
+- Excel sheets were cut to 1,000 rows and described as 1,000 rows. The
+  cap is 100,000 and a larger sheet states its real size.
+- The file-savings table (99.9% CSV, 98.8% PDF, 99.7% Excel, 95% JSON)
+  had no runner and measured the budget, not the summary; replaced.
+
+### Corrected numbers
+
+- Extraction, files row: 98% / 100% / 99% → **100% / 100% / 100%**.
+  By origin: synthetic 97% → **98%**, real 90% → **91%**
+  (docs/benchmarks.md had not been updated with README).
+- Resume block cost: **+25 tokens** per session everywhere; two pages
+  still said +23.
 
 ### Real agent sessions: error loss, false errors and file noise
 
