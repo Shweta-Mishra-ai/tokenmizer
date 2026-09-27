@@ -214,3 +214,105 @@ def test_nothing_is_dropped_that_the_sliding_window_keeps(graph):
     kept_sliding = [m for m in sliding if m.get("role") != "system"]
     kept_stable = [m for m in stable if m.get("role") != "system"]
     assert kept_stable[-len(kept_sliding):] == kept_sliding
+
+
+def test_two_sessions_keep_their_own_cut(tmp_path):
+    """The frozen cut is per session; one session's bridge must never be
+    reused for another's history."""
+    window = SmartMessageWindow(token_budget=400, protect_recent=4)
+    a = GraphMemory("session-a", storage_dir=str(tmp_path / "a"))
+    b = GraphMemory("session-b", storage_dir=str(tmp_path / "b"))
+    a.extract_from_messages(_session(10), incremental=False)
+    b.extract_from_messages(_session(10), incremental=False)
+    history_b = [{**m, "content": m["content"].replace("module", "service")}
+                 for m in _session(12)]
+
+    first_a = _ask(window, a, _session(12), stable=True)
+    first_b = _ask(window, b, history_b, stable=True)
+    again_a = _ask(window, a, _session(12) + [{"role": "user", "content": "next?"},
+                                              {"role": "assistant", "content": "ok"}],
+                   stable=True)
+    assert again_a[:len(first_a)] == first_a
+    assert all("module_" not in m["content"] for m in first_b
+               if m.get("role") != "system")
+
+
+# ── Which provider gets the stable window ────────────────────────────────────
+
+@pytest.mark.parametrize("mode,provider,expected", [
+    ("auto", "anthropic", True),
+    ("auto", "openai", False),
+    ("on", "openai", True),
+    ("off", "anthropic", False),
+])
+def test_stable_window_mode(monkeypatch, mode, provider, expected):
+    from tokenmizer.api import app as app_module
+    monkeypatch.setattr(app_module.settings.memory, "stable_window", mode)
+    monkeypatch.setattr(app_module.settings, "provider", provider)
+    assert app_module._stable_window() is expected
+
+
+# ── Where the per-turn block goes on a multimodal turn ───────────────────────
+
+def test_a_multimodal_turn_gets_the_block_as_its_own_text_part():
+    from tokenmizer.api import app as app_module
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}
+    parts = [{"type": "text", "text": "what is in this?"}, image]
+    messages = [{"role": "user", "content": parts}]
+    app_module._append_volatile(messages, "CONTEXT")
+    assert messages[0]["content"][:2] == parts
+    assert messages[0]["content"][2] == {"type": "text", "text": "CONTEXT"}
+    assert len(parts) == 2, "the client's own content list was mutated"
+
+
+def test_words_in_a_multimodal_turn_count_as_present():
+    from tokenmizer.api import app as app_module
+    from tokenmizer.graph_memory.helpers import _content_to_text
+    node = type("N", (), {"label": "Use PostgreSQL for sessions", "summary": ""})()
+    content = [{"type": "text", "text": "we use PostgreSQL for sessions"},
+               {"type": "image_url", "image_url": {"url": "x"}}]
+    words = [app_module._content_words(_content_to_text(content))]
+    assert app_module._already_in_payload(node, words)
+
+
+# ── The benchmark's stand-in for the provider cache ──────────────────────────
+# The published savings figures rest on this simulator, so its rules are
+# pinned: a prefix is read only if an earlier request wrote it, a marker
+# under the minimum writes nothing, and a string and a one-block list are
+# the same bytes.
+
+def _sim():
+    from benchmarks.savings.runner import _PromptCache
+    return _PromptCache(minimum=5)
+
+
+def _turns(n):
+    return [{"role": "user" if i % 2 == 0 else "assistant",
+             "content": f"message number {i} with some words in it"} for i in range(n)]
+
+
+def test_simulator_reads_what_the_previous_request_wrote():
+    cache = _sim()
+    first = cache.bill(None, _mark_history_cacheable(_turns(3)))
+    second = cache.bill(None, _mark_history_cacheable(_turns(5)))
+    assert first["read"] == 0 and first["write"] > 0
+    assert second["read"] == first["write"], "the marked prefix of request 1 is read back"
+    assert second["total"] == second["read"] + second["write"] + second["uncached"]
+
+
+def test_simulator_reads_nothing_without_markers():
+    cache = _sim()
+    cache.bill(None, _turns(3))
+    assert cache.bill(None, _turns(5))["read"] == 0
+
+
+def test_simulator_writes_nothing_under_the_minimum():
+    from benchmarks.savings.runner import _PromptCache
+    cache = _PromptCache(minimum=10_000)
+    assert cache.bill(None, _mark_history_cacheable(_turns(3)))["write"] == 0
+
+
+def test_simulator_misses_when_an_earlier_byte_changes():
+    cache = _sim()
+    cache.bill("system v1", _mark_history_cacheable(_turns(3)))
+    assert cache.bill("system v2", _mark_history_cacheable(_turns(5)))["read"] == 0
