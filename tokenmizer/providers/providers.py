@@ -157,6 +157,11 @@ class LLMResponse:
     # OpenAI-shaped tool calls the model asked for, empty for a plain
     # answer. See providers/tools.py for the shape and the translations.
     tool_calls: list = field(default_factory=list)
+    # Of input_tokens, how many the provider served from its prompt cache
+    # and how many it wrote to it. input_tokens is always the whole
+    # prompt, as OpenAI reports prompt_tokens; these say how it was billed.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -265,32 +270,93 @@ class BaseProvider(ABC):
         )
 
 
-# Anthropic will not cache a prefix shorter than a per-model minimum and
-# silently ignores cache_control below it, so these thresholds must stay
-# in TOKENS and at or above the real minimums. Setting them lower (an
-# earlier version used 800 CHARACTERS) attaches cache_control to prompts
-# that can never be cached, and prompt caching silently never engages.
-_CACHE_MIN_TOKENS_DEFAULT = 1024
-_CACHE_MIN_TOKENS_HAIKU = 2048
+# Anthropic will not cache a prefix shorter than a per-model minimum, and
+# the minimum is not monotonic across generations. A marker on a shorter
+# prefix is harmless — no error, no write, no charge — so an unknown or
+# newer model gets the SMALLEST known minimum: erring low costs nothing,
+# erring high silently forgoes the discount on every prompt in between.
+# Checked in order; the first substring that appears in the model id wins.
+_CACHE_MINIMUMS: tuple[tuple[tuple[str, ...], int], ...] = (
+    (("opus-4-5", "opus-4-6", "haiku-4-5"), 4096),
+    (("opus-4-7", "3-5-haiku", "haiku-3-5"), 2048),
+    (("opus-4-8", "sonnet-5", "sonnet-4", "opus-4-1", "opus-4"), 1024),
+)
+_CACHE_MIN_TOKENS_FLOOR = 512
+
+
+def _cache_minimum(model: str) -> int:
+    name = (model or "").lower()
+    for needles, minimum in _CACHE_MINIMUMS:
+        if any(n in name for n in needles):
+            return minimum
+    return _CACHE_MIN_TOKENS_FLOOR
 
 
 def _anthropic_system_param(system_text: str, model: str):
     """Build the `system` parameter, marking it cacheable only when it is
-    actually long enough for Anthropic to cache.
+    long enough for Anthropic to cache on its own.
 
-    Returns a plain string when the prefix is too short (no point paying
-    the structured-block overhead) and a single cache-controlled text
-    block when it is long enough to earn the discount.
+    Returns a plain string when the prefix is too short and a single
+    cache-controlled text block when it is long enough to earn the
+    discount. A short system prompt still gets cached — as part of the
+    conversation prefix, by the breakpoint _mark_history_cacheable puts
+    on the history that follows it.
     """
-    minimum = (_CACHE_MIN_TOKENS_HAIKU if "haiku" in (model or "").lower()
-               else _CACHE_MIN_TOKENS_DEFAULT)
-    if count_tokens(system_text, model) < minimum:
+    if count_tokens(system_text, model) < _cache_minimum(model):
         return system_text
     return [{
         "type": "text",
         "text": system_text,
         "cache_control": {"type": "ephemeral"},
     }]
+
+
+def _mark_history_cacheable(conv: list[dict]) -> list[dict]:
+    """Put a cache breakpoint on the turn before the one being asked.
+
+    Every request resends the whole conversation, and Anthropic bills a
+    prefix it has already seen at about a tenth of the input price. The
+    breakpoint goes on the second-to-last message, not the last: the proxy
+    appends per-turn context to the final user turn, and the client never
+    sends that text back, so a breakpoint after it would be a write that
+    is never read. Each request then reads everything up to the previous
+    request's breakpoint and writes one exchange more.
+
+    Returns a new list; the caller's messages and content lists are not
+    mutated.
+    """
+    if len(conv) < 2:
+        return conv
+    target = conv[-2]
+    content = target.get("content")
+    if isinstance(content, str):
+        if not content.strip():
+            return conv
+        blocks = [{"type": "text", "text": content,
+                   "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        blocks = [*content[:-1],
+                  {**content[-1], "cache_control": {"type": "ephemeral"}}]
+    else:
+        return conv
+    return [*conv[:-2], {**target, "content": blocks}, conv[-1]]
+
+
+def _anthropic_input(usage) -> tuple[int, int, int]:
+    """(whole prompt, served from cache, written to cache).
+
+    Anthropic's input_tokens counts only what follows the last cache hit
+    or write; reporting it alone would show a cached prompt as a small
+    one, and every downstream "tokens sent" figure would claim a saving
+    the proxy did not make.
+    """
+    def _n(name: str) -> int:
+        v = getattr(usage, name, 0)
+        return v if isinstance(v, int) else 0
+
+    read = _n("cache_read_input_tokens")
+    write = _n("cache_creation_input_tokens")
+    return _n("input_tokens") + read + write, read, write
 
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
@@ -331,7 +397,8 @@ class AnthropicProvider(BaseProvider):
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
             sys_parts.insert(0, system)
-        conv = anthropic_messages(conversation_messages(messages))
+        conv = _mark_history_cacheable(
+            anthropic_messages(conversation_messages(messages)))
         system_text = "\n\n".join(sys_parts) if sys_parts else None
 
         try:
@@ -362,8 +429,11 @@ class AnthropicProvider(BaseProvider):
                 # text_stream carries text blocks only; tool_use blocks
                 # are read off the final message.
                 _, calls = anthropic_response(getattr(final, "content", None))
+                prompt, read, write = _anthropic_input(final.usage)
                 return LLMResponse(text=full_text,
-                                   input_tokens=final.usage.input_tokens,
+                                   input_tokens=prompt,
+                                   cache_read_tokens=read,
+                                   cache_write_tokens=write,
                                    output_tokens=final.usage.output_tokens,
                                    model=model, provider="anthropic",
                                    finish_reason=(finish_reason(final.stop_reason, calls)
@@ -374,9 +444,12 @@ class AnthropicProvider(BaseProvider):
                 model=model, messages=conv, max_tokens=max_tokens, **kwargs_clean
             )
             text, calls = anthropic_response(resp.content)
+            prompt, read, write = _anthropic_input(resp.usage)
             return LLMResponse(
                 text=text,
-                input_tokens=resp.usage.input_tokens,
+                input_tokens=prompt,
+                cache_read_tokens=read,
+                cache_write_tokens=write,
                 output_tokens=resp.usage.output_tokens,
                 model=model,
                 provider="anthropic",
@@ -404,7 +477,8 @@ class AnthropicProvider(BaseProvider):
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
             sys_parts.insert(0, system)
-        conv = anthropic_messages(conversation_messages(messages))
+        conv = _mark_history_cacheable(
+            anthropic_messages(conversation_messages(messages)))
         kwargs_clean = _sampling(kwargs)
         if "stop" in kwargs_clean:
             kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))

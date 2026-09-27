@@ -86,6 +86,7 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_PROXY_PORT` | `8000` | Port the CLI's `serve` binds to, alongside `TOKENMIZER_PROXY_HOST` |
 | `TOKENMIZER_MEMORY__MAX_TOKENS_BEFORE_SUMMARY` | `4000` | Conversation size at which older turns are summarised rather than carried verbatim |
 | `TOKENMIZER_MEMORY__RECENT_TURNS_VERBATIM` | `10` | How many recent turns always survive windowing untouched |
+| `TOKENMIZER_MEMORY__STABLE_WINDOW` | `auto` | Hold the windowing cut still between cuts, so the provider's prompt cache serves the history. `auto` is on for `anthropic` only; `on` / `off` force it. Sends more tokens at the cache-read price, so turn it on for another provider only if that provider caches prompt prefixes |
 | `TOKENMIZER_GRAPH_CHECKPOINT__MIN_CONFIDENCE` | `0.65` | Extraction confidence below which a fact is not written to the graph |
 | `TOKENMIZER_GRAPH_CHECKPOINT__SEMANTIC_RETRIEVAL` | `auto` | Rank injected context by embeddings. `auto` = on when the model actually loads, resolved once at startup; `true`/`false` pin it |
 | `TOKENMIZER_GRAPH_CHECKPOINT__CROSS_SESSION_RECALL` | `false` | Let a session retrieve facts from the same principal's other sessions |

@@ -30,13 +30,20 @@ def graph_with_signal(tmp_path):
     return g
 
 
+QUESTION = "how are we handling database access right now"
+
+
+def _last_user(messages):
+    return next(m for m in reversed(messages) if m.get("role") == "user")
+
+
 class TestContextInjectionWithoutExistingSystemMessage:
 
     async def test_context_is_injected_even_with_no_system_message(
         self, graph_with_signal, monkeypatch
     ):
         monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
-        raw = [{"role": "user", "content": "how are we handling database access right now"}]
+        raw = [{"role": "user", "content": QUESTION}]
         messages = [dict(m) for m in raw]
 
         updated, _ = await app_module._update_graph(
@@ -44,44 +51,33 @@ class TestContextInjectionWithoutExistingSystemMessage:
             "claude-sonnet-4-6", {}, raw[0]["content"],
         )
 
-        system_msgs = [m for m in updated if m.get("role") == "system"]
-        assert system_msgs, (
-            "no system message exists in the request, but relevant graph "
-            "context was found — it must be injected as a NEW system "
-            "message, not silently discarded"
+        turn = _last_user(updated)["content"].lower()
+        assert "relevant session context" in turn, (
+            "relevant graph context was found but is not in the request"
         )
-        assert "postgresql" in system_msgs[0]["content"].lower() or \
-               "auth" in system_msgs[0]["content"].lower(), (
-            f"injected system message doesn't contain the expected graph "
-            f"context: {system_msgs[0]['content']!r}"
-        )
+        assert "postgresql" in turn or "auth" in turn
 
-    async def test_injected_system_message_is_first_in_list(
+    async def test_the_question_itself_is_unchanged_and_comes_first(
         self, graph_with_signal, monkeypatch
     ):
-        """Convention: system message goes first, matching how it's
-        placed everywhere else in this codebase (compression layer,
-        smart window bridge message, etc.)."""
         monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
-        raw = [{"role": "user", "content": "how are we handling database access right now"}]
+        raw = [{"role": "user", "content": QUESTION}]
         messages = [dict(m) for m in raw]
 
         updated, _ = await app_module._update_graph(
             "ctx-inject-test", graph_with_signal, raw, messages,
             "claude-sonnet-4-6", {}, raw[0]["content"],
         )
-        assert updated[0]["role"] == "system"
+        assert _last_user(updated)["content"].startswith(QUESTION)
+        assert raw[0]["content"] == QUESTION, "the client's own message was mutated"
 
-    async def test_existing_system_message_still_gets_context_prepended(
+    async def test_existing_system_message_is_left_exactly_as_sent(
         self, graph_with_signal, monkeypatch
     ):
-        """Regression guard: must not break the EXISTING behavior (a
-        system message that's already present gets the context
-        prepended to it) while fixing the missing-system-message case."""
         monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
         raw = [
             {"role": "system", "content": "You are a helpful coding assistant."},
-            {"role": "user", "content": "how are we handling database access right now"},
+            {"role": "user", "content": QUESTION},
         ]
         messages = [dict(m) for m in raw]
 
@@ -91,27 +87,110 @@ class TestContextInjectionWithoutExistingSystemMessage:
         )
         system_msgs = [m for m in updated if m.get("role") == "system"]
         assert len(system_msgs) == 1, "must not create a SECOND system message"
-        assert "You are a helpful coding assistant." in system_msgs[0]["content"]
+        assert system_msgs[0]["content"] == "You are a helpful coding assistant."
 
 
-class TestInjectedContextKeepsTheSystemPrefixStable:
+class TestInjectedContextKeepsTheCacheablePrefixStable:
+    """Providers cache the longest byte-identical prefix of a request and
+    render the system prompt before the conversation. A block that changes
+    every turn must therefore sit after both, or every request re-pays for
+    the whole history."""
 
-    async def test_context_block_is_appended_after_the_clients_system_prompt(
+    async def test_system_prompt_and_earlier_turns_go_out_unchanged(
         self, graph_with_signal, monkeypatch
     ):
-        """Provider prompt caching keys on the longest unchanged prefix of
-        the system prompt. The context block changes every turn, so at the
-        front it invalidated the cache on every request behind an agent
-        with a long stable system prompt. It belongs at the end."""
         monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
         stable = "You are the deployment assistant. " * 40
-        raw = [{"role": "user", "content": "how are we handling database access right now"}]
+        raw = [
+            {"role": "user", "content": "we picked a datastore earlier"},
+            {"role": "assistant", "content": "Yes, noted."},
+            {"role": "user", "content": QUESTION},
+        ]
         messages = [{"role": "system", "content": stable}] + [dict(m) for m in raw]
 
         updated, _ = await app_module._update_graph(
             "ctx-inject-test", graph_with_signal, raw, messages,
-            "claude-sonnet-4-6", {}, raw[0]["content"],
+            "claude-sonnet-4-6", {}, QUESTION,
         )
+        assert updated[0] == {"role": "system", "content": stable}
+        assert updated[1:3] == raw[:2]
+        assert "relevant session context" in updated[-1]["content"]
+
+    async def test_a_trailing_tool_result_keeps_the_system_placement(
+        self, graph_with_signal, monkeypatch
+    ):
+        """Only a user turn is a safe place to append to; a tool result
+        closing an agent step is left as the provider expects it."""
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
+        raw = [
+            {"role": "user", "content": QUESTION},
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "read", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ]
+        messages = [dict(m) for m in raw]
+
+        updated, _ = await app_module._update_graph(
+            "ctx-inject-test", graph_with_signal, raw, messages,
+            "claude-sonnet-4-6", {}, QUESTION,
+        )
+        assert updated[-1] == raw[-1]
         system = next(m["content"] for m in updated if m["role"] == "system")
-        assert system.startswith(stable), "the stable prefix must come first"
-        assert "relevant session context" in system[len(stable):]
+        assert "relevant session context" in system
+
+
+class TestContextTheRequestAlreadyCarriesIsNotRepeated:
+
+    async def test_a_short_session_gets_no_duplicate_of_its_own_history(
+        self, graph_with_signal, monkeypatch
+    ):
+        """Every node was extracted from a turn still in this request, so
+        the block would only repeat it. This was 81% extra input on a
+        ten-turn session."""
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
+        raw = [
+            {"role": "user", "content": "Use PostgreSQL for the primary datastore "
+                                        "because relational integrity matters here"},
+            {"role": "assistant", "content": "Agreed."},
+            {"role": "user", "content": "Implement the user authentication flow "
+                                        "in api/auth.py next"},
+            {"role": "assistant", "content": "On it."},
+            {"role": "user", "content": QUESTION},
+        ]
+        messages = [dict(m) for m in raw]
+
+        updated, _ = await app_module._update_graph(
+            "ctx-inject-test", graph_with_signal, raw, messages,
+            "claude-sonnet-4-6", {}, QUESTION,
+        )
+        assert updated == raw
+
+    async def test_a_fact_whose_turn_is_gone_is_still_injected(
+        self, graph_with_signal, monkeypatch
+    ):
+        """The same graph, with the turns that stated it no longer in the
+        request (windowed, or truncated by the client) — the reason the
+        block exists."""
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
+        raw = [{"role": "user", "content": QUESTION}]
+        messages = [dict(m) for m in raw]
+
+        updated, _ = await app_module._update_graph(
+            "ctx-inject-test", graph_with_signal, raw, messages,
+            "claude-sonnet-4-6", {}, QUESTION,
+        )
+        assert "postgresql" in updated[-1]["content"].lower()
+
+    def test_a_paraphrase_is_not_mistaken_for_the_fact(self):
+        """Conservative by design: if one word of the label is missing the
+        node is treated as absent, and injected."""
+        node = type("N", (), {"label": "Use PostgreSQL for sessions", "summary": ""})()
+        words = [app_module._content_words("we store sessions in postgres")]
+        assert not app_module._already_in_payload(node, words)
+
+    def test_words_split_across_two_messages_do_not_count(self):
+        node = type("N", (), {"label": "Use PostgreSQL for sessions", "summary": ""})()
+        words = [app_module._content_words("PostgreSQL it is"),
+                 app_module._content_words("sessions next")]
+        assert not app_module._already_in_payload(node, words)

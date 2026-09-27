@@ -28,6 +28,14 @@ class MemorySettings(BaseModel):
     enabled: bool = True
     max_tokens_before_summary: int = 4000
     recent_turns_verbatim: int = 10
+    # Hold the windowing cut still between cuts instead of sliding it one
+    # turn per request, so the provider's prompt cache can serve the
+    # history. Sends more tokens (the verbatim tail grows back to the
+    # budget before the next cut) that are billed at the cache-read price,
+    # which is a saving only where the provider caches prefixes.
+    #   auto — on for anthropic, the provider this is measured against
+    #   on / off — force it
+    stable_window: Literal["auto", "on", "off"] = "auto"
 
 
 class GraphCheckpointSettings(BaseModel):

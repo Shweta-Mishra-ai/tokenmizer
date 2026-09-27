@@ -41,9 +41,10 @@ def client(monkeypatch):
         yield c, provider
 
 
-def _sent_system_text(provider) -> str:
+def _sent_text(provider) -> str:
     messages = provider.chat.call_args.kwargs["messages"]
-    return "\n".join(m["content"] for m in messages if m.get("role") == "system")
+    return "\n".join(m["content"] for m in messages
+                     if isinstance(m.get("content"), str))
 
 
 # A session with enough substance for the graph to have something to say.
@@ -59,14 +60,27 @@ HISTORY = [
 ]
 
 
+def _learn_then_ask(c, session_id, question):
+    """Turn 1 carries the history, so the graph learns it. Turn 2 is the
+    client having dropped that history — its own truncation, or a new
+    process — which is when the model needs the graph to say what "it"
+    refers to. With the history still in the request there is nothing to
+    add, and nothing is added."""
+    c.post("/v1/chat/completions", json={
+        "model": "gpt-4o", "session_id": session_id,
+        "messages": HISTORY + [{"role": "user", "content": "noted"}],
+    })
+    c.post("/v1/chat/completions", json={
+        "model": "gpt-4o", "session_id": session_id,
+        "messages": [{"role": "user", "content": question}],
+    })
+
+
 @pytest.mark.parametrize("followup", ["why?", "continue", "fix it", "keep going"])
 def test_short_followup_still_receives_session_context(client, followup):
     c, provider = client
-    c.post("/v1/chat/completions", json={
-        "model": "gpt-4o", "session_id": f"short-{followup.replace('?', '')}",
-        "messages": HISTORY + [{"role": "user", "content": followup}],
-    })
-    assert "relevant session context" in _sent_system_text(provider), (
+    _learn_then_ask(c, f"short-{followup.replace('?', '')}", followup)
+    assert "relevant session context" in _sent_text(provider), (
         f"a {len(followup.split())}-word follow-up got no graph context; "
         "these are the turns that most need it"
     )
@@ -74,12 +88,8 @@ def test_short_followup_still_receives_session_context(client, followup):
 
 def test_long_query_behaviour_is_unchanged(client):
     c, provider = client
-    c.post("/v1/chat/completions", json={
-        "model": "gpt-4o", "session_id": "long-query",
-        "messages": HISTORY + [
-            {"role": "user", "content": "which datastore did we choose for orders"}],
-    })
-    assert "relevant session context" in _sent_system_text(provider)
+    _learn_then_ask(c, "long-query", "which datastore did we choose for orders")
+    assert "relevant session context" in _sent_text(provider)
 
 
 def test_last_substantive_query_walks_back_past_short_turns():
