@@ -21,7 +21,10 @@ what is under test here is the blending logic — the rank cutoff, additivity,
 cache invalidation, graceful degradation — not the model's judgement. How
 well the real model ranks real questions is measured by
 `python -m benchmarks.graph_retrieval.query_eval`, which is the right place
-for it (recall@6 85% -> 92% with the blend on).
+for it. Keyword ranking measures **88%** there now; the 85% -> 92%
+pair once quoted for the blend came from a 13-case eval, has not been
+re-measured against the current 40-case one, and must not be quoted —
+see docs/roadmap.md.
 """
 from __future__ import annotations
 

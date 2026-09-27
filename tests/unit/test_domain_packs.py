@@ -8,7 +8,7 @@ because the shapes are wrong but because nobody in those rooms says
 "Decided:" or "Fixed:".
 
 Measured on `benchmarks/eval/corpus_domains`, three labelled sessions:
-**macro F1 11% with the coding patterns alone, 96% with the packs.**
+**macro F1 11% with the coding patterns alone, 93% with the packs.**
 Reproduce either with `--ignore-packs`.
 
 The two rules that keep this safe are what these tests pin:

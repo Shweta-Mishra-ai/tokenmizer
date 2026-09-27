@@ -4,9 +4,11 @@
 It used to default to `false`, so a deployment with the embedding model
 sitting in its image ranked context by token overlap anyway unless someone
 found the flag. Measured on the retrieval eval, keyword ranking gets
-recall@6 **82% over 40 paraphrased questions**, and the misses are exactly
-the paraphrases embeddings exist for ("what is slow about the dashboard"
-against a node that says "re-render").
+recall@6 **88% over 40 paraphrased questions**. The two misses are
+abstract questions sharing no keyword with their answer — "what is still
+not safe across workers" and "what were we getting badly wrong" — which
+is the shape embeddings are meant for, though whether they recover them
+is untested (the model cannot load in this sandbox).
 
 The one thing that must not happen is assuming the capability is present.
 sentence-transformers ships no weights: the package being installed says

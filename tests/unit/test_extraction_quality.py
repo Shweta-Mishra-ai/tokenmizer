@@ -169,10 +169,10 @@ class TestQualityFloors:
         return evaluate(corpus_mod.load())
 
     @pytest.mark.parametrize("category,min_f1", [
-        ("completed_tasks", 0.82),   # measured 0.91
+        ("completed_tasks", 0.82),   # measured 0.98
         ("pending_tasks",   0.82),   # measured 0.95
-        ("decisions",       0.84),   # measured 0.92
-        ("files",           0.92),   # measured 0.99
+        ("decisions",       0.84),   # measured 0.99
+        ("files",           0.92),   # measured 1.00
         ("errors",          0.86),   # measured 0.94
     ])
     def test_category_f1_floor(self, result, category, min_f1):
@@ -180,7 +180,7 @@ class TestQualityFloors:
 
     def test_macro_f1_floor(self, result):
         f1s = [m["f1"] for m in result["micro"].values()]
-        assert sum(f1s) / len(f1s) >= 0.85   # measured 0.92
+        assert sum(f1s) / len(f1s) >= 0.85   # measured 0.97
 
     def test_real_transcripts_floor(self, result):
         """Scored separately, because the synthetic half is easier and a
@@ -190,7 +190,7 @@ class TestQualityFloors:
         assert len(real) >= 6, "real-transcript sample shrank"
         sub = evaluate(real)
         f1s = [m["f1"] for m in sub["micro"].values()]
-        assert sum(f1s) / len(f1s) >= 0.84   # measured 0.90
+        assert sum(f1s) / len(f1s) >= 0.84   # measured 0.91
 
     def test_label_quality_floor(self, result):
         """Before clipping: 23% truncated, 27% multi-sentence."""
