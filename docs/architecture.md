@@ -242,7 +242,7 @@ only if it carries a quantity with a unit or a constraint verb, and only
 if no node already covers it — restating a node spends resume budget on
 nothing. One node per session, rewritten as the dropped span grows.
 
-Measured in [benchmarks](benchmarks.md): out-of-ontology retention 17% to
+Measured in [benchmarks](benchmarks.md): out-of-ontology retention 0% to
 100% on the fixtures in `benchmarks/resume_quality`, at +23 tokens of
 resume block per session, with no section lost on the captured
 transcripts in the eval corpus.

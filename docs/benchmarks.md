@@ -96,7 +96,7 @@ re-render"). If the question quoted the answer, the person would not have
 needed to ask — and those are exactly the cases token-overlap ranking
 cannot serve.
 
-**recall@6 82%** with keyword ranking. Every case is checked to be
+**recall@6 88%** with keyword ranking. Every case is checked to be
 answerable from its own transcript before scoring: an ungrounded question
 measures extraction, not retrieval, and reads as a retrieval failure
 forever.
@@ -117,9 +117,9 @@ planning session:
 |---|---|---|
 | Completed tasks | 15% | **100%** |
 | Pending tasks | 29% | **100%** |
-| Decisions | 0% | **100%** |
-| Errors | 0% | **82%** |
-| **macro F1** | **11%** | **96%** |
+| Decisions | 0% | **94%** |
+| Errors | 0% | **78%** |
+| **macro F1** | **11%** | **93%** |
 
 Add `--ignore-packs` to reproduce the left column. The coding corpus is
 unchanged at 97%, because a pack's pattern families run *after* the
@@ -128,7 +128,7 @@ coding ones and can only add recall.
 These three sessions are hand-written, which the harness reports as
 `synthetic`. The caveat that applies to the coding fixtures applies here
 with more force: three sessions, one author, and the same person wrote
-the patterns. Treat 96% as "the mechanism works on sessions of this
+the patterns. Treat 93% as "the mechanism works on sessions of this
 shape", not as a generalisation claim.
 
 ## Resume quality — what survives windowing
@@ -140,7 +140,7 @@ latency target — used to leave the session at that point permanently.
 
 | | before | after |
 |---|---|---|
-| Out-of-ontology facts still readable in the resume block | 17% | **100%** |
+| Out-of-ontology facts still readable in the resume block | 0% | **100%** |
 | Resume block, per session | — | **+23 tokens** |
 | Sections lost on the corpus's six real transcripts | — | **0** |
 

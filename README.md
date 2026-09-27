@@ -283,7 +283,7 @@ Decided: Root cause is connection pool exhaustion after the 14:02 deploy
 Symptoms: Error rate is 34 percent and p99 latency jumped to 8 seconds
 ```
 
-**11% to 96%** on the labelled sessions in `benchmarks/eval/corpus_domains`,
+**11% to 93%** on the labelled sessions in `benchmarks/eval/corpus_domains`,
 with the coding corpus unchanged — a pack's patterns run *after* the
 coding ones and can only add. Three hand-written sessions, so read it as
 "the mechanism works on sessions of this shape", not as a generalisation
@@ -428,7 +428,7 @@ is a small sample and the same person wrote every label.
 **Retrieval is measured separately.** `python -m
 benchmarks.graph_retrieval.query_eval` scores what `query()` returns for
 questions phrased the way a person asks them, not in the node's own
-words: **recall@6 82% over 40 cases**, keyword ranking only. The eval was
+words: **recall@6 88% over 40 cases**, keyword ranking only. The eval was
 13 cases until this branch, where one case flipping moved the headline by
 8 points; every case is checked to be answerable from its own transcript,
 because an ungrounded question measures extraction and reads as a

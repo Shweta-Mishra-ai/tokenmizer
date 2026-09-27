@@ -47,7 +47,7 @@ class GraphCheckpointSettings(BaseModel):
     # The pair once quoted here — recall@6 85% keyword vs 92% with
     # embeddings — came from a 13-case eval, where one question flipping
     # moves the headline by 8 points. That eval is now 40 cases and
-    # keyword ranking scores 82% on it; the 92% figure has NOT been
+    # keyword ranking scores 88% on it; the 92% figure has NOT been
     # re-measured against it and must not be quoted (docs/roadmap.md and
     # README.md say the same, and this comment used to contradict them).
     #
@@ -65,7 +65,7 @@ class GraphCheckpointSettings(BaseModel):
     #
     #   "auto" (the default) — on when the model is actually loadable, off
     #                          otherwise. Measured on the retrieval eval:
-    #                          keyword ranking gets recall@6 82% over 40
+    #                          keyword ranking gets recall@6 88% over 40
     #                          paraphrased questions, and the misses are
     #                          exactly the paraphrases embeddings exist
     #                          for. A capability that is present should not
