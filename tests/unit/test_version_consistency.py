@@ -313,7 +313,9 @@ def test_every_merged_contributor_is_credited():
     if nxt:
         body = body[:nxt.start()]
 
-    handles = set(re.findall(r"github\.com/([\w.-]+)\)", body))
+    # Matches a profile link in either form the section has used: a
+    # markdown link ending in ")" and an HTML href ending in a quote.
+    handles = set(re.findall(r'github\.com/([\w.-]+)[)"]', body))
     missing = credited - handles
     assert not missing, (
         f"contributors dropped from the README: {sorted(missing)}. "

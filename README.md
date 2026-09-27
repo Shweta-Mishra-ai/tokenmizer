@@ -545,14 +545,14 @@ to run the eval harness.
 
 ## Contributors
 
-Thank you to everyone who has contributed to TokenMizer.
+Thank you to the people whose pull requests are part of TokenMizer.
 
-| Contributor | Merged pull requests | Reported issues |
-| --- | --- | --- |
-| [@0xfroOty](https://github.com/0xfroOty) | [#22](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/22), [#25](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/25), [#31](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/31) | [#19](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/19), [#20](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/20), [#23](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/23), [#30](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/30), [#34](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/34) |
-| [@pollychen-lab](https://github.com/pollychen-lab) | [#21](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/21), [#26](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/26) | — |
-| [@floze-the-genius](https://github.com/floze-the-genius) | [#35](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/35) | — |
-| [@TechNovaWorldai](https://github.com/TechNovaWorldai) | [#63](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/63) | [#62](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/62) |
+<p align="center">
+  <a href="https://github.com/0xfroOty" title="0xfroOty"><img src="https://avatars.githubusercontent.com/u/150147344?v=4&s=96" width="72" height="72" alt="0xfroOty"/></a>
+  <a href="https://github.com/pollychen-lab" title="pollychen-lab"><img src="https://avatars.githubusercontent.com/u/265131177?v=4&s=96" width="72" height="72" alt="pollychen-lab"/></a>
+  <a href="https://github.com/floze-the-genius" title="floze-the-genius"><img src="https://avatars.githubusercontent.com/u/88098863?v=4&s=96" width="72" height="72" alt="floze-the-genius"/></a>
+  <a href="https://github.com/TechNovaWorldai" title="TechNovaWorldai"><img src="https://avatars.githubusercontent.com/u/289400570?v=4&s=96" width="72" height="72" alt="TechNovaWorldai"/></a>
+</p>
 
 Contributions of any size are welcome. See
 [CONTRIBUTING.md](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md) to get started.
