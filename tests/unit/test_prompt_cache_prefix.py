@@ -93,6 +93,18 @@ def test_leaves_nothing_markable_alone(conv):
     assert _mark_history_cacheable(conv) == conv
 
 
+def test_a_client_managing_its_own_cache_is_left_alone():
+    """Its markers already say where its prefix is stable, and ours on top
+    could exceed the provider's four-marker limit."""
+    conv = [
+        {"role": "user", "content": [{"type": "text", "text": "big doc",
+                                      "cache_control": MARK}]},
+        {"role": "assistant", "content": "read it"},
+        {"role": "user", "content": "question"},
+    ]
+    assert _mark_history_cacheable(conv) == conv
+
+
 def test_reported_prompt_includes_the_cached_part():
     """Anthropic's input_tokens is only the uncached tail. Reporting it
     alone would show a cached prompt as a small one, and the proxy would

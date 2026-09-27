@@ -327,6 +327,13 @@ def _mark_history_cacheable(conv: list[dict]) -> list[dict]:
     """
     if len(conv) < 2:
         return conv
+    # A client that places its own markers is managing its cache; adding
+    # ours could also take the request past the provider's four-marker
+    # limit, which is a 400.
+    if any(isinstance(m.get("content"), list)
+           and any(isinstance(b, dict) and "cache_control" in b for b in m["content"])
+           for m in conv):
+        return conv
     target = conv[-2]
     content = target.get("content")
     if isinstance(content, str):
