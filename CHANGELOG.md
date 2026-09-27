@@ -340,15 +340,42 @@ longest single call on that hardware. Verified directly: 60 back-to-back
 searches took 439 ms and starved another thread for 13.4 ms, about one
 call's worth.
 
-So the change is a large win where extraction is many short calls, a
-no-op where one call dominates, and never worse. The first version of
+So for STALL the change is a large win where extraction is many short
+calls, a no-op where one call dominates, and never worse. Latency is a
+separate question with a different answer — see the table below; the
+caller who sent the big turn pays for the dispatch. The first version of
 this entry claimed a flat 30x from one machine's numbers; that was
 overstated, and the test asserting it turned `main` red on a runner where
 it is not true.
 
-Sequential end-to-end latency dropped from ~7 ms to ~2.4 ms per request
-in the same harness, because a turn no longer waits behind the previous
-turn's extraction — same caveat applies.
+**Per-request latency is not improved — it is slightly worse, and that is
+the trade.** The caller awaits extraction either way, and running it in a
+thread makes the pass itself slower through GIL handoffs. Verified
+before/after on the same box, with CPU count pinned by `taskset`, a fresh
+`storage_dir` per run and an assertion that extraction actually ran:
+
+| ~15 KB turn | latency | worst loop stall | extraction |
+|---|---|---|---|
+| inline, 1 CPU | 101.8 ms | 123.5 ms | 93.9 ms |
+| inline, 4 CPU | 102.0 ms | 105.0 ms | 91.2 ms |
+| threaded, 1 CPU | 128.4 ms | **19.9 ms** | 114.4 ms |
+| threaded, 4 CPU | 110.9 ms | **14.9 ms** | 99.8 ms |
+
+So: 9-26% more latency for the caller who sent the big turn, in exchange
+for 5-8x less stall inflicted on every other request in flight. For a
+proxy in front of a call that takes seconds, that is the right side of
+the trade — but it is a trade, not a free win.
+
+An earlier version of this entry claimed latency fell from ~7 ms to
+~2.4 ms. That was a measurement artifact and is retracted. The harness
+reused session ids against the default `./checkpoints` storage, so
+`_processed_hashes` persisted in `graph_memory.db` between runs and every
+run after the first early-returned from extraction: three of four
+readings measured deduplication rather than work, and the "improvement"
+was the dedup. Caught because the numbers were physically impossible —
+~10 ms of wall time for ~90 ms of known CPU. The corrected harness uses a
+fresh `storage_dir` per process and asserts extraction actually ran, so a
+silent early return fails the measurement instead of flattering it.
 
 The pass now runs in a worker thread. That does not make extraction
 faster — the GIL is held throughout — but it lets the loop be scheduled
