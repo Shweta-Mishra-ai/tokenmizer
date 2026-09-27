@@ -26,8 +26,6 @@ mistake, in the places it had not yet been made twice.
 """
 from __future__ import annotations
 
-import tempfile
-
 import pytest
 
 from tokenmizer.compression.output_trimmer import OutputTrimmer
@@ -151,14 +149,17 @@ _PREAMBLE = (
 ) * 2
 
 
-def _graph(name: str) -> GraphMemory:
-    return GraphMemory(name, storage_dir=tempfile.mkdtemp())
+def _graph(name: str, tmp_path) -> GraphMemory:
+    # pytest's tmp_path, not tempfile.mkdtemp(): mkdtemp leaves the
+    # directory behind after the run, and every other test file here
+    # already uses the fixture.
+    return GraphMemory(name, storage_dir=str(tmp_path / name))
 
 
 class TestASharedPreambleDoesNotSwallowATurn:
-    def test_two_replies_sharing_an_opening_are_two_messages(self):
+    def test_two_replies_sharing_an_opening_are_two_messages(self, tmp_path):
         assert len(_PREAMBLE) > 500, "fixture must exceed the old hash window"
-        graph = _graph("prefix")
+        graph = _graph("prefix", tmp_path)
 
         a = graph._msg_hash({"content": _PREAMBLE + "Decided: use PostgreSQL."})
         b = graph._msg_hash({"content": _PREAMBLE + "Decided: use Redis."})
@@ -168,13 +169,13 @@ class TestASharedPreambleDoesNotSwallowATurn:
             "replies the same message"
         )
 
-    def test_the_second_decision_is_still_extracted_a_turn_later(self):
+    def test_the_second_decision_is_still_extracted_a_turn_later(self, tmp_path):
         """The live shape: the proxy calls extract_from_messages() once
         per request, so the second reply arrives in a LATER call, after
         the first one's hash is already in _processed_hashes. The whole
         turn was filtered out as already-processed and its decision was
         lost permanently, with nothing logged."""
-        graph = _graph("prefix-turns")
+        graph = _graph("prefix-turns", tmp_path)
         graph.extract_from_messages([{
             "role": "assistant",
             "content": _PREAMBLE + "Decided: use PostgreSQL for the order storage layer.",
@@ -190,10 +191,10 @@ class TestASharedPreambleDoesNotSwallowATurn:
             f"the second decision was dropped as a duplicate: {labels}"
         )
 
-    def test_a_genuinely_repeated_message_is_still_deduped(self):
+    def test_a_genuinely_repeated_message_is_still_deduped(self, tmp_path):
         """The fix must not cost the feature it paid for: an identical
         message really is the same message."""
-        graph = _graph("prefix-dedup")
+        graph = _graph("prefix-dedup", tmp_path)
         message = {"role": "assistant",
                    "content": _PREAMBLE + "Decided: use PostgreSQL."}
 

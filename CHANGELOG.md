@@ -322,22 +322,33 @@ expensive thing it does per turn — regex over the whole message, no
 awaits — and it was called inline from the request handler.
 
 Measured with a 2 ms ticker recording its own lateness, which is exactly
-event-loop stall, against a 0.25 ms idle floor:
+event-loop stall, against the machine's idle floor. **How much a thread
+helps turns out to be machine-dependent, and the honest spread is the
+point:**
 
-| turn | stall before | stall after |
+| machine | inline | threaded |
 |---|---|---|
-| ~3 KB | 33 ms | 3.2 ms |
-| ~12 KB pasted log | 86 ms | 2.9 ms |
+| 4-core container | 154 ms | 6.5 ms (25x better) |
+| windows-latest runner | 74 ms | 30 ms (2.5x better) |
+| ubuntu-latest 3.10 runner | 114 ms | 114 ms (**no better**) |
 
-Those are Linux figures. The Windows runner stalls ~37 ms threaded, where
-inline is proportionally higher again — the improvement holds, the
-absolute numbers are per-platform, and the test asserts the ratio between
-the two dispatches on whatever machine it runs on rather than a
-millisecond ceiling calibrated on one of them.
+The reason is that `re` does not release the GIL, and CPython hands it
+over only *between* bytecodes — a single `re.search` over a large string
+is one bytecode and holds the lock for its whole duration. The loop can
+only be scheduled between regex calls, so the benefit is bounded by the
+longest single call on that hardware. Verified directly: 60 back-to-back
+searches took 439 ms and starved another thread for 13.4 ms, about one
+call's worth.
+
+So the change is a large win where extraction is many short calls, a
+no-op where one call dominates, and never worse. The first version of
+this entry claimed a flat 30x from one machine's numbers; that was
+overstated, and the test asserting it turned `main` red on a runner where
+it is not true.
 
 Sequential end-to-end latency dropped from ~7 ms to ~2.4 ms per request
 in the same harness, because a turn no longer waits behind the previous
-turn's extraction.
+turn's extraction — same caveat applies.
 
 The pass now runs in a worker thread. That does not make extraction
 faster — the GIL is held throughout — but it lets the loop be scheduled
