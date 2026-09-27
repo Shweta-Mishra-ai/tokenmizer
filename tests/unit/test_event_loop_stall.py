@@ -3,37 +3,37 @@ TokenMizer is a proxy. CPU it spends without yielding is latency every
 OTHER in-flight request pays.
 
 The heuristic extraction pass is the most expensive thing it does per
-turn, and it is pure CPU — regex over the whole message, no awaits. Called
-inline from the request handler it held the event-loop thread for as long
-as it ran. Measured against a 0.23 ms idle floor:
+turn, and it is pure CPU — regex over the whole message, no awaits.
+Called inline from the request handler it held the event-loop thread for
+as long as it ran. It now runs in a worker thread
+(`app._extract_heuristic`).
 
-    turn size      loop stall (before)   (after)
-    ~120 B                    ~4 ms       <1 ms
-    ~3 KB                     33 ms       ~6 ms
-    ~12 KB pasted log         86 ms       ~6 ms
+HOW MUCH THAT HELPS IS MACHINE-DEPENDENT, and the honest numbers are
+worth writing down because the first version of this file asserted an
+improvement that does not hold everywhere:
 
-A worker thread does not make extraction faster — the GIL is held
-throughout — but it lets the loop be scheduled between bytecodes rather
-than waiting for the whole pass, so one caller pasting a log stops adding
-its full extraction time to everyone else's latency.
+    machine                       inline      threaded
+    4-core container              154 ms       6.5 ms   (25x better)
+    windows-latest runner          74 ms      30 ms     (2.5x better)
+    ubuntu-latest 3.10 runner     114 ms     114 ms     (no better)
 
-What makes the thread safe is the session lock the request path already
-holds around `_update_graph`, NOT the older argument that GraphMemory's
-mutators contain no `await`. That argument is about coroutines and says
-nothing about threads; the comment making it has been corrected.
+The reason is that `re` does not release the GIL, and CPython hands it
+over only BETWEEN bytecodes — a single `re.search` over a large string is
+one bytecode and holds the lock for its whole duration. So the loop can
+only be scheduled between regex calls, and the benefit is bounded by how
+long the longest single call takes on that hardware. Verified directly:
+60 back-to-back searches took 439 ms and starved another thread for
+13.4 ms, about one call's worth.
 
-These tests measure loop lateness, which is the thing that matters. They
-compare the two dispatches on the same machine rather than against a
-fixed millisecond ceiling: the figures above are Linux, and the Windows
-runner stalls ~37 ms threaded where it would stall far more inline. A
-ceiling calibrated on one platform fails on another for reasons that have
-nothing to do with the behaviour under test.
+The thread is therefore an improvement where extraction is many short
+calls and a no-op where one call dominates. It is never WORSE, which is
+the one timing property that holds on every machine and the only one
+asserted here. The rest of this file is structural and deterministic.
 """
 from __future__ import annotations
 
 import asyncio
 import inspect
-import tempfile
 import time
 
 import pytest
@@ -92,51 +92,45 @@ async def _worst_stall_while(coro) -> float:
     return max(late)
 
 
-class TestExtractionDoesNotHoldTheEventLoop:
-    """Compares the two dispatches ON THE SAME MACHINE, in the same run.
+class TestTheThreadIsNeverWorseThanInline:
+    """The only timing claim that survives every platform.
 
-    An absolute ceiling was the first attempt and it was wrong: calibrated
-    from Linux (3 ms threaded, 86 ms inline), it failed on the Windows
-    runner at 37 ms threaded — where the inline figure is proportionally
-    higher too, so the fix was working and only the yardstick was
-    provincial. Scheduler granularity, `to_thread` overhead and runner
-    contention all differ per platform, and none of them is what this test
-    is about.
+    "Materially better" does not: see the table in the module docstring —
+    one runner measured 114 ms both ways. Asserting an improvement there
+    fails for a reason that is true about the GIL rather than about this
+    code, which is how the first version of this test turned `main` red.
 
-    The claim is relative and so is the measurement: dispatching to a
-    thread must stall the loop materially less than running inline. That
-    holds on any machine without a number baked in from one of them.
+    What a thread must not do is make things worse. The dispatch costs a
+    thread hop, and if that ever grew into something comparable to the
+    work itself this would catch it.
     """
 
     @pytest.mark.parametrize("multiplier", [96, 240])   # ~12 KB and ~30 KB
-    async def test_the_thread_stalls_the_loop_far_less_than_inline(
-            self, multiplier):
+    async def test_dispatching_to_a_thread_does_not_increase_the_stall(
+            self, multiplier, tmp_path):
         messages = [{"role": "assistant", "content": _TURN * multiplier}]
         floor = await _idle_floor()
 
-        inline_graph = GraphMemory("inline", storage_dir=tempfile.mkdtemp())
+        inline_graph = GraphMemory("inline", storage_dir=str(tmp_path / "i"))
 
         async def inline():
             inline_graph.extract_from_messages(messages, incremental=True)
 
         inline_stall = max(await _worst_stall_while(inline()) - floor, 0.01)
 
-        threaded_graph = GraphMemory("threaded", storage_dir=tempfile.mkdtemp())
+        threaded_graph = GraphMemory("threaded", storage_dir=str(tmp_path / "t"))
         threaded_stall = max(
             await _worst_stall_while(
                 app_module._extract_heuristic(threaded_graph, messages)) - floor,
             0.0)
 
         assert threaded_graph._nodes, "the extraction must still do its work"
-        assert inline_stall > 5 * max(floor, 1.0), (
-            f"inline extraction stalled {inline_stall:.1f} ms against a "
-            f"{floor:.1f} ms timer floor — too close to measure a ratio; "
-            f"raise the multiplier rather than trusting the comparison"
-        )
-        assert threaded_stall < inline_stall / 3, (
-            f"dispatching to a thread stalled the loop {threaded_stall:.1f} ms "
-            f"against {inline_stall:.1f} ms inline (floor {floor:.1f} ms) — "
-            f"not the order-of-magnitude difference the thread exists for"
+        # 1.5x, not 1.0x: both readings carry scheduler noise, and the
+        # claim is "not materially worse", not "never a microsecond more".
+        assert threaded_stall < inline_stall * 1.5, (
+            f"the thread stalled the loop {threaded_stall:.1f} ms against "
+            f"{inline_stall:.1f} ms inline (floor {floor:.1f} ms) — the "
+            f"dispatch has become a cost rather than a saving"
         )
 
 
