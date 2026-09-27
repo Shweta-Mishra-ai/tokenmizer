@@ -401,3 +401,101 @@ class TestSilentFailuresAreLogged:
         assert any("excel" in r.message.lower() for r in caplog.records), (
             "Excel parse failure returned an error result with no log line"
         )
+
+
+# ── Answering the question asked of a table ──────────────────────────────────
+
+def _sales_csv(rows: int = 5000) -> str:
+    import random
+    rng = random.Random(0)
+    lines = ["date,region,product,units,revenue"]
+    for i in range(rows):
+        region = ("north", "south", "east", "west", "central")[i % 5]
+        revenue = rng.uniform(10, 500) * (0.6 if region == "east" else 1.0)
+        lines.append(f"2025-01-{i % 28 + 1:02d},{region},p{i % 40},"
+                     f"{rng.randint(1, 50)},{revenue:.2f}")
+    return "\n".join(lines)
+
+
+class TestPerGroupBreakdown:
+    """Global min/max/mean cannot say which group is behind: east sits 40%
+    below the others here while the overall mean looks ordinary. The
+    documented example asked exactly that question of exactly this shape
+    of file, and the summary could not answer it."""
+
+    def _east_and_rest(self, content):
+        import re
+        means = dict(re.findall(r"^  (\w+): n=.*revenue sum=\S+ mean=([\d,.]+)",
+                                content, re.M))
+        means = {k: float(v.replace(",", "")) for k, v in means.items()}
+        return means.pop("east"), means
+
+    def test_the_underperforming_group_is_visible(self):
+        result = FileIntelligence().process(
+            _sales_csv(), "sales.csv", token_budget=500,
+            query="which regions are underperforming")
+        assert "By region" in result.content
+        east, rest = self._east_and_rest(result.content)
+        assert len(rest) == 4
+        assert all(east < 0.75 * other for other in rest.values())
+
+    def test_breakdown_and_samples_both_fit_the_budget(self):
+        """The breakdown is held to a share of the budget, so it cannot
+        crowd out the sample rows — the only raw data the model sees."""
+        result = CSVExtractor().extract(_sales_csv(), "sales.csv", token_budget=400,
+                                        query="revenue by region")
+        assert "By region" in result.content
+        assert "Sample rows" in result.content
+
+    def test_the_measure_that_separates_the_groups_leads(self):
+        """The query names the grouping ("regions"), not the measure. When
+        the budget forces measures out, the one kept must be the one the
+        groups differ on — revenue here, not units, which is flat."""
+        result = CSVExtractor().extract(_sales_csv(), "sales.csv", token_budget=500,
+                                        query="which regions are underperforming")
+        block = result.content[result.content.index("By region"):]
+        assert "highest revenue mean first" in block
+        if "units" in block:
+            assert block.index("revenue") < block.index("units")
+
+    def test_a_budget_too_small_for_it_drops_the_breakdown_not_the_samples(self):
+        result = CSVExtractor().extract(_sales_csv(), "sales.csv", token_budget=150)
+        assert "By region" not in result.content
+
+    def test_identifiers_are_not_summed(self):
+        csv_text = "order_id,id,region,amount\n" + "\n".join(
+            f"{1000 + i},{i},{('n', 's', 'e')[i % 3]},{(i * 37) % 101}" for i in range(60))
+        content = CSVExtractor().extract(csv_text, "o.csv").content
+        assert "By region" in content
+        assert "order_id sum" not in content and " id sum" not in content
+        assert "amount sum" in content
+
+    def test_a_group_per_row_is_not_a_breakdown(self):
+        """Five rows, five names: every group is one row the samples
+        already show."""
+        content = CSVExtractor().extract(SMALL_CSV, "data.csv").content
+        assert "By name" not in content and "By department" not in content
+
+    def test_the_column_the_query_names_is_broken_down_first(self):
+        csv_text = "team,tier,score\n" + "\n".join(
+            f"t{i % 3},{'gold' if i % 2 else 'silver'},{(i * 7) % 23}" for i in range(60))
+        content = CSVExtractor().extract(csv_text, "s.csv", query="score by tier").content
+        assert content.index("By tier") < content.index("By team")
+
+    def test_high_cardinality_columns_are_not_grouped(self):
+        content = CSVExtractor().extract(_sales_csv(), "sales.csv").content
+        assert "By product" not in content, "40 products is a list, not a breakdown"
+
+    def test_no_numeric_column_means_no_breakdown(self):
+        content = CSVExtractor().extract(
+            "a,b\nx,y\nz,y\nx,w\n", "t.csv").content
+        assert "By " not in content
+
+
+class TestPartialSourceIsDisclosed:
+
+    def test_a_capped_sheet_reports_the_real_row_count(self):
+        content = CSVExtractor().extract(
+            "k,v\na,1\nb,2\n", "book.xlsx[Sheet1]", rows_in_source=50_000).content
+        assert "50,000 rows" in content
+        assert "first 2 summarised" in content

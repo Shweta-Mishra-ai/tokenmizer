@@ -21,7 +21,10 @@ Quality guarantee:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from tokenmizer.core.tokenizer import count_messages_tokens
@@ -44,15 +47,25 @@ class SmartMessageWindow:
         self.token_budget = token_budget
         self.protect_recent = protect_recent
         self.graph_context_budget = graph_context_budget
+        # session id -> (turns windowed out, hash of them, bridge message).
+        # Bounded: a proxy serves many sessions and this is only a cost
+        # optimisation — a forgotten entry re-cuts, it never loses a turn.
+        self._frozen: "OrderedDict[str, tuple[int, str, dict]]" = OrderedDict()
+        self._frozen_max = 10_000
 
     def apply(
         self,
         messages: list[dict],
         graph: "GraphMemory",
         model: str = "gpt-4o",
+        stable: bool = False,
     ) -> tuple[list[dict], int]:
         """
         Apply smart windowing to messages.
+
+        `stable` keeps the cut where it was until the verbatim tail outgrows
+        the budget again, instead of sliding it forward one turn per
+        request. See _reuse_frozen_cut.
 
         Returns:
             (windowed_messages, tokens_saved)
@@ -64,6 +77,13 @@ class SmartMessageWindow:
 
         system_msgs = [m for m in messages if m.get("role") == "system"]
         conv_msgs = [m for m in messages if m.get("role") != "system"]
+
+        session_id = getattr(graph, "session_id", "") or ""
+        if stable and session_id:
+            reused = self._reuse_frozen_cut(
+                session_id, system_msgs, conv_msgs, model)
+            if reused is not None:
+                return reused, max(0, current_tokens - count_messages_tokens(reused, model))
 
         if len(conv_msgs) <= self.protect_recent:
             return messages, 0  # not enough history to window
@@ -134,12 +154,62 @@ class SmartMessageWindow:
         windowed_tokens = count_messages_tokens(windowed, model)
         saved = current_tokens - windowed_tokens
 
+        if stable and session_id:
+            self._freeze(session_id, split, _digest(old), bridge_msg)
+
         logger.info(
             f"SmartWindow: {len(old)} old turns compressed → "
             f"{current_tokens}→{windowed_tokens} tokens (saved {saved})"
         )
 
         return windowed, max(0, saved)
+
+
+    def _reuse_frozen_cut(
+        self,
+        session_id: str,
+        system_msgs: list[dict],
+        conv_msgs: list[dict],
+        model: str,
+    ) -> "list[dict] | None":
+        """The previous request's cut and bridge, if they still apply.
+
+        Sliding the window forward one turn per request replaces the bridge
+        and the first verbatim turn every time, so no two requests share a
+        prefix and a provider's prompt cache never serves one. Holding the
+        cut still makes every request between two cuts the previous one
+        plus a turn: the system prompt, the bridge and the history all go
+        out byte-identical and are billed at the cache-read price.
+
+        The cut is reused only while the turns it replaced are exactly the
+        ones this request starts with (the client may edit or regenerate
+        history) and the verbatim tail still fits the budget. Otherwise
+        the caller cuts afresh. Nothing is ever dropped that the sliding
+        window would have kept: turns after the cut stay verbatim.
+        """
+        frozen = self._frozen.get(session_id)
+        if frozen is None:
+            return None
+        split, digest, bridge_msg = frozen
+        if split >= len(conv_msgs) or _digest(conv_msgs[:split]) != digest:
+            return None
+        candidate = system_msgs + [bridge_msg] + conv_msgs[split:]
+        if count_messages_tokens(candidate, model) > self.token_budget:
+            return None
+        self._frozen.move_to_end(session_id)
+        return candidate
+
+    def _freeze(self, session_id: str, split: int, digest: str, bridge_msg: dict) -> None:
+        self._frozen[session_id] = (split, digest, bridge_msg)
+        self._frozen.move_to_end(session_id)
+        while len(self._frozen) > self._frozen_max:
+            self._frozen.popitem(last=False)
+
+
+def _digest(messages: list[dict]) -> str:
+    return hashlib.sha256(
+        json.dumps(messages, sort_keys=True, default=str).encode()
+    ).hexdigest()
 
 
 def needs_windowing(messages: list[dict], token_budget: int, model: str = "gpt-4o") -> bool:

@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 import uuid
 from collections import OrderedDict
@@ -45,6 +46,7 @@ from tokenmizer.config.settings import get_settings, resolve_semantic_retrieval
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.filters.file_intelligence import FileIntelligence
 from tokenmizer.graph_memory.graph import GraphMemory
+from tokenmizer.graph_memory.helpers import _content_to_text
 from tokenmizer.providers.providers import build_provider
 from tokenmizer.security.auth import verify_api_key
 from tokenmizer.security.fencing import fence
@@ -919,6 +921,13 @@ def _apply_compression_layers(
     return messages
 
 
+def _stable_window() -> bool:
+    mode = settings.memory.stable_window
+    if mode == "auto":
+        return settings.provider == "anthropic"
+    return mode == "on"
+
+
 def _last_substantive_query(raw_messages: list[dict], min_words: int = 4) -> str:
     """The most recent user turn long enough to retrieve against.
 
@@ -933,6 +942,91 @@ def _last_substantive_query(raw_messages: list[dict], min_words: int = 4) -> str
         if len(content.split()) >= min_words:
             return content
     return ""
+
+
+_WORD = re.compile(r"[a-z0-9][a-z0-9_./-]*[a-z0-9]|[a-z0-9]")
+_FILLER = frozenset({
+    "the", "and", "for", "with", "that", "this", "from", "into", "are",
+    "was", "were", "has", "have", "had", "not", "but", "its", "our",
+    "use", "using", "will", "would", "should", "can", "could",
+})
+
+
+def _content_words(text: str) -> frozenset:
+    return frozenset(
+        w for w in _WORD.findall(text.lower())
+        if len(w) > 2 and w not in _FILLER
+    )
+
+
+def _already_in_payload(node, message_words: list[frozenset]) -> bool:
+    """True when one message being sent already states this node.
+
+    Context injection exists to put back what the payload no longer
+    carries: turns windowing replaced, turns the client truncated on its
+    own, facts from another session. A node whose label and summary are
+    both fully present in a single message of this payload tells the
+    model nothing it is not already reading, and on a short session that
+    is every node. Injecting them anyway made a ten-turn session cost 81%
+    more input than it would have without the proxy.
+
+    Conservative by construction: a paraphrased label, a detail that only
+    exists in the summary, or words split across two messages all read as
+    absent, and the node is injected. The failure mode is a duplicate
+    line, never a lost fact.
+    """
+    words = _content_words(f"{node.label} {node.summary[:50] if node.summary else ''}")
+    if not words:
+        return False
+    return any(words <= mw for mw in message_words)
+
+
+def _append_volatile(messages: list[dict], fenced: str) -> None:
+    """Put per-turn context after everything a provider can cache.
+
+    Providers cache the longest byte-identical prefix of a request, and
+    render the system prompt before the conversation. Appending a block
+    that changes every turn to the system prompt therefore changed the
+    first bytes of the conversation too, and every request re-paid for
+    the whole history. Appended to the turn being asked instead, the
+    system prompt and every earlier turn go out exactly as they did last
+    time; the client never sees this text, so on the next request the
+    same user turn goes out without it and the prefix still matches.
+
+    Only a trailing user turn is a safe place. Anything else (a tool
+    result closing an agent step) keeps the old placement rather than
+    inventing a message some provider would reject.
+    """
+    last = messages[-1] if messages else None
+    if last is not None and last.get("role") == "user":
+        content = last.get("content")
+        if isinstance(content, list):
+            last["content"] = [*content, {"type": "text", "text": fenced}]
+            return
+        if isinstance(content, str) or content is None:
+            last["content"] = f"{content or ''}\n\n{fenced}"
+            return
+    sys_idx = next(
+        (i for i, m in enumerate(messages) if m.get("role") == "system"), None
+    )
+    if sys_idx is not None:
+        messages[sys_idx]["content"] = f"{messages[sys_idx]['content']}\n\n{fenced}"
+    else:
+        messages.insert(0, {"role": "system", "content": fenced})
+
+
+def _inject_context(messages: list[dict], session_id: str,
+                    relevant_pairs: list[tuple]) -> None:
+    """Append the ranked nodes to this turn, fenced."""
+    ctx_parts = [
+        f"  {n.type.value}: {n.label}"
+        + (f" ({n.summary[:50]})" if n.summary else "")
+        # Tag only nodes recalled from a DIFFERENT session.
+        + (f" [from session {sid}]" if sid != session_id else "")
+        for n, sid in relevant_pairs[:6]
+    ]
+    ctx_block = "\n".join(ctx_parts)
+    _append_volatile(messages, fence(ctx_block, "relevant session context"))
 
 
 async def _cross_session_query(
@@ -1119,7 +1213,8 @@ async def _update_graph(
     if settings.memory.enabled and needs_windowing(
         messages, settings.memory.max_tokens_before_summary, model
     ):
-        messages, window_saved = _smart_window.apply(messages, graph, model)
+        messages, window_saved = _smart_window.apply(
+            messages, graph, model, stable=_stable_window())
         savings["windowing"] = window_saved
     else:
         savings["windowing"] = 0
@@ -1148,41 +1243,19 @@ async def _update_graph(
         else:
             relevant_pairs = [(n, session_id) for n in graph.query(retrieval_query, top_k=8)]
         if relevant_pairs:
-            ctx_parts = [
-                f"  {n.type.value}: {n.label}"
-                + (f" ({n.summary[:50]})" if n.summary else "")
-                # Tag only nodes recalled from a DIFFERENT session — the
-                # common case (feature off, or this session's own nodes
-                # won the ranking) keeps the exact wording the model has
-                # always seen.
-                + (f" [from session {sid}]" if sid != session_id else "")
-                for n, sid in relevant_pairs[:6]
+            # Drop what the payload already says. Measured against the
+            # payload as it leaves — after windowing — so a fact whose turn
+            # was windowed out, or truncated by the client, still goes in.
+            message_words = [
+                _content_words(_content_to_text(m.get("content")))
+                for m in messages
             ]
-            ctx_block = "\n".join(ctx_parts)
-            sys_idx = next(
-                (i for i, m in enumerate(messages) if m.get("role") == "system"), None
-            )
-            if sys_idx is not None:
-                # APPENDED, not prepended. Provider prompt caching (layer
-                # 5) caches the longest unchanged prefix of the system
-                # prompt; this block changes every turn, and at the front
-                # it invalidated the cache on every request behind any
-                # agent with a long stable system prompt — the one place
-                # the cache pays. At the end, the terse prompt and the
-                # client's own system prompt stay cacheable.
-                messages[sys_idx]["content"] = (
-                    f"{messages[sys_idx]['content']}\n\n"
-                    f"{fence(ctx_block, 'relevant session context')}"
-                )
-            else:
-                # A system message is not guaranteed to exist: layer 2
-                # only adds one when terse_output is enabled. Without
-                # this branch, graph context injection would silently
-                # depend on that unrelated setting.
-                messages.insert(0, {
-                    "role": "system",
-                    "content": fence(ctx_block, "relevant session context"),
-                })
+            relevant_pairs = [
+                (n, sid) for n, sid in relevant_pairs
+                if not _already_in_payload(n, message_words)
+            ]
+            if relevant_pairs:
+                _inject_context(messages, session_id, relevant_pairs)
 
     # Preferences — habits that outlive this session, and so are NOT in
     # this session's graph: "keep it brief", "always TypeScript". Off
@@ -1203,15 +1276,7 @@ async def _update_graph(
             logger.warning("Preferences skipped for this turn: %s", e)
             pref_block = ""
         if pref_block:
-            sys_idx = next(
-                (i for i, m in enumerate(messages) if m.get("role") == "system"), None
-            )
-            fenced = fence(pref_block, "remembered preferences")
-            if sys_idx is not None:
-                messages[sys_idx]["content"] = (
-                    f"{messages[sys_idx]['content']}\n\n{fenced}")
-            else:
-                messages.insert(0, {"role": "system", "content": fenced})
+            _append_volatile(messages, fence(pref_block, "remembered preferences"))
 
     # Context occupancy, measured per turn rather than accumulated: each
     # `messages` list already carries the full running conversation, so a
@@ -1390,6 +1455,8 @@ async def _call_provider(
     if outcome is not None:
         outcome["tool_calls"] = list(resp.tool_calls or [])
         outcome["finish_reason"] = resp.finish_reason
+        outcome["cache_read_tokens"] = resp.cache_read_tokens
+        outcome["cache_write_tokens"] = resp.cache_write_tokens
 
     # A turn the model answered with a tool call is neither trimmed (the
     # text, if any, is the model's note to the caller) nor cached (the
@@ -1778,6 +1845,8 @@ async def chat_completions(req: ChatRequest, request: Request):
     # reported as `fallback`.
     tool_calls = outcome.pop("tool_calls", None) or []
     finish_reason = outcome.pop("finish_reason", None) or "stop"
+    cache_read_tokens = outcome.pop("cache_read_tokens", 0) or 0
+    cache_write_tokens = outcome.pop("cache_write_tokens", 0) or 0
     fallback = outcome
     if fallback:
         # The transformed request was rejected and the client's own
@@ -1824,11 +1893,18 @@ async def chat_completions(req: ChatRequest, request: Request):
             "prompt_tokens":          input_tokens_actual,
             "completion_tokens":      output_tokens,
             "total_tokens":           input_tokens_actual + output_tokens,
+            # OpenAI's field for the part of prompt_tokens a provider
+            # served from its prompt cache, billed at a fraction.
+            "prompt_tokens_details":  {"cached_tokens": cache_read_tokens},
             "original_prompt_tokens": orig_input_tokens,
             "tokens_saved":           total_saved,
         },
         "tokenmizer": {
             "cache_hit":   cache_hit,
+            # The provider's prompt cache, as distinct from cache_hit
+            # (TokenMizer answering without calling the provider at all).
+            "provider_cache": {"read_tokens": cache_read_tokens,
+                               "write_tokens": cache_write_tokens},
             "savings":     savings,
             "total_saved": total_saved,
             "latency_ms":  round(latency_ms, 1),

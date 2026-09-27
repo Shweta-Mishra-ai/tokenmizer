@@ -120,7 +120,7 @@ Then use skills directly:
 /tokenmizer:checkpoint my-project      → save session to graph memory
 /tokenmizer:resume my-project          → load previous session (300 tokens)
 /tokenmizer:resume my-project full     → full 600-token context
-/tokenmizer:analyze /data/sales.csv    → analyze file (99% token savings)
+/tokenmizer:analyze /data/sales.csv    → summarise a file within a token budget
 /tokenmizer:stats                      → token savings report
 ```
 

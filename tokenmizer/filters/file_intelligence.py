@@ -149,6 +149,8 @@ class CSVExtractor:
         token_budget: int = 400,
         sample_rows: int = 5,
         delimiter: str = ",",
+        query: str = "",
+        rows_in_source: int | None = None,
     ) -> FileExtractionResult:
         original_tokens = count_tokens(content)
 
@@ -175,8 +177,14 @@ class CSVExtractor:
         total_rows = len(rows)
         parts: list[str] = []
 
-        # 1. Shape
-        parts.append(f"File: {filename} | {total_rows:,} rows × {len(columns)} columns")
+        # 1. Shape. When the caller could only hand over part of the source
+        # (a capped Excel sheet), say so: a model told "1,000 rows" about a
+        # 50,000-row sheet reasons about the wrong dataset, confidently.
+        if rows_in_source and rows_in_source > total_rows:
+            parts.append(f"File: {filename} | {rows_in_source:,} rows × {len(columns)} "
+                         f"columns (first {total_rows:,} summarised)")
+        else:
+            parts.append(f"File: {filename} | {total_rows:,} rows × {len(columns)} columns")
 
         # 2. Schema with inferred types
         type_map = self._infer_types(rows, columns)
@@ -190,12 +198,24 @@ class CSVExtractor:
         if stats:
             parts.append("Stats:\n" + stats)
 
-        # 4. Categorical summary (text columns with few unique values)
-        cats = self._compute_categoricals(rows, columns, type_map)
+        # 4. Per-group breakdown: every low-cardinality text column against
+        # the numeric columns. Global stats cannot answer "which region is
+        # underperforming" — the east region can sit 40% below the rest
+        # while the overall mean looks ordinary — and that question is most
+        # of what anyone asks of a table. Placed before the samples because
+        # the budget truncates from the end.
+        breakdown, broken_down = self._compute_breakdown(
+            rows, columns, type_map, query, token_budget=token_budget)
+        if breakdown:
+            parts.append(breakdown)
+
+        # 5. Categorical summary for text columns the breakdown did not cover
+        cats = self._compute_categoricals(rows, columns, type_map,
+                                          skip=broken_down)
         if cats:
             parts.append("Categories:\n" + cats)
 
-        # 5. Sample rows — use TSV format (fewer tokens than CSV/JSON)
+        # 6. Sample rows — use TSV format (fewer tokens than CSV/JSON)
         sampled = self._stratified_sample(rows, sample_rows, columns=columns, type_map=type_map)
         header = "\t".join(columns)
         sample_lines = [header] + [
@@ -203,7 +223,7 @@ class CSVExtractor:
         ]
         parts.append("Sample rows (TSV):\n" + "\n".join(sample_lines))
 
-        # 6. Missing value note
+        # 7. Missing value note
         missing = self._missing_summary(rows, columns)
         if missing:
             parts.append("Missing values: " + missing)
@@ -271,11 +291,137 @@ class CSVExtractor:
             lines.append(f"  {col}: min={mn:.2f} max={mx:.2f} mean={avg:.2f} n={len(vals)}")
         return "\n".join(lines)
 
-    def _compute_categoricals(self, rows: list[dict], columns: list[str],
-                              type_map: dict, max_unique: int = 10) -> str:
-        lines = []
+    @staticmethod
+    def _number(v) -> float | None:
+        try:
+            return float(str(v).replace(",", "").replace("$", "").replace("%", ""))
+        except (ValueError, TypeError):
+            return None
+
+    # Share of the token budget the breakdown may take. The rest keeps the
+    # sample rows, which are the only raw data the model sees.
+    BREAKDOWN_SHARE = 0.4
+
+    def _is_identifier(self, rows: list[dict], col: str) -> bool:
+        """A key, not a quantity: its sum and mean mean nothing.
+
+        Named like one, or a run of consecutive distinct integers — a row
+        number. Distinct integers alone are not enough: prices in cents or
+        scores can all differ and are still quantities.
+        """
+        if re.search(r"(^|[_\s-])id$", col.strip().lower()):
+            return True
+        nums = [self._number(r.get(col)) for r in rows if r.get(col)]
+        if len(nums) < 2 or any(n is None or not n.is_integer() for n in nums):
+            return False
+        distinct = set(nums)
+        return len(distinct) == len(nums) and max(nums) - min(nums) + 1 == len(nums)
+
+    def _compute_breakdown(self, rows: list[dict], columns: list[str],
+                           type_map: dict, query: str = "",
+                           token_budget: int = 400,
+                           max_groups: int = 12, max_dims: int = 3,
+                           max_measures: int = 4) -> tuple[str, set]:
+        """Count, sum and mean of each numeric column per group.
+
+        A grouping column has 2..max_groups distinct values and at least
+        three rows per group on average: fewer, and each group is a row
+        the samples already show. Identifier columns are not measures.
+        Columns the query names come first, and the whole breakdown is
+        held to BREAKDOWN_SHARE of the budget — dropping measures, then
+        whole groupings, rather than crowding out the sample rows.
+        """
+        words = {w.rstrip("s") for w in re.findall(r"[a-z0-9]+", query.lower())}
+
+        def named(col: str) -> bool:
+            return any(w and w in words
+                       for w in (p.rstrip("s") for p in re.findall(r"[a-z0-9]+", col.lower())))
+
+        total = len(rows)
+        dims = []
         for col in columns:
             if type_map.get(col) != "text":
+                continue
+            groups = {r.get(col) for r in rows if r.get(col)}
+            if 2 <= len(groups) <= max_groups and total >= 3 * len(groups):
+                dims.append(col)
+        measures = [c for c in columns
+                    if type_map.get(c) == "number" and not self._is_identifier(rows, c)]
+        if not dims or not measures:
+            return "", set()
+        dims = sorted(dims, key=lambda c: not named(c))[:max_dims]
+        # Ranked per grouping below, by how far apart the groups are.
+
+        def tally(dim: str):
+            acc: dict[str, dict[str, list[float]]] = {}
+            count: dict[str, int] = {}
+            for r in rows:
+                g = r.get(dim)
+                if not g:
+                    continue
+                count[g] = count.get(g, 0) + 1
+                slot = acc.setdefault(g, {})
+                for m in measures:
+                    v = self._number(r.get(m))
+                    if v is not None:
+                        slot.setdefault(m, []).append(v)
+            return acc, count
+
+        def spread(acc, m: str) -> float:
+            """How far apart the groups are on m, relative to its scale.
+            The measure that separates the groups is the one a question
+            about them is asking about, whether or not it names it."""
+            means = [sum(v) / len(v) for v in (acc[g].get(m) for g in acc) if v]
+            if len(means) < 2:
+                return 0.0
+            scale = abs(sum(means) / len(means)) or 1.0
+            return (max(means) - min(means)) / scale
+
+        def render(dim, acc, count, ms: list[str], with_sum: bool) -> str:
+            lead = ms[0]
+
+            def mean(g, m):
+                vals = acc[g].get(m) or []
+                return sum(vals) / len(vals) if vals else float("-inf")
+
+            what = "sum and mean" if with_sum else "mean"
+            lines = [f"By {dim} (rows · {what} per column, highest {lead} mean first):"]
+            for g in sorted(count, key=lambda g: -mean(g, lead)):
+                cells = []
+                for m in ms:
+                    vals = acc[g].get(m)
+                    if not vals:
+                        continue
+                    t = sum(vals)
+                    if with_sum:
+                        shown = f"{t:,.0f}" if t.is_integer() else f"{t:,.2f}"
+                        cells.append(f"{m} sum={shown} mean={t / len(vals):,.2f}")
+                    else:
+                        cells.append(f"{m} mean={t / len(vals):,.2f}")
+                lines.append(f"  {g}: n={count[g]:,} · " + " · ".join(cells))
+            return "\n".join(lines)
+
+        cap = int(token_budget * self.BREAKDOWN_SHARE)
+        blocks: list[str] = []
+        kept: set = set()
+        for dim in dims:
+            acc, count = tally(dim)
+            ranked = sorted(measures, key=lambda m: (not named(m), -spread(acc, m)))
+            for ms, with_sum in ((ranked[:max_measures], True), (ranked[:2], False),
+                                 (ranked[:1], False)):
+                block = render(dim, acc, count, ms, with_sum)
+                if count_tokens("\n\n".join(blocks + [block])) <= cap:
+                    blocks.append(block)
+                    kept.add(dim)
+                    break
+        return "\n\n".join(blocks), kept
+
+    def _compute_categoricals(self, rows: list[dict], columns: list[str],
+                              type_map: dict, max_unique: int = 10,
+                              skip: set | None = None) -> str:
+        lines = []
+        for col in columns:
+            if type_map.get(col) != "text" or (skip and col in skip):
                 continue
             unique = set(r.get(col, "") for r in rows if r.get(col))
             if 2 <= len(unique) <= max_unique:
@@ -650,11 +796,17 @@ class ExcelExtractor:
     We extract per-sheet summaries using the same CSV strategy.
     """
 
+    # Rows per sheet handed to the CSV strategy. The sheet is already in
+    # memory by then; the cap bounds the CSV re-serialisation, and when it
+    # applies the summary says so.
+    MAX_ROWS_PER_SHEET = 100_000
+
     def extract(
         self,
         content_bytes: bytes,
         filename: str,
         token_budget: int = 800,
+        query: str = "",
     ) -> FileExtractionResult:
         original_tokens = len(content_bytes) // 3  # rough estimate for binary
 
@@ -703,7 +855,7 @@ class ExcelExtractor:
             csv_io = io.StringIO()
             writer = csv.writer(csv_io)
             writer.writerow(headers)
-            for row in rows_data[1:1001]:  # max 1000 rows per sheet
+            for row in rows_data[1:1 + self.MAX_ROWS_PER_SHEET]:
                 writer.writerow([str(c) if c is not None else "" for c in row])
 
             result = csv_extractor.extract(
@@ -711,6 +863,8 @@ class ExcelExtractor:
                 f"{filename}[{sheet_name}]",
                 token_budget=budget_per_sheet,
                 sample_rows=3,
+                query=query,
+                rows_in_source=len(rows_data) - 1,
             )
             parts.append(f"\n[Sheet: {sheet_name}]\n{result.content}")
             all_results.append(result)
@@ -881,15 +1035,16 @@ class FileIntelligence:
                    f"{len(content_bytes):,} bytes, budget={token_budget})")
 
         if file_type == "csv":
-            result = self._csv.extract(content_str, filename, token_budget)
+            result = self._csv.extract(content_str, filename, token_budget, query=query)
         elif file_type == "tsv":
-            result = self._csv.extract(content_str, filename, token_budget, delimiter="\t")
+            result = self._csv.extract(content_str, filename, token_budget,
+                                       delimiter="\t", query=query)
         elif file_type in ("json", "jsonl"):
             result = self._json.extract(content_str, filename, token_budget)
         elif file_type == "pdf":
             result = self._pdf.extract(content_bytes, filename, token_budget, query)
         elif file_type == "excel":
-            result = self._excel.extract(content_bytes, filename, token_budget)
+            result = self._excel.extract(content_bytes, filename, token_budget, query)
         elif file_type == "code":
             result = self._text.extract(content_str, filename, token_budget, "code")
         else:

@@ -174,8 +174,9 @@ class TestAnInjectionNeverBecomesANode:
 
 
 class TestThroughTheProxy:
-    """The three places conversation-derived text reaches a system
-    prompt: the retrieval block, the windowing bridge, the preferences."""
+    """The three places the proxy adds conversation-derived text to a
+    request: the retrieval block and preferences (appended to the turn
+    being asked) and the windowing bridge (a system message)."""
 
     def test_the_windowing_bridge_is_fenced(self, tmp_path):
         from tokenmizer.compression.window import SmartMessageWindow
@@ -207,7 +208,7 @@ class TestThroughTheProxy:
 
         from tokenmizer.api import app as app_module
 
-        source = inspect.getsource(app_module._update_graph)
+        source = inspect.getsource(app_module._inject_context)
         assert "fence(ctx_block" in source
         assert "[Relevant session context]" not in source, (
             "the bare header is what the fence replaced"

@@ -11,7 +11,8 @@ python -m benchmarks.eval --corpus DIR               # score YOUR sessions
 python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
-pytest tests/ -q                                     # 1812 tests
+python -m benchmarks.savings.runner                 # input cost, with and without
+pytest tests/ -q                                     # 1865 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -23,7 +24,7 @@ Measured on v0.5.4:
 
 | Category | Precision | Recall | F1 |
 |---|---|---|---|
-| Files | 98% | 100% | **99%** |
+| Files | 100% | 100% | **100%** |
 | Decisions | 97% | 100% | **99%** |
 | Completed tasks | 98% | 98% | **98%** |
 | Pending tasks | 100% | 90% | **95%** |
@@ -42,10 +43,10 @@ run rather than kept in a drawer:
 
 | Corpus origin | Sessions | Macro F1 |
 |---|---|---|
-| Synthetic (hand-written) | 8 | **97%** |
-| Real (captured transcripts) | 6 | **90%** |
+| Synthetic (hand-written) | 8 | **98%** |
+| Real (captured transcripts) | 6 | **91%** |
 
-**Treat 90% as the number that describes real sessions.** The five-point
+**Treat 91% as the number that describes real sessions.** The seven-point
 gap is the honest measure of how much the heuristics are fitted to text
 we wrote ourselves. Closing it needs more real transcripts, which is the
 single most useful contribution anyone could make here.
@@ -76,6 +77,58 @@ timeout"). That is what `use_llm_extraction` is for.
 To get a number for *your* workload, label a few of your own sessions in
 the format documented in `benchmarks/eval/corpus.py` and run
 `python -m benchmarks.eval --corpus /path/to/them`.
+
+## Input cost — with the proxy and without
+
+`python -m benchmarks.savings.runner` replays one conversation the way a
+chat client sends it — the whole history on every request — through the
+real proxy and the real Anthropic adapter, at four lengths. Only the
+network is replaced: a stand-in applies the provider's documented prompt
+caching rules to the exact request it receives (byte-exact prefix up to a
+cache marker, per-model minimum, reads at 0.1x the input price, writes at
+1.25x). Cost is in input-token units; `claude-sonnet-5`, cache minimum
+1,024 tokens:
+
+| Turns | History | Client alone, no caching | Client caching its own history | Through TokenMizer |
+|---:|---:|---:|---:|---:|
+| 10 | 462 | 2,333 | 2,333 | 2,833 (**21% more**) |
+| 40 | 2,057 | 41,556 | 14,745 | 16,158 (**61% less** / 10% more) |
+| 150 | 7,967 | 596,900 | 77,998 | 77,472 (**87% less** / level) |
+| 300 | 16,040 | 2,399,067 | 268,767 | 157,818 (**93% less** / **41% less**) |
+
+The two percentages are against the two client columns. Where the saving
+comes from: below about 4,000 tokens of history, prompt caching — the
+proxy marks the history cacheable and keeps every earlier byte of the
+request identical; above it, windowing, with the cut held still between
+cuts so the windowed history is cached too.
+
+**Short sessions still cost more on input**, and this is why: a ten-turn
+session of 462 tokens is under the model's cache minimum, so nothing can
+be cached, and the proxy adds its ~50-token brevity instruction to every
+request. That instruction exists to shorten what the model writes back,
+which costs several times more per token than input; this benchmark
+returns a fixed one-word answer and so charges the instruction while
+crediting it nothing. `terse_output.enabled: false` removes it.
+
+Read before quoting:
+
+* **Input only.** Output tokens are not measured, for the reason above.
+* **The session is real transcript text cycled to length**, not one real
+  session of that length. Turns are short, so fixed per-request overhead
+  is a larger share than on a real coding session.
+* **Cache entries never expire here.** A client that pauses longer than
+  the provider's cache lifetime between turns re-writes instead of reads.
+* **Token counts fall back to a character estimate** when no tokenizer can
+  load; the run prints which it used. The numbers above were taken with
+  the estimate.
+* **Answer quality after windowing is not measured.** That needs a real
+  model and is the open question for long sessions.
+
+Before this change, the same runner against the previous release: 81%
+more at 10 turns, 21% more at 40, 68% less at 150, 87% less at 300 —
+and against a client caching its own history, more expensive at every
+length (3.4 times as much at 40 turns), because the per-turn context
+block and the sliding window changed the start of every request.
 
 ## Memory quality — graph vs a plain summary
 
@@ -141,7 +194,7 @@ latency target — used to leave the session at that point permanently.
 | | before | after |
 |---|---|---|
 | Out-of-ontology facts still readable in the resume block | 0% | **100%** |
-| Resume block, per session | — | **+23 tokens** |
+| Resume block, per session | — | **+25 tokens** |
 | Sections lost on the corpus's six real transcripts | — | **0** |
 
 Checkpoint accuracy is unchanged by it (80% / 100% / 100% task /

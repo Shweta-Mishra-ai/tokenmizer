@@ -408,7 +408,7 @@ of 14 sessions, 6 of them real transcripts:
 
 | Category | Precision | Recall | F1 |
 |---|---|---|---|
-| Files | 98% | 100% | **99%** |
+| Files | 100% | 100% | **100%** |
 | Decisions | 97% | 100% | **99%** |
 | Completed tasks | 98% | 98% | **98%** |
 | Pending tasks | 100% | 90% | **95%** |
@@ -435,6 +435,17 @@ because an ungrounded question measures extraction and reads as a
 retrieval failure forever. `semantic_retrieval: auto` turns on embedding
 similarity when the model actually loads — the 92% figure previously
 quoted for it predates the enlarged eval and has not been re-measured.
+
+**Input cost is measured end to end.** `python -m
+benchmarks.savings.runner` replays a conversation through the real proxy
+against a stand-in that applies Anthropic's documented prompt-caching
+rules. Against a client sending its history with no caching, input cost
+is **61% lower at 40 turns, 87% at 150 and 93% at 300**; against a client
+that already caches its own history, 10% higher at 40 turns, level at
+150 and 41% lower at 300. **A ten-turn session costs 21% more input**:
+it is under the cache minimum, and the ~50-token brevity instruction is
+charged on every request while the output it shortens is not measured.
+Details and caveats in [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
 **Independently verified against 7 other methods.** A separate
 100-session benchmark ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research),
@@ -527,7 +538,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1812 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1865 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

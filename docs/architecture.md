@@ -243,7 +243,7 @@ if no node already covers it — restating a node spends resume budget on
 nothing. One node per session, rewritten as the dropped span grows.
 
 Measured in [benchmarks](benchmarks.md): out-of-ontology retention 0% to
-100% on the fixtures in `benchmarks/resume_quality`, at +23 tokens of
+100% on the fixtures in `benchmarks/resume_quality`, at +25 tokens of
 resume block per session, with no section lost on the captured
 transcripts in the eval corpus.
 
@@ -257,15 +257,37 @@ from tokenmizer.filters.file_intelligence import FileIntelligence
 fi = FileIntelligence()
 result = fi.process(open("sales.csv","rb").read(), "sales.csv",
                     token_budget=500, query="which regions underperforming")
-# 400,000 tokens → 450 tokens  (99.9% saved)
 ```
 
-| File | Savings |
-|---|---|
-| CSV (50k rows) | 99.9% |
-| PDF (200 pages) | 98.8% |
-| Excel (10 sheets) | 99.7% |
-| JSON (1k items) | 95% |
+A file is replaced by a summary capped at `token_budget`, so the
+percentage saved is set by the file's size and the budget, not by how good
+the summary is — a 50,000-row CSV at a 500-token budget "saves" over 99%
+whatever the summary says. What matters is whether the question can still
+be answered from it.
+
+For a table that means the schema, per-column statistics, and a
+**per-group breakdown**: every text column with 2–12 distinct values and
+at least three rows per group, against the numeric columns that are not
+identifiers, with count, sum and mean per group. Groupings the query
+names come first; within a grouping, the measure the groups differ most
+on leads, since that is what a question about the groups is asking even
+when it does not name it. The breakdown is held to 40% of the budget —
+dropping sums, then measures, then groupings — so the sample rows
+survive. Global statistics alone could not answer the example above: a
+50,000-row sales file where one region's revenue averages 40% below the
+rest has an ordinary-looking overall mean. With the breakdown the gap is
+on one line:
+
+```
+By region (rows · sum and mean per column, highest revenue mean first):
+  north: n=10,126 · revenue sum=2,581,759.28 mean=254.96 · units sum=259,431 mean=25.62
+  ...
+  east: n=10,002 · revenue sum=1,528,042.06 mean=152.77 · units sum=257,117 mean=25.71
+```
+
+PDFs keep the pages that share the most words with the query; JSON keeps
+its schema and array lengths; Excel runs the table strategy per sheet and
+states the real row count when a sheet is larger than it summarises.
 
 
 ---
