@@ -41,12 +41,21 @@ class GraphCheckpointSettings(BaseModel):
     # Blend embedding similarity into GraphMemory.query(), the ranker that
     # decides which nodes get injected into the prompt each turn.
     #
-    # Default off, and the reason is the size of the evidence, not doubt about
-    # the direction: measured on benchmarks/graph_retrieval/query_eval it
-    # takes recall@6 from 85% to 92% on paraphrased questions — one question
-    # out of thirteen. That is a real gain on a small sample, not a
-    # established one, and turning it on puts a model forward pass on the
-    # request path. Run the eval on your own sessions before enabling it.
+    # Default off, and the reason is the size of the evidence, not doubt
+    # about the direction.
+    #
+    # The pair once quoted here — recall@6 85% keyword vs 92% with
+    # embeddings — came from a 13-case eval, where one question flipping
+    # moves the headline by 8 points. That eval is now 40 cases and
+    # keyword ranking scores 82% on it; the 92% figure has NOT been
+    # re-measured against it and must not be quoted (docs/roadmap.md and
+    # README.md say the same, and this comment used to contradict them).
+    #
+    # Re-measuring needs the model, which needs huggingface.co, so it is
+    # `python -m benchmarks.graph_retrieval.query_eval --semantic` on a
+    # host with egress. Until someone runs that, the honest statement is
+    # that the direction is expected and the size is unknown — and
+    # turning this on puts a model forward pass on the request path.
     #
     # Requires sentence-transformers, which ships in the `cache` extra
     # (pip install "tokenmizer[cache]") — the same model semantic_cache,
