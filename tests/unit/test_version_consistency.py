@@ -292,14 +292,13 @@ def test_every_merged_contributor_is_credited():
     shrunk. Adding a contributor is expected; removing one has to be
     deliberate enough to edit this list.
     """
-    # Everyone whose work is merged. Add to this when a PR lands; the
-    # point of the set is that removing a name has to be deliberate.
-    # Everyone whose contribution is recorded, code or not. The avatar
-    # grid in that section only counts commits, so the ones who reported
-    # a bug or reviewed the project from outside exist ONLY in this list
-    # — nothing else in the repo would notice them going missing.
+    # Everyone whose pull request is merged. Add to this when a PR lands;
+    # the point of the set is that removing a name has to be deliberate.
+    # The section credits merged work and the bug reports behind it, and
+    # nothing else in the repo would notice a name going missing, so this
+    # list is the only guard on it.
     credited = {"0xfroOty", "pollychen-lab", "floze-the-genius",
-                "TechNovaWorldai", "neoneye"}
+                "TechNovaWorldai"}
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     # Matches the heading at either level. It was nested under
