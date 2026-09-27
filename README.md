@@ -545,21 +545,17 @@ to run the eval harness.
 
 ## Contributors
 
-TokenMizer is better because of the people who found something wrong with
-it and said so. Thank you.
+Thank you to everyone who has contributed to TokenMizer.
 
-**Sent a fix**
+| Contributor | Merged pull requests | Reported issues |
+| --- | --- | --- |
+| [@0xfroOty](https://github.com/0xfroOty) | [#22](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/22), [#25](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/25), [#31](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/31) | [#19](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/19), [#20](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/20), [#23](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/23), [#30](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/30), [#34](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/34) |
+| [@pollychen-lab](https://github.com/pollychen-lab) | [#21](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/21), [#26](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/26) | — |
+| [@floze-the-genius](https://github.com/floze-the-genius) | [#35](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/35) | — |
+| [@TechNovaWorldai](https://github.com/TechNovaWorldai) | [#63](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/63) | [#62](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/62) |
 
-- [**@0xfroOty**](https://github.com/0xfroOty) — negated-decision handling in the decision tracker ([#22](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/22)), `OutputTrimmer` level alignment ([#25](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/25)), streaming cache-hit analytics ([#31](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/31))
-- [**@pollychen-lab**](https://github.com/pollychen-lab) — graph node IDs derived from stored (truncated) labels ([#21](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/21)), semantic-opposite decision detection ([#26](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/26))
-- [**@floze-the-genius**](https://github.com/floze-the-genius) — dashboard stats authentication fix ([#35](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/35))
-- [**@TechNovaWorldai**](https://github.com/TechNovaWorldai) — the `minimal` terse prompt trimmed back under its own token budget ([#63](https://github.com/Shweta-Mishra-ai/tokenmizer/pull/63))
-
-**Found the bug in the first place** — which this project considers the
-harder half
-
-- [**@0xfroOty**](https://github.com/0xfroOty) — opposite decisions merged into one node ([#19](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/19)), node IDs colliding after label truncation ([#20](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/20)), `full` trimming behaving like `lite` ([#23](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/23)), streaming always recording `cache_hit=False` ([#30](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/30)), dashboard stats failing under an API key ([#34](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/34))
-- [**@TechNovaWorldai**](https://github.com/TechNovaWorldai) — the terse prompt over its own budget ([#62](https://github.com/Shweta-Mishra-ai/tokenmizer/issues/62))
+Contributions of any size are welcome. See
+[CONTRIBUTING.md](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md) to get started.
 
 ## Support
 
