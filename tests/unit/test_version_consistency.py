@@ -279,47 +279,37 @@ def test_readme_test_count_matches_reality():
         )
 
 
-def test_every_merged_contributor_is_credited():
-    """Nobody who sent a fix upstream may quietly fall out of the README.
+def test_the_readme_still_credits_contributors():
+    """The Contributors section may not quietly disappear again.
 
-    The v0.5.0 documentation split dropped the Contributors section
-    entirely — three people and six merged pull requests, removed by a
-    restructure that nothing was watching. Credit is not decoration; it
-    is the only thing an outside contributor gets, and losing it in a
-    refactor is worse than never having written it.
+    The v0.5.0 documentation split dropped it entirely — three people and
+    six merged pull requests, removed by a restructure that nothing was
+    watching. Credit is not decoration; it is the only thing an outside
+    contributor gets, and losing it in a refactor is worse than never
+    having written it.
 
-    Reads the credited handles from the README and checks the set has not
-    shrunk. Adding a contributor is expected; removing one has to be
-    deliberate enough to edit this list.
+    The section now shows a generated grid rather than a hand-written
+    list, so there are no names in the README to compare against. What
+    this guards is the section itself and the grid inside it: the heading
+    exists, and it contains an image built from this repository. A
+    restructure that drops either fails here.
     """
-    # Everyone whose pull request is merged. Add to this when a PR lands;
-    # the point of the set is that removing a name has to be deliberate.
-    # The section credits merged work and the bug reports behind it, and
-    # nothing else in the repo would notice a name going missing, so this
-    # list is the only guard on it.
-    credited = {"0xfroOty", "pollychen-lab", "floze-the-genius",
-                "TechNovaWorldai"}
-
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    # Matches the heading at either level. It was nested under
-    # Contributing and is now a section of its own, and which of those it
-    # is has nothing to do with whether anyone was dropped — the thing
-    # this test exists to catch.
-    m = re.search(r"^#{2,3} Contributors$", readme, re.M)
+    # The heading has carried a suffix ("❤️ Thanks") and has been nested
+    # under Contributing before, neither of which has anything to do with
+    # whether the credit survived — the thing this test exists to catch.
+    m = re.search(r"^#{2,3} Contributors\b.*$", readme, re.M)
     assert m, "the README no longer credits contributors"
     body = readme[m.end():]
-    # Stop at the next heading of the same level or higher.
     nxt = re.search(r"^## ", body, re.M)
     if nxt:
         body = body[:nxt.start()]
 
-    # Matches a profile link in either form the section has used: a
-    # markdown link ending in ")" and an HTML href ending in a quote.
-    handles = set(re.findall(r'github\.com/([\w.-]+)[)"]', body))
-    missing = credited - handles
-    assert not missing, (
-        f"contributors dropped from the README: {sorted(missing)}. "
-        f"If someone must genuinely be removed, edit this test too."
+    assert "contrib.rocks/image?repo=Shweta-Mishra-ai/tokenmizer" in body, (
+        "the contributors grid is gone from the Contributors section"
+    )
+    assert "/graphs/contributors" in body, (
+        "the contributors grid no longer links to the contributor graph"
     )
 
 

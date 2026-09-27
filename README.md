@@ -543,19 +543,22 @@ what matters, not its content.
 [CONTRIBUTING.md](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md) covers setup, the layer rules, and how
 to run the eval harness.
 
+If you have a question about the project or want to discuss something,
+join the [Discord server](https://discord.gg/fPg9KvjRe).
+
 ## Contributors
 
-Thank you to the people whose pull requests are part of TokenMizer.
+We extend our gratitude to everyone who has contributed to TokenMizer —
+the people who report issues, send pull requests, and answer questions.
+
+TokenMizer is a community-driven project, and your contributions
+continually improve it.
 
 <p align="center">
-  <a href="https://github.com/0xfroOty" title="0xfroOty"><img src="https://avatars.githubusercontent.com/u/150147344?v=4&s=96" width="72" height="72" alt="0xfroOty"/></a>
-  <a href="https://github.com/pollychen-lab" title="pollychen-lab"><img src="https://avatars.githubusercontent.com/u/265131177?v=4&s=96" width="72" height="72" alt="pollychen-lab"/></a>
-  <a href="https://github.com/floze-the-genius" title="floze-the-genius"><img src="https://avatars.githubusercontent.com/u/88098863?v=4&s=96" width="72" height="72" alt="floze-the-genius"/></a>
-  <a href="https://github.com/TechNovaWorldai" title="TechNovaWorldai"><img src="https://avatars.githubusercontent.com/u/289400570?v=4&s=96" width="72" height="72" alt="TechNovaWorldai"/></a>
+  <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=Shweta-Mishra-ai/tokenmizer" alt="Contributors"/>
+  </a>
 </p>
-
-Contributions of any size are welcome. See
-[CONTRIBUTING.md](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/CONTRIBUTING.md) to get started.
 
 ## Support
 
