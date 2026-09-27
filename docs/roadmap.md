@@ -16,12 +16,12 @@ benchmark, the suite is right and this file is a bug.
 | Surface | Number | Source |
 |---|---|---|
 | Extraction, macro F1 on the labelled corpus | 97% overall; **91% on real transcripts**, 98% synthetic | `python -m benchmarks.eval` |
-| Label quality | 0% truncated mid-word; 0 near-duplicate pairs over 170 labels | same run |
-| Retrieval, recall@6 on paraphrased questions | **82% keyword, n=40** (was 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
-| Extraction outside coding | **96%** macro F1 with a domain pack, **11%** without | `benchmarks.eval --corpus benchmarks/eval/corpus_domains` |
-| Out-of-ontology facts surviving windowing | **17% to 100%**, at +22 tokens of resume per session | `benchmarks.resume_quality.runner` |
-| Checkpoint accuracy | 80% task / 100% decision / 100% file recall, 195-token resume | `benchmarks.checkpoint_accuracy.runner` |
-| Graph density, fastapi_auth session | 28 nodes, 26 edges, 3 communities + 7 unclustered | `/api/graph/{id}/viz` |
+| Label quality | 0% truncated mid-word; 0 near-duplicate pairs over 169 labels | same run |
+| Retrieval, recall@6 on paraphrased questions | **88% keyword, n=40** (was 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
+| Extraction outside coding | **93%** macro F1 with a domain pack, **11%** without | `benchmarks.eval --corpus benchmarks/eval/corpus_domains` |
+| Out-of-ontology facts surviving windowing | **0% to 100%**, at +25 tokens of resume per session | `benchmarks.resume_quality.runner` |
+| Checkpoint accuracy | 80% task / 100% decision / 100% file recall, 207-token resume | `benchmarks.checkpoint_accuracy.runner` |
+| Graph density, fastapi_auth session | 29 nodes, 27 edges, 4 communities + 6 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
 | Suite | 1812 tests, ruff clean | `pytest tests/` |
 
@@ -82,7 +82,7 @@ budget on nothing. One node per session, rewritten as the dropped span
 grows rather than accumulated, and never allowed to fail a chat request.
 
 Measured by the new `benchmarks/resume_quality/runner.py`:
-out-of-ontology retention **17% to 100%** on its fixtures, **+23 tokens**
+out-of-ontology retention **0% to 100%** on its fixtures, **+25 tokens**
 of resume block per session, **no section lost** on the captured
 transcripts in the eval corpus, and checkpoint accuracy unchanged
 (80/100/100). Read the fixture number with the caveat the runner states
@@ -129,9 +129,14 @@ no longer gets quietly worse ranking than the same deployment's proxy.
 The eval is enlarged from 13 cases to **40**, across every corpus session
 including the six captured transcripts, with a grounding check that
 refuses a question its own transcript cannot answer. Keyword ranking
-scores **recall@6 82%** on it — and the misses are exactly the paraphrases
-embeddings exist for ("what is slow about the dashboard" against a node
-that says "re-render").
+scores **recall@6 88%** on it. The two misses, named rather than
+characterised, are `real_audit_concurrency` / "what is still not safe
+across workers" (expects a node about per-process state; returns the
+advisory-lock nodes) and `real_audit_extraction` / "what were we getting
+badly wrong" (expects the error-recall node). Both are abstract
+questions whose answer shares no keyword with them, which is the shape
+embeddings are meant for — but whether embeddings actually recover
+them is untested here and is not claimed.
 
 **The 92%-with-embeddings figure is not re-measured and should not be
 quoted.** It came from the 13-case eval, and this branch was written in a
@@ -165,7 +170,7 @@ for them. The alternative, a node type per domain, would grow the
 ontology to thirty types of which a session uses five, each needing a
 colour slot, a lane and a section.
 
-**11% to 96%** on `benchmarks/eval/corpus_domains`, and the coding corpus
+**11% to 93%** on `benchmarks/eval/corpus_domains`, and the coding corpus
 is bit-for-bit unchanged at 97%, because a pack's families run *after*
 the coding ones and can only add. Reproduce the before number with
 `python -m benchmarks.eval --corpus benchmarks/eval/corpus_domains
