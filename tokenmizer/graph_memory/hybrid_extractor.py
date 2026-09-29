@@ -2149,7 +2149,12 @@ def get_hybrid_extractor(domain: str | None = None) -> HybridExtractor:
         try:
             from tokenmizer.config.settings import get_settings
             domain = get_settings().domain
-        except Exception:
+        except Exception as e:
+            # Falling back changes which extraction patterns run for every
+            # session, so a settings failure here must not be invisible.
+            logger.warning("Could not read the configured domain (%s: %s); "
+                           "using the coding extraction patterns.",
+                           type(e).__name__, e)
             domain = "coding"
     # Shared with get_pack via domains.normalize_domain: this line and
     # that one were the same expression written twice, and a type guard

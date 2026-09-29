@@ -111,7 +111,13 @@ async def verify_api_key(request: Request) -> None:
     # does not reveal WHICH key matched, or how many are configured.
     try:
         candidates = _get_configured_keys()
-    except Exception:
+    except Exception as e:
+        # Fall back to the single key already read, which keeps auth
+        # closed. But the multi-key lookup failing means keys added beyond
+        # the first are being refused, and that should be visible.
+        logger.warning("Could not read the full list of API keys (%s: %s); "
+                       "only the primary key is being accepted.",
+                       type(e).__name__, e)
         candidates = [configured]
     presented = hashlib.sha256(key.encode()).digest()
     valid = False
