@@ -210,6 +210,17 @@ class Settings(BaseSettings):
     # Provider — synced exactly with providers/registry.py
     provider: Literal[
         "anthropic", "claude",
+class PrivacySettings(BaseModel):
+    # Nothing leaves this machine except to hosts named here. Refuses to
+    # start with a remote provider, and blocks every other connection and
+    # DNS lookup in the process. See tokenmizer/core/privacy.py.
+    local_only: bool = False
+    # Hosts a local_only process may still reach: your own gateway or
+    # inference server. Loopback is always allowed. An HTTP proxy must be
+    # listed to be reachable, and then so is everything behind it.
+    allowed_hosts: List[str] = Field(default_factory=list)
+
+
         "openai", "gpt",
         "deepseek",
         "mistral",
@@ -322,6 +333,7 @@ class Settings(BaseSettings):
     # Server
     # Was "0.0.0.0" (all interfaces) — the CLI's `serve` command didn't
     # even read this field until this fix (see cli.py), so the old
+    privacy: PrivacySettings = Field(default_factory=PrivacySettings)
     # default was inert. Now that it's wired in, localhost-only is the
     # safe default; the documented Docker deployment path is unaffected
     # since the Dockerfile always passes --host 0.0.0.0 explicitly.

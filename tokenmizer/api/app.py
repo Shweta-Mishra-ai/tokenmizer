@@ -43,6 +43,7 @@ from tokenmizer.compression.engine import CompressionPipeline
 from tokenmizer.compression.output_trimmer import OutputTrimmer
 from tokenmizer.compression.window import SmartMessageWindow, needs_windowing
 from tokenmizer.config.settings import get_settings, resolve_semantic_retrieval
+from tokenmizer.core import privacy
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.filters.file_intelligence import FileIntelligence
 from tokenmizer.graph_memory.graph import GraphMemory
@@ -650,6 +651,10 @@ def _warm_up() -> None:
 async def lifespan(app: FastAPI):
     logger.info("TokenMizer starting")
     await asyncio.to_thread(_warm_up)
+    # Before anything can open a connection, including the warm-up, which
+    # loads the tokenizer and may fetch its vocabulary. A configuration that
+    # contradicts local-only mode stops the server here, loudly.
+    privacy.enforce(settings)
     flusher = asyncio.create_task(_periodic_flush())
     try:
         yield
@@ -666,6 +671,7 @@ async def lifespan(app: FastAPI):
         await _flush_all_graphs("shutdown")
         _analytics.flush()
         logger.info("TokenMizer stopped")
+        privacy.release()
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
