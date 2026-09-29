@@ -51,6 +51,14 @@ class MemorySettings(BaseModel):
     # cost (docs/benchmarks.md) and NOT on answer quality, which needs a
     # real model. Set 0 to keep every recent message verbatim.
     max_tail_tokens: int = Field(default=16000, ge=0)
+    # Budget, in tokens, for an index of the file paths that appeared in the
+    # tool output windowing drops, kept in the resume block. Measured on a
+    # real agent session: without it 71% of what the agent went on to use
+    # was still in the request, with it 94%. The dropped output is gone, but
+    # the agent still knows which files exist and where, and what to read
+    # again. The index goes in the frozen bridge, so it is billed once per
+    # cut and read from the provider's cache after. 0 leaves it out.
+    tool_index_tokens: int = Field(default=1500, ge=0)
 
 
 class GraphCheckpointSettings(BaseModel):

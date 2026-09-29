@@ -268,6 +268,26 @@ def needed_from_history(action: str, history: list[dict], common: int = 30) -> s
             if 0 < source.count(t) < common}
 
 
+def present(token: str, text: str) -> bool:
+    """Is `token` recoverable from `text`?
+
+    Verbatim, or for a path, written the compact way a directory listing
+    writes it: the directory on a line and the file name after it on the same
+    line. Requiring the full string would count a readable listing as a loss.
+    """
+    if token in text:
+        return True
+    directory, slash, name = token.rpartition("/")
+    if not slash or not name:
+        return False
+    marker = directory + "/"
+    for line in text.splitlines():
+        at = line.find(marker)
+        if at != -1 and name in line[at + len(marker):]:
+            return True
+    return False
+
+
 def retention(requests, actions, sent: list[str]) -> tuple[int, int, list[str]]:
     """(needed, still present, examples of what was lost) over a replay."""
     needed = kept = 0
@@ -275,7 +295,7 @@ def retention(requests, actions, sent: list[str]) -> tuple[int, int, list[str]]:
     for req, action, text in zip(requests, actions, sent):
         for tok in needed_from_history(action, req):
             needed += 1
-            if tok in text:
+            if present(tok, text):
                 kept += 1
             elif len(lost) < 12:
                 lost.append(tok)

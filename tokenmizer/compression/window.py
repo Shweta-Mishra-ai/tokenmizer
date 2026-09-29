@@ -24,10 +24,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
-from tokenmizer.core.tokenizer import count_messages_tokens
+from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.security.fencing import fence
 
 if TYPE_CHECKING:
@@ -44,6 +45,7 @@ class SmartMessageWindow:
         protect_recent: int = 8,
         graph_context_budget: int = 250,
         max_tail_tokens: int = 0,
+        tool_index_tokens: int = 0,
     ):
         self.token_budget = token_budget
         self.protect_recent = protect_recent
@@ -57,6 +59,9 @@ class SmartMessageWindow:
         # Whole steps are dropped from the front of the tail until it fits,
         # but the newest step is never dropped. 0 disables the ceiling.
         self.max_tail_tokens = max_tail_tokens
+        # Budget, in tokens, for the index of paths seen in the tool output
+        # that windowing drops. See path_index. 0 leaves it out.
+        self.tool_index_tokens = tool_index_tokens
         # session id -> (messages windowed out, hash of them, bridge message,
         # conversation-level lead-in). Bounded: a proxy serves many sessions
         # and this is only a cost optimisation — a forgotten entry re-cuts,
@@ -140,6 +145,15 @@ class SmartMessageWindow:
             # message, where an imperative reads as an instruction rather
             # than as a record of one. See security/fencing.py.
             bridge_parts.append(fence(graph_ctx, "session context from earlier turns"))
+
+        # What the agent looked at in the tool output being dropped. The
+        # graph holds the files it knows are important, in a few dozen
+        # tokens; the agent goes on to use files and directories that a
+        # listing or a search showed it once and no node records.
+        if self.tool_index_tokens > 0:
+            index = path_index(old, self.tool_index_tokens, model)
+            if index:
+                bridge_parts.append(fence(index, "paths seen in earlier tool output"))
 
         # Add a note about what's omitted
         bridge_parts.append(
@@ -254,6 +268,89 @@ class SmartMessageWindow:
         self._frozen.move_to_end(session_id)
         while len(self._frozen) > self._frozen_max:
             self._frozen.popitem(last=False)
+
+
+_PATH_EXTENSIONS = frozenset((
+    "py js jsx ts tsx json md toml yaml yml txt sh cfg ini html css go rs java "
+    "c h cpp rb sql lock xml csv env ipynb").split())
+_PATH_STRIP = "\"'`()[]{}<>,;:*|=!?"
+_MAX_TOKEN_CHARS = 160          # longer is a blob, not a path
+_MAX_SCAN_CHARS = 400_000       # per message; the rest is not read
+_PATH_CHARS = re.compile(r"[\w.\-/@+~]+")
+
+
+def _as_path(word: str) -> str:
+    """`word` as a path, or "" if it is not one.
+
+    Word by word rather than one regex over the whole text: tool output has
+    minified lines and blobs with no separator for hundreds of thousands of
+    characters, and a pattern with nested repeats over them is quadratic.
+    Here every word is looked at once, and long ones are skipped unread.
+    """
+    word = word.strip(_PATH_STRIP).rstrip(".")
+    if not (4 <= len(word) <= _MAX_TOKEN_CHARS) or "://" in word or word[0] == "-":
+        return ""
+    if not _PATH_CHARS.fullmatch(word):
+        return ""
+    word = word.removeprefix("./")
+    if "/" in word:
+        # a directory, or a file in one; "a/b" is not a fraction or a date
+        # when it has a letter in it and no more than one dot-free segment
+        # of digits alone
+        return word if any(c.isalpha() for c in word) else ""
+    stem, dot, ext = word.rpartition(".")
+    return word if dot and stem and ext.lower() in _PATH_EXTENSIONS else ""
+
+
+def path_index(dropped: list[dict], budget: int, model: str = "gpt-4o") -> str:
+    """The paths mentioned in the tool calls and tool output that windowing
+    is dropping, grouped by directory, newest directories first, within
+    `budget` tokens. "" when there are none.
+
+    Measured on a real agent session, 60% of what the agent went on to use
+    and no longer had were file paths, and another third were parts of
+    them; they were in a listing or a search result that had been dropped.
+    No selector predicts which of a request's ~280 paths will be needed
+    (the needed path's rank by recency or frequency was about 176 of 276),
+    so the index lists them all and lets the budget decide. Written the way
+    a directory listing writes them, which is also about 40% smaller than
+    full paths.
+    """
+    seen: dict[str, None] = {}
+    for m in dropped:
+        texts = []
+        content = m.get("content")
+        # Tool output and the calls that made it, not what people wrote: a
+        # chat that mentions a file is not an agent that has looked at it.
+        if m.get("role") == "tool" and isinstance(content, str):
+            texts.append(content)
+        for call in m.get("tool_calls") or []:
+            texts.append((call.get("function") or {}).get("arguments") or "")
+        for text in texts:
+            for word in text[:_MAX_SCAN_CHARS].split():
+                path = _as_path(word)
+                if path:
+                    seen.setdefault(path)
+    if not seen:
+        return ""
+    groups: dict[str, list[str]] = {}
+    for path in seen:
+        directory, _, name = path.rpartition("/")
+        groups.setdefault(directory + "/" if directory else "", []).append(name)
+    head = ("Paths seen in earlier tool output (contents omitted; read a file "
+            "again to see it):")
+    lines = [f"{d or '(no directory)'}: {' '.join(names)}" for d, names in groups.items()]
+    used = count_tokens(head, model)
+    kept: list[str] = []
+    for line in reversed(lines):              # newest directories win
+        cost = count_tokens(line, model) + 1
+        if used + cost > budget:
+            break
+        kept.append(line)
+        used += cost
+    if not kept:
+        return ""
+    return head + "\n" + "\n".join(reversed(kept))
 
 
 # What opens the tail when the window starts on an agent step. Constant, so

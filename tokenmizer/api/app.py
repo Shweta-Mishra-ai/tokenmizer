@@ -291,6 +291,7 @@ _smart_window = SmartMessageWindow(
     protect_recent=settings.memory.recent_turns_verbatim,
     graph_context_budget=250,
     max_tail_tokens=settings.memory.max_tail_tokens,
+    tool_index_tokens=settings.memory.tool_index_tokens,
 )
 _file_intelligence = FileIntelligence()
 _extraction_provider = None   # lazy — only built if use_llm_extraction=True

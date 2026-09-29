@@ -284,3 +284,166 @@ def test_chat_keeps_holding_a_cut_to_the_chat_budget(graph):
         a = small.apply(conv, graph, stable=True)[0]
         b = large.apply(conv, graph, stable=True)[0]
         assert a == b, "a large tail ceiling changed how a plain chat is windowed"
+
+
+# ── The index of paths seen in the output that is dropped ────────────────────
+# Measured on a real agent session: 60% of what the agent went on to use and
+# no longer had were file paths, and another third were parts of them. They
+# were in a listing or a search result that windowing had dropped.
+
+from tokenmizer.compression.window import _as_path, path_index  # noqa: E402
+
+
+def _tool(text: str, call_id: str = "c1") -> dict:
+    return {"role": "tool", "tool_call_id": call_id, "content": text}
+
+
+@pytest.mark.parametrize("word,expected", [
+    ("tokenmizer/graph_memory/graph.py", "tokenmizer/graph_memory/graph.py"),
+    ("./tests/unit/test_x.py", "tests/unit/test_x.py"),
+    ("`api/app.py`,", "api/app.py"),
+    ('"docs/roadmap.md"', "docs/roadmap.md"),
+    ("pyproject.toml", "pyproject.toml"),
+    ("/root/project/src/main.rs.", "/root/project/src/main.rs"),
+    ("tokenmizer/checkpoints/", "tokenmizer/checkpoints/"),
+])
+def test_things_that_are_paths(word, expected):
+    assert _as_path(word) == expected
+
+
+@pytest.mark.parametrize("word", [
+    "https://example.com/a/b.py",       # a URL
+    "3.11", "1.5.0", "12/25",            # a version, a date
+    "--max-tokens", "-v",                # flags
+    "self.assertEqual", "cache.get",     # attribute access, not a file
+    "the", "ok", "",                     # too short or plain words
+    "a" * 300,                           # a blob
+    "key=value/with=equals",             # not a path character set
+])
+def test_things_that_are_not_paths(word):
+    assert _as_path(word) == ""
+
+
+def test_the_index_is_grouped_by_directory_like_a_listing():
+    out = path_index([_tool("edited tokenmizer/api/app.py and tokenmizer/api/routes.py "
+                            "then tests/unit/test_a.py")], budget=500)
+    assert "tokenmizer/api/: app.py routes.py" in out
+    assert "tests/unit/: test_a.py" in out
+    assert out.startswith("Paths seen in earlier tool output")
+
+
+def test_paths_in_the_calls_count_too():
+    call = {"role": "assistant", "content": None, "tool_calls": [{
+        "id": "c1", "type": "function",
+        "function": {"name": "read", "arguments": '{"file_path": "src/deep/module.py"}'}}]}
+    assert "src/deep/: module.py" in path_index([call], budget=500)
+
+
+def test_a_path_is_listed_once_however_often_it_appears():
+    out = path_index([_tool("api/app.py " * 50), _tool("api/app.py")], budget=500)
+    assert out.count("app.py") == 1
+
+
+def test_nothing_to_index_is_an_empty_string():
+    assert path_index([_tool("all tests passed, nothing else here")], budget=500) == ""
+    assert path_index([], budget=500) == ""
+
+
+def test_the_budget_holds_and_the_newest_directories_are_kept():
+    old = _tool(" ".join(f"old{i}/file.py" for i in range(200)))
+    new = _tool("newest/dir/keep.py")
+    out = path_index([old, new], budget=120)
+    from tokenmizer.core.tokenizer import count_tokens
+    assert count_tokens(out) <= 120
+    assert "newest/dir/: keep.py" in out
+
+
+def test_a_budget_too_small_for_one_line_gives_no_index():
+    assert path_index([_tool("api/app.py")], budget=3) == ""
+
+
+@pytest.mark.parametrize("blob", [
+    "a" * 400_000,                                   # one enormous word
+    "a/" * 200_000,                                  # slashes all the way
+    ("x" * 150 + "/") * 3000,                        # long segments
+    ("1234567890" * 10 + " ") * 4000,                # many long words
+    "/" * 400_000,
+    ".-" * 200_000,
+])
+def test_extraction_is_linear_on_hostile_output(blob):
+    """Tool output has minified lines and blobs. Every word is read once and
+    long ones are skipped unread, so nothing here can be quadratic."""
+    import time
+    t0 = time.perf_counter()
+    path_index([_tool(blob)], budget=1500)
+    assert time.perf_counter() - t0 < 3.0
+
+
+def test_extraction_reads_no_more_than_the_scan_cap():
+    """A megabyte of output is not read past the cap, so a path that only
+    appears after it is not found. Bounded work beats completeness here."""
+    hidden = "x " * 250_000 + "late/only.py"
+    assert path_index([_tool(hidden)], budget=500) == ""
+
+
+# ── In the bridge ────────────────────────────────────────────────────────────
+
+def _bridge(out):
+    return next(m["content"] for m in out if m.get("role") == "system")
+
+
+def _session_with_paths(steps=12):
+    conv = [{"role": "user", "content": "Fix the failing login test in api/auth.py"}]
+    for i in range(steps):
+        conv += _step(i)
+    conv[2]["content"] = ("src/only_in_the_first_result/needle.py " + "filler " * 3000)
+    return conv
+
+
+def test_paths_from_dropped_output_reach_the_bridge(graph):
+    conv = _session_with_paths()
+    out, _ = SmartMessageWindow(token_budget=4000, protect_recent=8,
+                                max_tail_tokens=6000, tool_index_tokens=800).apply(conv, graph)
+    assert "src/only_in_the_first_result/: needle.py" in _bridge(out)
+    assert all("needle.py" not in str(m.get("content")) for m in out
+               if m.get("role") != "system"), "sanity: the output itself is gone"
+
+
+def test_the_index_is_fenced_because_tool_output_is_not_trusted(graph):
+    from tokenmizer.security.fencing import FENCE_OPEN
+
+    out, _ = SmartMessageWindow(token_budget=4000, protect_recent=8, max_tail_tokens=6000,
+                                tool_index_tokens=800).apply(_session_with_paths(), graph)
+    bridge = _bridge(out)
+    assert FENCE_OPEN in bridge
+    assert bridge.index("paths seen in earlier tool output") < bridge.index("needle.py")
+
+
+def test_a_budget_of_zero_leaves_the_index_out(graph):
+    out, _ = SmartMessageWindow(token_budget=4000, protect_recent=8, max_tail_tokens=6000,
+                                tool_index_tokens=0).apply(_session_with_paths(), graph)
+    assert "needle.py" not in _bridge(out)
+
+
+def test_chat_gets_no_index(graph):
+    conv = []
+    for i in range(30):
+        conv.append({"role": "user", "content": f"look at docs/page{i}.md " + "words " * 60})
+        conv.append({"role": "assistant", "content": "ok " + "words " * 60})
+    conv.append({"role": "user", "content": "next"})
+    out, _ = SmartMessageWindow(token_budget=2000, protect_recent=8,
+                                tool_index_tokens=800).apply(conv, graph)
+    assert "Paths seen" not in _bridge(out), "the index is for dropped tool output only"
+
+
+def test_the_index_survives_a_held_cut(graph):
+    """It is part of the frozen bridge: built at the cut and reused, so it
+    costs once per cut and the provider's cache serves it after."""
+    window = SmartMessageWindow(token_budget=4000, protect_recent=8,
+                                max_tail_tokens=16000, tool_index_tokens=800)
+    conv = _session_with_paths(steps=14)
+    first, _ = window.apply(conv, graph, stable=True)
+    second, _ = window.apply(conv + _step(14), graph, stable=True)
+    assert "needle.py" in _bridge(first)
+    assert _bridge(second) == _bridge(first)
+    assert second[:len(first)] == first
