@@ -133,7 +133,18 @@ def test_a_proxy_is_not_allowed_implicitly(monkeypatch):
         socket.getaddrinfo("proxy.corp.example", 3128)
 
 
-def test_unix_sockets_are_local_by_construction(tmp_path):
+def test_a_path_address_is_local_by_construction():
+    """An address that is not a (host, port) pair is a filesystem path, which
+    cannot leave the machine. This is the logic, and it runs everywhere."""
+    privacy.enforce(_settings())
+    assert privacy._active.address_allowed("/tmp/anything.sock") is True
+    assert privacy._active.address_allowed(("203.0.113.7", 443)) is False
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"),
+                    reason="Windows has no unix-domain sockets to connect")
+def test_a_real_unix_socket_still_connects(tmp_path):
+    """The same rule on a real socket, where the platform has them."""
     privacy.enforce(_settings())
     path = str(tmp_path / "s.sock")
     srv = socket.socket(socket.AF_UNIX)
