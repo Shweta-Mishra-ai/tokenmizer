@@ -68,6 +68,24 @@ class TestOfflineFallback:
         g = GraphMemory("offline-1", storage_dir=str(offline))
         assert len(g._nodes) > 0, "nothing reached the store"
 
+    def test_checkpoint_preserves_tool_call_without_the_proxy(self, offline):
+        messages = [
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_write", "type": "function",
+                "function": {"name": "write_file", "arguments": '{"path":"src/cache.py"}'},
+            }]},
+            {"role": "tool", "tool_call_id": "call_write", "name": "write_file",
+             "content": "Error: permission denied; token=secretvalue123456"},
+        ]
+        text, is_error = mcp.handle_checkpoint_session(
+            {"session_id": "offline-tool", "messages": messages})
+        assert not is_error, text
+        g = GraphMemory("offline-tool", storage_dir=str(offline))
+        assert {n.label for n in g._nodes.values() if n.type.value == "file"} == {
+            "src/cache.py"
+        }
+        assert "secretvalue123456" not in str([n.label for n in g._nodes.values()])
+
     def test_resume_reads_the_graph_without_the_proxy(self, offline):
         mcp.handle_checkpoint_session({"session_id": "offline-2", "messages": TRANSCRIPT})
         text, is_error = mcp.handle_resume_session({"session_id": "offline-2"})

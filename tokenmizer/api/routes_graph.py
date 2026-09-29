@@ -398,9 +398,7 @@ async def create_manual_checkpoint(session_id: str, body: CheckpointBody | None 
     """
     try:
         graph = await app_module._get_graph_async(session_id)
-        raw_messages = [
-            {"role": m.role, "content": m.text()} for m in (body.messages if body else [])
-        ]
+        raw_messages = [m.to_dict() for m in (body.messages if body else [])]
         raw_messages = redact_messages(raw_messages)
         async with app_module._get_session_lock(session_id):
             ckpt = app_module._checkpoint_mgr.create(
