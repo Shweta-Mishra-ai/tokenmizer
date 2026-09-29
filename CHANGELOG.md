@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1908 tests; every published number below was
+remembering. Suite is now 1911 tests; every published number below was
 re-derived from a run.
 
 ### Agent sessions, local-only mode, and a filter that locked sessions out
@@ -23,9 +23,11 @@ the proxy with the new `--trace` option of `benchmarks/savings`.
   in an agent loop a message is a file or a log.
   Windowing now cuts at agent steps, never separating a call from its
   results, and `memory.max_tail_tokens` (default 16000) caps the verbatim
-  tail in tokens; the newest step is never dropped. 64.5% fewer tokens on
-  that session, and 4.0% less input cost than a caching client. Measured on
-  cost, **not on answer quality**; `0` restores exact message counting.
+  tail in tokens; the newest step is never dropped. A cut lands at half the
+  ceiling and is held while the tail grows back, so the provider's cache can
+  serve the history. 71.9% fewer tokens on that session, and 24.8% less
+  input cost than a caching client. Measured on cost, **not on answer
+  quality**; `0` restores exact message counting.
 - **The injection filter locked sessions out permanently.** It scanned every
   message, and a client resends the whole history each turn, so one phrase
   anywhere (a file the agent read, an assistant quote) meant a 400 on every

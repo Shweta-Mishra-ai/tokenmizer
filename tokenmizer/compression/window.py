@@ -195,12 +195,9 @@ class SmartMessageWindow:
         if split >= len(conv_msgs) or _digest(conv_msgs[:split]) != digest:
             return None
         candidate = system_msgs + [bridge_msg] + [dict(m) for m in lead] + conv_msgs[split:]
-        # The budget is for chat, where a turn is a few hundred tokens. In
-        # an agent loop the tail is dominated by tool output and never fits
-        # it, so holding the cut to the budget would re-cut on every request
-        # and hand back nothing. The tail ceiling is the limit there.
-        if count_messages_tokens(candidate, model) > max(self.token_budget,
-                                                         self.max_tail_tokens):
+        # See _tail_limit: the chat budget in chat, the ceiling in an agent
+        # loop.
+        if count_messages_tokens(candidate, model) > self._tail_limit(conv_msgs):
             return None
         self._frozen.move_to_end(session_id)
         return candidate
@@ -226,11 +223,30 @@ class SmartMessageWindow:
         last = starts[-1]
         wanted = len(conv) - self.protect_recent
         split = next((i for i in starts if i >= wanted), last)
-        if self.max_tail_tokens > 0:
-            while split < last and count_messages_tokens(
-                    conv[split:], model) > self.max_tail_tokens:
+        if self.max_tail_tokens > 0 and any(m.get("role") == "tool" for m in conv):
+            # In an agent loop, cut down to half the ceiling, not to just
+            # under it and not merely to protect_recent messages. A tail
+            # left near the ceiling has no room to grow, so the next step
+            # pushes it over and the cut is made again, moving the start of
+            # the request on every request and never letting the provider's
+            # cache serve the history. Cut to half, the tail grows back over
+            # several requests before the next cut.
+            target = self.max_tail_tokens // 2
+            while split < last and count_messages_tokens(conv[split:], model) > target:
                 split = next(i for i in starts if i > split)
         return split
+
+    def _tail_limit(self, conv: list[dict]) -> int:
+        """How large a held cut may grow before it is re-made.
+
+        In chat that is the token budget, as it always was. In an agent loop
+        (there are tool results in the conversation) a tail is dominated by
+        tool output and never fits a chat-sized budget, so the ceiling is the
+        limit; holding to the budget would re-cut on every request.
+        """
+        if self.max_tail_tokens > 0 and any(m.get("role") == "tool" for m in conv):
+            return self.max_tail_tokens
+        return self.token_budget
 
     def _freeze(self, session_id: str, split: int, digest: str,
                 bridge_msg: dict, lead: list) -> None:

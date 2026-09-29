@@ -12,7 +12,7 @@ python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
 python -m benchmarks.savings.runner                 # input cost, with and without
-pytest tests/ -q                                     # 1908 tests
+pytest tests/ -q                                     # 1911 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -149,12 +149,12 @@ only, token counts from a character estimate, 23 requests of it:
 | Client alone, no caching | 711,332 | 711,332 | — |
 | Client caching its own history | 711,332 | 235,094 | — |
 | Proxy before this change | 714,808 (0% fewer) | 260,046 | 10.6% more |
-| **Proxy, `max_tail_tokens: 16000` (default)** | **252,526 (64.5% fewer)** | **225,766** | **4.0% less** |
-| Proxy, `max_tail_tokens: 8000` | 144,275 (79.7% fewer) | 142,292 | 39.5% less |
+| **Proxy, `max_tail_tokens: 16000` (default)** | **200,003 (71.9% fewer)** | **176,687** | **24.8% less** |
+| Proxy, `max_tail_tokens: 8000` | 128,166 (82.0% fewer) | 130,906 | 44.3% less |
 
-Over 58 requests the default is 85% fewer tokens and 31.7% less input cost
-than a caching client; 8,000 is 92% and 54%. (The proxy before this change
-could not complete 58 requests: see the injection-filter fix in the
+Over 58 requests the default is 87.2% fewer tokens and 49.3% less input cost
+than a caching client; 8,000 is 93.3% and 64.2%. (The proxy before this
+change could not complete 58 requests: see the injection-filter fix in the
 changelog.)
 
 Why it was 0% before: the window opened on a user turn, and an agent loop has
@@ -163,7 +163,11 @@ two of them are from the user; at 58 requests, two in 110. So the "protected"
 tail was nearly the whole conversation, and windowing had nothing to remove.
 Windowing now cuts at agent steps, keeps a call together with its results,
 and caps the verbatim tail in tokens (`memory.max_tail_tokens`); the newest
-step is never dropped.
+step is never dropped. A cut lands at half the ceiling and is held while the
+tail grows back to it, so the history stays byte-identical across several
+requests and the provider's cache can serve it. Cutting to just under the
+ceiling instead left no room to grow: the cut moved on every request, and
+the cache never hit.
 
 **What this does not show, and matters most here:** answer quality. Dropping
 old tool output means a file read several steps back has to be read again,

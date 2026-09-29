@@ -229,3 +229,58 @@ def test_the_anthropic_request_built_from_a_windowed_agent_loop_is_valid(graph):
             prev = wire[i - 1]["content"]
             called = [b["id"] for b in prev if b.get("type") == "tool_use"]
             assert sorted(results) == sorted(called), f"orphan tool_result at message {i}"
+
+
+# ── The cut has to hold for several requests, not one ────────────────────────
+
+def test_a_cut_holds_across_several_requests_before_it_is_re_made(graph):
+    """Cut to the ceiling and the next step goes over it, so the cut moves
+    on every request and the provider's cache never serves the history.
+    Cut to half of it and the tail has room to grow back."""
+    window = SmartMessageWindow(token_budget=4000, protect_recent=8, max_tail_tokens=16000)
+    conv = _agent_session(steps=14)
+    held = window.apply(conv, graph, stable=True)[0]
+    unchanged_for = 0
+    for i in range(14, 24):
+        conv = conv + _step(i)
+        out = window.apply(conv, graph, stable=True)[0]
+        _assert_valid(out)
+        if out[:len(held)] == held:
+            unchanged_for += 1
+            held = out
+        else:
+            break
+    assert unchanged_for >= 2, (
+        f"the cut was re-made after {unchanged_for} request(s); it should "
+        f"hold for several so the cached prefix is reused")
+
+
+def test_a_recut_leaves_room_to_grow(graph):
+    conv = _agent_session(steps=14)
+    out, _ = SmartMessageWindow(
+        token_budget=4000, protect_recent=8, max_tail_tokens=16000).apply(conv, graph)
+    tail = [m for m in out if m.get("role") != "system"]
+    assert count_messages_tokens(tail) <= 16000 // 2 + count_messages_tokens(_step(0)), (
+        "a fresh cut should land at about half the ceiling, not just under it")
+
+
+def test_chat_keeps_holding_a_cut_to_the_chat_budget(graph):
+    """The tail ceiling is for agent loops. A chat session without tool
+    results is held to the token budget as before, so a large ceiling does
+    not quietly send four times as much history in a long chat."""
+    conv = []
+    for i in range(40):
+        conv.append({"role": "user", "content": f"question {i} " + "words " * 50})
+        conv.append({"role": "assistant", "content": f"answer {i} " + "words " * 50})
+    conv.append({"role": "user", "content": "next"})
+    small = SmartMessageWindow(token_budget=2000, protect_recent=8, max_tail_tokens=0)
+    large = SmartMessageWindow(token_budget=2000, protect_recent=8, max_tail_tokens=60000)
+    a = small.apply(conv, graph, stable=True)[0]
+    b = large.apply(conv, graph, stable=True)[0]
+    assert a == b
+    for i in range(20):
+        conv = conv + [{"role": "assistant", "content": "ok " + "words " * 50},
+                       {"role": "user", "content": f"more {i} " + "words " * 50}]
+        a = small.apply(conv, graph, stable=True)[0]
+        b = large.apply(conv, graph, stable=True)[0]
+        assert a == b, "a large tail ceiling changed how a plain chat is windowed"

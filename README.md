@@ -449,8 +449,8 @@ Details and caveats in [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmiz
 
 **Agent sessions are measured separately**, because tool output, not prose,
 is most of what they send. On a real 23-request agent session the proxy
-sent 64% fewer tokens than the client alone, where before this release it
-sent none fewer, and cost 4% less than a client caching its own history.
+sent 72% fewer tokens than the client alone, where before this release it
+sent none fewer, and cost 25% less than a client caching its own history.
 That is one session and an input-only estimate, and it says nothing about
 answer quality: see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
@@ -545,7 +545,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 1908 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 1911 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

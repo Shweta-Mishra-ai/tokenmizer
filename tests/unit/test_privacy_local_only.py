@@ -188,11 +188,13 @@ def test_the_tokenizer_degrades_to_an_estimate_instead_of_dialling_out(monkeypat
     monkeypatch.setattr(tiktoken, "get_encoding", download)
     privacy.enforce(_settings())
     tokenizer._get_encoding.cache_clear()
+    tokenizer.count_tokens.cache_clear()     # a memoised count would skip the download
     try:
         with caplog.at_level(logging.WARNING):
             n = tokenizer.count_tokens("hello world, this is a sentence", "gpt-4o")
     finally:
         tokenizer._get_encoding.cache_clear()
+        tokenizer.count_tokens.cache_clear()
     assert reached, "the tokenizer never tried to download"
     assert n > 0
     assert any("openaipublic" in r.getMessage() or "local-only" in r.getMessage()
