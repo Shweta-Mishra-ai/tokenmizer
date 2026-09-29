@@ -48,8 +48,14 @@ the proxy with the new `--trace` option of `benchmarks/savings`.
   span summary skipped non-string content but not string tool results.
 - **`privacy.local_only`** makes "nothing leaves this machine" a property of
   the process: it refuses to start with a remote provider and blocks every
-  connection and DNS lookup not on `privacy.allowed_hosts`. Documented
-  limits: it sees hostnames, not what travels through a proxy tunnel.
+  connection and DNS lookup not on `privacy.allowed_hosts`. It is enforced
+  when the app module is imported, before the embedding model can be
+  loaded, and proxy settings are removed unless the proxy's host is listed:
+  a proxy on loopback (a local relay or tunnel) passes the loopback rule
+  and carries traffic anywhere, which is how the tokenizer download
+  reached the network when the real server was first run in the mode.
+  `GET /health` reports `privacy.guard_active`. Documented limit: it sees
+  hostnames, not what travels through a proxy the operator lists.
 - Three fallbacks on a failed settings read now log a warning; one of them
   meant API keys beyond the first were being refused with no trace.
 

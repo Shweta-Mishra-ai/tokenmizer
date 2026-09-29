@@ -65,6 +65,12 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+# Local-only mode has to be in force before the rest of this module is built:
+# constructing the semantic cache can load the embedding model, which
+# downloads its weights on first use. The lifespan enforces it again, which
+# is a no-op here and re-installs after a shutdown in the same process.
+privacy.enforce(settings)
+
 
 def _warn_if_multi_worker_risk() -> None:
     """
@@ -1992,6 +1998,10 @@ async def dashboard():
 # Graph inspection, checkpoint, and decision-management endpoints live in
 # routes_graph.py (split out to keep this file focused on the core proxy
 # path). Imported at the bottom of this module — by this point every
+        # Whether "nothing leaves this machine" is being enforced, checkable
+        # from outside. Not part of `degraded`: it is configuration, not a
+        # failure.
+        "privacy": privacy.status(settings),
 # singleton/helper routes_graph.py references via `app_module.<name>`
 # (_analytics, _cache, _checkpoint_mgr, _get_graph_async, _check_rate_limit)
 # is already defined above.

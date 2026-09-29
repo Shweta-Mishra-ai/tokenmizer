@@ -27,7 +27,14 @@ def _settings(provider="ollama", local_only=True, allowed=()):
 
 
 @pytest.fixture(autouse=True)
-def _release_guard():
+def _release_guard(monkeypatch):
+    # The machine running the tests may have proxies configured (CI runners
+    # and agent sandboxes do), and the mode removes them, so every test
+    # starts from an environment it controls.
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                "http_proxy", "https_proxy", "all_proxy",
+                "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        monkeypatch.delenv(var, raising=False)
     yield
     privacy.release()
 
@@ -133,6 +140,60 @@ def test_a_proxy_is_not_allowed_implicitly(monkeypatch):
         socket.getaddrinfo("proxy.corp.example", 3128)
 
 
+@pytest.mark.parametrize("value", [
+    "http://127.0.0.1:44635",
+    "http://localhost:3128",
+    "127.0.0.1:8080",                      # no scheme
+    "socks5://[::1]:1080",
+])
+def test_a_proxy_on_loopback_is_removed_because_it_would_bypass_the_guard(monkeypatch, value):
+    """A proxy on loopback (a local relay, an SSH or corporate tunnel) passes
+    the loopback rule and then carries the traffic anywhere. Found by running
+    the real server: the tokenizer download went through it."""
+    monkeypatch.setenv("HTTPS_PROXY", value)
+    monkeypatch.setenv("https_proxy", value)
+    privacy.enforce(_settings())
+    import os
+    assert "HTTPS_PROXY" not in os.environ and "https_proxy" not in os.environ
+    assert privacy.status(_settings())["proxies_removed"] == ["HTTPS_PROXY", "https_proxy"]
+
+
+def test_a_proxy_the_operator_listed_is_kept(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+    privacy.enforce(_settings(allowed=["127.0.0.1"]))
+    import os
+    assert os.environ["HTTPS_PROXY"] == "http://127.0.0.1:3128"
+    assert privacy.status(_settings())["proxies_removed"] == []
+
+
+def test_release_puts_the_environment_back(monkeypatch):
+    import os
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    privacy.enforce(_settings())
+    assert "HTTPS_PROXY" not in os.environ and os.environ["HF_HUB_OFFLINE"] == "1"
+    privacy.release()
+    assert os.environ["HTTPS_PROXY"] == "http://127.0.0.1:3128"
+    assert "HF_HUB_OFFLINE" not in os.environ
+
+
+def test_an_offline_setting_the_operator_already_chose_is_left_alone(monkeypatch):
+    import os
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    privacy.enforce(_settings())
+    assert os.environ["HF_HUB_OFFLINE"] == "0"
+    privacy.release()
+    assert os.environ["HF_HUB_OFFLINE"] == "0"
+
+
+def test_status_reports_the_mode_and_what_it_did():
+    assert privacy.status(_settings(local_only=False))["guard_active"] is False
+    privacy.enforce(_settings(allowed=["gateway.example"]))
+    status = privacy.status(_settings())
+    assert status["local_only"] and status["guard_active"]
+    assert status["allowed_hosts"] == ["gateway.example"]
+
+
 def test_a_path_address_is_local_by_construction():
     """An address that is not a (host, port) pair is a filesystem path, which
     cannot leave the machine. This is the logic, and it runs everywhere."""
@@ -234,5 +295,7 @@ def test_the_server_starts_and_serves_health_in_local_only_mode(monkeypatch):
     monkeypatch.setattr(app_module.settings, "provider", "ollama")
     with TestClient(app_module.app) as client:
         assert privacy._active is not None
-        assert client.get("/health").status_code == 200
+        health = client.get("/health")
+        assert health.status_code == 200
+        assert health.json()["privacy"]["guard_active"] is True
     assert privacy._active is None, "the guard outlived the server"
