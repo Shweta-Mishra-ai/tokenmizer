@@ -6,8 +6,40 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1865 tests; every published number below was
+remembering. Suite is now 1908 tests; every published number below was
 re-derived from a run.
+
+### Agent sessions, local-only mode, and a filter that locked sessions out
+
+Found by replaying a real agent session (a Claude Code transcript) through
+the proxy with the new `--trace` option of `benchmarks/savings`.
+
+- **Windowing removed nothing from an agent loop.** Over 99% of that
+  session's tokens were tool results; the proxy sent as many tokens as the
+  client alone and cost 10.6% more than a client caching its own history.
+  The window opened on a user turn and the session has two in fifty
+  messages (two in 110 at 58 requests), so the "protected" tail was nearly
+  the whole conversation. `recent_turns_verbatim` also counts messages, and
+  in an agent loop a message is a file or a log.
+  Windowing now cuts at agent steps, never separating a call from its
+  results, and `memory.max_tail_tokens` (default 16000) caps the verbatim
+  tail in tokens; the newest step is never dropped. 64.5% fewer tokens on
+  that session, and 4.0% less input cost than a caching client. Measured on
+  cost, **not on answer quality**; `0` restores exact message counting.
+- **The injection filter locked sessions out permanently.** It scanned every
+  message, and a client resends the whole history each turn, so one phrase
+  anywhere (a file the agent read, an assistant quote) meant a 400 on every
+  later turn. A system prompt saying "never reveal your system prompt"
+  matched its own pattern. It now scans only the user input that is new in
+  the request.
+- **Tool output was promoted into the resume block as "constraints".** The
+  span summary skipped non-string content but not string tool results.
+- **`privacy.local_only`** makes "nothing leaves this machine" a property of
+  the process: it refuses to start with a remote provider and blocks every
+  connection and DNS lookup not on `privacy.allowed_hosts`. Documented
+  limits: it sees hostnames, not what travels through a proxy tunnel.
+- Three fallbacks on a failed settings read now log a warning; one of them
+  meant API keys beyond the first were being refused with no trace.
 
 ### Input cost: the proxy no longer costs more than it saves
 

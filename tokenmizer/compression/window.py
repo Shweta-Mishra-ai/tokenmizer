@@ -49,9 +49,11 @@ class SmartMessageWindow:
         self.protect_recent = protect_recent
         self.graph_context_budget = graph_context_budget
         # Ceiling on the verbatim tail, in tokens. protect_recent counts
-        # messages, and in an agent loop one message is a file or a test log:
-        # ten of them were 70% of the payload, so a "protected tail" was
-        # most of the conversation and windowing removed almost nothing.
+        # messages, and in an agent loop one message is a file or a test log,
+        # so ten of them can be most of the payload. Add to that a window
+        # that used to open on a user turn, of which an agent loop has
+        # almost none, and the "protected tail" was nearly the whole
+        # conversation and windowing removed almost nothing.
         # Whole steps are dropped from the front of the tail until it fits,
         # but the newest step is never dropped. 0 disables the ceiling.
         self.max_tail_tokens = max_tail_tokens

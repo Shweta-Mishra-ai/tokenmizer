@@ -12,7 +12,7 @@ python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
 python -m benchmarks.savings.runner                 # input cost, with and without
-pytest tests/ -q                                     # 1865 tests
+pytest tests/ -q                                     # 1908 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -129,6 +129,48 @@ more at 10 turns, 21% more at 40, 68% less at 150, 87% less at 300 —
 and against a client caching its own history, more expensive at every
 length (3.4 times as much at 40 turns), because the per-turn context
 block and the sliding window changed the start of every request.
+
+## Input cost on a real agent session
+
+The table above replays chat. Agent sessions are different, and the
+difference decides whether the proxy helps: in the session measured here,
+**over 99% of the tokens sent were tool results** (files and logs), where a
+chat session is mostly prose.
+
+`python -m benchmarks.savings.runner --trace session.jsonl` replays a
+Claude Code transcript — real text, real tool output, real order — through
+the proxy, so you can measure your own sessions. This one is the opening
+requests of an agent session on this repository: one session, one author, so
+read it as a worked example and not as a typical result. `claude-sonnet-5`, input
+only, token counts from a character estimate, 23 requests of it:
+
+| | Tokens sent | Input cost | vs a client caching its own history |
+|---|---:|---:|---:|
+| Client alone, no caching | 711,332 | 711,332 | — |
+| Client caching its own history | 711,332 | 235,094 | — |
+| Proxy before this change | 714,808 (0% fewer) | 260,046 | 10.6% more |
+| **Proxy, `max_tail_tokens: 16000` (default)** | **252,526 (64.5% fewer)** | **225,766** | **4.0% less** |
+| Proxy, `max_tail_tokens: 8000` | 144,275 (79.7% fewer) | 142,292 | 39.5% less |
+
+Over 58 requests the default is 85% fewer tokens and 31.7% less input cost
+than a caching client; 8,000 is 92% and 54%. (The proxy before this change
+could not complete 58 requests: see the injection-filter fix in the
+changelog.)
+
+Why it was 0% before: the window opened on a user turn, and an agent loop has
+almost none. In the 23-request slice the last request holds 50 messages and
+two of them are from the user; at 58 requests, two in 110. So the "protected"
+tail was nearly the whole conversation, and windowing had nothing to remove.
+Windowing now cuts at agent steps, keeps a call together with its results,
+and caps the verbatim tail in tokens (`memory.max_tail_tokens`); the newest
+step is never dropped.
+
+**What this does not show, and matters most here:** answer quality. Dropping
+old tool output means a file read several steps back has to be read again,
+and whether the model copes as well as with the full history needs a real
+model. The ceiling is a measured token/cost trade, not a measured quality
+one; `memory.max_tail_tokens: 0` keeps every recent message. The 8,000
+figure keeps one or two steps and is the more aggressive end of that trade.
 
 ## Memory quality — graph vs a plain summary
 

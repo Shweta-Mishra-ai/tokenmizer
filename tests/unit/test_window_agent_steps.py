@@ -2,11 +2,11 @@
 Windowing in an agent loop.
 
 `protect_recent` counts messages, and in a tool loop one message is a file
-or a test log. On a real agent session the ten "protected" messages were
-70% of the payload, the cut moved to the last user turn (there were three
-in twenty-five messages), and windowing removed nothing at all. The tail is
-now measured in tokens, cut only at the start of a step, and the newest
-step is never dropped.
+or a test log. On a real agent session the window opened on a user turn
+(there were two in fifty messages), so the "protected" tail was nearly the
+whole conversation and windowing removed nothing at all. The tail is now
+measured in tokens, cut only at the start of a step, and the newest step is
+never dropped.
 
 The hard requirement is validity. Both providers reject a tool result that
 is not preceded by the assistant turn that called it, and a conversation
