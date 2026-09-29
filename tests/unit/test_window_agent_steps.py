@@ -362,18 +362,26 @@ def test_a_budget_too_small_for_one_line_gives_no_index():
     assert path_index([_tool("api/app.py")], budget=3) == ""
 
 
-@pytest.mark.parametrize("blob", [
-    "a" * 400_000,                                   # one enormous word
-    "a/" * 200_000,                                  # slashes all the way
-    ("x" * 150 + "/") * 3000,                        # long segments
-    ("1234567890" * 10 + " ") * 4000,                # many long words
-    "/" * 400_000,
-    ".-" * 200_000,
-])
-def test_extraction_is_linear_on_hostile_output(blob):
+# Built inside the test and named, not passed as parameters: pytest makes a
+# parameter's value part of the test id, and a 400,000-character id is longer
+# than the 32,767 a Windows environment variable can hold (pytest stores the
+# id in one), which errors every one of these before it starts.
+_HOSTILE = {
+    "one_enormous_word": lambda: "a" * 400_000,
+    "slashes_all_the_way": lambda: "a/" * 200_000,
+    "long_segments": lambda: ("x" * 150 + "/") * 3000,
+    "many_long_words": lambda: ("1234567890" * 10 + " ") * 4000,
+    "only_slashes": lambda: "/" * 400_000,
+    "dots_and_dashes": lambda: ".-" * 200_000,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_HOSTILE))
+def test_extraction_is_linear_on_hostile_output(shape):
     """Tool output has minified lines and blobs. Every word is read once and
     long ones are skipped unread, so nothing here can be quadratic."""
     import time
+    blob = _HOSTILE[shape]()
     t0 = time.perf_counter()
     path_index([_tool(blob)], budget=1500)
     assert time.perf_counter() - t0 < 3.0
