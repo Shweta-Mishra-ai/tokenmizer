@@ -12,7 +12,7 @@ python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
 python -m benchmarks.savings.runner                 # input cost, with and without
-pytest tests/ -q                                     # 1912 tests
+pytest tests/ -q                                     # 1950 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -144,37 +144,64 @@ requests of an agent session on this repository: one session, one author, so
 read it as a worked example and not as a typical result. `claude-sonnet-5`, input
 only, token counts from a character estimate, 23 requests of it:
 
-| | Tokens sent | Input cost | vs a client caching its own history |
-|---|---:|---:|---:|
-| Client alone, no caching | 711,332 | 711,332 | — |
-| Client caching its own history | 711,332 | 235,094 | — |
-| Proxy before this change | 714,808 (0% fewer) | 260,046 | 10.6% more |
-| **Proxy, `max_tail_tokens: 16000` (default)** | **200,003 (71.9% fewer)** | **176,687** | **24.8% less** |
-| Proxy, `max_tail_tokens: 8000` | 128,166 (82.0% fewer) | 130,906 | 44.3% less |
+| | Tokens sent | Input cost | vs a client caching its own history | Next step's needs still in the request |
+|---|---:|---:|---:|---:|
+| Client alone, no caching | 711,332 | 711,332 | — | 100% |
+| Client caching its own history | 711,332 | 235,094 | — | 100% |
+| Proxy before this change | 714,808 (0% fewer) | 260,046 | 10.6% more | 100% (nothing dropped) |
+| **Proxy, defaults (`max_tail_tokens: 16000`, path index)** | **215,306 (69.7% fewer)** | **187,289** | **20.3% less** | **97.4%** |
+| Proxy, `max_tail_tokens: 8000` | 131,065 (81.6% fewer) | 128,887 | 45.2% less | 90.8% |
+| Proxy, defaults without the path index | 200,003 (71.9% fewer) | 176,687 | 24.8% less | 81.6% |
 
-Over 58 requests the default is 87.2% fewer tokens and 49.3% less input cost
-than a caching client; 8,000 is 93.3% and 64.2%. (The proxy before this
-change could not complete 58 requests: see the injection-filter fix in the
-changelog.)
+Over 58 requests the defaults are 86.9% fewer tokens and 45.8% less input
+cost than a caching client, with 93.9% of the next step's needs in the
+request; 8,000 is 93.1%, 63.2% and 90.7%. Without the path index the
+defaults retain 71.0% there. (The proxy before this change could not
+complete 58 requests: see the injection-filter fix in the changelog.)
 
-Why it was 0% before: the window opened on a user turn, and an agent loop has
-almost none. In the 23-request slice the last request holds 50 messages and
-two of them are from the user; at 58 requests, two in 110. So the "protected"
-tail was nearly the whole conversation, and windowing had nothing to remove.
-Windowing now cuts at agent steps, keeps a call together with its results,
-and caps the verbatim tail in tokens (`memory.max_tail_tokens`); the newest
-step is never dropped. A cut lands at half the ceiling and is held while the
-tail grows back to it, so the history stays byte-identical across several
-requests and the provider's cache can serve it. Cutting to just under the
-ceiling instead left no room to grow: the cut moved on every request, and
-the cache never hit.
+**How "needs still in the request" is measured.** Dropping tokens says
+nothing about whether the model still had what it needed, so this asks it of
+the real agent: what it did next (the arguments of its next tool calls) is
+the ground truth for what it needed. The identifiers, paths and strings in
+those arguments that came from earlier tool output or the user, and are not
+so common as to be noise, are checked against everything the proxy actually
+sent. A path written as a directory line with the file name after it counts,
+since a readable listing is not a loss. `--retention` prints it, with
+examples of what was lost. It is a proxy for information, not for answer
+quality: it says the information was in the request, not that the model used
+it well.
 
-**What this does not show, and matters most here:** answer quality. Dropping
-old tool output means a file read several steps back has to be read again,
-and whether the model copes as well as with the full history needs a real
-model. The ceiling is a measured token/cost trade, not a measured quality
-one; `memory.max_tail_tokens: 0` keeps every recent message. The 8,000
-figure keeps one or two steps and is the more aggressive end of that trade.
+Why the proxy saved nothing before: the window opened on a user turn, and an
+agent loop has almost none. In the 23-request slice the last request holds
+50 messages and two of them are from the user; at 58 requests, two in 110.
+So the "protected" tail was nearly the whole conversation, and windowing had
+nothing to remove. Windowing now cuts at agent steps, keeps a call together
+with its results, and caps the verbatim tail in tokens
+(`memory.max_tail_tokens`); the newest step is never dropped. A cut lands at
+half the ceiling and is held while the tail grows back to it, so the history
+stays byte-identical across several requests and the provider's cache can
+serve it. Cutting to just under the ceiling instead left no room to grow:
+the cut moved on every request, and the cache never hit.
+
+Why information was lost, and what fixed it: replacing old turns with the
+graph's 250-token resume block dropped the file paths that a listing or a
+search had shown once. They were 60% of what the agent went on to use and no
+longer had, and another third were parts of them. No selector predicts which
+of a request's ~280 paths will be needed (the needed one ranked about 176th
+by recency or by frequency), so the bridge carries all of them, grouped by
+directory, within `memory.tool_index_tokens` (about 1,150 used). That took
+retention from 71.0% to 93.9% at 58 requests, for about 4 points of the cost
+saving. The ceiling itself costs almost nothing in retention: with none,
+retention is 97.4% and 94.4%. The loss comes from windowing replacing old
+turns, which is the design, not from the ceiling.
+
+**What this does not establish.** The remaining 3 to 6% is content the index
+cannot carry, such as the values in a config file read earlier
+(`addopts`, `timeout`). And retention is not answer quality: whether the model
+copes as well without the dropped output needs a real model.
+`memory.max_tail_tokens: 0` keeps every recent message and
+`memory.tool_index_tokens: 0` drops the index; 8,000 is the more aggressive
+end of the trade, with about 9% of the next step's needs missing.
 
 ## Memory quality — graph vs a plain summary
 

@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1912 tests; every published number below was
+remembering. Suite is now 1950 tests; every published number below was
 re-derived from a run.
 
 ### Agent sessions, local-only mode, and a filter that locked sessions out
@@ -25,9 +25,19 @@ the proxy with the new `--trace` option of `benchmarks/savings`.
   results, and `memory.max_tail_tokens` (default 16000) caps the verbatim
   tail in tokens; the newest step is never dropped. A cut lands at half the
   ceiling and is held while the tail grows back, so the provider's cache can
-  serve the history. 71.9% fewer tokens on that session, and 24.8% less
-  input cost than a caching client. Measured on cost, **not on answer
-  quality**; `0` restores exact message counting.
+  serve the history. 69.7% fewer tokens on that session, and 20.3% less
+  input cost than a caching client. `0` restores exact message counting.
+- **The window lost information, not only tokens, and now it is measured.**
+  `--retention` in `benchmarks/savings` asks what the real agent went on to
+  use next and checks it against what the proxy sent. Only 71% survived at
+  58 requests: 60% of the loss was file paths from dropped listings and
+  searches, which the 250-token resume block could not hold. The bridge now
+  carries an index of the paths in the tool output it drops, grouped by
+  directory (`memory.tool_index_tokens`, default 1500, about 1,150 used):
+  71.0% to 93.9% at 58 requests and 81.6% to 97.4% at 23, for about 4
+  points of the cost saving. Extraction is linear on hostile output. What
+  remains missing is file contents the index cannot carry. This is
+  information retained, **not answer quality**.
 - **The injection filter locked sessions out permanently.** It scanned every
   message, and a client resends the whole history each turn, so one phrase
   anywhere (a file the agent read, an assistant quote) meant a 400 on every
