@@ -935,6 +935,15 @@ def _apply_compression_layers(
     return messages
 
 
+def _window_messages(messages: list[dict], graph, model: str) -> tuple[list[dict], int]:
+    """Window `messages` if they have outgrown the budget: (messages, saved)."""
+    if not needs_windowing(
+        messages, settings.memory.max_tokens_before_summary, model
+    ):
+        return messages, 0
+    return _smart_window.apply(messages, graph, model, stable=_stable_window())
+
+
 def _stable_window() -> bool:
     mode = settings.memory.stable_window
     if mode == "auto":
@@ -1224,11 +1233,15 @@ async def _update_graph(
     # Smart windowing. `memory.enabled` gates this — it is the switch for
     # the memory subsystem's summarisation behaviour, and until now
     # nothing read it, so turning it off silently changed nothing.
-    if settings.memory.enabled and needs_windowing(
-        messages, settings.memory.max_tokens_before_summary, model
-    ):
-        messages, window_saved = _smart_window.apply(
-            messages, graph, model, stable=_stable_window())
+    #
+    # Off the event loop: counting a long history and, at a cut, reading all
+    # the tool output being dropped are both proportional to the session, so
+    # on a long agent session they were tens to hundreds of milliseconds in
+    # which no other request was served. The session lock is held, so the
+    # graph this touches has no other writer.
+    if settings.memory.enabled:
+        messages, window_saved = await asyncio.to_thread(
+            _window_messages, messages, graph, model)
         savings["windowing"] = window_saved
     else:
         savings["windowing"] = 0
@@ -1985,6 +1998,10 @@ async def health():
         "sessions_with_data_loss": sessions_data_loss,
         "checkpoint_storage_broken": checkpoints_broken,
         "checkpoint_data_loss": checkpoints_data_loss,
+        # Whether "nothing leaves this machine" is being enforced, checkable
+        # from outside. Not part of `degraded`: it is configuration, not a
+        # failure.
+        "privacy": privacy.status(settings),
     }
 
 
@@ -1998,10 +2015,6 @@ async def dashboard():
 # Graph inspection, checkpoint, and decision-management endpoints live in
 # routes_graph.py (split out to keep this file focused on the core proxy
 # path). Imported at the bottom of this module — by this point every
-        # Whether "nothing leaves this machine" is being enforced, checkable
-        # from outside. Not part of `degraded`: it is configuration, not a
-        # failure.
-        "privacy": privacy.status(settings),
 # singleton/helper routes_graph.py references via `app_module.<name>`
 # (_analytics, _cache, _checkpoint_mgr, _get_graph_async, _check_rate_limit)
 # is already defined above.

@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
@@ -68,6 +69,11 @@ class SmartMessageWindow:
         # it never loses a turn.
         self._frozen: "OrderedDict[str, tuple[int, str, dict, list]]" = OrderedDict()
         self._frozen_max = 10_000
+        # apply() runs off the event loop, on whichever worker thread the
+        # request landed on, and two sessions' requests can be in it at once.
+        # The table is shared between them; the conversation and the graph
+        # are not (a session's own lock serialises those).
+        self._frozen_lock = threading.Lock()
 
     def apply(
         self,
@@ -202,7 +208,8 @@ class SmartMessageWindow:
         the caller cuts afresh. Nothing is ever dropped that the sliding
         window would have kept: turns after the cut stay verbatim.
         """
-        frozen = self._frozen.get(session_id)
+        with self._frozen_lock:
+            frozen = self._frozen.get(session_id)
         if frozen is None:
             return None
         split, digest, bridge_msg, lead = frozen
@@ -213,7 +220,9 @@ class SmartMessageWindow:
         # loop.
         if count_messages_tokens(candidate, model) > self._tail_limit(conv_msgs):
             return None
-        self._frozen.move_to_end(session_id)
+        with self._frozen_lock:
+            if session_id in self._frozen:
+                self._frozen.move_to_end(session_id)
         return candidate
 
     def _choose_split(self, conv: list[dict], model: str) -> "int | None":
@@ -264,10 +273,11 @@ class SmartMessageWindow:
 
     def _freeze(self, session_id: str, split: int, digest: str,
                 bridge_msg: dict, lead: list) -> None:
-        self._frozen[session_id] = (split, digest, bridge_msg, lead)
-        self._frozen.move_to_end(session_id)
-        while len(self._frozen) > self._frozen_max:
-            self._frozen.popitem(last=False)
+        with self._frozen_lock:
+            self._frozen[session_id] = (split, digest, bridge_msg, lead)
+            self._frozen.move_to_end(session_id)
+            while len(self._frozen) > self._frozen_max:
+                self._frozen.popitem(last=False)
 
 
 _PATH_EXTENSIONS = frozenset((
@@ -276,6 +286,7 @@ _PATH_EXTENSIONS = frozenset((
 _PATH_STRIP = "\"'`()[]{}<>,;:*|=!?"
 _MAX_TOKEN_CHARS = 160          # longer is a blob, not a path
 _MAX_SCAN_CHARS = 400_000       # per message; the rest is not read
+_MAX_INDEX_CHARS = 2_000_000    # per index, newest output first
 _PATH_CHARS = re.compile(r"[\w.\-/@+~]+")
 
 
@@ -317,7 +328,22 @@ def path_index(dropped: list[dict], budget: int, model: str = "gpt-4o") -> str:
     full paths.
     """
     seen: dict[str, None] = {}
-    for m in dropped:
+    # A cut runs on the request path and reads everything it drops, so the
+    # work has to be bounded however long the session is: read the newest
+    # output back to a total cap and leave the oldest unread. A very long
+    # session loses paths that only its earliest output showed, which is the
+    # right end to lose them from.
+    budget_chars = _MAX_INDEX_CHARS
+    recent: list[dict] = []
+    for m in reversed(dropped):
+        size = len(m.get("content") or "") if isinstance(m.get("content"), str) else 0
+        for call in m.get("tool_calls") or []:
+            size += len((call.get("function") or {}).get("arguments") or "")
+        if recent and budget_chars - size < 0:
+            break
+        budget_chars -= size
+        recent.append(m)
+    for m in reversed(recent):
         texts = []
         content = m.get("content")
         # Tool output and the calls that made it, not what people wrote: a

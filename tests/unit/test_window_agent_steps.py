@@ -455,3 +455,38 @@ def test_the_index_survives_a_held_cut(graph):
     assert "needle.py" in _bridge(first)
     assert _bridge(second) == _bridge(first)
     assert second[:len(first)] == first
+
+
+def test_the_work_of_one_index_is_bounded_however_long_the_session():
+    """A cut runs on the request path and reads what it drops. Output beyond
+    the total cap is left unread, oldest first, so the newest paths are kept
+    and the time does not grow with the length of the session."""
+    import time
+
+    from tokenmizer.compression import window as w
+
+    filler = "word " * 40_000                                  # 200,000 chars
+    dropped = [_tool("oldest/only/here.py " + filler)]
+    dropped += [_tool(filler) for _ in range(w._MAX_INDEX_CHARS // len(filler) + 2)]
+    dropped.append(_tool("newest/dir/kept.py"))
+    t0 = time.perf_counter()
+    out = path_index(dropped, budget=1500)
+    elapsed = time.perf_counter() - t0
+    assert "newest/dir/: kept.py" in out
+    assert "oldest/only/" not in out, "the oldest output should be past the cap"
+    assert elapsed < 2.0
+
+
+def test_a_short_session_is_indexed_completely():
+    dropped = [_tool(f"dir{i}/file.py") for i in range(50)]
+    out = path_index(dropped, budget=1500)
+    assert all(f"dir{i}/: file.py" in out for i in range(50))
+
+
+def test_one_message_larger_than_the_cap_is_still_read():
+    """The newest message is always read, or a huge last result would give an
+    empty index."""
+    from tokenmizer.compression import window as w
+
+    big = _tool("keep/this.py " + "x " * (w._MAX_INDEX_CHARS // 2 + 10))
+    assert "keep/: this.py" in path_index([big], budget=1500)
