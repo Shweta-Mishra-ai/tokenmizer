@@ -54,6 +54,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -126,10 +127,27 @@ class _PromptCache:
                 "uncached": total - read - write}
 
 
+def _sent_text(system, messages) -> str:
+    """Every word of the request the provider would have received."""
+    parts: list[str] = []
+    if isinstance(system, str):
+        parts.append(system)
+    for b in system or []:
+        if isinstance(b, dict):
+            parts.append(b.get("text", ""))
+    for m in messages:
+        c = m["content"]
+        for b in ([{"text": c}] if isinstance(c, str) else c):
+            parts.append(b.get("text") or json.dumps(b.get("content", b.get("input", "")),
+                                                    default=str))
+    return "\n".join(parts)
+
+
 def _fake_anthropic(cache: _PromptCache, ledger: list):
     class Messages:
         async def create(self, *, model, messages, max_tokens, system=None, **kw):
             bill = cache.bill(system, messages)
+            bill["sent"] = _sent_text(system, messages)
             ledger.append(bill)
             return SimpleNamespace(
                 content=[SimpleNamespace(type="text", text="ok")],
@@ -163,6 +181,178 @@ def _conversation(turns: int) -> list[tuple[str, str]]:
                   for i in range(0, len(ms) - 1, 2)]
     return [(f"[turn {t}] {pairs[t % len(pairs)][0]}", pairs[t % len(pairs)][1])
             for t in range(turns)]
+
+
+def load_trace(path: str, max_requests: int) -> list[list[dict]]:
+    return load_trace_with_actions(path, max_requests)[0]
+
+
+def load_trace_with_actions(path: str, max_requests: int):
+    """A Claude Code session transcript (JSONL) as the request a chat
+    client would send before each assistant turn: the whole history so far,
+    OpenAI-shaped, tool calls and tool results included.
+
+    Real text, real tool output, real order. What is NOT preserved is what
+    the model would have answered differently under a different prompt: the
+    assistant turns replayed are the ones the transcript recorded.
+    """
+    history: list[dict] = []
+    requests: list[list[dict]] = []
+    actions: list[str] = []      # what the agent did next, per request
+
+    def text_of(c) -> str:
+        if isinstance(c, str):
+            return c
+        return "".join(b.get("text", "") for b in c
+                       if isinstance(b, dict) and b.get("type") == "text")
+
+    for line in open(path, encoding="utf-8"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("isSidechain") or d.get("type") not in ("user", "assistant"):
+            continue
+        m = d.get("message") or {}
+        c = m.get("content")
+        if m.get("role") == "user":
+            if isinstance(c, list):
+                for b in c:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        out = b.get("content", "")
+                        out = out if isinstance(out, str) else text_of(out) or json.dumps(out)
+                        history.append({"role": "tool",
+                                        "tool_call_id": b.get("tool_use_id", ""),
+                                        "content": out})
+            txt = text_of(c) if c else ""
+            if txt.strip():
+                history.append({"role": "user", "content": txt})
+        elif m.get("role") == "assistant":
+            requests.append([dict(x) for x in history])
+            actions.append(" ".join(
+                json.dumps(b.get("input", {}), default=str)
+                for b in (c if isinstance(c, list) else [])
+                if isinstance(b, dict) and b.get("type") == "tool_use"))
+            calls = [{"id": b["id"], "type": "function",
+                      "function": {"name": b.get("name", ""),
+                                   "arguments": json.dumps(b.get("input", {}))}}
+                     for b in (c if isinstance(c, list) else [])
+                     if isinstance(b, dict) and b.get("type") == "tool_use"]
+            msg = {"role": "assistant", "content": text_of(c) if c else ""}
+            if calls:
+                msg["tool_calls"] = calls
+            if msg["content"] or calls:
+                history.append(msg)
+        if len(requests) >= max_requests:
+            break
+    # A request must end on a user or tool turn, as a real one does.
+    keep = [i for i, r in enumerate(requests) if r and r[-1]["role"] in ("user", "tool")]
+    return [requests[i] for i in keep], [actions[i] for i in keep]
+
+
+_KEY = re.compile(r"[A-Za-z_./\\-][A-Za-z0-9_./\\-]{5,}")
+
+
+def needed_from_history(action: str, history: list[dict], common: int = 30) -> set[str]:
+    """What the agent's next action took from earlier tool output or the
+    user: identifiers, paths and strings of six or more characters that it
+    used and that are in the history. Tokens that occur `common` times or
+    more are too ordinary to be information (JSON keys, "command").
+
+    This is the ground truth for what the agent needed next, because it is
+    what the agent actually did next.
+    """
+    source = "\n".join(m["content"] for m in history
+                       if m["role"] in ("tool", "user") and isinstance(m.get("content"), str))
+    return {t for t in _KEY.findall(action)
+            if 0 < source.count(t) < common}
+
+
+def present(token: str, text: str) -> bool:
+    """Is `token` recoverable from `text`?
+
+    Verbatim, or for a path, written the compact way a directory listing
+    writes it: the directory on a line and the file name after it on the same
+    line. Requiring the full string would count a readable listing as a loss.
+    """
+    if token in text:
+        return True
+    directory, slash, name = token.rpartition("/")
+    if not slash or not name:
+        return False
+    marker = directory + "/"
+    for line in text.splitlines():
+        at = line.find(marker)
+        if at != -1 and name in line[at + len(marker):]:
+            return True
+    return False
+
+
+def retention(requests, actions, sent: list[str]) -> tuple[int, int, list[str]]:
+    """(needed, still present, examples of what was lost) over a replay."""
+    needed = kept = 0
+    lost: list[str] = []
+    for req, action, text in zip(requests, actions, sent):
+        for tok in needed_from_history(action, req):
+            needed += 1
+            if present(tok, text):
+                kept += 1
+            elif len(lost) < 12:
+                lost.append(tok)
+    return needed, kept, lost
+
+
+def _direct_trace(requests, model, cache_history: bool) -> list[dict]:
+    from tokenmizer.providers.providers import (
+        _cache_minimum,
+        _mark_history_cacheable,
+        conversation_messages,
+    )
+    from tokenmizer.providers.tools import anthropic_messages
+
+    cache = _PromptCache(_cache_minimum(model))
+    bills = []
+    for req in requests:
+        conv = anthropic_messages(conversation_messages(req))
+        bills.append(cache.bill(None, _mark_history_cacheable(conv) if cache_history else conv))
+    return bills
+
+
+def _proxy_trace(requests, model, max_tail=None) -> tuple[list[dict], int]:
+    os.environ["TOKENMIZER_GRAPH_CHECKPOINT__STORAGE_DIR"] = tempfile.mkdtemp()
+    import anthropic
+    from fastapi.testclient import TestClient
+
+    from tokenmizer.api import app as A
+    from tokenmizer.providers.providers import AnthropicProvider, _cache_minimum
+
+    ledger: list[dict] = []
+    anthropic.AsyncAnthropic = _fake_anthropic(_PromptCache(_cache_minimum(model)), ledger)
+    A._get_provider = lambda: AnthropicProvider(api_key="benchmark", model=model)
+
+    async def _unlimited(request):
+        return None
+
+    A._check_rate_limit = _unlimited
+    A.settings.provider = "anthropic"
+    A.settings.cache.enabled = False
+    A.settings.api_key = ""
+    A.settings.graph_checkpoint.storage_dir = tempfile.mkdtemp()
+    A._graph_cache.clear()
+    if max_tail is not None:
+        A._smart_window.max_tail_tokens = max_tail
+    A._smart_window._frozen.clear()
+
+    with TestClient(A.app) as c:
+        for req in requests:
+            r = c.post("/v1/chat/completions",
+                       json={"model": model, "messages": req, "session_id": "trace"})
+            if r.status_code != 200:
+                raise SystemExit(f"proxy returned {r.status_code}: {r.text[:300]}")
+        nodes = len(A._graph_cache["trace"]._nodes) if "trace" in A._graph_cache else 0
+    if len(ledger) != len(requests):
+        raise SystemExit(f"{len(ledger)} provider calls for {len(requests)} requests")
+    return ledger, nodes
 
 
 def _direct(turns, model, cache_history: bool) -> list[dict]:
@@ -222,10 +412,55 @@ def _through_proxy(turns, model) -> tuple[list[dict], int]:
     return ledger, nodes
 
 
+def _report_trace(args) -> None:
+    from tokenmizer.providers.providers import _cache_minimum
+
+    print(f"model {args.model} · cache minimum {_cache_minimum(args.model)} tokens · "
+          f"trace {Path(args.trace).name}")
+    print("cost is in input-token units: full price 1, cache read "
+          f"{READ}, cache write {WRITE}. Input only.\n")
+    print(f"{'requests':>8} {'history':>9} | {'direct':>11} {'direct+cache':>13}"
+          f" {'tokenmizer':>11} | {'vs direct':>9} {'vs +cache':>9} | tokens sent"
+          f" {'direct':>9} {'tokenmizer':>11}")
+    for n in args.requests:
+        reqs, actions = load_trace_with_actions(args.trace, n)
+        if not reqs:
+            raise SystemExit("no usable requests in that trace")
+        plain = _direct_trace(reqs, args.model, False)
+        cached = _direct_trace(reqs, args.model, True)
+        a, b = (sum(map(_cost, x)) for x in (plain, cached))
+        tp = sum(x["total"] for x in plain)
+        for tail in args.max_tail:
+            proxied, nodes = _proxy_trace(reqs, args.model, tail)
+            if nodes == 0:
+                raise SystemExit("the graph is empty: extraction did not run")
+            c = sum(map(_cost, proxied))
+            tx = sum(x["total"] for x in proxied)
+            label = "default" if tail is None else f"tail<={tail:,}"
+            if args.retention:
+                needed, kept, lost = retention(reqs, actions, [b["sent"] for b in proxied])
+                label += (f"  | kept {kept:,}/{needed:,} "
+                          f"({100 * kept / max(needed, 1):.1f}%) of what the agent used next")
+                if lost:
+                    print(f"{'':>8} lost e.g. {lost[:6]}")
+            print(f"{len(reqs):>8} {plain[-1]['total']:>9,} | {a:>11,.0f} {b:>13,.0f} {c:>11,.0f} |"
+                  f" {100 * (a - c) / a:>8.1f}% {100 * (b - c) / b:>8.1f}% |"
+                  f" {'':>11}{tp:>9,} {tx:>11,}  {label}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="claude-sonnet-5")
     ap.add_argument("--turns", type=int, nargs="+", default=[10, 40, 150, 300])
+    ap.add_argument("--trace", help="a Claude Code session transcript (.jsonl) to "
+                    "replay instead of the bundled conversation")
+    ap.add_argument("--requests", type=int, nargs="+", default=[20, 60, 150],
+                    help="with --trace: how many requests of it to replay")
+    ap.add_argument("--max-tail", type=int, nargs="+", default=[None],
+                    help="with --trace: memory.max_tail_tokens values to compare")
+    ap.add_argument("--retention", action="store_true",
+                    help="with --trace: also report how much of what the agent "
+                         "went on to use survived in what the proxy sent")
     args = ap.parse_args()
 
     import logging
@@ -238,6 +473,9 @@ def main() -> None:
     except Exception:
         tokenizer = "CHARACTER ESTIMATE (no tokenizer could load)"
 
+    if args.trace:
+        _report_trace(args)
+        return
     print(f"model {args.model} · cache minimum {_cache_minimum(args.model)} tokens"
           f" · tokenizer: {tokenizer}")
     print("cost is in input-token units: full price 1, cache read "

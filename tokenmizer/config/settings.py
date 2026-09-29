@@ -36,6 +36,29 @@ class MemorySettings(BaseModel):
     #   auto — on for anthropic, the provider this is measured against
     #   on / off — force it
     stable_window: Literal["auto", "on", "off"] = "auto"
+    # Ceiling, in tokens, on the verbatim tail that windowing keeps.
+    # recent_turns_verbatim counts messages, and in an agent loop one
+    # message is a file or a test log. Whole steps are dropped from the
+    # front of the tail until it fits; the newest step never is. 0 = no
+    # ceiling, the tail is exactly recent_turns_verbatim messages.
+    #
+    # 16,000 is roughly the last two or three steps of an agent loop whose
+    # tools return files and logs, which is also what Anthropic's own
+    # context-editing keeps by default (the last three tool uses). It only
+    # ever bites once a tail is that big, so a chat session never sees it.
+    # What it costs is that a file read four steps ago is no longer in the
+    # request and has to be read again; that trade is measured on token
+    # cost (docs/benchmarks.md) and NOT on answer quality, which needs a
+    # real model. Set 0 to keep every recent message verbatim.
+    max_tail_tokens: int = Field(default=16000, ge=0)
+    # Budget, in tokens, for an index of the file paths that appeared in the
+    # tool output windowing drops, kept in the resume block. Measured on a
+    # real agent session: without it 71% of what the agent went on to use
+    # was still in the request, with it 94%. The dropped output is gone, but
+    # the agent still knows which files exist and where, and what to read
+    # again. The index goes in the frozen bridge, so it is billed once per
+    # cut and read from the provider's cache after. 0 leaves it out.
+    tool_index_tokens: int = Field(default=1500, ge=0)
 
 
 class GraphCheckpointSettings(BaseModel):
@@ -195,6 +218,17 @@ class TerseOutputSettings(BaseModel):
     style: Literal["terse", "minimal"] = "terse"
 
 
+class PrivacySettings(BaseModel):
+    # Nothing leaves this machine except to hosts named here. Refuses to
+    # start with a remote provider, and blocks every other connection and
+    # DNS lookup in the process. See tokenmizer/core/privacy.py.
+    local_only: bool = False
+    # Hosts a local_only process may still reach: your own gateway or
+    # inference server. Loopback is always allowed. An HTTP proxy must be
+    # listed to be reachable, and then so is everything behind it.
+    allowed_hosts: List[str] = Field(default_factory=list)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="TOKENMIZER_",
@@ -307,6 +341,7 @@ class Settings(BaseSettings):
     cache: CacheSettings = Field(default_factory=CacheSettings)
     preferences: PreferenceSettings = Field(default_factory=PreferenceSettings)
     terse_output: TerseOutputSettings = Field(default_factory=TerseOutputSettings)
+    privacy: PrivacySettings = Field(default_factory=PrivacySettings)
 
     # How long an upstream provider call may hang before it is
     # abandoned. Every vendor SDK used by providers/providers.py

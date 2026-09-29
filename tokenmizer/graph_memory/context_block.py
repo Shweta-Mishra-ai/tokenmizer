@@ -11,6 +11,7 @@ one-line delegating method so existing callers are unaffected.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,8 @@ from tokenmizer.graph_memory.types import EdgeType, NodeStatus, NodeType
 
 if TYPE_CHECKING:
     from tokenmizer.graph_memory.graph import GraphMemory
+
+logger = logging.getLogger(__name__)
 
 
 _DEFAULT_WORDS = {
@@ -35,7 +38,10 @@ def _vocabulary(graph: "GraphMemory") -> dict:
         try:
             from tokenmizer.config.settings import get_settings
             domain = get_settings().domain
-        except Exception:
+        except Exception as e:
+            logger.warning("Could not read the configured domain (%s: %s); "
+                           "section headings use the default vocabulary.",
+                           type(e).__name__, e)
             domain = None
     return {**_DEFAULT_WORDS, **get_pack(domain).vocabulary}
 

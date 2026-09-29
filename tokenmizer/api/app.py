@@ -43,6 +43,7 @@ from tokenmizer.compression.engine import CompressionPipeline
 from tokenmizer.compression.output_trimmer import OutputTrimmer
 from tokenmizer.compression.window import SmartMessageWindow, needs_windowing
 from tokenmizer.config.settings import get_settings, resolve_semantic_retrieval
+from tokenmizer.core import privacy
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.filters.file_intelligence import FileIntelligence
 from tokenmizer.graph_memory.graph import GraphMemory
@@ -63,6 +64,12 @@ from tokenmizer.semantic_cache.cache import SemanticCache
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
+
+# Local-only mode has to be in force before the rest of this module is built:
+# constructing the semantic cache can load the embedding model, which
+# downloads its weights on first use. The lifespan enforces it again, which
+# is a no-op here and re-installs after a shutdown in the same process.
+privacy.enforce(settings)
 
 
 def _warn_if_multi_worker_risk() -> None:
@@ -289,6 +296,8 @@ _smart_window = SmartMessageWindow(
     token_budget=settings.memory.max_tokens_before_summary,
     protect_recent=settings.memory.recent_turns_verbatim,
     graph_context_budget=250,
+    max_tail_tokens=settings.memory.max_tail_tokens,
+    tool_index_tokens=settings.memory.tool_index_tokens,
 )
 _file_intelligence = FileIntelligence()
 _extraction_provider = None   # lazy — only built if use_llm_extraction=True
@@ -649,6 +658,10 @@ def _warm_up() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("TokenMizer starting")
+    # Before anything can open a connection, including the warm-up, which
+    # loads the tokenizer and may fetch its vocabulary. A configuration that
+    # contradicts local-only mode stops the server here, loudly.
+    privacy.enforce(settings)
     await asyncio.to_thread(_warm_up)
     flusher = asyncio.create_task(_periodic_flush())
     try:
@@ -665,6 +678,7 @@ async def lifespan(app: FastAPI):
         await _drain_background_tasks()
         await _flush_all_graphs("shutdown")
         _analytics.flush()
+        privacy.release()
         logger.info("TokenMizer stopped")
 
 
@@ -919,6 +933,15 @@ def _apply_compression_layers(
             messages = [{"role": "system", "content": terse}] + messages
 
     return messages
+
+
+def _window_messages(messages: list[dict], graph, model: str) -> tuple[list[dict], int]:
+    """Window `messages` if they have outgrown the budget: (messages, saved)."""
+    if not needs_windowing(
+        messages, settings.memory.max_tokens_before_summary, model
+    ):
+        return messages, 0
+    return _smart_window.apply(messages, graph, model, stable=_stable_window())
 
 
 def _stable_window() -> bool:
@@ -1210,11 +1233,15 @@ async def _update_graph(
     # Smart windowing. `memory.enabled` gates this — it is the switch for
     # the memory subsystem's summarisation behaviour, and until now
     # nothing read it, so turning it off silently changed nothing.
-    if settings.memory.enabled and needs_windowing(
-        messages, settings.memory.max_tokens_before_summary, model
-    ):
-        messages, window_saved = _smart_window.apply(
-            messages, graph, model, stable=_stable_window())
+    #
+    # Off the event loop: counting a long history and, at a cut, reading all
+    # the tool output being dropped are both proportional to the session, so
+    # on a long agent session they were tens to hundreds of milliseconds in
+    # which no other request was served. The session lock is held, so the
+    # graph this touches has no other writer.
+    if settings.memory.enabled:
+        messages, window_saved = await asyncio.to_thread(
+            _window_messages, messages, graph, model)
         savings["windowing"] = window_saved
     else:
         savings["windowing"] = 0
@@ -1971,6 +1998,10 @@ async def health():
         "sessions_with_data_loss": sessions_data_loss,
         "checkpoint_storage_broken": checkpoints_broken,
         "checkpoint_data_loss": checkpoints_data_loss,
+        # Whether "nothing leaves this machine" is being enforced, checkable
+        # from outside. Not part of `degraded`: it is configuration, not a
+        # failure.
+        "privacy": privacy.status(settings),
     }
 
 

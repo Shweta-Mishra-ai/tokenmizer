@@ -91,7 +91,14 @@ def _sentences(messages: list[dict]) -> list[str]:
     for m in messages:
         content = m.get("content")
         if not isinstance(content, str):
-            continue            # tool results and content-part lists
+            continue            # content-part lists
+        # A tool result is what a command printed, not something a person
+        # said. Its "must", its "under 5s" and its "limit" are log lines and
+        # source code, and once tool results are windowed out with the rest
+        # they would be promoted into the resume block as the session's
+        # constraints.
+        if m.get("role") == "tool":
+            continue
         for s in _SENTENCE.finditer(content):
             for part in _CLAUSE.split(s.group(0)):
                 text = " ".join(part.split()).strip(" .!?")
