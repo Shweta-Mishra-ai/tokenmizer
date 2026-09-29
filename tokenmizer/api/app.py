@@ -975,11 +975,25 @@ _FILLER = frozenset({
 })
 
 
+_EXTENSION = re.compile(r"^(.+)\.[a-z][a-z0-9]{0,4}$")
+
+
 def _content_words(text: str) -> frozenset:
-    return frozenset(
-        w for w in _WORD.findall(text.lower())
-        if len(w) > 2 and w not in _FILLER
-    )
+    """The words of `text` that carry content, and for a file name both
+    spellings: with its extension and without. A node label is clipped to a
+    clause and often ends at `hybrid_extractor` where the turn said
+    `hybrid_extractor.py`; they are the same file. Both sides go through
+    here, so a label naming `config.py` still needs `config.py`, not
+    `config.yaml`, in the turn."""
+    words = set()
+    for w in _WORD.findall(text.lower()):
+        if len(w) <= 2 or w in _FILLER:
+            continue
+        words.add(w)
+        stem = _EXTENSION.match(w)
+        if stem and len(stem.group(1)) > 2:
+            words.add(stem.group(1))
+    return frozenset(words)
 
 
 def _already_in_payload(node, message_words: list[frozenset]) -> bool:

@@ -189,6 +189,31 @@ class TestContextTheRequestAlreadyCarriesIsNotRepeated:
         words = [app_module._content_words("we store sessions in postgres")]
         assert not app_module._already_in_payload(node, words)
 
+    def test_a_file_named_with_and_without_its_extension_is_the_same_file(self):
+        """A node label is clipped to a clause and can lose the extension the
+        turn spelled out. Reading `hybrid_extractor` as a different word from
+        `hybrid_extractor.py` sent a fenced block, boilerplate included, to
+        repeat a sentence the model was already reading, on every later turn
+        of a 20-turn session."""
+        node = type("N", (), {
+            "label": "Replaced the pattern with typed-exception matching in "
+                     "hybrid_extractor", "summary": ""})()
+        said = ("Replaced the pattern with typed-exception matching in "
+                "hybrid_extractor.py. Error F1 went from 14 to 87 percent.")
+        assert app_module._already_in_payload(node, [app_module._content_words(said)])
+
+    def test_a_different_extension_is_a_different_file(self):
+        """The stem match must not turn one file into another: a label that
+        names config.py is not stated by a turn that only says config.yaml."""
+        node = type("N", (), {"label": "Edit config.py", "summary": ""})()
+        words = [app_module._content_words("Edit config.yaml")]
+        assert not app_module._already_in_payload(node, words)
+
+    def test_a_sentence_ending_in_a_stem_needs_the_stem_in_the_turn(self):
+        node = type("N", (), {"label": "Fix hybrid_extractor", "summary": ""})()
+        words = [app_module._content_words("Fix hybrid_extractors instead")]
+        assert not app_module._already_in_payload(node, words)
+
     def test_words_split_across_two_messages_do_not_count(self):
         node = type("N", (), {"label": "Use PostgreSQL for sessions", "summary": ""})()
         words = [app_module._content_words("PostgreSQL it is"),

@@ -6,7 +6,7 @@ A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 1980 tests; every published number below was
+remembering. Suite is now 1995 tests; every published number below was
 re-derived from a run.
 
 ### Agent sessions, local-only mode, and a filter that locked sessions out
@@ -60,6 +60,16 @@ the proxy with the new `--trace` option of `benchmarks/savings`.
   meant API keys beyond the first were being refused with no trace.
 
 ### Input cost: the proxy no longer costs more than it saves
+
+A later measurement found one more source of overhead that the terse
+instruction does not explain. The check that keeps the proxy from repeating
+a fact the request already carries compared `hybrid_extractor` with
+`hybrid_extractor.py` as different words, so from the fifteenth turn of a
+session it appended a fenced block to restate a sentence the model was
+already reading. File names now match with or without their extension (and
+`config.py` still does not match `config.yaml`). With the terse instruction
+off, the proxy's input cost now equals a caching client's exactly at 20 and
+40 turns; before, it was 200 input-token units higher at 20.
 
 `benchmarks/savings` replays a conversation through the real proxy and
 Anthropic adapter against a stand-in applying the documented prompt
