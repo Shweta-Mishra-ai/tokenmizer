@@ -165,6 +165,116 @@ def _conversation(turns: int) -> list[tuple[str, str]]:
             for t in range(turns)]
 
 
+def load_trace(path: str, max_requests: int) -> list[list[dict]]:
+    """A Claude Code session transcript (JSONL) as the request a chat
+    client would send before each assistant turn: the whole history so far,
+    OpenAI-shaped, tool calls and tool results included.
+
+    Real text, real tool output, real order. What is NOT preserved is what
+    the model would have answered differently under a different prompt: the
+    assistant turns replayed are the ones the transcript recorded.
+    """
+    history: list[dict] = []
+    requests: list[list[dict]] = []
+
+    def text_of(c) -> str:
+        if isinstance(c, str):
+            return c
+        return "".join(b.get("text", "") for b in c
+                       if isinstance(b, dict) and b.get("type") == "text")
+
+    for line in open(path, encoding="utf-8"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("isSidechain") or d.get("type") not in ("user", "assistant"):
+            continue
+        m = d.get("message") or {}
+        c = m.get("content")
+        if m.get("role") == "user":
+            if isinstance(c, list):
+                for b in c:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        out = b.get("content", "")
+                        out = out if isinstance(out, str) else text_of(out) or json.dumps(out)
+                        history.append({"role": "tool",
+                                        "tool_call_id": b.get("tool_use_id", ""),
+                                        "content": out})
+            txt = text_of(c) if c else ""
+            if txt.strip():
+                history.append({"role": "user", "content": txt})
+        elif m.get("role") == "assistant":
+            requests.append([dict(x) for x in history])
+            calls = [{"id": b["id"], "type": "function",
+                      "function": {"name": b.get("name", ""),
+                                   "arguments": json.dumps(b.get("input", {}))}}
+                     for b in (c if isinstance(c, list) else [])
+                     if isinstance(b, dict) and b.get("type") == "tool_use"]
+            msg = {"role": "assistant", "content": text_of(c) if c else ""}
+            if calls:
+                msg["tool_calls"] = calls
+            if msg["content"] or calls:
+                history.append(msg)
+        if len(requests) >= max_requests:
+            break
+    # A request must end on a user or tool turn, as a real one does.
+    return [r for r in requests if r and r[-1]["role"] in ("user", "tool")]
+
+
+def _direct_trace(requests, model, cache_history: bool) -> list[dict]:
+    from tokenmizer.providers.providers import (
+        _cache_minimum,
+        _mark_history_cacheable,
+        conversation_messages,
+    )
+    from tokenmizer.providers.tools import anthropic_messages
+
+    cache = _PromptCache(_cache_minimum(model))
+    bills = []
+    for req in requests:
+        conv = anthropic_messages(conversation_messages(req))
+        bills.append(cache.bill(None, _mark_history_cacheable(conv) if cache_history else conv))
+    return bills
+
+
+def _proxy_trace(requests, model, max_tail=None) -> tuple[list[dict], int]:
+    os.environ["TOKENMIZER_GRAPH_CHECKPOINT__STORAGE_DIR"] = tempfile.mkdtemp()
+    import anthropic
+    from fastapi.testclient import TestClient
+
+    from tokenmizer.api import app as A
+    from tokenmizer.providers.providers import AnthropicProvider, _cache_minimum
+
+    ledger: list[dict] = []
+    anthropic.AsyncAnthropic = _fake_anthropic(_PromptCache(_cache_minimum(model)), ledger)
+    A._get_provider = lambda: AnthropicProvider(api_key="benchmark", model=model)
+
+    async def _unlimited(request):
+        return None
+
+    A._check_rate_limit = _unlimited
+    A.settings.provider = "anthropic"
+    A.settings.cache.enabled = False
+    A.settings.api_key = ""
+    A.settings.graph_checkpoint.storage_dir = tempfile.mkdtemp()
+    A._graph_cache.clear()
+    if max_tail is not None:
+        A._smart_window.max_tail_tokens = max_tail
+    A._smart_window._frozen.clear()
+
+    with TestClient(A.app) as c:
+        for req in requests:
+            r = c.post("/v1/chat/completions",
+                       json={"model": model, "messages": req, "session_id": "trace"})
+            if r.status_code != 200:
+                raise SystemExit(f"proxy returned {r.status_code}: {r.text[:300]}")
+        nodes = len(A._graph_cache["trace"]._nodes) if "trace" in A._graph_cache else 0
+    if len(ledger) != len(requests):
+        raise SystemExit(f"{len(ledger)} provider calls for {len(requests)} requests")
+    return ledger, nodes
+
+
 def _direct(turns, model, cache_history: bool) -> list[dict]:
     """The client alone: every request is its own full history."""
     from tokenmizer.providers.providers import _cache_minimum, _mark_history_cacheable
@@ -222,10 +332,46 @@ def _through_proxy(turns, model) -> tuple[list[dict], int]:
     return ledger, nodes
 
 
+def _report_trace(args) -> None:
+    from tokenmizer.providers.providers import _cache_minimum
+
+    print(f"model {args.model} · cache minimum {_cache_minimum(args.model)} tokens · "
+          f"trace {Path(args.trace).name}")
+    print("cost is in input-token units: full price 1, cache read "
+          f"{READ}, cache write {WRITE}. Input only.\n")
+    print(f"{'requests':>8} {'history':>9} | {'direct':>11} {'direct+cache':>13}"
+          f" {'tokenmizer':>11} | {'vs direct':>9} {'vs +cache':>9} | tokens sent"
+          f" {'direct':>9} {'tokenmizer':>11}")
+    for n in args.requests:
+        reqs = load_trace(args.trace, n)
+        if not reqs:
+            raise SystemExit("no usable requests in that trace")
+        plain = _direct_trace(reqs, args.model, False)
+        cached = _direct_trace(reqs, args.model, True)
+        a, b = (sum(map(_cost, x)) for x in (plain, cached))
+        tp = sum(x["total"] for x in plain)
+        for tail in args.max_tail:
+            proxied, nodes = _proxy_trace(reqs, args.model, tail)
+            if nodes == 0:
+                raise SystemExit("the graph is empty: extraction did not run")
+            c = sum(map(_cost, proxied))
+            tx = sum(x["total"] for x in proxied)
+            label = "default" if tail is None else f"tail<={tail:,}"
+            print(f"{len(reqs):>8} {plain[-1]['total']:>9,} | {a:>11,.0f} {b:>13,.0f} {c:>11,.0f} |"
+                  f" {100 * (a - c) / a:>8.1f}% {100 * (b - c) / b:>8.1f}% |"
+                  f" {'':>11}{tp:>9,} {tx:>11,}  {label}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="claude-sonnet-5")
     ap.add_argument("--turns", type=int, nargs="+", default=[10, 40, 150, 300])
+    ap.add_argument("--trace", help="a Claude Code session transcript (.jsonl) to "
+                    "replay instead of the bundled conversation")
+    ap.add_argument("--requests", type=int, nargs="+", default=[20, 60, 150],
+                    help="with --trace: how many requests of it to replay")
+    ap.add_argument("--max-tail", type=int, nargs="+", default=[None],
+                    help="with --trace: memory.max_tail_tokens values to compare")
     args = ap.parse_args()
 
     import logging
@@ -238,6 +384,9 @@ def main() -> None:
     except Exception:
         tokenizer = "CHARACTER ESTIMATE (no tokenizer could load)"
 
+    if args.trace:
+        _report_trace(args)
+        return
     print(f"model {args.model} · cache minimum {_cache_minimum(args.model)} tokens"
           f" · tokenizer: {tokenizer}")
     print("cost is in input-token units: full price 1, cache read "

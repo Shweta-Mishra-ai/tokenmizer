@@ -290,6 +290,7 @@ _smart_window = SmartMessageWindow(
     token_budget=settings.memory.max_tokens_before_summary,
     protect_recent=settings.memory.recent_turns_verbatim,
     graph_context_budget=250,
+    max_tail_tokens=settings.memory.max_tail_tokens,
 )
 _file_intelligence = FileIntelligence()
 _extraction_provider = None   # lazy — only built if use_llm_extraction=True
@@ -650,11 +651,11 @@ def _warm_up() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("TokenMizer starting")
-    await asyncio.to_thread(_warm_up)
     # Before anything can open a connection, including the warm-up, which
     # loads the tokenizer and may fetch its vocabulary. A configuration that
     # contradicts local-only mode stops the server here, loudly.
     privacy.enforce(settings)
+    await asyncio.to_thread(_warm_up)
     flusher = asyncio.create_task(_periodic_flush())
     try:
         yield
@@ -670,8 +671,8 @@ async def lifespan(app: FastAPI):
         await _drain_background_tasks()
         await _flush_all_graphs("shutdown")
         _analytics.flush()
-        logger.info("TokenMizer stopped")
         privacy.release()
+        logger.info("TokenMizer stopped")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
