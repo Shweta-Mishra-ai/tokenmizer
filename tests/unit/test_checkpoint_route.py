@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from tokenmizer.api import app as app_module
 from tokenmizer.api.app import app
+from tokenmizer.graph_memory.graph import GraphMemory
 from tokenmizer.security.ownership import OwnershipStore
 
 TRANSCRIPT = [
@@ -42,6 +43,40 @@ def test_transcript_in_the_body_is_extracted_into_the_graph(client):
     stats = client.get("/api/graph/ckpt-msgs").json()
     assert stats["node_count"] >= 1
     assert "decision" in stats["by_type"]
+
+
+def test_checkpoint_preserves_tool_call_message_shape(client, monkeypatch, tmp_path):
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "call_write", "type": "function",
+            "function": {"name": "write_file", "arguments": '{"path":"src/cache.py"}'},
+        }]},
+        {"role": "tool", "tool_call_id": "call_write", "name": "write_file",
+         "content": "Error: permission denied; token=secretvalue123456"},
+    ]
+    direct = GraphMemory("ckpt-direct-tool", storage_dir=str(tmp_path))
+    direct.extract_from_messages(messages)
+    expected_files = {n.label for n in direct._nodes.values() if n.type.value == "file"}
+    assert expected_files == {"src/cache.py"}
+
+    received = []
+    create = app_module._checkpoint_mgr.create
+
+    def capture_create(*args, **kwargs):
+        received.extend(kwargs["messages"])
+        return create(*args, **kwargs)
+
+    monkeypatch.setattr(app_module._checkpoint_mgr, "create", capture_create)
+    r = client.post("/api/checkpoint?session_id=ckpt-tool", json={"messages": messages})
+    assert r.status_code == 200, r.text
+    graph = app_module._graph_cache["ckpt-tool"]
+    actual_files = {n.label for n in graph._nodes.values() if n.type.value == "file"}
+    assert actual_files == expected_files
+    assert received[0]["tool_calls"] == messages[0]["tool_calls"]
+    assert received[1]["tool_call_id"] == "call_write"
+    assert received[1]["name"] == "write_file"
+    assert "secretvalue123456" not in received[1]["content"]
+    assert "[REDACTED]" in received[1]["content"]
 
 
 def test_transcript_is_redacted_before_it_reaches_the_graph(client):

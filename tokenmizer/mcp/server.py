@@ -375,11 +375,24 @@ def handle_checkpoint_session(args: dict) -> tuple[str, bool]:
 def _local_checkpoint(session_id: str, messages: list) -> tuple[str, bool]:
     """Write the transcript into the graph without the proxy."""
     try:
+        from tokenmizer.graph_memory.helpers import _content_to_text
+        from tokenmizer.providers.tools import normalize_tool_calls
+        from tokenmizer.security.redaction import redact_messages
+
         memory = _memory(session_id)
-        gained = memory.add([
-            {"role": str(m.get("role", "user")), "content": str(m.get("content", ""))}
-            for m in messages if isinstance(m, dict)
-        ]) if messages else 0
+        normalized = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            item = {"role": str(m.get("role", "user")),
+                    "content": _content_to_text(m.get("content", ""))}
+            if m.get("tool_calls"):
+                item["tool_calls"] = normalize_tool_calls(m["tool_calls"])
+            for field in ("tool_call_id", "name"):
+                if m.get(field):
+                    item[field] = m[field]
+            normalized.append(item)
+        gained = memory.add(redact_messages(normalized)) if normalized else 0
         memory.save()
         stats = memory.stats()
         context = memory.context(token_budget=400)
