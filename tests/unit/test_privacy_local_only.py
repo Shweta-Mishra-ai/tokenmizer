@@ -155,7 +155,9 @@ def test_a_proxy_on_loopback_is_removed_because_it_would_bypass_the_guard(monkey
     privacy.enforce(_settings())
     import os
     assert "HTTPS_PROXY" not in os.environ and "https_proxy" not in os.environ
-    assert privacy.status(_settings())["proxies_removed"] == ["HTTPS_PROXY", "https_proxy"]
+    # Windows treats the two spellings as one variable, so compare by name.
+    removed = {v.lower() for v in privacy.status(_settings())["proxies_removed"]}
+    assert removed == {"https_proxy"}
 
 
 def test_a_proxy_the_operator_listed_is_kept(monkeypatch):
