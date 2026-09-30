@@ -17,7 +17,10 @@ consumer shares the same already-safe copy.
 """
 from __future__ import annotations
 
+import hashlib
 import re
+import threading
+from collections import OrderedDict
 
 _PATTERNS = [
     # Anthropic
@@ -71,15 +74,56 @@ _PATTERNS = [
 ]
 
 
+# A client resends the whole conversation on every request, so without a
+# memo every earlier turn is scanned again each time: measured on a real
+# 51-request agent session, about 210 ms per request, on the event loop.
+# The memo is keyed on a digest, and a text with nothing to redact (almost
+# all of them) is stored as None, so an entry costs a few dozen bytes
+# whatever the size of the text. A redacted text keeps its redacted copy
+# unless it is larger than _MEMO_MAX_CHARS, in which case it is recomputed.
+_MEMO_MAX_ENTRIES = 32_768
+_MEMO_MAX_CHARS = 64_000
+_memo: OrderedDict[bytes, str | None] = OrderedDict()
+_memo_lock = threading.Lock()
+
+
+def _memo_clear() -> None:
+    with _memo_lock:
+        _memo.clear()
+
+
+def _scrub(text: str) -> str:
+    for pat in _PATTERNS:
+        text = pat.sub("[REDACTED]", text)
+    return text
+
+
 def redact(text: str) -> str:
     """Replace all detected secrets with [REDACTED]. Non-string input is
     passed through as the empty string rather than raising, since callers
     (graph nodes, message content) may legitimately have None/empty values."""
     if not isinstance(text, str):
         return ""
-    for pat in _PATTERNS:
-        text = pat.sub("[REDACTED]", text)
-    return text
+    if not text:
+        return text
+    key = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=32).digest()
+    with _memo_lock:
+        if key in _memo:
+            _memo.move_to_end(key)
+            hit = _memo[key]
+            return text if hit is None else hit
+    out = _scrub(text)
+    if out == text:
+        value = None
+    elif len(out) <= _MEMO_MAX_CHARS:
+        value = out
+    else:
+        return out
+    with _memo_lock:
+        _memo[key] = value
+        while len(_memo) > _MEMO_MAX_ENTRIES:
+            _memo.popitem(last=False)
+    return out
 
 
 def redact_node(label: str, summary: str = "") -> tuple[str, str]:

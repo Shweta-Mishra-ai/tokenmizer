@@ -182,6 +182,28 @@ class TestContextTheRequestAlreadyCarriesIsNotRepeated:
         )
         assert "postgresql" in updated[-1]["content"].lower()
 
+    async def test_the_payload_word_sets_are_built_off_the_event_loop(
+        self, graph_with_signal, monkeypatch
+    ):
+        """Building a word set for every message in the payload is linear in
+        the payload, which on an agent session is tool output: it runs in a
+        worker thread so the event loop keeps serving other requests."""
+        import threading
+        monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
+        loop_thread = threading.get_ident()
+        threads = []
+        real = app_module._content_words
+        # A node's own label (a few words) is fine on the loop; the payload's
+        # messages are what grows, so only those are tracked.
+        monkeypatch.setattr(app_module, "_content_words", lambda t: (
+            threads.append(threading.get_ident()) if QUESTION in t else None, real(t))[1])
+        raw = [{"role": "user", "content": QUESTION}]
+        await app_module._update_graph(
+            "ctx-inject-test", graph_with_signal, raw, [dict(m) for m in raw],
+            "claude-sonnet-4-6", {}, QUESTION,
+        )
+        assert threads and loop_thread not in threads
+
     def test_a_paraphrase_is_not_mistaken_for_the_fact(self):
         """Conservative by design: if one word of the label is missing the
         node is treated as absent, and injected."""

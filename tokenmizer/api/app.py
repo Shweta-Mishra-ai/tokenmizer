@@ -647,9 +647,12 @@ def _warm_up() -> None:
     later, and the server must start either way.
     """
     try:
-        from tokenmizer.core.tokenizer import count_tokens
+        from tokenmizer.core import tokenizer
         from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
-        count_tokens("warm up")
+        tokenizer.count_tokens("warm up")
+        # The Claude path imports the Anthropic SDK on first use: about
+        # 0.7 s, which otherwise lands on the first Claude request.
+        tokenizer.count_tokens("warm up", "claude")
         get_hybrid_extractor(None).heuristic_extract([{"role": "user", "content": "warm up"}])
     except Exception as e:
         logger.warning("Startup warm-up failed (first request will be slower): %s", e)
@@ -1287,10 +1290,11 @@ async def _update_graph(
             # Drop what the payload already says. Measured against the
             # payload as it leaves — after windowing — so a fact whose turn
             # was windowed out, or truncated by the client, still goes in.
-            message_words = [
-                _content_words(_content_to_text(m.get("content")))
-                for m in messages
-            ]
+            # Linear in the payload, which on an agent session is tool
+            # output, so off the event loop like extraction and windowing.
+            message_words = await asyncio.to_thread(
+                lambda: [_content_words(_content_to_text(m.get("content")))
+                         for m in messages])
             relevant_pairs = [
                 (n, sid) for n, sid in relevant_pairs
                 if not _already_in_payload(n, message_words)

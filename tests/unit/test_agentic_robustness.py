@@ -611,6 +611,24 @@ def test_startup_warms_the_extractor_and_a_failed_warm_up_still_starts(monkeypat
         assert c.get("/health").status_code == 200
 
 
+def test_startup_warms_the_claude_token_counter_too(monkeypatch):
+    """The Claude path of the counter imports the Anthropic SDK on first
+    use. Warming only the default model left that import, about 0.7 s on
+    the event loop, to the first Claude request after every start."""
+    from fastapi.testclient import TestClient
+
+    import tokenmizer.api.app as app_module
+    from tokenmizer.core import tokenizer
+
+    models = []
+    real = tokenizer.count_tokens
+    monkeypatch.setattr(tokenizer, "count_tokens",
+                        lambda text, model="gpt-4o": (models.append(model), real(text, model))[1])
+    with TestClient(app_module.app):
+        pass
+    assert any(tokenizer.is_claude_model(m) for m in models), models
+
+
 # ── Lists under headings, and files named as examples ────────────────────────
 
 def test_errors_listed_under_a_fixed_heading_are_resolved():
