@@ -647,9 +647,12 @@ def _warm_up() -> None:
     later, and the server must start either way.
     """
     try:
-        from tokenmizer.core.tokenizer import count_tokens
+        from tokenmizer.core import tokenizer
         from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
-        count_tokens("warm up")
+        tokenizer.count_tokens("warm up")
+        # The Claude path imports the Anthropic SDK on first use: about
+        # 0.7 s, which otherwise lands on the first Claude request.
+        tokenizer.count_tokens("warm up", "claude")
         get_hybrid_extractor(None).heuristic_extract([{"role": "user", "content": "warm up"}])
     except Exception as e:
         logger.warning("Startup warm-up failed (first request will be slower): %s", e)
@@ -975,11 +978,25 @@ _FILLER = frozenset({
 })
 
 
+_EXTENSION = re.compile(r"^(.+)\.[a-z][a-z0-9]{0,4}$")
+
+
 def _content_words(text: str) -> frozenset:
-    return frozenset(
-        w for w in _WORD.findall(text.lower())
-        if len(w) > 2 and w not in _FILLER
-    )
+    """The words of `text` that carry content, and for a file name both
+    spellings: with its extension and without. A node label is clipped to a
+    clause and often ends at `hybrid_extractor` where the turn said
+    `hybrid_extractor.py`; they are the same file. Both sides go through
+    here, so a label naming `config.py` still needs `config.py`, not
+    `config.yaml`, in the turn."""
+    words = set()
+    for w in _WORD.findall(text.lower()):
+        if len(w) <= 2 or w in _FILLER:
+            continue
+        words.add(w)
+        stem = _EXTENSION.match(w)
+        if stem and len(stem.group(1)) > 2:
+            words.add(stem.group(1))
+    return frozenset(words)
 
 
 def _already_in_payload(node, message_words: list[frozenset]) -> bool:
@@ -1273,10 +1290,11 @@ async def _update_graph(
             # Drop what the payload already says. Measured against the
             # payload as it leaves — after windowing — so a fact whose turn
             # was windowed out, or truncated by the client, still goes in.
-            message_words = [
-                _content_words(_content_to_text(m.get("content")))
-                for m in messages
-            ]
+            # Linear in the payload, which on an agent session is tool
+            # output, so off the event loop like extraction and windowing.
+            message_words = await asyncio.to_thread(
+                lambda: [_content_words(_content_to_text(m.get("content")))
+                         for m in messages])
             relevant_pairs = [
                 (n, sid) for n, sid in relevant_pairs
                 if not _already_in_payload(n, message_words)
