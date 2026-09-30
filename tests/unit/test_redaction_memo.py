@@ -94,3 +94,28 @@ def test_messages_are_redacted_the_same_on_every_resend():
     assert first == second
     assert SECRET not in str(first)
     assert history[0]["content"] == f"use {SECRET}"      # input not mutated
+
+
+def test_concurrent_callers_never_get_an_unredacted_secret(monkeypatch):
+    """The memo is shared by the event loop and worker threads. Many threads
+    redacting a mix of clean and secret-bearing texts, under constant
+    eviction, must each get exactly the unmemoised result."""
+    import threading
+    monkeypatch.setattr(R, "_MEMO_MAX_ENTRIES", 16)
+    texts = [f"turn {i} " + (SECRET if i % 3 == 0 else "clean") for i in range(60)]
+    expected = {t: R._scrub(t) for t in texts}
+    wrong = []
+
+    def worker(offset):
+        for k in range(300):
+            t = texts[(offset + k) % len(texts)]
+            if R.redact(t) != expected[t]:
+                wrong.append(t)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert not wrong
+    assert len(R._memo) <= 16
