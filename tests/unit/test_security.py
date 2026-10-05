@@ -15,6 +15,7 @@ Extended during the audit/fix pass to cover:
     content scanning (previously: any message with list-content bypassed
     the injection filter completely, regardless of what text was inside).
 """
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -163,6 +164,77 @@ class TestRedaction:
         nested_text = cleaned[0]["content"][0]["content"][0]["text"]
         assert "sk-ant" not in nested_text
         assert "[REDACTED]" in nested_text
+
+    def test_openai_tool_arguments_are_redacted_and_remain_valid_json(self):
+        secret = "sk-abcdefghijklmnopqrstuvwx1234567890"
+        arguments = json.dumps({"path": ".env", "content": f"API_KEY={secret}"})
+        messages = [{
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_write",
+                "type": "function",
+                "function": {"name": "write_file", "arguments": arguments},
+            }],
+        }]
+
+        cleaned = redact_messages(messages)
+        call = cleaned[0]["tool_calls"][0]
+        cleaned_arguments = json.loads(call["function"]["arguments"])
+
+        assert call["id"] == "call_write"
+        assert call["function"]["name"] == "write_file"
+        assert cleaned_arguments["path"] == ".env"
+        assert secret not in cleaned_arguments["content"]
+        assert "[REDACTED]" in cleaned_arguments["content"]
+        assert messages[0]["tool_calls"][0]["function"]["arguments"] == arguments
+
+    def test_openai_tool_arguments_preserve_clean_and_scrub_malformed_input(self):
+        clean = '{  "path": "src/app.py", "line": 7  }'
+        malformed = '{"token":"sk-abcdefghijklmnopqrstuvwx1234567890"'
+        messages = [{
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"function": {"name": "read_file", "arguments": clean}},
+                {"function": {"name": "broken", "arguments": malformed}},
+            ],
+        }]
+
+        calls = redact_messages(messages)[0]["tool_calls"]
+
+        assert calls[0]["function"]["arguments"] == clean
+        assert "sk-abcdefghijklmnopqrstuvwx1234567890" not in (
+            calls[1]["function"]["arguments"]
+        )
+        assert "[REDACTED]" in calls[1]["function"]["arguments"]
+
+    def test_anthropic_tool_input_is_redacted_without_mutating_message(self):
+        secret = "sk-abcdefghijklmnopqrstuvwx1234567890"
+        tool_input = {
+            "path": ".env",
+            "content": f"API_KEY={secret}",
+            "headers": {"Authorization": f"Bearer {secret}abcdefgh"},
+        }
+        messages = [{
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_write",
+                "name": "write_file",
+                "input": tool_input,
+            }],
+        }]
+
+        cleaned = redact_messages(messages)
+        block = cleaned[0]["content"][0]
+
+        assert block["id"] == "toolu_write"
+        assert block["name"] == "write_file"
+        assert block["input"]["path"] == ".env"
+        assert secret not in block["input"]["content"]
+        assert secret not in block["input"]["headers"]["Authorization"]
+        assert messages[0]["content"][0]["input"] == tool_input
 
     # ── URL-embedded credentials and additional provider key formats ────────
 

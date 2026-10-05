@@ -18,6 +18,7 @@ consumer shares the same already-safe copy.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import threading
 from collections import OrderedDict
@@ -130,6 +131,53 @@ def redact_node(label: str, summary: str = "") -> tuple[str, str]:
     return redact(label), redact(summary)
 
 
+def _redact_values(value):
+    """Redact string values recursively without changing keys or types."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [_redact_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_values(item) for key, item in value.items()}
+    return value
+
+
+def _redact_arguments(arguments):
+    """Scrub OpenAI tool arguments while preserving valid JSON."""
+    if not isinstance(arguments, str):
+        return _redact_values(arguments)
+    try:
+        parsed = json.loads(arguments)
+    except (TypeError, ValueError):
+        return redact(arguments)
+    cleaned = _redact_values(parsed)
+    if cleaned == parsed:
+        return arguments
+    return json.dumps(cleaned, separators=(",", ":"))
+
+
+def _redact_tool_calls(tool_calls):
+    if not isinstance(tool_calls, list):
+        return tool_calls
+    cleaned = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            cleaned.append(call)
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict) or "arguments" not in function:
+            cleaned.append(call)
+            continue
+        cleaned.append({
+            **call,
+            "function": {
+                **function,
+                "arguments": _redact_arguments(function["arguments"]),
+            },
+        })
+    return cleaned
+
+
 def _redact_content(content):
     """
     Redact secrets from message content of any shape.
@@ -145,10 +193,10 @@ def _redact_content(content):
          str(), embedding raw, unredacted secrets inside a stringified
          repr that nothing downstream expected.
 
-    Fix: text blocks are redacted in place; non-text blocks (images,
-    documents, tool_use/tool_result) are passed through unchanged — we
-    must never attempt to regex-redact binary/base64 image data, both
-    because it's not text and because doing so would corrupt the image.
+    Fix: text and tool-input values are redacted in place; image and
+    document blocks pass through unchanged. We must never regex-redact
+    binary/base64 image data, both because it is not text and because doing
+    so would corrupt the image.
     """
     if content is None:
         return None
@@ -162,6 +210,8 @@ def _redact_content(content):
             elif isinstance(block, dict):
                 if block.get("type") == "text" and "text" in block:
                     cleaned.append({**block, "text": redact(str(block["text"]))})
+                elif block.get("type") == "tool_use" and "input" in block:
+                    cleaned.append({**block, "input": _redact_values(block["input"])})
                 elif "content" in block and isinstance(block.get("content"), (str, list)):
                     # tool_result content is `str | list[block]` per the
                     # Anthropic/OpenAI schema — a tool returning structured
@@ -176,7 +226,7 @@ def _redact_content(content):
                     # covers it the same way the top-level list does.
                     cleaned.append({**block, "content": _redact_content(block["content"])})
                 else:
-                    # image/document/tool_use blocks — leave untouched
+                    # image/document blocks — leave untouched
                     cleaned.append(block)
             else:
                 cleaned.append(block)
@@ -189,10 +239,11 @@ def _redact_content(content):
 
 
 def redact_messages(messages: list[dict]) -> list[dict]:
-    """Return a copy of messages with secrets scrubbed from content.
-    Safe for plain-string content, multimodal block lists, and missing/None
-    content (tool-call-only messages)."""
-    return [
-        {**m, "content": _redact_content(m.get("content"))}
-        for m in messages
-    ]
+    """Return a copy with secrets scrubbed from content and tool inputs."""
+    cleaned = []
+    for message in messages:
+        item = {**message, "content": _redact_content(message.get("content"))}
+        if "tool_calls" in message:
+            item["tool_calls"] = _redact_tool_calls(message["tool_calls"])
+        cleaned.append(item)
+    return cleaned
