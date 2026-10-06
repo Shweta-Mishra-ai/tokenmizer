@@ -25,6 +25,10 @@ graph_checkpoint:
                                 # same provider and model configured for chat
   extraction_model: ""          # pin a different model of that provider for
                                 # extraction; empty = default_model
+  extraction_max_tokens: 2048   # output budget of the extraction call (256-16384).
+                                # A model that reasons before answering spends part
+                                # of it on reasoning; raise it if the log reports a
+                                # cut-off extraction reply
 
 compression:
   enabled: true
@@ -99,6 +103,7 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_COMPRESSION__RATIO` | `0.5` | Target share of the prompt to keep. Only the `llmlingua2` engine honours it; the heuristic engine drops what it can prove is safe to drop and ignores a ratio |
 | `TOKENMIZER_MEMORY__ENABLED` | `true` | Conversation windowing and summarisation. Off means every turn is sent verbatim |
 | `TOKENMIZER_GRAPH_CHECKPOINT__EXTRACTION_MODEL` | *(empty)* | Pin a different model **of the configured provider** for extraction — usually a cheaper one. Empty uses `default_model` |
+| `TOKENMIZER_GRAPH_CHECKPOINT__EXTRACTION_MAX_TOKENS` | `2048` | Output-token budget of the extraction call (256–16384). A model that reasons before it answers spends part of it on reasoning, so a budget sized for the JSON alone can be exhausted before the JSON is complete. Raise it if the log reports a cut-off extraction reply |
 | `TOKENMIZER_PREFERENCES__ENABLED` | `false` | Cross-session preference memory. Off by default on purpose — see the section below before enabling it |
 | `TOKENMIZER_PREFERENCES__MAX_ITEMS` | `4` | Preference lines injected into the system prompt |
 | `TOKENMIZER_PREFERENCES__MAX_CHARS` | `400` | Total size of those lines |

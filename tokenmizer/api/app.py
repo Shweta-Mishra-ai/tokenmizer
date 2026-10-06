@@ -1201,7 +1201,9 @@ async def _update_graph(
                             # provider_fn goes to extract(), not __init__ —
                             # omitting it silently skips the LLM pass
                             # (regression-tested in test_hybrid_extractor).
-                            ext = HybridExtractor()
+                            ext = HybridExtractor(
+                                max_output_tokens=settings.graph_checkpoint.extraction_max_tokens
+                            )
                             extracted = await ext.extract(_msgs, provider_fn=_pfn)
                             # Also off the loop: incremental=False
                             # re-walks every message, so this is the

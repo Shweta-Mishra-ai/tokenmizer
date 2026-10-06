@@ -68,6 +68,11 @@ class GraphCheckpointSettings(BaseModel):
     max_resume_tokens: int = 400
     use_llm_extraction: bool = False  # set True for 80%+ recall (needs API key, ~$0.001/turn)
     extraction_model: str = ""        # leave empty = auto-pick cheapest model for your provider
+    # Output-token budget for the LLM extraction call. A model that reasons
+    # before it answers spends part of this on reasoning, so a budget sized
+    # for the JSON alone can be exhausted before the JSON is complete; raise
+    # it if the log reports a truncated extraction reply.
+    extraction_max_tokens: int = Field(default=2048, ge=256, le=16384)
     min_confidence: float = 0.65      # minimum validation confidence threshold
     # Blend embedding similarity into GraphMemory.query(), the ranker that
     # decides which nodes get injected into the prompt each turn.

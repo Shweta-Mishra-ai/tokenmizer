@@ -155,6 +155,11 @@ from tokenmizer.graph_memory.patterns import (
 
 logger = logging.getLogger(__name__)
 
+# Output budget of the LLM extraction call. Not sized for the JSON alone:
+# a model that reasons before answering spends part of it on reasoning, and
+# 800 was exhausted before the object was complete (issue #89).
+DEFAULT_EXTRACTION_MAX_TOKENS = 2048
+
 
 def _parse_json_object(raw: str) -> Optional[dict]:
     """The first JSON object in a model reply, or None.
@@ -176,13 +181,65 @@ def _parse_json_object(raw: str) -> Optional[dict]:
     except json.JSONDecodeError:
         pass
     start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
+    if start == -1:
         return None
-    try:
-        data = json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    if end > start:
+        try:
+            data = json.loads(text[start:end + 1])
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            pass
+    return _recover_truncated_object(text[start:])
+
+
+def _recover_truncated_object(text: str) -> Optional[dict]:
+    """The complete leading part of a JSON object cut off mid-reply, or None.
+
+    A reply that hits the output-token cap ends mid-structure, and
+    json.loads then rejects all of it, discarding every field that did
+    arrive intact. Cut points are only ever the end of a finished element
+    (a comma or a closing bracket outside any string), so what comes back
+    is a prefix of what the model wrote with its open brackets closed: a
+    value cut in half is dropped, never completed or guessed at.
+    """
+    stack: list[str] = []
+    cuts: list[tuple[int, str]] = []   # (where to cut, closers to append)
+    in_string = escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack:
+                return None
+            stack.pop()
+            cuts.append((i + 1, "".join(reversed(stack))))
+        elif ch == ",":
+            cuts.append((i, "".join(reversed(stack))))
+    if not stack and not in_string:
+        return None   # balanced: malformed, not cut off — nothing to recover
+    for index, closers in reversed(cuts):
+        try:
+            data = json.loads(text[:index] + closers)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            logger.warning(
+                "LLM extraction reply was cut off before it finished (output "
+                "budget exhausted?); kept the %d complete field(s) that "
+                "arrived. Raise graph_checkpoint.extraction_max_tokens if "
+                "this repeats.", len(data),
+            )
+            return data
+    return None
 
 
 # A contraction's tail. The subject windows are character runs that exclude
@@ -734,8 +791,16 @@ class HybridExtractor:
     drops heuristic-only items; 0.9 keeps only corroborated ones.
     """
 
-    def __init__(self, min_confidence: float = 0.55, domain: str | None = None):
+    def __init__(
+        self,
+        min_confidence: float = 0.55,
+        domain: str | None = None,
+        max_output_tokens: int = DEFAULT_EXTRACTION_MAX_TOKENS,
+    ):
         self.min_confidence = min_confidence
+        # The LLM pass's output budget. Settings are a parameter here, not
+        # an import: graph_memory/ does not read the config layer for this.
+        self.max_output_tokens = max_output_tokens
         # The domain pack's families run IN ADDITION to the coding ones,
         # so a pack can only add recall and a coding session is
         # bit-for-bit what it was. See graph_memory/domains.py.
@@ -778,7 +843,7 @@ class HybridExtractor:
             result = await provider_fn(
                 messages=[{"role": "user", "content": prompt}],
                 system=EXTRACTION_SYSTEM,
-                max_tokens=800,
+                max_tokens=self.max_output_tokens,
             )
             raw = result.get("text", "")
             data = _parse_json_object(raw)
