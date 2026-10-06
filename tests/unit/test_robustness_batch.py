@@ -112,17 +112,20 @@ class TestOllamaStreamSampling:
 
 
 class TestMaxCompletionTokens:
+    # A request needs one message to be valid; these tests are about the
+    # token fields, so they carry the smallest valid message.
+    MESSAGES = [{"role": "user", "content": "hi"}]
 
     def test_alias_wins_over_default(self):
-        req = app_module.ChatRequest(messages=[], max_completion_tokens=77)
+        req = app_module.ChatRequest(messages=self.MESSAGES, max_completion_tokens=77)
         assert app_module._max_tokens(req) == 77
 
     def test_max_tokens_still_honoured(self):
-        req = app_module.ChatRequest(messages=[], max_tokens=55)
+        req = app_module.ChatRequest(messages=self.MESSAGES, max_tokens=55)
         assert app_module._max_tokens(req) == 55
 
     def test_default_is_4096(self):
-        assert app_module._max_tokens(app_module.ChatRequest(messages=[])) == 4096
+        assert app_module._max_tokens(app_module.ChatRequest(messages=self.MESSAGES)) == 4096
 
 
 class TestContextWindows:

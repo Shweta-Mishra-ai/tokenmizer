@@ -773,7 +773,10 @@ class ChatRequest(BaseModel):
     model_config = {"extra": "allow"}
 
     model: Optional[str] = None
-    messages: list[ChatMessage]
+    # At least one message, as every provider requires. Without the bound an
+    # empty list reached the provider twice (transformed, then untransformed
+    # retry) and came back as a misleading 502 instead of a 422 naming the field.
+    messages: list[ChatMessage] = Field(min_length=1)
     # Ranges every provider enforces anyway. Checked here so a bad value is
     # a 422 naming the field, not an opaque upstream 400 after the request
     # has been compressed, extracted and forwarded — `max_tokens: -5` went
