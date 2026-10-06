@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -512,7 +513,7 @@ def test_keyword_prefilter_never_changes_output():
 
     import tokenmizer.graph_memory.hybrid_extractor as H
 
-    sessions = [json.load(open(f))["messages"]
+    sessions = [json.loads(Path(f).read_text(encoding="utf-8"))["messages"]
                 for f in sorted(glob.glob("benchmarks/eval/corpus*/*.json"))]
     sessions += [[{"role": "assistant", "content": t}] for t in (
         "Deploy failed, rolled back.", "The cache returns stale data after a deploy.",

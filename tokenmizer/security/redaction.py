@@ -178,6 +178,26 @@ def _redact_tool_calls(tool_calls):
     return cleaned
 
 
+# A Gemini part carries exactly one of these keys, and the field inside it
+# that holds model- or tool-produced content: the call's arguments, a tool's
+# output, code the model wrote, and the output of running it. Everything
+# else in the part (name, id, outcome, signatures) is metadata, left as sent.
+_GEMINI_PAYLOAD_FIELDS = {
+    "functionCall": "args",
+    "functionResponse": "response",
+    "executableCode": "code",
+    "codeExecutionResult": "output",
+}
+
+
+def _gemini_payload_key(block: dict):
+    """The Gemini part key whose payload this block carries, or None."""
+    for part, field in _GEMINI_PAYLOAD_FIELDS.items():
+        if isinstance(block.get(part), dict) and field in block[part]:
+            return part
+    return None
+
+
 def _redact_content(content):
     """
     Redact secrets from message content of any shape.
@@ -208,17 +228,21 @@ def _redact_content(content):
             if isinstance(block, str):
                 cleaned.append(redact(block))
             elif isinstance(block, dict):
-                if block.get("type") == "text" and "text" in block:
+                if "text" in block and (
+                    block.get("type") == "text"
+                    or (block.get("type") is None and isinstance(block["text"], str))
+                ):
+                    # A Gemini part is {"text": ...} with no "type"; the
+                    # extractor reads it as text, so it is redacted as text.
                     cleaned.append({**block, "text": redact(str(block["text"]))})
                 elif block.get("type") == "tool_use" and "input" in block:
                     cleaned.append({**block, "input": _redact_values(block["input"])})
-                elif isinstance(block.get("functionCall"), dict) and "args" in block["functionCall"]:
+                elif _gemini_payload_key(block) is not None:
+                    part = _gemini_payload_key(block)
+                    field = _GEMINI_PAYLOAD_FIELDS[part]
                     cleaned.append({
                         **block,
-                        "functionCall": {
-                            **block["functionCall"],
-                            "args": _redact_values(block["functionCall"]["args"]),
-                        },
+                        part: {**block[part], field: _redact_values(block[part][field])},
                     })
                 elif "content" in block and isinstance(block.get("content"), (str, list)):
                     # tool_result content is `str | list[block]` per the
