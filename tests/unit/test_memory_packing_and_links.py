@@ -17,6 +17,7 @@ Two measured defects:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -125,7 +126,7 @@ def test_tasks_are_part_of_the_goal_when_extracted_incrementally(tmp_path):
 def test_incremental_and_whole_extraction_form_the_same_relations(tmp_path):
     import glob
     for path in sorted(glob.glob("benchmarks/eval/corpus/*.json"))[:8]:
-        msgs = json.load(open(path))["messages"]
+        msgs = json.loads(Path(path).read_text(encoding="utf-8"))["messages"]
         whole = GraphMemory("w", storage_dir=str(tmp_path / "w" / path.split("/")[-1]))
         whole.extract_from_messages(msgs, incremental=False)
         inc = GraphMemory("i", storage_dir=str(tmp_path / "i" / path.split("/")[-1]))

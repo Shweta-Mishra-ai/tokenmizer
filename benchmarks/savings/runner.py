@@ -206,7 +206,13 @@ def load_trace_with_actions(path: str, max_requests: int):
         return "".join(b.get("text", "") for b in c
                        if isinstance(b, dict) and b.get("type") == "text")
 
-    for line in open(path, encoding="utf-8"):
+    def lines():
+        # Owns the handle, so the file is closed when the loop below breaks
+        # early at max_requests as well as when it runs to the end.
+        with open(path, encoding="utf-8") as transcript:
+            yield from transcript
+
+    for line in lines():
         try:
             d = json.loads(line)
         except ValueError:

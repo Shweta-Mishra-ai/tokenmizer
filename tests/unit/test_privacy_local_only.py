@@ -96,8 +96,8 @@ def test_loopback_still_connects(listener):
 
 def test_an_unlisted_address_is_refused_before_any_packet(listener):
     privacy.enforce(_settings())
-    with pytest.raises(NetworkBlocked, match="203.0.113.7"):
-        socket.socket().connect(("203.0.113.7", 443))
+    with socket.socket() as sock, pytest.raises(NetworkBlocked, match="203.0.113.7"):
+        sock.connect(("203.0.113.7", 443))
 
 
 def test_an_unlisted_hostname_is_refused_at_the_lookup():
@@ -110,7 +110,8 @@ def test_an_unlisted_hostname_is_refused_at_the_lookup():
 
 def test_connect_ex_reports_failure_instead_of_connecting():
     privacy.enforce(_settings())
-    assert socket.socket().connect_ex(("203.0.113.7", 443)) != 0
+    with socket.socket() as sock:
+        assert sock.connect_ex(("203.0.113.7", 443)) != 0
 
 
 def test_a_listed_host_resolves_and_its_addresses_may_connect(listener, monkeypatch):
