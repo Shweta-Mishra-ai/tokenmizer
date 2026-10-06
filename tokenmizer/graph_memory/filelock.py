@@ -65,6 +65,15 @@ class LockUnavailable(Exception):
     """The lock could not be acquired within the timeout."""
 
 
+# Windows treats these as devices whatever follows the first dot, so a lock
+# file named `con.<hash>.lock` is not a file there.
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
 def _safe_name(session_id: str) -> str:
     """Filesystem-safe lock filename for a session.
 
@@ -72,10 +81,15 @@ def _safe_name(session_id: str) -> str:
     NULs, or be long enough to blow the filename limit. Anything outside
     a conservative allowlist is replaced, and a hash suffix keeps two
     different ids from colliding onto one lock file after sanitising
-    (which would make two unrelated sessions block each other).
+    (which would make two unrelated sessions block each other). A result
+    that is a Windows device name (`con`, `nul`, `com1`, ...) gets a
+    leading underscore; the hash suffix keeps it distinct from a session
+    that is really named `_con`.
     """
     import hashlib
     cleaned = "".join(c if (c.isalnum() or c in "-_") else "_" for c in session_id)[:64]
+    if cleaned.upper() in _WINDOWS_DEVICE_NAMES:
+        cleaned = "_" + cleaned
     digest = hashlib.sha256(session_id.encode()).hexdigest()[:12]
     return f"{cleaned}.{digest}.lock"
 
