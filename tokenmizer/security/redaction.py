@@ -212,6 +212,14 @@ def _redact_content(content):
                     cleaned.append({**block, "text": redact(str(block["text"]))})
                 elif block.get("type") == "tool_use" and "input" in block:
                     cleaned.append({**block, "input": _redact_values(block["input"])})
+                elif isinstance(block.get("functionCall"), dict) and "args" in block["functionCall"]:
+                    cleaned.append({
+                        **block,
+                        "functionCall": {
+                            **block["functionCall"],
+                            "args": _redact_values(block["functionCall"]["args"]),
+                        },
+                    })
                 elif "content" in block and isinstance(block.get("content"), (str, list)):
                     # tool_result content is `str | list[block]` per the
                     # Anthropic/OpenAI schema — a tool returning structured
@@ -245,5 +253,11 @@ def redact_messages(messages: list[dict]) -> list[dict]:
         item = {**message, "content": _redact_content(message.get("content"))}
         if "tool_calls" in message:
             item["tool_calls"] = _redact_tool_calls(message["tool_calls"])
+        function_call = message.get("function_call")
+        if isinstance(function_call, dict) and "arguments" in function_call:
+            item["function_call"] = {
+                **function_call,
+                "arguments": _redact_arguments(function_call["arguments"]),
+            }
         cleaned.append(item)
     return cleaned
