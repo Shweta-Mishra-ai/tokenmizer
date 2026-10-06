@@ -12,7 +12,7 @@ python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
 python -m benchmarks.savings.runner                 # input cost, with and without
-pytest tests/ -q                                     # 2005 tests
+pytest tests/ -q                                     # 2107 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -20,7 +20,7 @@ pytest tests/ -q                                     # 2005 tests
 `python -m benchmarks.eval` scores extraction against a labelled corpus:
 **14 sessions, 144 turns, 172 labelled items, 14 domains** (Go, Rust,
 Python, TypeScript, React, SQL, CI, ML, plus six real audit sessions).
-Measured on v0.5.4:
+Measured on v0.6.0:
 
 | Category | Precision | Recall | F1 |
 |---|---|---|---|

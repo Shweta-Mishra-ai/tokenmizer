@@ -1,13 +1,69 @@
 # Changelog
 
-## [Unreleased] — session resilience, extraction recall, retrieval, and voice
+## [0.6.0] — 2026-10-06 — agent sessions, tool-call safety, extraction recall, and retrieval
 
 A deep audit found that the defects which remained were at the seams
 between layers — the one place a suite of 664 layer-internal tests does not
 look. Three of them fired only in long sessions, on Anthropic or Gemini, or
 on Windows: the conditions of a Claude Code user with a session worth
-remembering. Suite is now 2005 tests; every published number below was
+remembering. Suite is now 2107 tests; every published number below was
 re-derived from a run.
+
+### Tool calls through checkpoints and redaction, and extraction that survives a cut-off reply
+
+Found and fixed after v0.5.4; each fix has a regression test that fails
+without it.
+
+- **Checkpoints dropped tool calls.** `POST /api/checkpoint` and the MCP
+  offline checkpoint reduced every message to its role and text before graph
+  ingestion, discarding `tool_calls`, `tool_call_id` and `name`. A transcript
+  containing an assistant `write_file` call returned success with
+  `node_count: 0`, while the same transcript passed straight to
+  `GraphMemory.extract_from_messages()` created the file node. Both paths now
+  keep the full normalised message and pass it through redaction. Fixed by
+  Tionne Smith (#84; the report is #81).
+- **Redaction missed tool-call arguments.** `redact_messages()` scrubbed
+  `content` only, so a secret inside an OpenAI `tool_calls[].function.arguments`
+  or an Anthropic `tool_use.input` passed through to the provider, the
+  extraction model and the checkpoints. String values are now redacted
+  recursively, the JSON stays valid, clean arguments are left byte-for-byte
+  unchanged, and the caller's message is never mutated. Fixed by Tionne Smith
+  (#85, #86). Legacy OpenAI `function_call.arguments` and Gemini
+  `functionCall.args` were covered the same way by pythonyx135793 (#87, #88).
+- **Four more Gemini parts leaked.** `functionResponse` (a tool's output),
+  `executableCode`, `codeExecutionResult`, and a plain `{"text": ...}` part,
+  which has no `type` key and which the extractor reads as text, so a secret
+  in one reached extraction as well (#90, #93). Only the field that holds the
+  content is redacted; names, ids, outcomes and signatures are left as sent.
+- **A cut-off extraction reply discarded the whole LLM pass.** The extraction
+  call hard-coded `max_tokens=800`. A model that reasons before it answers
+  spends part of that budget on reasoning, so the JSON was cut off
+  mid-structure, `json.loads` rejected all of it, and extraction fell back to
+  heuristic-only with only a warning in the log.
+  `graph_checkpoint.extraction_max_tokens` (default 2048, range 256-16384;
+  `TOKENMIZER_GRAPH_CHECKPOINT__EXTRACTION_MAX_TOKENS`) now sets the budget,
+  and a reply that is cut off keeps the complete fields that arrived: a value
+  cut in half is dropped, never completed (#79, #89, #91). The figure reported
+  with it, that `gemini-3-flash-preview` spends 640-770 of the 800 tokens on
+  reasoning, was not independently measured here.
+- **Empty `messages` reached the provider.** `POST /v1/chat/completions` with
+  `{"messages": []}` was forwarded upstream twice and came back as a 502; it
+  is now a 422 naming the field (#92).
+- **Lock files could take a Windows device name.** A session id that
+  sanitises to `con`, `nul`, `aux`, `prn`, `com1`-`com9` or `lpt1`-`lpt9`
+  produced `con.<hash>.lock`, which Windows treats as a device. The stem now
+  gets a leading underscore. Found by inspection and not reproduced on
+  Windows, so this is hardening, not a confirmed failure (#92).
+- **Documentation and tests.** The architecture diagram path in
+  `docs/architecture.md` was wrong and rendered as a broken image; a new guard
+  checks that every relative link and image in the docs exists. The suite no
+  longer emits `ResourceWarning`s (#93).
+
+**Behaviour changes to know about.** Secrets inside earlier tool-call
+arguments are now redacted before the request reaches the provider, so the
+model sees `[REDACTED]` in its own earlier tool inputs, as it already did for
+message text. A chat request with an empty `messages` list is now rejected
+with a 422 instead of being forwarded.
 
 ### Agent sessions, local-only mode, and a filter that locked sessions out
 
@@ -917,13 +973,13 @@ An audit of every merged pull request and every issue against the
 README's list found the code credits complete and the rest of it
 missing entirely:
 
-- **@0xfroOty reported five of the bugs they are credited for fixing**
+- **0xfroOty reported five of the bugs they are credited for fixing**
   (#19, #20, #23, #30, #34) and the README mentioned only the pull
   requests — while the Contributing section three paragraphs above says
   in as many words that the report is the harder half.
-- **@TechNovaWorldai filed #62 before sending #63**, and only the fix
+- **TechNovaWorldai filed #62 before sending #63**, and only the fix
   was listed.
-- **@neoneye was not mentioned at all.** An independent analysis of
+- **neoneye was not mentioned at all.** An independent analysis of
   TokenMizer and a listing among other agent-memory systems in the agent
   memory atlas (#39) — no commits, so the avatar grid will never show
   this contribution either.
