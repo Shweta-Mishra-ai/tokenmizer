@@ -44,7 +44,7 @@ flowchart LR
 ## Request pipeline and data model
 
 <div align="center">
-  <img src="docs/assets/architecture.svg" width="880" alt="TokenMizer architecture: proxy pipeline, graph memory, and SQLite storage"/>
+  <img src="assets/architecture.svg" width="880" alt="TokenMizer architecture: proxy pipeline, graph memory, and SQLite storage"/>
 </div>
 
 ### What happens on one request
