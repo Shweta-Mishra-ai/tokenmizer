@@ -6,7 +6,6 @@ import unittest
 
 from tokenmizer.security.redaction import redact_messages
 
-
 SECRET = "sk-" + "abcdefghijklmnopqrstuvwxyz1234567890"
 
 
