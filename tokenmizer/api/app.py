@@ -48,7 +48,7 @@ from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.filters.file_intelligence import FileIntelligence
 from tokenmizer.graph_memory.graph import GraphMemory
 from tokenmizer.graph_memory.helpers import _content_to_text
-from tokenmizer.providers.providers import build_provider
+from tokenmizer.providers.providers import build_provider, missing_provider_sdk
 from tokenmizer.security.auth import verify_api_key
 from tokenmizer.security.fencing import fence
 from tokenmizer.security.middleware import injection_guard
@@ -360,6 +360,19 @@ def _get_provider():
     return _provider
 
 
+def _provider_failure_detail(correlation_id: str) -> str:
+    """The client-facing text of a failed provider call. It stays opaque (SDK
+    exceptions embed URLs and other internals), except for one cause that is
+    safe and actionable to name: the provider's SDK is not installed."""
+    detail = (f"Provider request failed (ref: {correlation_id}). "
+              f"Check server logs for details.")
+    hint = missing_provider_sdk(settings.provider)
+    if hint:
+        detail += (f" The {settings.provider} SDK is not installed; "
+                   f"install it with: {hint}")
+    return detail
+
+
 # ── Graph helpers (state-backend backed) ─────────────────────────────────────
 
 # In-process graph cache — avoids SQLite reload on every request.
@@ -665,6 +678,12 @@ async def lifespan(app: FastAPI):
     # loads the tokenizer and may fetch its vocabulary. A configuration that
     # contradicts local-only mode stops the server here, loudly.
     privacy.enforce(settings)
+    sdk_hint = missing_provider_sdk(settings.provider)
+    if sdk_hint:
+        logger.warning(
+            "Provider %r is configured but its SDK is not installed, so chat "
+            "requests will fail (checkpoints and the graph still work). "
+            "Install it with: %s", settings.provider, sdk_hint)
     await asyncio.to_thread(_warm_up)
     flusher = asyncio.create_task(_periodic_flush())
     try:
@@ -1468,8 +1487,7 @@ async def _call_provider(
                              f"transformed={e!r}; untransformed={e2!r}")
                 raise HTTPException(
                     status_code=502,
-                    detail=f"Provider request failed (ref: {correlation_id}). "
-                           f"Check server logs for details.",
+                    detail=_provider_failure_detail(correlation_id),
                 )
             else:
                 # The transforms were the problem. That is a TokenMizer bug
@@ -1494,8 +1512,7 @@ async def _call_provider(
             logger.error(f"Provider error [{correlation_id}]: {e}")
             raise HTTPException(
                 status_code=502,
-                detail=f"Provider request failed (ref: {correlation_id}). "
-                       f"Check server logs for details.",
+                detail=_provider_failure_detail(correlation_id),
             )
 
     response_text  = resp.text
@@ -2025,6 +2042,11 @@ async def health():
         # from outside. Not part of `degraded`: it is configuration, not a
         # failure.
         "privacy": privacy.status(settings),
+        # The install command when the configured provider's SDK is missing,
+        # else null. Deliberately NOT part of `degraded`: a deployment that
+        # only checkpoints through MCP never needs a provider, and a clean
+        # `pip install tokenmizer` would otherwise report degraded forever.
+        "provider_sdk_missing": missing_provider_sdk(settings.provider),
     }
 
 

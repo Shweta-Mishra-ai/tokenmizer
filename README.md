@@ -546,7 +546,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 2107 tests, must stay green
+pytest tests/ -q && ruff check tokenmizer/     # 2131 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it
@@ -567,8 +567,9 @@ join the [Discord server](https://discord.gg/fPg9KvjRe).
 
 ## Contributors
 
-We extend our gratitude to everyone who has contributed to TokenMizer —
-the people who report issues, send pull requests, and answer questions.
+We extend our gratitude to everyone who has sent a pull request to
+TokenMizer. The avatars below are generated from the repository's commits, so
+a merged pull request adds its author automatically.
 
 TokenMizer is a community-driven project, and your contributions
 continually improve it.

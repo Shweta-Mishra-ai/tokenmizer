@@ -10,6 +10,7 @@ Invariants every adapter upholds:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import re
 import time
@@ -1184,6 +1185,42 @@ def _warn_on_model_provider_mismatch(provider: str, model: str) -> None:
                 model, owners[0], provider, provider, provider,
             )
             return
+
+
+# The SDK each provider's adapter imports on first use, and the pip extra that
+# installs it. Ollama speaks plain HTTP and needs none; DeepSeek, Mistral, Grok
+# and OpenRouter use the OpenAI SDK.
+_PROVIDER_SDK = {
+    "anthropic": ("anthropic", "anthropic"),
+    "claude": ("anthropic", "anthropic"),
+    "openai": ("openai", "openai"),
+    "gpt": ("openai", "openai"),
+    "deepseek": ("openai", "openai"),
+    "mistral": ("openai", "openai"),
+    "grok": ("openai", "openai"),
+    "openrouter": ("openai", "openai"),
+    "gemini": ("google.genai", "gemini"),
+    "cohere": ("cohere", "cohere"),
+}
+
+
+def missing_provider_sdk(provider: str) -> Optional[str]:
+    """The install command if `provider`'s SDK is not importable, else None.
+
+    A plain `pip install tokenmizer` has no provider SDK, and the adapters
+    import theirs on the first request, so the first chat call failed with
+    the cause only in the server log. This answers the question at startup
+    and when a request fails, without importing the SDK (which can be slow).
+    """
+    entry = _PROVIDER_SDK.get((provider or "").lower())
+    if entry is None:
+        return None
+    module, extra = entry
+    try:
+        found = importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):   # a parent package (google) is absent
+        found = False
+    return None if found else f'pip install "tokenmizer[{extra}]"'
 
 
 def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
