@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.1] — 2026-10-07 — missing provider SDK reporting and a release-notes size guard
+
+### A missing provider SDK is reported where the operator will see it
+
+A plain `pip install tokenmizer` has no provider SDK (they are the
+`anthropic`, `openai`, `gemini` and `cohere` extras), and the adapters import
+theirs on the first request. The first chat call failed with an opaque 502,
+and the actual cause, `pip install anthropic`, appeared only in the server
+log.
+
+- The proxy logs a warning at startup naming the provider and the exact
+  install command.
+- `/health` gains `provider_sdk_missing`: the install command, or `null`.
+  It does not turn `status` to `degraded`: a deployment that only
+  checkpoints through MCP never needs a provider, and a clean install would
+  otherwise report degraded indefinitely.
+- A 502 caused by a failed provider call ends with the install command when
+  the missing SDK is the cause. Otherwise it stays opaque, because SDK
+  exceptions embed URLs and other internals.
+
+### Release notes are kept within GitHub's limit
+
+The release workflow publishes to PyPI first and creates the GitHub release
+from the CHANGELOG section afterwards, so a section longer than GitHub's
+125,000 characters would fail after the upload. A new guard checks the
+current version's section against that limit.
+
+### Documentation
+
+The README's Contributors section now thanks the authors of pull requests and
+says how the avatar grid is built: from the repository's commits, so a merged
+pull request adds its author automatically.
+
 ## [0.6.0] — 2026-10-06 — agent sessions, tool-call safety, extraction recall, and retrieval
 
 A deep audit found that the defects which remained were at the seams
