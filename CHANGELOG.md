@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Documentation
+
+The README's Contributors avatars are now listed explicitly, one per author of
+a merged pull request, instead of loaded from the `contrib.rocks` image
+service. The grid rendered blank in the README, and the cause was never
+established; the service is a third party, and GitHub-hosted avatars do not
+depend on one. A new author is added to the list by hand when their first
+pull request merges.
+
 ## [0.6.1] — 2026-10-07 — missing provider SDK reporting and a release-notes size guard
 
 ### A missing provider SDK is reported where the operator will see it
