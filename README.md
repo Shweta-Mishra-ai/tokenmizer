@@ -567,17 +567,21 @@ join the [Discord server](https://discord.gg/fPg9KvjRe).
 
 ## Contributors
 
-We extend our gratitude to everyone who has sent a pull request to
-TokenMizer. The avatars below are generated from the repository's commits, so
-a merged pull request adds its author automatically.
+We extend our gratitude to everyone who has had a pull request merged into
+TokenMizer. The avatars below are the authors of those pull requests, in the
+order they first merged one.
 
 TokenMizer is a community-driven project, and your contributions
-continually improve it.
+continually improve it. The full list is on the
+[contributors graph](https://github.com/Shweta-Mishra-ai/tokenmizer/graphs/contributors).
 
 <p align="center">
-  <a href="https://github.com/Shweta-Mishra-ai/tokenmizer/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=Shweta-Mishra-ai/tokenmizer" alt="Contributors"/>
-  </a>
+  <a href="https://github.com/pollychen-lab"><img src="https://avatars.githubusercontent.com/u/265131177?v=4&s=96" width="64" height="64" alt="pollychen-lab" title="pollychen-lab"/></a>
+  <a href="https://github.com/0xfroOty"><img src="https://avatars.githubusercontent.com/u/150147344?v=4&s=96" width="64" height="64" alt="0xfroOty" title="0xfroOty"/></a>
+  <a href="https://github.com/floze-the-genius"><img src="https://avatars.githubusercontent.com/u/88098863?v=4&s=96" width="64" height="64" alt="floze-the-genius" title="floze-the-genius"/></a>
+  <a href="https://github.com/TechNovaWorldai"><img src="https://avatars.githubusercontent.com/u/289400570?v=4&s=96" width="64" height="64" alt="TechNovaWorldai" title="TechNovaWorldai"/></a>
+  <a href="https://github.com/electricwolfemarshmallowhypertext"><img src="https://avatars.githubusercontent.com/u/11317945?v=4&s=96" width="64" height="64" alt="electricwolfemarshmallowhypertext" title="electricwolfemarshmallowhypertext"/></a>
+  <a href="https://github.com/pythonyx135793"><img src="https://avatars.githubusercontent.com/u/325767769?v=4&s=96" width="64" height="64" alt="pythonyx135793" title="pythonyx135793"/></a>
 </p>
 
 ## Support

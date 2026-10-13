@@ -288,11 +288,13 @@ def test_the_readme_still_credits_contributors():
     contributor gets, and losing it in a refactor is worse than never
     having written it.
 
-    The section now shows a generated grid rather than a hand-written
-    list, so there are no names in the README to compare against. What
-    this guards is the section itself and the grid inside it: the heading
-    exists, and it contains an image built from this repository. A
-    restructure that drops either fails here.
+    The section lists one GitHub-hosted avatar per author of a merged pull
+    request. It used to load a grid from a third-party image service, which
+    was seen rendering blank under the heading. What this
+    guards is the section itself and the credit inside it: the heading
+    exists, it links to the contributor graph, and it still shows the six
+    outside authors merged so far. A restructure that drops any of them
+    fails here. Raise the floor when a new author is added.
     """
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     # The heading has carried a suffix ("❤️ Thanks") and has been nested
@@ -305,11 +307,14 @@ def test_the_readme_still_credits_contributors():
     if nxt:
         body = body[:nxt.start()]
 
-    assert "contrib.rocks/image?repo=Shweta-Mishra-ai/tokenmizer" in body, (
-        "the contributors grid is gone from the Contributors section"
+    avatars = re.findall(
+        r'<a href="https://github\.com/[\w-]+"><img src="https://avatars\.githubusercontent\.com/u/\d+', body)
+    assert len(avatars) >= 6, (
+        f"the Contributors section lists {len(avatars)} linked avatars; "
+        "six outside authors have merged pull requests"
     )
     assert "/graphs/contributors" in body, (
-        "the contributors grid no longer links to the contributor graph"
+        "the Contributors section no longer links to the contributor graph"
     )
 
 
