@@ -244,6 +244,30 @@ def test_an_edited_old_message_is_seen_again(tmp_path):
     assert second[:3] == first[:3] and second[4:] == first[4:]
 
 
+def test_same_length_structured_edit_updates_the_graph(tmp_path):
+    graph = GraphMemory("structured-edit", storage_dir=str(tmp_path))
+    prefix = "Context before the decision. "
+    suffix = " Context after the decision."
+
+    def message(store):
+        return {"role": "assistant", "content": [{
+            "type": "text",
+            "text": f"{prefix}Decided: use {store} for cache.{suffix}",
+        }]}
+
+    redis = message("Redis")
+    kafka = message("Kafka")
+    assert len(redis["content"][0]["text"]) == len(kafka["content"][0]["text"])
+    assert redis["content"][0]["text"][:16] == kafka["content"][0]["text"][:16]
+    assert redis["content"][0]["text"][-16:] == kafka["content"][0]["text"][-16:]
+
+    graph.extract_from_messages([redis])
+    graph.extract_from_messages([kafka])
+
+    assert any("Kafka" in node.label for node in graph._nodes.values()
+               if node.type == NodeType.DECISION)
+
+
 def test_a_history_trimmed_from_the_front_is_hashed_in_full(tmp_path):
     g = GraphMemory("s", storage_dir=str(tmp_path))
     msgs = [_tool_turn(i, "same length text") for i in range(10)]
