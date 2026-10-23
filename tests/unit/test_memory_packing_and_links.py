@@ -16,6 +16,7 @@ Two measured defects:
 """
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -229,6 +230,34 @@ def test_cached_hashes_equal_full_hashes(tmp_path):
     msgs = [_tool_turn(i, f"output {i} " * 50) for i in range(30)]
     for k in range(1, 31):
         assert g._history_hashes(msgs[:k]) == [g._msg_hash(m) for m in msgs[:k]]
+
+
+def test_unchanged_structured_history_reuses_message_hashes(tmp_path, monkeypatch):
+    graph = GraphMemory("hash-reuse", storage_dir=str(tmp_path))
+    messages = [
+        _tool_turn(0, "command output"),
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "call_1", "type": "function", "function": {
+                "name": "write_file", "arguments": '{"path": "app.py"}',
+            },
+        }]},
+        {"role": "assistant", "content": None, "function_call": {
+            "name": "read_file", "arguments": '{"path": "app.py"}',
+        }},
+    ]
+    calls = []
+    original = graph._msg_hash
+
+    def counted(message):
+        calls.append(message)
+        return original(message)
+
+    monkeypatch.setattr(graph, "_msg_hash", counted)
+    first = graph._history_hashes(messages)
+    assert len(calls) == len(messages)
+    calls.clear()
+    assert graph._history_hashes(copy.deepcopy(messages)) == first
+    assert calls == []
 
 
 def test_an_edited_old_message_is_seen_again(tmp_path):

@@ -144,19 +144,53 @@ _MAX_PROCESSED_HASHES = 500
 _HASHES_TRIMMED = "#trimmed"
 
 
+def _digest(value, depth: int = 3) -> int:
+    """Order-sensitive content hash of a JSON-like value, three levels deep.
+
+    Strings use Python's cached, process-local hash. Containers below the
+    depth limit contribute their entry count, preserving the existing bound
+    on traversal of large tool-input trees.
+    """
+    if isinstance(value, str):
+        return hash(value)
+    if isinstance(value, (list, dict)):
+        if depth == 0:
+            return len(value)
+        items = value.values() if isinstance(value, dict) else value
+        total = 0
+        for v in items:
+            total = (total * 1000003 + _digest(v, depth - 1)) & 0xFFFFFFFFFFFFFFFF
+        return total
+    return 1
+
+
 def _fingerprint(msg) -> object:
-    """Digest a complete structured message; plain text is hashed directly."""
+    """A cheap identity for a structured message at a fixed position; None
+    for a plain-text message, which is simply hashed. See
+    GraphMemory._history_hashes."""
     if not isinstance(msg, dict):
         return None
     content = msg.get("content")
     tool_calls = msg.get("tool_calls")
     if not isinstance(content, list) and not tool_calls and not msg.get("function_call"):
         return None
-    try:
-        payload = json.dumps(msg, sort_keys=True, default=str)
-    except (TypeError, ValueError):
-        payload = repr(msg)
-    return hashlib.sha256(payload.encode("utf-8", "surrogatepass")).digest()
+    parts: list = [msg.get("role"), msg.get("tool_call_id"), msg.get("name")]
+    if isinstance(content, list):
+        parts.append(len(content))
+        for block in content:
+            if isinstance(block, dict):
+                parts.append((block.get("type"), block.get("id") or block.get("tool_use_id"),
+                              _digest(block)))
+            else:
+                parts.append(_digest(block))
+    else:
+        parts.append(_digest(content))
+    for call in (tool_calls or []):
+        if isinstance(call, dict):
+            parts.append((call.get("id"), _digest(call)))
+    if msg.get("function_call"):
+        parts.append(_digest(msg.get("function_call")))
+    return tuple(parts)
 
 
 def _names_file(name: str, text: str) -> bool:
@@ -757,10 +791,13 @@ class GraphMemory:
     def _history_hashes(self, messages: list) -> list[str]:
         """`_msg_hash` of every message, reusing the last call's hashes.
 
-        A structured message reuses the previous hash only when a digest of
-        its complete content matches at the same position. A history trimmed
-        from the front shifts positions and is hashed in full. Plain-text
-        messages are always hashed directly.
+        A structured message reuses the previous hash when its cheap,
+        order-sensitive content-hash fingerprint matches at the same position.
+        Strings contribute their process-local hash; containers nested deeper
+        than three levels contribute entry counts, so edits below that bound
+        can still be missed. This depth limit predates the content-hash fix.
+        A history trimmed from the front shifts positions and is hashed in
+        full. Plain-text messages are always hashed directly.
         """
         prev = self._hash_cache
         hashes: list[str] = []
