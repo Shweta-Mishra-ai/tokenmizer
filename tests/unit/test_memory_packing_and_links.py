@@ -16,6 +16,7 @@ Two measured defects:
 """
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -231,6 +232,34 @@ def test_cached_hashes_equal_full_hashes(tmp_path):
         assert g._history_hashes(msgs[:k]) == [g._msg_hash(m) for m in msgs[:k]]
 
 
+def test_unchanged_structured_history_reuses_message_hashes(tmp_path, monkeypatch):
+    graph = GraphMemory("hash-reuse", storage_dir=str(tmp_path))
+    messages = [
+        _tool_turn(0, "command output"),
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "call_1", "type": "function", "function": {
+                "name": "write_file", "arguments": '{"path": "app.py"}',
+            },
+        }]},
+        {"role": "assistant", "content": None, "function_call": {
+            "name": "read_file", "arguments": '{"path": "app.py"}',
+        }},
+    ]
+    calls = []
+    original = graph._msg_hash
+
+    def counted(message):
+        calls.append(message)
+        return original(message)
+
+    monkeypatch.setattr(graph, "_msg_hash", counted)
+    first = graph._history_hashes(messages)
+    assert len(calls) == len(messages)
+    calls.clear()
+    assert graph._history_hashes(copy.deepcopy(messages)) == first
+    assert calls == []
+
+
 def test_an_edited_old_message_is_seen_again(tmp_path):
     # A client that clears an old tool result (context editing) changes its
     # length: the message must be re-hashed, not given its stale hash.
@@ -242,6 +271,30 @@ def test_an_edited_old_message_is_seen_again(tmp_path):
     second = g._history_hashes(edited)
     assert second[3] != first[3] and second[3] == g._msg_hash(edited[3])
     assert second[:3] == first[:3] and second[4:] == first[4:]
+
+
+def test_same_length_structured_edit_updates_the_graph(tmp_path):
+    graph = GraphMemory("structured-edit", storage_dir=str(tmp_path))
+    prefix = "Context before the decision. "
+    suffix = " Context after the decision."
+
+    def message(store):
+        return {"role": "assistant", "content": [{
+            "type": "text",
+            "text": f"{prefix}Decided: use {store} for cache.{suffix}",
+        }]}
+
+    redis = message("Redis")
+    kafka = message("Kafka")
+    assert len(redis["content"][0]["text"]) == len(kafka["content"][0]["text"])
+    assert redis["content"][0]["text"][:16] == kafka["content"][0]["text"][:16]
+    assert redis["content"][0]["text"][-16:] == kafka["content"][0]["text"][-16:]
+
+    graph.extract_from_messages([redis])
+    graph.extract_from_messages([kafka])
+
+    assert any("Kafka" in node.label for node in graph._nodes.values()
+               if node.type == NodeType.DECISION)
 
 
 def test_a_history_trimmed_from_the_front_is_hashed_in_full(tmp_path):

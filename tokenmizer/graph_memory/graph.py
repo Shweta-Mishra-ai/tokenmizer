@@ -144,30 +144,24 @@ _MAX_PROCESSED_HASHES = 500
 _HASHES_TRIMMED = "#trimmed"
 
 
-def _size(value, depth: int = 3) -> int:
-    """Total length of the strings in a JSON-like value, three levels deep
-    (block -> tool-result content list -> text block), which is where a
-    message's text lives. Below that a container counts its entries: a
-    tool call's input tree was most of the fingerprint's cost."""
+def _digest(value, depth: int = 3) -> int:
+    """Order-sensitive content hash of a JSON-like value, three levels deep.
+
+    Strings use Python's cached, process-local hash. Containers below the
+    depth limit contribute their entry count, preserving the existing bound
+    on traversal of large tool-input trees.
+    """
     if isinstance(value, str):
-        return len(value)
+        return hash(value)
     if isinstance(value, (list, dict)):
         if depth == 0:
             return len(value)
         items = value.values() if isinstance(value, dict) else value
         total = 0
         for v in items:
-            total += _size(v, depth - 1)
+            total = (total * 1000003 + _digest(v, depth - 1)) & 0xFFFFFFFFFFFFFFFF
         return total
     return 1
-
-
-def _edges_of(value) -> str:
-    """The first and last 16 characters of a block's main text, if any."""
-    text = value.get("text") if isinstance(value, dict) else None
-    if not isinstance(text, str):
-        text = value.get("content") if isinstance(value, dict) else None
-    return (text[:16] + text[-16:]) if isinstance(text, str) else ""
 
 
 def _fingerprint(msg) -> object:
@@ -186,16 +180,16 @@ def _fingerprint(msg) -> object:
         for block in content:
             if isinstance(block, dict):
                 parts.append((block.get("type"), block.get("id") or block.get("tool_use_id"),
-                              _size(block), _edges_of(block)))
+                              _digest(block)))
             else:
-                parts.append(_size(block))
+                parts.append(_digest(block))
     else:
-        parts.append(_size(content))
+        parts.append(_digest(content))
     for call in (tool_calls or []):
         if isinstance(call, dict):
-            parts.append((call.get("id"), _size(call)))
+            parts.append((call.get("id"), _digest(call)))
     if msg.get("function_call"):
-        parts.append(_size(msg.get("function_call")))
+        parts.append(_digest(msg.get("function_call")))
     return tuple(parts)
 
 
@@ -797,20 +791,13 @@ class GraphMemory:
     def _history_hashes(self, messages: list) -> list[str]:
         """`_msg_hash` of every message, reusing the last call's hashes.
 
-        The proxy sends the whole history on every request, and hashing it
-        was most of the per-request cost on a long agent session: 12-17 ms
-        at 900 messages (1.8 MB, mostly tool results), against 2 ms to
-        fingerprint them.
-
-        A structured message whose fingerprint matches the one at the SAME
-        position last time reuses that position's hash. Positional, not a
-        lookup by fingerprint: fingerprints are not unique, and a new message
-        given an old one's hash would be skipped as already processed. A
-        history trimmed from the front shifts every position and is hashed
-        in full. Plain-text messages are always hashed; that is cheap. An
-        in-place edit that keeps the role, the block structure and every
-        block's length would reuse a stale hash; the fingerprint also keeps
-        each block's first and last characters to narrow that further.
+        A structured message reuses the previous hash when its cheap,
+        order-sensitive content-hash fingerprint matches at the same position.
+        Strings contribute their process-local hash; containers nested deeper
+        than three levels contribute entry counts, so edits below that bound
+        can still be missed. This depth limit predates the content-hash fix.
+        A history trimmed from the front shifts positions and is hashed in
+        full. Plain-text messages are always hashed directly.
         """
         prev = self._hash_cache
         hashes: list[str] = []
