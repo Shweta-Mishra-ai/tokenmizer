@@ -195,7 +195,12 @@ class CheckpointManager:
         next_action = ""
         for msg in reversed(messages):
             if msg.get("role") == "user":
-                next_action = msg.get("content", "")[:200]
+                from tokenmizer.graph_memory.helpers import _content_to_text
+                from tokenmizer.security.redaction import redact
+                # Stored memory is redacted in full (emails included), even
+                # when the copy sent to the provider was not. Content may be
+                # a block list or None, not only a string.
+                next_action = redact(_content_to_text(msg.get("content")))[:200]
                 break
 
         # Build tiered resume blocks

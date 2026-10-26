@@ -167,8 +167,18 @@ class FillerRemover:
         for pat in _FILLER_RE:
             text = pat.sub("", text)
         text = re.sub(r'\n{3,}', '\n\n', text)
-        text = re.sub(r'  +', ' ', text)
+        # Only runs of spaces INSIDE a line, left by a removed phrase.
+        # Collapsing every run flattened the indentation of any code pasted
+        # without a fence to a single space.
+        text = re.sub(r'(?<=\S)  +', ' ', text)
         return text.strip(), "filler_removal"
+
+
+_CODE_LINE = re.compile(r"^\s+\S|[{};=()\[\]]|^\s*(?:def|class|return|import|from|if|for|while)\b")
+
+
+def _looks_like_code_line(line: str) -> bool:
+    return bool(_CODE_LINE.search(line))
 
 
 class DuplicateLineRemover:
@@ -179,7 +189,10 @@ class DuplicateLineRemover:
         lines = []
         for line in text.splitlines():
             stripped = line.strip()
-            if stripped and stripped in seen and len(stripped) > 40:
+            # Never a line of code: a repeated statement is two statements,
+            # and dropping one changes what the program does.
+            if (stripped and stripped in seen and len(stripped) > 40
+                    and not _looks_like_code_line(line)):
                 continue  # skip duplicate non-trivial lines
             seen.add(stripped)
             lines.append(line)
@@ -190,8 +203,10 @@ class WhitespaceNormalizer:
     """Collapse excessive whitespace. ~2-5% reduction."""
 
     def apply(self, text: str) -> Tuple[str, str]:
-        text = re.sub(r'\t', '  ', text)
-        text = re.sub(r' {4,}', '   ', text)
+        # Leading whitespace is indentation, and in Python or YAML it is
+        # meaning: tabs are left alone and only runs of spaces after the
+        # first non-space character on a line are collapsed.
+        text = re.sub(r'(?<=\S) {4,}', '   ', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip(), "whitespace_normalization"
 

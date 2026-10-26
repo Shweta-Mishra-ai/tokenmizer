@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -170,12 +171,14 @@ def _build_rate_limiter():
     if settings.state_backend == "sqlite":
         from tokenmizer.api.shared_rate_limiter import SQLiteRateLimiter
         shared = SQLiteRateLimiter(
-            rate=60, per_seconds=60, burst=10,
+            rate=settings.rate_limit.requests_per_minute, per_seconds=60,
+            burst=settings.rate_limit.burst,
             storage_dir=settings.graph_checkpoint.storage_dir,
         )
         if shared.available:
             return shared
-    return get_rate_limiter(rate=60, per_seconds=60, burst=10)
+    return get_rate_limiter(rate=settings.rate_limit.requests_per_minute,
+                            per_seconds=60, burst=settings.rate_limit.burst)
 
 
 _rate_limiter = _build_rate_limiter()
@@ -535,10 +538,16 @@ _CONTEXT_WINDOWS = {
     # OpenAI: the 4.1 family and the 5 series are far larger than 4o; the
     # reasoning models sit at 200k. Longest-key matching keeps "gpt-4o"
     # from being shadowed by "gpt-4", and "gpt-4.1" from matching "gpt-4".
-    "gpt-4.1": 1_000_000, "gpt-4o": 128_000, "gpt-4": 128_000, "gpt-3.5": 16_000,
+    # Bare "gpt-4" is the original 8k model (and gpt-4-32k its 32k
+    # sibling); only the turbo/preview builds are 128k. A 128k figure for
+    # the 8k model meant the checkpoint never fired.
+    "gpt-4.1": 1_000_000, "gpt-4o": 128_000, "gpt-4-turbo": 128_000,
+    "gpt-4-1106": 128_000, "gpt-4-0125": 128_000, "gpt-4-32k": 32_000,
+    "gpt-4": 8_000, "gpt-3.5": 16_000,
     "gpt-5": 400_000,
     "o1": 200_000, "o3": 200_000, "o4": 200_000,
-    "gemini": 1_000_000,
+    # Gemini 1.0 is 32k; 1.5 and later are 1M+.
+    "gemini-1.0": 32_000, "gemini-pro": 32_000, "gemini": 1_000_000,
     "deepseek": 128_000,
     "mistral": 128_000, "codestral": 256_000,
     "grok": 128_000,
@@ -581,6 +590,10 @@ def _context_window(model: str) -> int:
 # FLUSH_INTERVAL_SECONDS is the worst-case exposure for case 2: a hard
 # kill can lose at most this much graph activity.
 FLUSH_INTERVAL_SECONDS = 30
+
+# New messages between two auto-checkpoints of one session. See _update_graph.
+AUTO_CHECKPOINT_EVERY = 10
+_last_auto_checkpoint: "OrderedDict[str, int]" = OrderedDict()
 
 
 async def _flush_all_graphs(reason: str) -> tuple[int, int]:
@@ -769,6 +782,13 @@ class ChatMessage(BaseModel):
         from tokenmizer.graph_memory.helpers import _content_to_text
         return _content_to_text(self.content)
 
+    def non_text_blocks(self) -> int:
+        """Content blocks text() drops (images, documents, audio)."""
+        if not isinstance(self.content, list):
+            return 0
+        return sum(1 for b in self.content
+                   if isinstance(b, dict) and b.get("type") not in (None, "text"))
+
     def to_dict(self) -> dict:
         """The pipeline's message shape: role + text content, plus the
         tool fields only when set, so an ordinary message is exactly the
@@ -911,6 +931,8 @@ async def _check_rate_limit(request: Request) -> None:
     be meaningful for deployments that configure several (see
     settings.api_keys); addresses are the control that always applies.
     """
+    if not settings.rate_limit.enabled:
+        return
     allowed, retry_after = await _rate_limiter.check(_rate_limit_key(request))
     if not allowed:
         raise HTTPException(
@@ -932,11 +954,16 @@ def _apply_compression_layers(
     user_query = next(
         (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
     )
-    # Layer 0: File intelligence
-    messages, file_saved = _file_intelligence.process_message_files(
-        messages, token_budget_per_file=600, query=user_query
-    )
-    savings["file_extraction"] = file_saved
+    # Layer 0: File intelligence. Older turns only, unless configured
+    # otherwise — see FileIntelligenceSettings.
+    fi = settings.file_intelligence
+    if fi.enabled:
+        messages, file_saved = _file_intelligence.process_message_files(
+            messages, token_budget_per_file=fi.token_budget_per_file,
+            query=user_query, digest_current_turn=fi.digest_current_turn,
+        )
+        if file_saved:
+            savings["file_extraction"] = file_saved
 
     # Layer 1: Prompt compression
     if settings.compression.enabled:
@@ -1043,6 +1070,21 @@ def _already_in_payload(node, message_words: list[frozenset]) -> bool:
     return any(words <= mw for mw in message_words)
 
 
+_ALWAYS_INJECTABLE = frozenset({"goal", "decision"})
+
+
+def _worth_injecting(graph, node, query_words: frozenset) -> bool:
+    """A node goes into the prompt only if it shares vocabulary with the
+    turn, or is a goal or an active decision — the standing context every
+    turn needs. query() ranks every live node (its floor is cleared by
+    importance alone), which is right for ranking and wrong as a gate:
+    six unrelated files and tasks went into every turn, paid for each time."""
+    if node.type.value in _ALWAYS_INJECTABLE:
+        return True
+    node_words = graph._expand_with_aliases(graph._search_words(node))
+    return bool(node_words & query_words)
+
+
 def _append_volatile(messages: list[dict], fenced: str) -> None:
     """Put per-turn context after everything a provider can cache.
 
@@ -1117,6 +1159,13 @@ async def _cross_session_query(
             other_graphs[sid] = await _get_graph_async(sid)
         except Exception as e:
             logger.warning(f"Cross-session recall: could not load session {sid!r}: {e}")
+    # A session whose lock is held may have an extraction running in a
+    # worker thread, mutating its node dict while query_across_sessions
+    # iterates it ("dictionary changed size during iteration"). Skip it for
+    # this turn. Nothing below awaits, so a lock free now stays free until
+    # the query has returned.
+    other_graphs = {sid: g for sid, g in other_graphs.items()
+                    if not (_session_locks.get(sid) and _session_locks[sid].locked())}
 
     return query_across_sessions(
         graph, list(other_graphs), retrieval_query, top_k,
@@ -1184,11 +1233,14 @@ async def _update_graph(
                 await _extract_heuristic(graph, raw_messages)
                 _lock_ref = _get_session_lock(session_id)
 
+                _started = [False]
+
                 async def _background_extract(
                     _g=graph, _msgs=new_msgs, _all=raw_messages,
                     _cheap=cheap, _lock=_lock_ref, _sid=session_id,
                 ):
                     global _extraction_pending
+                    _started[0] = True
                     _extraction_pending -= 1
                     with _extraction_slot() as got_slot:
                         if not got_slot:
@@ -1251,7 +1303,15 @@ async def _update_graph(
 
                 if _extraction_has_capacity():
                     _extraction_pending += 1
-                    _track_background_task(_background_extract())
+                    task = _track_background_task(_background_extract())
+
+                    def _release_if_never_started(_t, _s=_started):
+                        # Cancelled (e.g. at shutdown) before it ran: the
+                        # body that decrements the queue count never did.
+                        global _extraction_pending
+                        if not _s[0]:
+                            _extraction_pending -= 1
+                    task.add_done_callback(_release_if_never_started)
                 else:
                     # Do not even build the coroutine: its closure holds
                     # this turn's transcript, and a queue of those is the
@@ -1319,9 +1379,11 @@ async def _update_graph(
             message_words = await asyncio.to_thread(
                 lambda: [_content_words(_content_to_text(m.get("content")))
                          for m in messages])
+            query_words = graph._expand_with_aliases(graph._query_tokens(retrieval_query))
             relevant_pairs = [
                 (n, sid) for n, sid in relevant_pairs
                 if not _already_in_payload(n, message_words)
+                and _worth_injecting(graph, n, query_words)
             ]
             if relevant_pairs:
                 _inject_context(messages, session_id, relevant_pairs)
@@ -1386,13 +1448,23 @@ async def _update_graph(
     # CheckpointManager._prune_auto_checkpoints, which caps retained
     # auto-checkpoints per session and never touches manual ones.
     checkpoint_status = {"attempted": False, "succeeded": False, "checkpoint_id": None}
+    # Once a session is over the threshold it stays over it, and every turn
+    # used to write a full snapshot. One per AUTO_CHECKPOINT_EVERY new
+    # messages keeps the safety net current without paying that each turn.
+    last = _last_auto_checkpoint.get(session_id)
+    due = last is None or len(raw_messages) - last >= AUTO_CHECKPOINT_EVERY \
+        or len(raw_messages) < last
     if (context_pct >= settings.graph_checkpoint.trigger_at_percent
-            and settings.graph_checkpoint.enabled):
+            and settings.graph_checkpoint.enabled and due):
         checkpoint_status["attempted"] = True
         last_error: Optional[Exception] = None
         for attempt in range(2):  # one retry for transient SQLite lock contention
             try:
-                ckpt = _checkpoint_mgr.create(
+                # Off the event loop: extraction, three resume builders and a
+                # SQLite write. The session lock is held, so nothing else
+                # touches this graph meanwhile.
+                ckpt = await asyncio.to_thread(
+                    _checkpoint_mgr.create,
                     session_id=session_id,
                     messages=raw_messages,
                     graph=graph,
@@ -1400,6 +1472,9 @@ async def _update_graph(
                     trigger="auto_threshold",
                     model=model,
                 )
+                _last_auto_checkpoint[session_id] = len(raw_messages)
+                while len(_last_auto_checkpoint) > _SESSION_LOCK_MAX:
+                    _last_auto_checkpoint.pop(next(iter(_last_auto_checkpoint)))
                 logger.info(f"Auto-checkpoint {ckpt.checkpoint_id} for {session_id}")
                 checkpoint_status["succeeded"] = True
                 checkpoint_status["checkpoint_id"] = ckpt.checkpoint_id
@@ -1411,7 +1486,8 @@ async def _update_graph(
                     logger.warning(
                         f"Auto-checkpoint attempt 1 failed for {session_id}, retrying once: {e}"
                     )
-                await asyncio.sleep(0.1)
+                if attempt == 0:
+                    await asyncio.sleep(0.1)
         if last_error is not None:
             logger.error(
                 f"Auto-checkpoint FAILED for {session_id} after retry — "
@@ -1421,6 +1497,49 @@ async def _update_graph(
             _analytics.record_silent_failure("checkpoint")
 
     return messages, checkpoint_status
+
+
+# Provider errors that say nothing about the request's SHAPE: the same
+# request, retried untransformed, would fail or succeed for the same
+# reason. Retrying them doubled traffic to a rate-limiting provider and,
+# when the retry happened to succeed, reported a transient upstream blip
+# as a TokenMizer pipeline bug.
+_NOT_A_REQUEST_FAULT = re.compile(
+    r"rate_limit|http_(?:401|403|408|429|5\d\d)|timeout|max_retries", re.I)
+
+
+def _should_retry_untransformed(e: Exception) -> bool:
+    from tokenmizer.providers.providers import ProviderError
+    if not isinstance(e, ProviderError):
+        return True
+    if e.retryable or _NOT_A_REQUEST_FAULT.search(e.error_type or ""):
+        return False
+    return True
+
+
+def _net_saved(savings: dict, orig: int, sent: int, cache_hit: bool) -> int:
+    """Input tokens the provider was NOT sent, net of what the proxy added.
+
+    Summing the per-layer savings ignored the other direction — the terse
+    system prompt, the injected context, the fence preambles — so a turn
+    could report savings while sending more than the client did. The
+    per-layer breakdown stays in `savings`; the headline is the net."""
+    if cache_hit:
+        return orig
+    return max(0, orig - sent)
+
+
+def _cache_context(req, model: str, raw_messages: list[dict]) -> str:
+    """The cache key's context: the conversation AND the parameters that
+    change the answer. Without the model and the limits in the key, an
+    answer cut off at max_tokens=10, or written by another model, was
+    served for an hour to every later identical question."""
+    params = json.dumps({
+        "model": model, "max_tokens": _max_tokens(req),
+        **_sampling_kwargs(req),
+    }, sort_keys=True, default=str)
+    return _cache.conversation_fingerprint(raw_messages or []) + "|" + \
+        hashlib.sha256(params.encode()).hexdigest()[:16]
 
 
 async def _call_provider(
@@ -1443,11 +1562,12 @@ async def _call_provider(
     """
     # Cache lookup. Keyed on the prompt AND the conversation it was asked
     # in — see SemanticCache.conversation_fingerprint.
-    cache_ctx = _cache.conversation_fingerprint(raw_messages or [])
+    cache_ctx = _cache_context(req, model, raw_messages)
     if settings.cache.enabled and user_content:
         cached = _cache.get(user_content, session_id=session_id, context=cache_ctx)
         if cached:
-            savings["cache"] = count_tokens(user_content, model)
+            # The whole prompt was not sent, not just its last turn.
+            savings["cache"] = count_messages_tokens(raw_messages or messages, model)
             output_tokens = count_tokens(cached.response, model)
             return cached.response, 0, output_tokens, 0.0, True
 
@@ -1474,7 +1594,8 @@ async def _call_provider(
         # this turn are zero, and the response says so; if it also fails,
         # the 502 below stands.
         correlation_id = uuid.uuid4().hex[:12]
-        if raw_messages is not None and raw_messages != messages:
+        if (raw_messages is not None and raw_messages != messages
+                and _should_retry_untransformed(e)):
             logger.warning(
                 f"Provider rejected the transformed request [{correlation_id}] "
                 f"for session {session_id!r}; retrying with the untransformed "
@@ -1531,16 +1652,20 @@ async def _call_provider(
     if resp.tool_calls:
         return response_text, input_tokens, output_tokens, latency_ms, False
 
-    # Output trim
+    # Output trim. The provider has already billed every output token, so
+    # this saves the CLIENT's context on later turns, not money: usage
+    # keeps the provider's figure, and the trim is reported on its own
+    # rather than counted as tokens saved.
     if settings.terse_output.enabled:
         response_text, output_saved = _output_trimmer.trim(
             response_text, level=settings.terse_output.level
         )
-        savings["output_trim"] = output_saved
-        output_tokens = max(1, output_tokens - output_saved)
+        if outcome is not None and output_saved:
+            outcome["output_trimmed_tokens"] = output_saved
 
-    # Cache write
-    if settings.cache.enabled and user_content:
+    # Cache write — never for an answer the token limit cut off.
+    truncated = (resp.finish_reason or "") in ("length", "max_tokens")
+    if settings.cache.enabled and user_content and not truncated:
         _cache.set(user_content, response_text,
                    input_tokens=input_tokens, output_tokens=output_tokens,
                    session_id=session_id, context=cache_ctx)
@@ -1549,7 +1674,8 @@ async def _call_provider(
 
 
 def _stream_response(req, messages, model, user_content, session_id,
-                     savings, orig_input_tokens, raw_messages=None) -> StreamingResponse:
+                     savings, orig_input_tokens, raw_messages=None,
+                     public_session_id: Optional[str] = "") -> StreamingResponse:
     """True SSE passthrough (OpenAI chat.completion.chunk format).
 
     Cache hits stream as a single chunk. After the stream closes, analytics
@@ -1583,14 +1709,15 @@ def _stream_response(req, messages, model, user_content, session_id,
     def _chunk(delta: dict, finish: str | None = None, extra: dict | None = None) -> str:
         payload = {
             "id": resp_id, "object": "chat.completion.chunk",
-            "created": created, "model": model, "session_id": session_id,
+            "created": created, "model": model,
+            "session_id": session_id if public_session_id == "" else public_session_id,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
         if extra:
             payload.update(extra)
         return "data: " + _json.dumps(payload) + "\n\n"
 
-    cache_ctx = _cache.conversation_fingerprint(raw_messages or [])
+    cache_ctx = _cache_context(req, model, raw_messages)
 
     tool_kw = _tool_kwargs(req)
     # An adapter that supports tools but cannot stream tool-call deltas
@@ -1669,7 +1796,8 @@ def _stream_response(req, messages, model, user_content, session_id,
                         # attempts left.
                         if full_text or saw_tool_calls:
                             break
-                        if attempt == 0 and len(candidates) > 1:
+                        if (attempt == 0 and len(candidates) > 1
+                                and _should_retry_untransformed(e)):
                             correlation_id = uuid.uuid4().hex[:12]
                             logger.warning(
                                 f"Provider rejected the transformed stream "
@@ -1695,10 +1823,15 @@ def _stream_response(req, messages, model, user_content, session_id,
 
         except ProviderError as e:
             # Mid-stream failure: SSE can't change the status code anymore —
-            #emit an explicit error event instead of silently truncating.
+            # emit an explicit error event instead of silently truncating.
+            # Same rule as the non-stream path: SDK error text carries URLs
+            # and other internals, so it goes to the log, not the client.
             stream_failed = True
+            correlation_id = uuid.uuid4().hex[:12]
+            logger.error(f"Provider stream error [{correlation_id}]: {e}")
             yield "data: " + _json.dumps(
-                {"error": {"message": str(e), "type": "provider_error"}}
+                {"error": {"message": _provider_failure_detail(correlation_id),
+                           "type": "provider_error"}}
             ) + "\n\n"
         except Exception as e:
             # Anything the provider layer didn't wrap in ProviderError
@@ -1742,7 +1875,8 @@ def _stream_response(req, messages, model, user_content, session_id,
             session_id=session_id, provider=settings.provider, model=model,
             input_tokens_original=orig_input_tokens,
             input_tokens_sent=input_tokens, output_tokens=output_tokens,
-            tokens_saved=sum(savings.values()), latency_ms=latency_ms,
+            tokens_saved=_net_saved(savings, orig_input_tokens, input_tokens, cache_hit),
+            latency_ms=latency_ms,
             cache_hit=cache_hit, layer_savings=savings,
         )
 
@@ -1762,7 +1896,13 @@ async def chat_completions(req: ChatRequest, request: Request):
       _update_graph()           — graph extraction, windowing, context inject
       _call_provider()          — cache → LLM → output trim → cache write
     """
-    session_id = req.session_id or str(uuid.uuid4())
+    # No session id, no memory. A generated id used to be claimed, given a
+    # graph, persisted and auto-checkpointed on every request — and since
+    # standard OpenAI clients never send one, each of their requests became
+    # a permanent one-message session nobody could ever resume. The header
+    # is accepted for clients that cannot add a body field (CORS already
+    # allowed it; nothing read it).
+    session_id = req.session_id or request.headers.get("X-Session-ID") or None
     model      = req.model or settings.default_model
     # One exact-match substitution, never re-applied, so a map that points
     # at another of its own keys cannot loop. The original name is echoed
@@ -1809,8 +1949,13 @@ async def chat_completions(req: ChatRequest, request: Request):
     # into that session's graph — a write-side version of the same hole
     # the read endpoints had. See security/ownership.py.
     principal = getattr(request.state, "principal", DEV_PRINCIPAL)
+    # Cache scope and analytics key for a request with no session: per
+    # principal, so anonymous callers holding different keys never share
+    # cached answers.
+    scope_id = session_id or f"__anon__:{principal}"
     try:
-        _ownership.check_access(session_id, principal, claim=True)
+        if session_id is not None:
+            _ownership.check_access(session_id, principal, claim=True)
     except SessionAccessDenied:
         logger.warning(f"Denied chat request for session {session_id!r} — different principal")
         raise HTTPException(
@@ -1835,7 +1980,15 @@ async def chat_completions(req: ChatRequest, request: Request):
     # Redacting once here means every downstream path is safe by construction
     # instead of relying on each call site to remember to redact.
     raw_messages = [m.to_dict() for m in req.messages]
-    raw_messages = redact_messages(raw_messages)
+    dropped_blocks = sum(m.non_text_blocks() for m in req.messages)
+    if dropped_blocks:
+        logger.warning(
+            "Request for session %r carried %d non-text content block(s) "
+            "(images, files); TokenMizer forwards text only, so the model "
+            "will not see them.", session_id, dropped_blocks)
+    sec = settings.security
+    if sec.redact_provider_messages:
+        raw_messages = redact_messages(raw_messages, emails=sec.redact_emails_to_provider)
     # Per-dict copy, not raw_messages[:]. A shallow list copy shares every
     # dict, so Layer 2's terse-prompt injection — which prepends onto the
     # system message in place — rewrote raw_messages too. raw_messages is
@@ -1863,7 +2016,7 @@ async def chat_completions(req: ChatRequest, request: Request):
 
     # Layer 4: graph update + context injection (mutates messages)
     checkpoint_status: dict = {"attempted": False, "succeeded": False, "checkpoint_id": None}
-    if settings.graph_checkpoint.enabled:
+    if settings.graph_checkpoint.enabled and session_id is not None:
         graph    = await _get_graph_async(session_id)
         # Two separate protections, for two separate hazards.
         #
@@ -1898,13 +2051,14 @@ async def chat_completions(req: ChatRequest, request: Request):
     # input-side layers (file intel, compression, graph context) still apply.
     if req.stream:
         return _stream_response(req, messages, model, user_content,
-                                session_id, savings, orig_input_tokens,
-                                raw_messages=raw_messages)
+                                scope_id, savings, orig_input_tokens,
+                                raw_messages=raw_messages,
+                                public_session_id=session_id)
 
     # Layer 5: call provider (or return cache hit)
     outcome: dict = {}
     response_text, input_tokens_actual, output_tokens, latency_ms, cache_hit = await _call_provider(
-        req, messages, model, user_content, session_id, savings,
+        req, messages, model, user_content, scope_id, savings,
         raw_messages=raw_messages, outcome=outcome,
     )
     # What the provider answered with, and — separately — whether the
@@ -1914,6 +2068,7 @@ async def chat_completions(req: ChatRequest, request: Request):
     finish_reason = outcome.pop("finish_reason", None) or "stop"
     cache_read_tokens = outcome.pop("cache_read_tokens", 0) or 0
     cache_write_tokens = outcome.pop("cache_write_tokens", 0) or 0
+    output_trimmed = outcome.pop("output_trimmed_tokens", 0) or 0
     fallback = outcome
     if fallback:
         # The transformed request was rejected and the client's own
@@ -1921,9 +2076,9 @@ async def chat_completions(req: ChatRequest, request: Request):
         sent_input_tokens = orig_input_tokens
 
     # Analytics
-    total_saved = sum(savings.values())
+    total_saved = _net_saved(savings, orig_input_tokens, sent_input_tokens, cache_hit)
     _analytics.record(
-        session_id=session_id,
+        session_id=scope_id,
         provider=settings.provider,
         model=model,
         input_tokens_original=orig_input_tokens,
@@ -1974,6 +2129,11 @@ async def chat_completions(req: ChatRequest, request: Request):
                                "write_tokens": cache_write_tokens},
             "savings":     savings,
             "total_saved": total_saved,
+            # Tokens trimmed from the reply AFTER the provider billed them:
+            # they shrink what the client carries forward, not the bill.
+            **({"output_trimmed_tokens": output_trimmed} if output_trimmed else {}),
+            # Images and other non-text blocks the proxy could not forward.
+            **({"dropped_non_text_blocks": dropped_blocks} if dropped_blocks else {}),
             "latency_ms":  round(latency_ms, 1),
             # Surfaced so a client can detect "my context wasn't saved"
             # here, rather than when a later resume returns nothing.
@@ -1990,6 +2150,12 @@ async def chat_completions(req: ChatRequest, request: Request):
     }
 
 # ── Health / Info ─────────────────────────────────────────────────────────────
+
+# record_silent_failure sources that mean stored data was not written.
+_DATA_FAILURES = frozenset({
+    "checkpoint", "graph_eviction", "graph_flush", "analytics_flush",
+})
+
 
 @app.get("/health")
 async def health():
@@ -2009,43 +2175,37 @@ async def health():
     every counter here is also available in /api/stats.
     """
     failures = _analytics.persist_failures
-    sessions_load_failed = sorted(
-        sid for sid, g in _graph_cache.items() if g._load_failed)
-    sessions_no_durability = sorted(
-        sid for sid, g in _graph_cache.items() if g._persistence_broken)
-    sessions_data_loss = sorted(
-        sid for sid, g in _graph_cache.items() if g._data_loss_detected)
+    # Only failures where something the proxy was trusted to KEEP was not
+    # kept make the deployment degraded. A failed background extraction or
+    # a transient upstream error loses nothing; counting them here left
+    # /health "degraded" for the rest of the process's life after one
+    # provider timeout, which teaches operators to ignore the field.
+    data_failures = {k: v for k, v in failures.items() if k in _DATA_FAILURES and v}
+    sessions_load_failed = sum(1 for g in _graph_cache.values() if g._load_failed)
+    sessions_no_durability = sum(1 for g in _graph_cache.values() if g._persistence_broken)
+    sessions_data_loss = sum(1 for g in _graph_cache.values() if g._data_loss_detected)
     checkpoints_broken = bool(getattr(_checkpoint_mgr, "persistence_broken", False))
     checkpoints_data_loss = bool(getattr(_checkpoint_mgr, "data_loss_detected", False))
 
-    degraded = bool(failures or sessions_load_failed or sessions_no_durability
+    degraded = bool(data_failures or sessions_load_failed or sessions_no_durability
                     or sessions_data_loss or checkpoints_broken or checkpoints_data_loss)
     return {
         "status": "degraded" if degraded else "ok",
         "timestamp": time.time(),
         "version": __version__,
         "sessions_in_memory": len(_graph_cache),
-        # Non-zero means something was lost or not written. Each key names
-        # the path that failed; see AnalyticsEngine.record_silent_failure.
+        # Every counter, including the ones that do not degrade health
+        # (llm_extraction, transform_rejected): visible, but not alarming.
         "persist_failures": failures,
-        # Deliberate, bounded degradation — NOT part of `degraded`. A
-        # proxy shedding the optional LLM extraction pass under load is
-        # working as configured; calling that unhealthy would train an
-        # operator to ignore the field that means something was lost.
         "shed": _analytics.shed,
+        # Counts, not ids: this route is unauthenticated, and session ids
+        # belong to whichever principal claimed them.
         "sessions_with_unreadable_graph": sessions_load_failed,
         "sessions_without_durable_storage": sessions_no_durability,
         "sessions_with_data_loss": sessions_data_loss,
         "checkpoint_storage_broken": checkpoints_broken,
         "checkpoint_data_loss": checkpoints_data_loss,
-        # Whether "nothing leaves this machine" is being enforced, checkable
-        # from outside. Not part of `degraded`: it is configuration, not a
-        # failure.
         "privacy": privacy.status(settings),
-        # The install command when the configured provider's SDK is missing,
-        # else null. Deliberately NOT part of `degraded`: a deployment that
-        # only checkpoints through MCP never needs a provider, and a clean
-        # `pip install tokenmizer` would otherwise report degraded forever.
         "provider_sdk_missing": missing_provider_sdk(settings.provider),
     }
 

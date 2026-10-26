@@ -63,6 +63,19 @@ _FILE_EXTENSIONS = {
 }
 
 
+# Code-fence language tags -> the extension detect_file_type() knows.
+_FENCE_LANG_EXT = {
+    "python": "py", "py3": "py", "python3": "py",
+    "javascript": "js", "jsx": "js", "node": "js", "mjs": "js",
+    "typescript": "ts", "tsx": "ts",
+    "golang": "go", "rust": "rs", "ruby": "rb",
+    "bash": "sh", "shell": "sh", "zsh": "sh", "console": "sh",
+    "c++": "cpp", "cxx": "cpp", "cc": "cpp", "h": "c", "hpp": "cpp",
+    "postgres": "sql", "postgresql": "sql", "mysql": "sql", "sqlite": "sql",
+    "yml": "yaml", "markdown": "md", "plaintext": "text", "txt": "text",
+}
+
+
 # ── Result dataclass ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -1105,6 +1118,7 @@ class FileIntelligence:
         messages: list[dict],
         token_budget_per_file: int = 800,
         query: str = "",
+        digest_current_turn: bool = False,
     ) -> tuple[list[dict], int]:
         """
         Scan messages for large file content blocks and extract intelligently.
@@ -1116,9 +1130,21 @@ class FileIntelligence:
         """
         total_saved = 0
         processed = []
+        # The new input — every message after the last assistant turn — is
+        # what the question is ABOUT. Digesting it replaced code the user
+        # asked about with a sample of it, and the model answered without
+        # the line in question. Only older turns are digested.
+        protect_from = len(messages)
+        for idx in range(len(messages) - 1, -1, -1) if not digest_current_turn else ():
+            if messages[idx].get("role") == "assistant":
+                break
+            protect_from = idx
 
-        for msg in messages:
+        for idx, msg in enumerate(messages):
             content = msg.get("content", "")
+            if idx >= protect_from:
+                processed.append(msg)
+                continue
             if not isinstance(content, str) or len(content) < 500:
                 processed.append(msg)
                 continue
@@ -1154,9 +1180,13 @@ class FileIntelligence:
             content,
         )
         if code_fence:
-            lang = code_fence.group(1) or "text"
+            lang = (code_fence.group(1) or "text").lower()
             block = code_fence.group(2)
-            filename = f"attachment.{lang}" if lang != "text" else "attachment.txt"
+            # The fence names a LANGUAGE, not an extension. "python" became
+            # "attachment.python", matched no type, and the block was
+            # content-sniffed — as CSV, because code has commas.
+            ext = _FENCE_LANG_EXT.get(lang, lang)
+            filename = f"attachment.{ext}" if ext != "text" else "attachment.txt"
             pre = content[:code_fence.start()].strip()
             post = content[code_fence.end():].strip()
             return block, filename, pre, post

@@ -66,11 +66,13 @@ _REMEMBERED_INJECTION = [
     re.compile(r'ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?', re.I),
     re.compile(r'disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?', re.I),
     re.compile(r'forget\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?', re.I),
-    re.compile(r'(?:reveal|print|repeat|output|show)\s+(?:your\s+|the\s+)?'
+    re.compile(r'(?:reveal|print|repeat|output|show)\s+your\s+'
                r'(?:system\s+prompt|instructions|api[_\s]?key|secret)', re.I),
+    re.compile(r'(?:reveal|print|repeat|output|show)\s+(?:the\s+)?'
+               r'(?:system\s+prompt|api[_\s]?key)', re.I),
     re.compile(r'you\s+are\s+now\s+(?:DAN|jailbreak(?:ed)?|unrestricted|'
                r'in\s+developer\s+mode)', re.I),
-    re.compile(r'bypass\s+(?:your\s+)?(?:safety|filter|restriction|guardrails?)', re.I),
+    re.compile(r'bypass\s+your\s+(?:safety|filters?|restrictions?|guardrails?)', re.I),
     re.compile(r'new\s+(?:system\s+)?(?:instructions?|rules?)\s*[:\-]', re.I),
     # The fence itself. Text carrying the delimiter is either an attempt to
     # break out of one or a quotation of this module; neither belongs in a

@@ -10,6 +10,7 @@ Re-exported from graph.py for backward compatibility:
 from __future__ import annotations
 
 import math
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -1676,16 +1677,24 @@ def to_share_html(graph: "GraphMemory") -> str:
     edges = vis.get("edges", [])
     transitions = vis.get("transitions", [])
     decisions = sum(1 for n in nodes if n.get("type") == "decision")
-    html = (_SHARE_HTML_TEMPLATE
-            .replace("__SESSION__", _html.escape(graph.session_id, quote=True))
-            .replace("__NODES__", str(len(nodes)))
-            .replace("__EDGES__", str(len(edges)))
-            .replace("__DECISIONS__", str(decisions))
-            .replace("__TRANSITIONS__", str(len(transitions)))
-            .replace("__DATA__", _script_json({
-                "nodes": nodes, "edges": edges, "transitions": transitions,
-                "session_id": graph.session_id, "meta": vis.get("meta", {}),
-            }))
-            .replace("__COLORS__", _script_json(_TYPE_COLOR))
-            .replace("__COLORS_LIGHT__", _script_json(_TYPE_COLOR_LIGHT)))
+    values = {
+        "__SESSION__": _html.escape(graph.session_id, quote=True),
+        "__NODES__": str(len(nodes)),
+        "__EDGES__": str(len(edges)),
+        "__DECISIONS__": str(decisions),
+        "__TRANSITIONS__": str(len(transitions)),
+        "__DATA__": _script_json({
+            "nodes": nodes, "edges": edges, "transitions": transitions,
+            "session_id": graph.session_id, "meta": vis.get("meta", {}),
+        }),
+        "__COLORS__": _script_json(_TYPE_COLOR),
+        "__COLORS_LIGHT__": _script_json(_TYPE_COLOR_LIGHT),
+    }
+    # One pass over the TEMPLATE. Chained .replace() calls also rewrote
+    # placeholders that appeared inside substituted data — a node label
+    # containing "__COLORS__" had a JSON object spliced into it, which
+    # broke the page's script.
+    pattern = re.compile("|".join(re.escape(k) for k in
+                                  sorted(values, key=len, reverse=True)))
+    html = pattern.sub(lambda m: values[m.group(0)], _SHARE_HTML_TEMPLATE)
     return html

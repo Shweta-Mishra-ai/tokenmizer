@@ -204,6 +204,26 @@ class BaseProvider(ABC):
         self.default_model = model
         self._retry_delays = [1.0, 2.0, 4.0]
 
+    def _client(self, factory, **kwargs):
+        """One SDK client per event loop, reused across calls.
+
+        A client was built for every request and never closed: a fresh
+        connection pool (and TLS handshake) per call, and the old pools
+        left for the garbage collector. Keyed weakly on the running loop
+        because an async HTTP client is bound to the loop that created it;
+        and on the factory and its arguments, so a different key, timeout
+        or patched constructor gets its own client."""
+        import weakref
+        cache = self.__dict__.setdefault("_client_cache", weakref.WeakKeyDictionary())
+        loop = asyncio.get_running_loop()
+        per_loop = cache.setdefault(loop, {})
+        key = (id(factory), tuple(sorted((k, repr(v)) for k, v in kwargs.items())))
+        entry = per_loop.get(key)
+        if entry is None or entry[0] is not factory:
+            entry = (factory, factory(**kwargs))
+            per_loop[key] = entry
+        return entry[1]
+
     @property
     def _timeout_kwargs(self) -> dict:
         """`{"timeout": n}` for an SDK client, or `{}` to keep its own
@@ -233,9 +253,16 @@ class BaseProvider(ABC):
     ) -> LLMResponse:
         model = model or self.default_model
         t0 = time.monotonic()
+        # request_timeout bounds each attempt; this bounds them together.
+        # Four attempts at 120s each was an eight-minute request.
+        budget = self.request_timeout if self.request_timeout and self.request_timeout > 0 else None
 
         for attempt, delay in enumerate([0] + self._retry_delays):
             if delay:
+                if budget is not None and time.monotonic() - t0 + delay >= budget:
+                    raise ProviderError(self.__class__.__name__, "timeout",
+                                        f"retries exhausted the {budget:.0f}s request budget",
+                                        retryable=False)
                 await asyncio.sleep(delay)
             try:
                 resp = await self._call(messages, model, max_tokens, stream, system, **kwargs)
@@ -398,8 +425,8 @@ class AnthropicProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install anthropic")
 
-        client = anthropic.AsyncAnthropic(api_key=self.api_key,
-                                          **self._timeout_kwargs)
+        client = self._client(anthropic.AsyncAnthropic, api_key=self.api_key,
+                              **self._timeout_kwargs)
 
         # Separate system messages from conversation
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
@@ -444,8 +471,7 @@ class AnthropicProvider(BaseProvider):
                                    cache_write_tokens=write,
                                    output_tokens=final.usage.output_tokens,
                                    model=model, provider="anthropic",
-                                   finish_reason=(finish_reason(final.stop_reason, calls)
-                                                  if calls else final.stop_reason or "stop"),
+                                   finish_reason=finish_reason(final.stop_reason, calls),
                                    tool_calls=calls)
 
             resp = await client.messages.create(
@@ -461,8 +487,7 @@ class AnthropicProvider(BaseProvider):
                 output_tokens=resp.usage.output_tokens,
                 model=model,
                 provider="anthropic",
-                finish_reason=(finish_reason(resp.stop_reason, calls)
-                               if calls else resp.stop_reason or "stop"),
+                finish_reason=finish_reason(resp.stop_reason, calls),
                 tool_calls=calls,
             )
         except anthropic.RateLimitError as e:
@@ -479,8 +504,8 @@ class AnthropicProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install anthropic")
         model = model or self.default_model
-        client = anthropic.AsyncAnthropic(api_key=self.api_key,
-                                          **self._timeout_kwargs)
+        client = self._client(anthropic.AsyncAnthropic, api_key=self.api_key,
+                              **self._timeout_kwargs)
 
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
@@ -588,13 +613,24 @@ class OpenAIProvider(BaseProvider):
         super().__init__(api_key, model)
         self._base_url = base_url
 
+    # OpenAI's reasoning models reject `max_tokens` and take
+    # `max_completion_tokens`. Only for OpenAI itself: gateways and the
+    # OpenAI-compatible vendors below still expect `max_tokens`.
+    _COMPLETION_TOKENS_MODELS = re.compile(r"^(?:o\d|gpt-5)", re.IGNORECASE)
+
+    def _limit_kwargs(self, model: str, max_tokens: int) -> dict:
+        if self._base_url is None and self._COMPLETION_TOKENS_MODELS.match(model or ""):
+            return {"max_completion_tokens": max_tokens}
+        return {"max_tokens": max_tokens}
+
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
             from openai import AsyncOpenAI
         except ImportError:
             raise ImportError("pip install openai")
 
-        client = AsyncOpenAI(
+        client = self._client(
+            AsyncOpenAI,
             api_key=self.api_key,
             **({"base_url": self._base_url} if self._base_url else {}),
             **self._timeout_kwargs,
@@ -603,6 +639,7 @@ class OpenAIProvider(BaseProvider):
         all_messages = messages[:]
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
+        limit = self._limit_kwargs(model, max_tokens)
 
         try:
             sampling = _sampling(kwargs)  # OpenAI SDK accepts temperature/top_p/stop natively
@@ -611,7 +648,7 @@ class OpenAIProvider(BaseProvider):
                 full_text = ""
                 input_tokens = count_messages_tokens(all_messages, model)
                 async for chunk in await client.chat.completions.create(
-                    model=model, messages=all_messages, max_tokens=max_tokens,
+                    model=model, messages=all_messages, **limit,
                     stream=True, **sampling
                 ):
                     delta = chunk.choices[0].delta.content or ""
@@ -622,7 +659,7 @@ class OpenAIProvider(BaseProvider):
                                    model=model, provider="openai")
 
             resp = await client.chat.completions.create(
-                model=model, messages=all_messages, max_tokens=max_tokens, **sampling
+                model=model, messages=all_messages, **limit, **sampling
             )
             choice = resp.choices[0]
             calls = normalize_tool_calls(getattr(choice.message, "tool_calls", None))
@@ -648,7 +685,8 @@ class OpenAIProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install openai")
         model = model or self.default_model
-        client = AsyncOpenAI(
+        client = self._client(
+            AsyncOpenAI,
             api_key=self.api_key,
             **({"base_url": self._base_url} if self._base_url else {}),
             **self._timeout_kwargs,
@@ -658,7 +696,7 @@ class OpenAIProvider(BaseProvider):
             all_messages = [{"role": "system", "content": system}] + all_messages
         try:
             stream = await client.chat.completions.create(
-                model=model, messages=all_messages, max_tokens=max_tokens,
+                model=model, messages=all_messages, **self._limit_kwargs(model, max_tokens),
                 stream=True, **_sampling(kwargs), **tool_kwargs(kwargs),
             )
             async for chunk in stream:
@@ -1231,18 +1269,21 @@ def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
     key = settings.get_api_key_for_provider(provider)
     model = model or settings.default_model
     _warn_on_model_provider_mismatch(provider, model)
+    openai_base = (getattr(settings, "openai_base_url", "") or "").strip() or None
+    ollama_base = (getattr(settings, "ollama_base_url", "") or "").strip() \
+        or "http://localhost:11434"
 
     mapping = {
         "anthropic": lambda: AnthropicProvider(key, model),
         "claude": lambda: AnthropicProvider(key, model),
-        "openai": lambda: OpenAIProvider(key, model),
-        "gpt": lambda: OpenAIProvider(key, model),
+        "openai": lambda: OpenAIProvider(key, model, base_url=openai_base),
+        "gpt": lambda: OpenAIProvider(key, model, base_url=openai_base),
         "deepseek": lambda: DeepSeekProvider(key, model or "deepseek-chat"),
         "mistral": lambda: MistralProvider(key, model or "mistral-large-latest"),
         "grok": lambda: GrokProvider(key, model or "grok-3"),
         "cohere": lambda: CohereProvider(key, model or "command-r-plus"),
         "gemini": lambda: GeminiProvider(key, model or "gemini-1.5-pro"),
-        "ollama": lambda: OllamaProvider(model or "llama3"),
+        "ollama": lambda: OllamaProvider(model or "llama3", base_url=ollama_base),
         "openrouter": lambda: OpenRouterProvider(key, model),
     }
 

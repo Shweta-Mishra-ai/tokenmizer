@@ -2,6 +2,97 @@
 
 ## [Unreleased]
 
+### Request content is no longer silently changed or dropped
+
+- **File intelligence no longer digests the turn being asked.** A fenced
+  ` ```python ` block in the current message was read as CSV (`python` was
+  used as a file extension) and replaced by a ~65-token sample, so the model
+  answered a "find the bug" question without the code. Only older turns are
+  digested now, fence languages map to real extensions, and the layer can be
+  configured (`file_intelligence.*`).
+- **Redaction keeps code intact.** `api_key: Optional[str]` became
+  `[REDACTED][str]` and `password = os.environ[...]` became
+  `[REDACTED][...]`. Only a credential's value is replaced now, and only
+  when it is a literal. Email addresses reach the provider unless
+  `security.redact_emails_to_provider` is set; stored memory still redacts
+  them. `security.redact_provider_messages` turns provider-side redaction off.
+- **The injection filter stops blocking ordinary requests.** "Repeat the
+  above steps in TypeScript" and "Print instructions for installing…" were
+  400s. The patterns now require the model as the object ("your system
+  prompt"), quoted text is not scanned, and `security.injection_filter` turns
+  the filter off.
+- **Compression keeps indentation and repeated statements** in un-fenced
+  code in older turns.
+- Images and other non-text blocks the proxy cannot forward are counted in
+  `tokenmizer.dropped_non_text_blocks` and logged, rather than vanishing.
+
+### Memory correctness
+
+- An incidental or negative mention no longer supersedes a decision: "many
+  teams use MongoDB, but we are sticking with our choice", "we decided not to
+  use MongoDB" and "I considered MySQL but rejected it" each replaced the
+  active PostgreSQL decision in the resume.
+- Nodes added after a transient "database is locked" on load were dropped by
+  the next persist, which reported success. They are now written.
+- A validator type correction no longer overwrites an existing node.
+- A SUMMARY node with the default confidence no longer raises.
+- "Fixed the ImportError: …" now closes the open ImportError instead of
+  leaving it open beside a resolved twin.
+- A user's "yes" to an assistant's "Should we use Redis…?" is recorded as a
+  decision, including a second "yes" later in the session.
+- Corruption recovery deletes the session's rows from the tables that hold
+  them (it targeted the legacy blob table), and quarantine moves the `-wal`
+  and `-shm` files with the database.
+- Graph read routes and decision invalidation take the session lock, so
+  they cannot iterate a graph while extraction mutates it in a thread.
+
+### Proxy behaviour
+
+- A request with no `session_id` (and no `X-Session-ID` header, now read) is
+  stateless: no session is claimed, persisted or checkpointed for it.
+- `/health` is degraded only when stored data was not written; a failed
+  background extraction or a transient upstream error no longer degrades it
+  for the life of the process. It reports counts, not session ids.
+- A transient provider error (rate limit, 5xx, timeout) is no longer retried
+  with the untransformed messages and reported as a TokenMizer bug.
+- Cache keys include the model and the sampling and length parameters, and a
+  truncated answer is not cached.
+- `usage.completion_tokens` is the provider's figure; trimmed output is
+  reported as `tokenmizer.output_trimmed_tokens`. `total_saved` is net of
+  what the proxy adds to the prompt.
+- Auto-checkpoints run off the event loop and at most once per 10 new
+  messages once over the threshold.
+- Injected context is limited to goals, decisions and nodes that share
+  vocabulary with the turn.
+- Streaming errors no longer send the provider's raw error text.
+- `/api/stats` is scoped to the caller's sessions when several API keys are
+  configured, and unclaimed sessions are not readable in that mode.
+- Context windows: bare `gpt-4` is 8k and Gemini 1.0 32k (both were
+  overstated, so the checkpoint never fired).
+- Rate limits are configurable (`rate_limit.*`), and the shared limiter no
+  longer blocks the event loop.
+
+### Providers
+
+- Anthropic stop reasons map to OpenAI values (`end_turn` → `stop`,
+  `max_tokens` → `length`).
+- OpenAI reasoning models (`o*`, `gpt-5`) receive `max_completion_tokens`.
+- Retries are bounded by `request_timeout` as a whole, and SDK clients are
+  reused per event loop instead of built and leaked per request.
+- `openai_base_url` and `ollama_base_url` settings.
+
+### Other
+
+- A failed `analytics.db` initialisation no longer creates a database file
+  named `None` in the working directory; the committed copy is removed.
+- The MCP server falls back to local storage only when the proxy cannot be
+  reached, not when it is slow (a read timeout extracted the transcript twice).
+- `tokenmizer checkpoint --level` prints the requested level.
+- `docker-compose.yml` publishes the port on loopback only.
+- Stale guidance corrected: the multi-worker warning, the Dockerfile comment,
+  the LLM-extraction cost, the recall figure in `tokenmizer.yaml`, and `.env`
+  values now override the YAML file as documented.
+
 ### Documentation
 
 The README's Contributors avatars are now listed explicitly, one per author of

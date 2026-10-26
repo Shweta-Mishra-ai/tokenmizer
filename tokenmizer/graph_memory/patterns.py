@@ -411,14 +411,65 @@ _NEGATION_WORDS = re.compile(
 )
 
 
+# Someone else's choice, or an option weighed and dropped, is not this
+# session's decision. "For comparison, many teams use MongoDB for orders"
+# and "I considered using MySQL but rejected it" both read as a choice to
+# every pass above, and the new "decision" then superseded the real one.
+# Scoped to the clause (back to a comma, "but", "and", or a sentence
+# boundary), so "We considered Kafka, and chose RabbitMQ" keeps RabbitMQ.
+_REPORTED_CHOICE = re.compile(
+    r"\b(?:(?:many|most|some|other|lots\s+of|a\s+lot\s+of)\s+"
+    r"(?:teams|people|companies|projects|folks|devs|developers|orgs|shops)|"
+    r"for\s+comparison|in\s+comparison|compared\s+(?:to|with)|"
+    r"considered|considering|thought\s+about|looked\s+at|evaluated|"
+    r"rejected|ruled\s+out|decided\s+against|instead\s+of)\b",
+    re.IGNORECASE,
+)
+# The rejection that arrives after the option: "MySQL ... but rejected it".
+_REJECTED_AFTER = re.compile(
+    r"\bbut\s+(?:then\s+|later\s+|ultimately\s+)?(?:rejected|dropped|"
+    r"abandoned|ruled\s+(?:it|that|them)\s+out|decided\s+against)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_BREAK_BACK = re.compile(r"[.!?\n,;:]|\s(?:but|and|so|then|however)\s",
+                                re.IGNORECASE)
+
+
 def _is_negated_context(content: str, match_start: int) -> bool:
-    """True if `match_start` in `content` falls inside a negated clause."""
+    """True if `match_start` in `content` falls inside a negated clause, or
+    in a clause that reports someone else's choice or a rejected option."""
     clause_start = 0
     for i in range(match_start - 1, -1, -1):
         if content[i] in ".!?\n":
             clause_start = i + 1
             break
-    return bool(_NEGATION_WORDS.search(content[clause_start:match_start]))
+    if _NEGATION_WORDS.search(content[clause_start:match_start]):
+        return True
+    sentence_end = len(content)
+    for i in range(match_start, len(content)):
+        if content[i] in ".!?\n":
+            sentence_end = i
+            break
+    before = content[clause_start:match_start]
+    breaks = list(_CLAUSE_BREAK_BACK.finditer(before))
+    clause = before[breaks[-1].end():] if breaks else before
+    if _REPORTED_CHOICE.search(clause):
+        return True
+    return bool(_REJECTED_AFTER.search(content[match_start:sentence_end]))
+
+
+# A label that names no option at all ("our choice", "the plan") or states
+# the negation itself ("not to use MongoDB") cannot be a decision.
+_BOGUS_DECISION_LABEL = re.compile(
+    r"^(?:(?:our|my|the|this|that|their|your|same|current|original)\s+)?"
+    r"(?:choice|decision|plan|approach|option|pick|call|stack|setup|one|idea)s?$"
+    r"|^(?:not|no|never|don'?t|avoid)\b",
+    re.IGNORECASE,
+)
+
+
+def is_bogus_decision_label(label: str) -> bool:
+    return bool(_BOGUS_DECISION_LABEL.search(label.strip().rstrip(".!")))
 
 
 # "Should we go with Postgres or Redis for this?" matches Pass 1's "go

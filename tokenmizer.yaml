@@ -66,7 +66,7 @@ graph_checkpoint:
                               # nodes in the background (see USAGE.md, Part 9)
   semantic_retrieval: auto    # auto (default) = on when the embedding model
                               # actually loads, off otherwise. true/false to
-                              # pin it. Keyword ranking gets recall@6 82% on
+                              # pin it. Keyword ranking gets recall@6 88% on
                               # 40 paraphrased questions
                               # (benchmarks.graph_retrieval.query_eval);
                               # embeddings need tokenmizer[cache] and the
@@ -139,3 +139,23 @@ memory:
 # by this setting either way.
 proxy_host: 127.0.0.1
 proxy_port: 8000
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+rate_limit:
+  enabled: true
+  requests_per_minute: 60     # per client address
+  burst: 10
+
+# ── Request-altering layers ───────────────────────────────────────────────────
+# Each has false positives, so each can be switched off.
+security:
+  redact_provider_messages: true    # scrub credentials before the provider sees them
+  redact_emails_to_provider: false  # stored memory always redacts emails
+  injection_filter: true            # 400 on known jailbreak phrasings
+file_intelligence:
+  enabled: true                     # digest large files in OLDER turns
+  token_budget_per_file: 600
+  digest_current_turn: false        # never digest the turn being asked about
+
+# openai_base_url: ""                         # an OpenAI-compatible gateway
+# ollama_base_url: http://localhost:11434     # in Docker: http://host.docker.internal:11434

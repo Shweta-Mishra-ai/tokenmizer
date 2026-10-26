@@ -61,7 +61,7 @@ def test_an_unreadable_graph_degrades_the_status(client, tmp_path):
     app_module._graph_cache["unreadable"] = g
     body = c.get("/health").json()
     assert body["status"] == "degraded"
-    assert body["sessions_with_unreadable_graph"] == ["unreadable"]
+    assert body["sessions_with_unreadable_graph"] == 1
 
 
 def test_storage_without_durability_degrades_the_status(client, tmp_path):
@@ -71,7 +71,7 @@ def test_storage_without_durability_degrades_the_status(client, tmp_path):
     app_module._graph_cache["no-durable"] = g
     body = c.get("/health").json()
     assert body["status"] == "degraded"
-    assert body["sessions_without_durable_storage"] == ["no-durable"]
+    assert body["sessions_without_durable_storage"] == 1
 
 
 def test_broken_checkpoint_storage_degrades_the_status(client, monkeypatch):

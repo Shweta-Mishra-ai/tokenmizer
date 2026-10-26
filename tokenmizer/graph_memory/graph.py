@@ -571,7 +571,25 @@ class GraphMemory:
                     node_id = self._node_id(node_type.value, norm)
                 except ValueError:
                     pass  # keep original type if correction is unknown
+                # The corrected id can name a node that already exists. The
+                # dedup above ran against the ORIGINAL type's id, so without
+                # this the new node replaced the existing one outright —
+                # status, summary, importance and created_at all lost.
+                existing = self._nodes.get(node_id)
+                if existing is not None:
+                    existing.touch()
+                    self._dirty = True
+                    existing.status = _next_status(node_type, existing.status, status)
+                    if stored_summary and not existing.summary:
+                        existing.summary = stored_summary
+                    return node_id
 
+        # A SUMMARY node skips the validator, so there is no validator score
+        # to fall back on: it keeps the confidence it was given.
+        if node_type is NodeType.SUMMARY or confidence != 0.7:
+            node_confidence = confidence
+        else:
+            node_confidence = result.confidence
         node = MemoryNode(
             id=node_id,
             type=node_type,
@@ -579,7 +597,7 @@ class GraphMemory:
             status=status,
             summary=stored_summary,
             importance=importance,
-            confidence=confidence if confidence != 0.7 else result.confidence,
+            confidence=node_confidence,
         )
         self._nodes[node_id] = node
         self._dirty = True
@@ -808,6 +826,13 @@ class GraphMemory:
                 h = prev[i][1]
             else:
                 h = self._msg_hash(m)
+                # A short reply ("yes", "ok", "continue") recurs throughout
+                # a session, and hashed on its text alone the second one
+                # read as already processed and was never extracted — the
+                # "yes" accepting a later proposal was lost. Chained to the
+                # message before it, each occurrence is its own message.
+                if fp is None and hashes and len(_content_to_text(m.get("content"))) <= 24:
+                    h = hashlib.sha1((hashes[-1] + h).encode()).hexdigest()[:16]
             hashes.append(h)
             cache.append((fp, h))
         self._hash_cache = cache
@@ -962,7 +987,8 @@ class GraphMemory:
                 prior_message = scrub_surrogates(messages[new_idx[0] - 1])
         else:
             new_messages = messages
-            new_hashes = [self._msg_hash(m) for m in messages]
+            hashes = self._history_hashes(messages)
+            new_hashes = hashes
         # Lone surrogates would reach node labels and from there SQLite — see
         # helpers.scrub_surrogates. Only the messages about to be extracted
         # are scrubbed: _msg_hash is surrogate-safe on its own, and copying
@@ -995,8 +1021,7 @@ class GraphMemory:
         # with the hashes (no schema change) and tells the check above to
         # treat messages older than the window as processed rather than new.
         if len(self._processed_hashes - {_HASHES_TRIMMED}) > _MAX_PROCESSED_HASHES:
-            recent = (hashes[-_MAX_PROCESSED_HASHES:] if hashes is not None
-                      else [self._msg_hash(m) for m in messages[-_MAX_PROCESSED_HASHES:]])
+            recent = hashes[-_MAX_PROCESSED_HASHES:]
             self._processed_hashes = set(recent) | {_HASHES_TRIMMED}
             self._dirty = True  # processed_hashes is part of the persisted row
 
@@ -1233,6 +1258,20 @@ class GraphMemory:
                 continue
             status = NodeStatus.COMPLETED if resolved else NodeStatus.FAILED
             importance = 0.5 if resolved else 0.9
+            if resolved:
+                # "Fixed the ImportError: the Order class was renamed" is the
+                # resolution of the open "ImportError: cannot import name
+                # 'Order'", worded differently. Close that node rather than
+                # add a resolved twin beside a still-open original.
+                open_id = self._open_error_resolved_by(label)
+                if open_id:
+                    err = self._nodes[open_id]
+                    err.status = NodeStatus.COMPLETED
+                    err.importance = min(err.importance, 0.5)
+                    err.touch()
+                    self._dirty = True
+                    error_ids.append(open_id)
+                    continue
             err_nid = self.add_node(NodeType.ERROR, label, status, importance=importance)
             if err_nid:
                 error_ids.append(err_nid)
@@ -1319,6 +1358,29 @@ class GraphMemory:
         for schema in data.get("schemas", []):
             if schema:
                 self.add_node(NodeType.SCHEMA, schema, NodeStatus.COMPLETED, importance=0.7)
+
+    _EXCEPTION_NAME = re.compile(r"\b([A-Z]\w*(?:Error|Exception|Failure))\b")
+    _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+
+    def _open_error_resolved_by(self, label: str) -> str:
+        """Id of the one open ERROR that `label` (a resolved error) closes,
+        or "". Same exception class AND at least one other shared
+        identifier, and unambiguous — two candidates close neither."""
+        kinds = set(self._EXCEPTION_NAME.findall(label))
+        if not kinds:
+            return ""
+        words = {w.lower() for w in self._IDENT.findall(label)} - {k.lower() for k in kinds}
+        words -= self._STOP_WORDS | {"fixed", "fix", "error", "the", "was", "now"}
+        matches = []
+        for nid, n in self._nodes.items():
+            if n.type != NodeType.ERROR or n._evicted or n.status != NodeStatus.FAILED:
+                continue
+            if not kinds & set(self._EXCEPTION_NAME.findall(n.label)):
+                continue
+            other = {w.lower() for w in self._IDENT.findall(n.label)}
+            if words & other:
+                matches.append(nid)
+        return matches[0] if len(matches) == 1 else ""
 
     _STOP_WORDS = frozenset({
         "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
@@ -1464,8 +1526,10 @@ class GraphMemory:
         if vectors is None:
             return scored
 
+        # Clamped at zero: a negative best similarity made the ratio below
+        # flip sign, ranking the WORST matches highest.
         similarities = [
-            (EmbeddingEngine.cosine(q_emb, vector), node)
+            (max(0.0, EmbeddingEngine.cosine(q_emb, vector)), node)
             for node, vector in zip(nodes, vectors) if vector is not None
         ]
         if not similarities:

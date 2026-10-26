@@ -32,6 +32,7 @@ import logging
 import re
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -150,7 +151,7 @@ class PreferenceStore:
         for _ in range(6):
             try:
                 self._db_path.parent.mkdir(parents=True, exist_ok=True)
-                with self._connect() as conn:
+                with closing(self._connect()) as conn, conn:
                     conn.execute(_SCHEMA)
                 return True
             except sqlite3.OperationalError as e:
@@ -185,7 +186,7 @@ class PreferenceStore:
         if existing:
             key = existing
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.execute(
                     "INSERT INTO preferences (principal, key, value, updated_at) "
                     "VALUES (?, ?, ?, ?) ON CONFLICT(principal, key) DO UPDATE SET "
@@ -247,7 +248,7 @@ class PreferenceStore:
         if not self.available:
             return []
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 return [
                     (row[0], row[1]) for row in conn.execute(
                         "SELECT key, value FROM preferences WHERE principal = ? "
@@ -282,7 +283,7 @@ class PreferenceStore:
         if not self.available:
             return 0
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 if key:
                     cur = conn.execute(
                         "DELETE FROM preferences WHERE principal = ? AND key = ?",

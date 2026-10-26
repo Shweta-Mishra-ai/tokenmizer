@@ -147,6 +147,7 @@ from tokenmizer.graph_memory.patterns import (
     _tech_mention_is_a_decision,
     clause_subject,
     find_supersessions,
+    is_bogus_decision_label,
     is_library_name,
     looks_english,
     mask_mentions,
@@ -1744,6 +1745,12 @@ class HybridExtractor:
         # Proposals from the most recent user turn, waiting for the next
         # assistant turn to accept or ignore them.
         open_proposals: list[str] = []
+        # Proposals the ASSISTANT put forward ("Should we use Redis for the
+        # session cache?"), waiting for the user's next turn to accept.
+        assistant_proposals: list[str] = []
+        if prior_message and prior_message.get("role") == "assistant":
+            assistant_proposals = self._question_proposals(
+                _content_to_text(prior_message.get("content", "")))
         if prior_message and prior_message.get("role") == "user":
             prior_text = _strip_emphasis(_content_to_text(prior_message.get("content", "")))
             if prior_text.strip() and looks_english(prior_text):
@@ -1780,8 +1787,17 @@ class HybridExtractor:
                         result.decisions.append(
                             {"label": label, "reason": "", "source_role": "user"})
                         seen_decisions.add(norm)
+            if role == "user" and assistant_proposals:
+                for label in self._accepted_proposals(assistant_proposals, content):
+                    norm = self._normalize(label)
+                    if norm not in seen_decisions:
+                        result.decisions.append(
+                            {"label": label, "reason": "", "source_role": "user"})
+                        seen_decisions.add(norm)
             if role != "system":
                 open_proposals = []
+                assistant_proposals = (self._question_proposals(content)
+                                       if role == "assistant" else [])
 
             self._extract_one_message(
                 content, role, i, is_recent,
@@ -1798,10 +1814,21 @@ class HybridExtractor:
         # this return value directly, so it is the only place the
         # de-duplication can happen for heuristic-only extraction.
         result.files = self._drop_shadowed_paths(result.files)
-        result.decisions = self._drop_vaguer_decisions(result.decisions)
+        result.decisions = self._drop_vaguer_decisions(self._drop_bogus_decisions(result.decisions))
         result.errors = self._drop_restated_errors(result.errors)
         return result
 
+
+    @staticmethod
+    def _question_proposals(text: str) -> list[str]:
+        """Options a turn put forward as a question ("Should we use Redis
+        for the session cache?"). A proposal only, until a reply accepts it."""
+        out = []
+        for m in _PROPOSAL.finditer(text or ""):
+            label = _clip(m.group(1))
+            if len(label) >= 3 and not is_bogus_decision_label(label):
+                out.append(label)
+        return out
 
     @staticmethod
     def _accepted_proposals(proposals: list[str], reply: str) -> list[str]:
@@ -2016,7 +2043,7 @@ class HybridExtractor:
                     seen.add(norm)
             setattr(result, attr, deduped[:15])
         result.files = self._drop_shadowed_paths(result.files)
-        result.decisions = self._drop_vaguer_decisions(data.decisions)
+        result.decisions = self._drop_vaguer_decisions(self._drop_bogus_decisions(data.decisions))
         result.errors = self._drop_restated_errors(result.errors)
         result.superseded = data.superseded
         result.evidence = data.evidence
@@ -2094,6 +2121,12 @@ class HybridExtractor:
                        and restates(a, b, k) for b in labels):
                     dropped.add(a)
         return [e for e in errors if e not in dropped]
+
+    @staticmethod
+    def _drop_bogus_decisions(decisions: list) -> list:
+        return [d for d in decisions
+                if not is_bogus_decision_label(
+                    d.get("label", "") if isinstance(d, dict) else str(d))]
 
     def _drop_vaguer_decisions(self, decisions: list) -> list:
         """Collapse "Use X" into a longer decision that also names X.

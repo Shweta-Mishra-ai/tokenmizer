@@ -47,12 +47,6 @@ _PATTERNS = [
     # Bearer tokens in Authorization headers
     re.compile(r'Bearer\s+[A-Za-z0-9\-_\.]{20,}', re.IGNORECASE),
     # Generic: password=..., secret=..., token=..., key=...
-    re.compile(
-        r'(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key'
-        r'|private[_\-]?key|auth[_\-]?key|client[_\-]?secret)\s*[=:]\s*'
-        r'["\']?[\w\-\.\/+]{8,}',
-        re.IGNORECASE,
-    ),
     # URL-embedded credentials (postgres://user:pass@host/db): redact the
     # userinfo section only — scheme and host survive so the message stays
     # readable. Connection-string passwords match no keyword or provider
@@ -71,7 +65,6 @@ _PATTERNS = [
     # rule; standalone "together_" prefixed keys:)
     re.compile(r'together_[A-Za-z0-9]{20,}', re.IGNORECASE),
     # Email addresses (PII)
-    re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b'),
 ]
 
 
@@ -82,6 +75,44 @@ _PATTERNS = [
 # all of them) is stored as None, so an entry costs a few dozen bytes
 # whatever the size of the text. A redacted text keeps its redacted copy
 # unless it is larger than _MEMO_MAX_CHARS, in which case it is recomputed.
+# `key = value` / `key: value` credentials. The value is replaced and the
+# key kept: redacting the whole match turned `api_key: Optional[str]` into
+# `[REDACTED][str]` and `password = os.environ["X"]` into
+# `[REDACTED]["X"]` — ordinary code, rewritten before the model saw it.
+# A value is treated as a secret when it is quoted, or when it is a bare
+# token that is not code: not a dotted reference, not a call or subscript,
+# not a type or identifier made only of letters.
+_KEY_VALUE = re.compile(
+    r'(?P<key>(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key'
+    r'|private[_\-]?key|auth[_\-]?key|client[_\-]?secret)\s*[=:]\s*)'
+    r'(?:(?P<q>["\'])(?P<qval>[^"\'\s]{8,})(?P=q)'
+    r'|(?P<val>[\w\-./+]{8,})(?P<after>[(\[]?))',
+    re.IGNORECASE,
+)
+
+
+def _key_value_sub(m: "re.Match") -> str:
+    if m.group("qval") is not None:
+        return f"{m.group('key')}{m.group('q')}[REDACTED]{m.group('q')}"
+    val, after = m.group("val"), m.group("after")
+    looks_like_code = (
+        after                                   # a call or a subscript
+        or "." in val and not any(c.isdigit() for c in val.split(".")[-1])
+        or val.isalpha()                        # a name or a type: Optional
+        or re.fullmatch(r"[a-z_]+", val) is not None
+    )
+    if looks_like_code:
+        return m.group(0)
+    return f"{m.group('key')}[REDACTED]"
+
+
+# Email addresses. Kept out of _PATTERNS: an address is personal data to
+# keep out of stored memory, but it is also the content of countless
+# legitimate requests ("send the report to alice@acme.com"), so the copy
+# sent to the provider keeps it unless the operator asks otherwise. The
+# lookahead leaves `git@github.com:org/repo` alone.
+_EMAIL = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b(?!:)')
+
 _MEMO_MAX_ENTRIES = 32_768
 _MEMO_MAX_CHARS = 64_000
 _memo: OrderedDict[bytes, str | None] = OrderedDict()
@@ -93,27 +124,33 @@ def _memo_clear() -> None:
         _memo.clear()
 
 
-def _scrub(text: str) -> str:
+def _scrub(text: str, emails: bool = True) -> str:
     for pat in _PATTERNS:
         text = pat.sub("[REDACTED]", text)
+    text = _KEY_VALUE.sub(_key_value_sub, text)
+    if emails:
+        text = _EMAIL.sub("[REDACTED]", text)
     return text
 
 
-def redact(text: str) -> str:
+def redact(text: str, emails: bool = True) -> str:
     """Replace all detected secrets with [REDACTED]. Non-string input is
     passed through as the empty string rather than raising, since callers
-    (graph nodes, message content) may legitimately have None/empty values."""
+    (graph nodes, message content) may legitimately have None/empty values.
+
+    `emails=False` leaves email addresses in place (see _EMAIL)."""
     if not isinstance(text, str):
         return ""
     if not text:
         return text
-    key = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=32).digest()
+    key = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=32,
+                          person=b"e1" if emails else b"e0").digest()
     with _memo_lock:
         if key in _memo:
             _memo.move_to_end(key)
             hit = _memo[key]
             return text if hit is None else hit
-    out = _scrub(text)
+    out = _scrub(text, emails)
     if out == text:
         value = None
     elif len(out) <= _MEMO_MAX_CHARS:
@@ -131,32 +168,32 @@ def redact_node(label: str, summary: str = "") -> tuple[str, str]:
     return redact(label), redact(summary)
 
 
-def _redact_values(value):
+def _redact_values(value, emails: bool = True):
     """Redact string values recursively without changing keys or types."""
     if isinstance(value, str):
-        return redact(value)
+        return redact(value, emails)
     if isinstance(value, list):
-        return [_redact_values(item) for item in value]
+        return [_redact_values(item, emails) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_values(item) for key, item in value.items()}
+        return {key: _redact_values(item, emails) for key, item in value.items()}
     return value
 
 
-def _redact_arguments(arguments):
+def _redact_arguments(arguments, emails: bool = True):
     """Scrub OpenAI tool arguments while preserving valid JSON."""
     if not isinstance(arguments, str):
-        return _redact_values(arguments)
+        return _redact_values(arguments, emails)
     try:
         parsed = json.loads(arguments)
     except (TypeError, ValueError):
-        return redact(arguments)
-    cleaned = _redact_values(parsed)
+        return redact(arguments, emails)
+    cleaned = _redact_values(parsed, emails)
     if cleaned == parsed:
         return arguments
     return json.dumps(cleaned, separators=(",", ":"))
 
 
-def _redact_tool_calls(tool_calls):
+def _redact_tool_calls(tool_calls, emails: bool = True):
     if not isinstance(tool_calls, list):
         return tool_calls
     cleaned = []
@@ -172,7 +209,7 @@ def _redact_tool_calls(tool_calls):
             **call,
             "function": {
                 **function,
-                "arguments": _redact_arguments(function["arguments"]),
+                "arguments": _redact_arguments(function["arguments"], emails),
             },
         })
     return cleaned
@@ -198,7 +235,7 @@ def _gemini_payload_key(block: dict):
     return None
 
 
-def _redact_content(content):
+def _redact_content(content, emails: bool = True):
     """
     Redact secrets from message content of any shape.
 
@@ -221,12 +258,12 @@ def _redact_content(content):
     if content is None:
         return None
     if isinstance(content, str):
-        return redact(content)
+        return redact(content, emails)
     if isinstance(content, list):
         cleaned = []
         for block in content:
             if isinstance(block, str):
-                cleaned.append(redact(block))
+                cleaned.append(redact(block, emails))
             elif isinstance(block, dict):
                 if "text" in block and (
                     block.get("type") == "text"
@@ -234,15 +271,15 @@ def _redact_content(content):
                 ):
                     # A Gemini part is {"text": ...} with no "type"; the
                     # extractor reads it as text, so it is redacted as text.
-                    cleaned.append({**block, "text": redact(str(block["text"]))})
+                    cleaned.append({**block, "text": redact(str(block["text"]), emails)})
                 elif block.get("type") == "tool_use" and "input" in block:
-                    cleaned.append({**block, "input": _redact_values(block["input"])})
+                    cleaned.append({**block, "input": _redact_values(block["input"], emails)})
                 elif _gemini_payload_key(block) is not None:
                     part = _gemini_payload_key(block)
                     field = _GEMINI_PAYLOAD_FIELDS[part]
                     cleaned.append({
                         **block,
-                        part: {**block[part], field: _redact_values(block[part][field])},
+                        part: {**block[part], field: _redact_values(block[part][field], emails)},
                     })
                 elif "content" in block and isinstance(block.get("content"), (str, list)):
                     # tool_result content is `str | list[block]` per the
@@ -256,7 +293,7 @@ def _redact_content(content):
                     # and the background extraction LLM. Recursing through
                     # _redact_content (which already handles both shapes)
                     # covers it the same way the top-level list does.
-                    cleaned.append({**block, "content": _redact_content(block["content"])})
+                    cleaned.append({**block, "content": _redact_content(block["content"], emails)})
                 else:
                     # image/document blocks — leave untouched
                     cleaned.append(block)
@@ -265,23 +302,23 @@ def _redact_content(content):
         return cleaned
     if isinstance(content, dict):
         if "text" in content:
-            return {**content, "text": redact(str(content["text"]))}
+            return {**content, "text": redact(str(content["text"]), emails)}
         return content
     return content
 
 
-def redact_messages(messages: list[dict]) -> list[dict]:
+def redact_messages(messages: list[dict], emails: bool = True) -> list[dict]:
     """Return a copy with secrets scrubbed from content and tool inputs."""
     cleaned = []
     for message in messages:
-        item = {**message, "content": _redact_content(message.get("content"))}
+        item = {**message, "content": _redact_content(message.get("content"), emails)}
         if "tool_calls" in message:
-            item["tool_calls"] = _redact_tool_calls(message["tool_calls"])
+            item["tool_calls"] = _redact_tool_calls(message["tool_calls"], emails)
         function_call = message.get("function_call")
         if isinstance(function_call, dict) and "arguments" in function_call:
             item["function_call"] = {
                 **function_call,
-                "arguments": _redact_arguments(function_call["arguments"]),
+                "arguments": _redact_arguments(function_call["arguments"], emails),
             }
         cleaned.append(item)
     return cleaned

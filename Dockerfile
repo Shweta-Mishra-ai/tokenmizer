@@ -93,12 +93,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# IMPORTANT: --workers 1. Session locks, graph LRU cache, rate limiter and
-# analytics are in-process. With >1 worker each process holds divergent state
-# for the same session (last-writer-wins graph loss, split rate limits).
-# Scale horizontally only after moving state to the Redis backend
-# (TOKENMIZER_STATE_BACKEND=redis) AND making graph/analytics multi-process
-# safe. Until then: one worker, scale vertically.
+# One worker by default. Graph and checkpoint writes are safe across
+# processes (per-row storage under a cross-process file lock), but the
+# graph cache, analytics and semantic cache are per process; with more
+# workers set TOKENMIZER_STATE_BACKEND=sqlite so rate limits are shared.
 CMD ["python", "-m", "uvicorn", "tokenmizer.api.app:app", \
      "--host", "0.0.0.0", "--port", "8000", \
      "--workers", "1", "--log-level", "info"]

@@ -255,15 +255,17 @@ def _get(path: str) -> dict:
 def _is_transport_error(exc: Exception) -> bool:
     """True if the proxy could not be reached at all.
 
-    A connect failure or a timeout means nothing answered. An HTTP status
-    means something did, and its answer stands — see the OFFLINE note.
+    Only a failure to CONNECT means nothing answered. A read timeout means
+    the proxy received the request and is still working on it — a slow
+    checkpoint of a long transcript — so answering from local storage as
+    well would extract the same conversation twice. An HTTP status means
+    something answered, and its answer stands — see the OFFLINE note.
     """
     try:
         import httpx
     except ImportError:
         return False
-    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
-                           httpx.ReadTimeout, httpx.TimeoutException))
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
 
 
 def _explain(exc: Exception) -> str:
