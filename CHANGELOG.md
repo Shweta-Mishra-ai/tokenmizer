@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Short sessions no longer cost more than no proxy; long sessions cost less
+
+Measured with `python -m benchmarks.savings.runner` (input only, against a
+client that caches its own history): 10 turns 21% more → 11% more, 40
+turns 10% more → 4% more, 150 turns level → **17% less**, 300 turns 41% less
+→ **48% less**. With `terse_output.enabled: false`, 4-, 10- and 40-turn
+sessions now cost exactly what the client alone costs.
+
+- No context block when the request already carries every message the
+  graph was built from — on a short session each node only restated what
+  the model was reading in full.
+- The brevity instruction is 26 tokens (was 50) and the fence preamble 25
+  (was 57); both are paid on every request.
+- A held windowing cut never leaves a request under the provider's
+  prompt-cache minimum. It used to cut to about 800 tokens, below the
+  1,024-token minimum, and nothing cached for a dozen requests after each
+  cut.
+
+### Remaining gaps closed
+
+- Streams report `finish_reason: "length"` when the provider cut them off
+  (Anthropic, OpenAI-compatible, Ollama, Gemini, Cohere), and a truncated
+  stream is not cached.
+- Image blocks are forwarded to providers that accept them (Anthropic —
+  converted to its own image shape — and OpenAI-compatible, except
+  DeepSeek) instead of being dropped; the cache is skipped for a turn
+  carrying one.
+- `tokenmizer reassign-sessions` moves sessions (and preferences) to a new
+  API key after a rotation, or from dev mode to the first key.
+- The semantic cache no longer answers a "regenerate" at temperature > 0,
+  and honours `Cache-Control: no-cache`.
+- The MCP server's offline fallback uses the proxy's configured
+  `storage_dir`, as an absolute path, instead of `./checkpoints` relative to
+  wherever it was launched.
+- A non-Claude provider with no `default_model` set uses its own default
+  model instead of being sent `claude-sonnet-4-6`.
+
 ### Request content is no longer silently changed or dropped
 
 - **File intelligence no longer digests the turn being asked.** A fenced

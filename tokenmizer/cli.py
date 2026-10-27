@@ -456,6 +456,46 @@ def resume(
     ))
 
 
+@app.command("reassign-sessions")
+def reassign_sessions(
+    to_key: str = typer.Option(..., "--to-key", envvar="TOKENMIZER_NEW_API_KEY",
+                               help="The API key that should own the sessions"),
+    from_key: Optional[str] = typer.Option(None, "--from-key",
+                                           help="The old API key"),
+    from_dev: bool = typer.Option(False, "--from-dev",
+                                  help="Sessions created while no API key was set"),
+    config: Optional[str] = typer.Option(None, help="Path to tokenmizer.yaml"),
+):
+    """Give an old key's sessions to a new key, after rotating it.
+
+    Sessions belong to the key that created them, so after a rotation (or
+    after setting the first key on a dev-mode deployment) they are
+    unreachable until moved. Run on the host that holds storage_dir.
+    """
+    import os
+
+    from tokenmizer.preferences import PreferenceStore
+    from tokenmizer.security.ownership import (
+        DEV_PRINCIPAL,
+        OwnershipStore,
+        principal_for_key,
+    )
+
+    if from_dev == bool(from_key):
+        console.print("[red]Pass exactly one of --from-key or --from-dev.[/red]")
+        raise typer.Exit(2)
+    if config:
+        os.environ["TOKENMIZER_CONFIG"] = config
+    from tokenmizer.config.settings import get_settings
+    storage = get_settings().graph_checkpoint.storage_dir
+    old = DEV_PRINCIPAL if from_dev else principal_for_key(from_key)
+    new = principal_for_key(to_key)
+    moved = OwnershipStore(storage_dir=storage).reassign(old, new)
+    prefs = PreferenceStore(storage_dir=storage).reassign(old, new)
+    # Ownership is read from disk on every request: no restart needed.
+    console.print(f"Moved {moved} session(s) and {prefs} preference(s) in {storage}.")
+
+
 @app.command()
 def mcp():
     """Run the MCP stdio server (same entrypoint as `tokenmizer-mcp`).

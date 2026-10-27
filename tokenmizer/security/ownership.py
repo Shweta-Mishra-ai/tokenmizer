@@ -179,6 +179,31 @@ class OwnershipStore:
             raise OwnershipUnavailable(str(e)) from e
         return [r[0] for r in rows]
 
+    def reassign(self, from_principal: str, to_principal: str) -> int:
+        """Move every session `from_principal` owns to `to_principal`.
+        Returns how many moved.
+
+        A principal is derived from the API key, so rotating a key — or
+        adding the first key to a deployment that ran in dev mode — left
+        every existing session owned by a principal no request could ever
+        present again: permanently unreachable. This is the administrative
+        way across: run it once with the old and new key.
+        """
+        if from_principal == to_principal:
+            return 0
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "UPDATE session_owners SET owner=? WHERE owner=?",
+                    (to_principal, from_principal))
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+        except Exception as e:
+            raise OwnershipUnavailable(str(e)) from e
+
     def check_access(self, session_id: str, principal: str, *, claim: bool = True) -> None:
         """Raise SessionAccessDenied if `principal` may not touch this
         session. With claim=True an unowned session is claimed.

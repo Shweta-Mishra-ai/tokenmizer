@@ -440,11 +440,12 @@ quoted for it predates the enlarged eval and has not been re-measured.
 benchmarks.savings.runner` replays a conversation through the real proxy
 against a stand-in that applies Anthropic's documented prompt-caching
 rules. Against a client sending its history with no caching, input cost
-is **61% lower at 40 turns, 87% at 150 and 93% at 300**; against a client
-that already caches its own history, 10% higher at 40 turns, level at
-150 and 41% lower at 300. **A ten-turn session costs 21% more input**:
-it is under the cache minimum, and the ~50-token brevity instruction is
-charged on every request while the output it shortens is not measured.
+is **63% lower at 40 turns, 89% at 150 and 94% at 300**; against a client
+that already caches its own history, 4% higher at 40 turns, **17% lower at
+150 and 48% lower at 300**. A ten-turn session costs 11% more input, and
+all of that is the 26-token brevity instruction, which is there to shorten
+the (unmeasured, more expensive) output; with it off, short sessions cost
+exactly what the client alone costs.
 Details and caveats in [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
 **Agent sessions are measured separately**, because tool output, not prose,

@@ -281,13 +281,43 @@ def test_the_session_id_header_is_honoured(proxy):
     assert r.json()["session_id"] == sid
 
 
-def test_dropped_images_are_reported(proxy):
-    c, _, _ = proxy
-    r = c.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": [
-        {"type": "text", "text": "what is in this picture?"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
-    ]}]})
+_IMAGE_TURN = {"role": "user", "content": [
+    {"type": "text", "text": "what is in this picture?"},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+]}
+
+
+def test_images_reach_a_provider_that_accepts_them(proxy):
+    c, _, provider = proxy
+    provider.supports_images = True
+    r = c.post("/v1/chat/completions", json={"messages": [_IMAGE_TURN]})
+    assert r.status_code == 200
+    sent = provider.chat.call_args.kwargs["messages"]
+    last = sent[-1]["content"]
+    assert isinstance(last, list)
+    assert {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}} in last
+    assert "_media" not in sent[-1]
+    assert "dropped_non_text_blocks" not in r.json()["tokenmizer"]
+
+
+def test_images_a_provider_cannot_take_are_reported(proxy):
+    c, _, provider = proxy
+    provider.supports_images = False
+    r = c.post("/v1/chat/completions", json={"messages": [_IMAGE_TURN]})
     assert r.json()["tokenmizer"]["dropped_non_text_blocks"] == 1
+    assert all("_media" not in m for m in provider.chat.call_args.kwargs["messages"])
+
+
+def test_anthropic_receives_images_in_its_own_shape():
+    from tokenmizer.providers.tools import anthropic_content
+    out = anthropic_content([
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        {"type": "image_url", "image_url": {"url": "https://x.test/a.png"}},
+    ])
+    assert out[1] == {"type": "image", "source": {
+        "type": "base64", "media_type": "image/png", "data": "AAAA"}}
+    assert out[2] == {"type": "image", "source": {"type": "url", "url": "https://x.test/a.png"}}
 
 
 def test_a_failed_background_extraction_does_not_degrade_health(proxy):
@@ -368,3 +398,133 @@ def test_a_failed_analytics_store_creates_no_file_named_none(tmp_path, monkeypat
     engine = AnalyticsEngine(storage_dir=str(store))
     assert engine._db_path is None
     assert not (tmp_path / "None").exists()
+
+
+# ── Token cost: short and long sessions ──────────────────────────────────────
+
+async def test_a_short_session_gets_no_context_it_already_carries(tmp_path, monkeypatch):
+    """Every node of a short session restates a message still in the
+    payload; injecting them cost more than sending no context at all."""
+    from tokenmizer.api import app as app_module
+    monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
+    g = GraphMemory("short", storage_dir=str(tmp_path))
+    raw = [
+        {"role": "user", "content": "Decided: use PostgreSQL for the orders database."},
+        {"role": "assistant", "content": "Done. Added the orders table in db/schema.sql."},
+        {"role": "user", "content": "what database are we using for orders again"},
+    ]
+    g.extract_from_messages(raw)
+    updated, _ = await app_module._update_graph(
+        "short", g, raw, [dict(m) for m in raw], "claude-sonnet-4-6", {}, raw[-1]["content"])
+    assert "SESSION_RECORD" not in updated[-1]["content"]
+
+
+async def test_a_fact_from_a_turn_the_client_dropped_is_still_injected(tmp_path, monkeypatch):
+    from tokenmizer.api import app as app_module
+    monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
+    g = GraphMemory("dropped", storage_dir=str(tmp_path))
+    g.extract_from_messages([
+        {"role": "user", "content": "Decided: use PostgreSQL for the orders database."},
+        {"role": "assistant", "content": "Done. Added the orders table in db/schema.sql "
+                                         "and the model in app/models/order.py."}])
+    assert len(g._nodes) >= 3
+    raw = [{"role": "user", "content": "what database are we using for orders again"}]
+    updated, _ = await app_module._update_graph(
+        "dropped", g, raw, [dict(m) for m in raw], "claude-sonnet-4-6", {}, raw[-1]["content"])
+    assert "PostgreSQL" in updated[-1]["content"]
+
+
+def test_the_per_request_instructions_stay_short():
+    from tokenmizer.compression.engine import CompressionPipeline
+    from tokenmizer.core.tokenizer import count_tokens
+    from tokenmizer.security.fencing import fence
+    assert count_tokens(CompressionPipeline().terse_system_prompt("full")) <= 30
+    assert count_tokens(fence("x", "")) <= 40
+
+
+def test_a_stable_cut_keeps_the_request_above_the_cache_minimum(tmp_path):
+    """Cut down to `protect_recent` messages, a request fell below the
+    provider's cache minimum and paid full price until it grew back."""
+    from tokenmizer.compression.window import SmartMessageWindow
+    from tokenmizer.core.tokenizer import count_messages_tokens
+    g = GraphMemory("w", storage_dir=str(tmp_path))
+    conv = []
+    for i in range(60):
+        conv.append({"role": "user", "content": f"question {i} " + "about the system " * 8})
+        conv.append({"role": "assistant", "content": f"answer {i} " + "with some detail " * 8})
+    w = SmartMessageWindow(token_budget=4000, protect_recent=10, max_tail_tokens=0,
+                           tool_index_tokens=0)
+    out, saved = w.apply(conv, g, "claude-sonnet-4-6", stable=True, min_tail=1280)
+    assert saved > 0
+    assert count_messages_tokens(out, "claude-sonnet-4-6") >= 1280
+
+
+# ── Remaining gaps ───────────────────────────────────────────────────────────
+
+class _Streamer:
+    supports_tools = True
+    supports_tool_stream = True
+    supports_images = False
+
+    def __init__(self):
+        self.calls = 0
+
+    async def chat_stream(self, messages, **kw):
+        self.calls += 1
+        yield "partial answer"
+        yield {"finish_reason": "length"}
+
+
+def test_a_truncated_stream_says_length_and_is_not_cached(proxy, monkeypatch):
+    c, app_module, _ = proxy
+    streamer = _Streamer()
+    monkeypatch.setattr(app_module, "_get_provider", lambda: streamer)
+    monkeypatch.setattr(app_module.settings.cache, "enabled", True)
+    body = {"session_id": f"trunc-{time.time_ns()}", "stream": True,
+            "messages": [{"role": "user", "content": "write a long essay please"}]}
+    first = c.post("/v1/chat/completions", json=body).text
+    assert '"finish_reason": "length"' in first
+    c.post("/v1/chat/completions", json=body)
+    assert streamer.calls == 2, "the truncated answer was served from the cache"
+
+
+def test_regenerate_at_a_nonzero_temperature_is_not_a_cache_hit(proxy, monkeypatch):
+    c, app_module, provider = proxy
+    monkeypatch.setattr(app_module.settings.cache, "enabled", True)
+    body = {"session_id": f"regen-{time.time_ns()}", "temperature": 0.7,
+            "messages": [{"role": "user", "content": "suggest a project name"}]}
+    c.post("/v1/chat/completions", json=body)
+    r = c.post("/v1/chat/completions", json=body)
+    assert r.json()["tokenmizer"]["cache_hit"] is False
+    assert provider.chat.await_count == 2
+
+
+def test_sessions_can_be_moved_to_a_rotated_key(tmp_path):
+    from tokenmizer.security.ownership import OwnershipStore, principal_for_key
+    store = OwnershipStore(storage_dir=str(tmp_path))
+    old, new = principal_for_key("old-key"), principal_for_key("new-key")
+    store.claim("s1", old)
+    store.claim("s2", old)
+    assert store.reassign(old, new) == 2
+    assert set(store.sessions_for(new)) == {"s1", "s2"}
+    store.check_access("s1", new, claim=False)
+
+
+def test_a_non_claude_provider_does_not_get_the_claude_default_model():
+    from types import SimpleNamespace
+
+    from tokenmizer.providers.providers import build_provider
+    settings = SimpleNamespace(
+        provider="ollama", default_model="claude-sonnet-4-6", request_timeout=10,
+        ollama_base_url="http://localhost:11434", openai_base_url="",
+        get_api_key_for_provider=lambda p: "")
+    assert build_provider(settings).default_model == "llama3"
+    settings.default_model = "qwen2.5"
+    assert build_provider(settings).default_model == "qwen2.5"
+
+
+def test_the_mcp_server_uses_an_absolute_storage_dir():
+    import os
+
+    from tokenmizer.mcp import server
+    assert os.path.isabs(server.TOKENMIZER_STORAGE_DIR)

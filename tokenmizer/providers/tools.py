@@ -143,6 +143,28 @@ def anthropic_tool_choice(tool_choice: Any, parallel_tool_calls: Optional[bool] 
     return choice
 
 
+def anthropic_content(content):
+    """OpenAI content blocks -> Anthropic's, for the one shape that differs:
+    an `image_url` block becomes an `image` block with a base64 or URL
+    source. Anything else passes through unchanged."""
+    if not isinstance(content, list):
+        return content
+    out = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image_url":
+            url = (block.get("image_url") or {}).get("url", "") \
+                if isinstance(block.get("image_url"), dict) else str(block.get("image_url") or "")
+            if url.startswith("data:") and ";base64," in url:
+                media_type, data = url[5:].split(";base64,", 1)
+                out.append({"type": "image", "source": {
+                    "type": "base64", "media_type": media_type, "data": data}})
+            elif url:
+                out.append({"type": "image", "source": {"type": "url", "url": url}})
+            continue
+        out.append(block)
+    return out
+
+
 def anthropic_messages(conv: list[dict]) -> list[dict]:
     """OpenAI-shaped conversation -> Anthropic messages.
 
@@ -185,7 +207,7 @@ def anthropic_messages(conv: list[dict]) -> list[dict]:
             out.append({"role": "assistant", "content": blocks})
             continue
 
-        out.append({"role": role, "content": m.get("content")})
+        out.append({"role": role, "content": anthropic_content(m.get("content"))})
 
     for m in out:
         m.pop("_tool_results", None)

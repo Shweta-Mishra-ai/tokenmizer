@@ -183,6 +183,9 @@ class BaseProvider(ABC):
     # cannot see the tools for.
     supports_tools: bool = False
     supports_tool_stream: bool = False
+    # Whether image content blocks can be forwarded (see api/app.py
+    # _with_media). Without it they are dropped, and the response says so.
+    supports_images: bool = False
 
     # How long an upstream call may hang before it is abandoned.
     #
@@ -399,6 +402,7 @@ def _anthropic_input(usage) -> tuple[int, int, int]:
 class AnthropicProvider(BaseProvider):
 
     supports_tools = True
+    supports_images = True
     # text_stream carries only text, so the raw event stream is read
     # instead: content_block_start(tool_use) then input_json_delta. See
     # chat_stream.
@@ -571,6 +575,12 @@ class AnthropicProvider(BaseProvider):
                                 "function": {
                                     "arguments": getattr(delta, "partial_json", "") or ""},
                             }]}
+                    elif kind == "message_delta":
+                        # Why the stream ended. A stream cut off at
+                        # max_tokens used to be reported "stop" — and cached.
+                        stop = getattr(getattr(event, "delta", None), "stop_reason", None)
+                        if stop and finish_reason(stop, []) == "length":
+                            yield {"finish_reason": "length"}
         except anthropic.RateLimitError as e:
             raise ProviderError("anthropic", "rate_limit", str(e), retryable=True)
         except anthropic.APIStatusError as e:
@@ -607,6 +617,9 @@ class OpenAIProvider(BaseProvider):
     # through, streamed or not.
     supports_tools = True
     supports_tool_stream = True
+    # Image blocks pass through in the same shape. Subclasses whose API has
+    # no vision input set this back to False.
+    supports_images = True
 
     def __init__(self, api_key: str, model: str = "gpt-4o",
                  base_url: Optional[str] = None):
@@ -713,6 +726,9 @@ class OpenAIProvider(BaseProvider):
                 calls = getattr(delta, "tool_calls", None)
                 if calls:
                     yield {"tool_calls": [_stream_tool_call_delta(tc) for tc in calls]}
+                ended = getattr(chunk.choices[0], "finish_reason", None)
+                if isinstance(ended, str) and finish_reason(ended, []) == "length":
+                    yield {"finish_reason": "length"}
         except Exception as e:
             raise ProviderError(self.__class__.__name__.lower().replace("provider", ""),
                                 "api_error", str(e),
@@ -722,6 +738,7 @@ class OpenAIProvider(BaseProvider):
 # ── DeepSeek ──────────────────────────────────────────────────────────────────
 
 class DeepSeekProvider(OpenAIProvider):
+    supports_images = False
     def __init__(self, api_key: str, model: str = "deepseek-chat"):
         super().__init__(api_key, model, base_url="https://api.deepseek.com/v1")
         self.default_model = model
@@ -845,6 +862,10 @@ class CohereProvider(BaseProvider):
                                         max_tokens=max_tokens,
                                         **self._chat_kwargs(kwargs))
             async for event in stream:
+                delta = getattr(event, "delta", None)
+                ended = str(getattr(delta, "finish_reason", "") or "")
+                if ended.upper() == "MAX_TOKENS":
+                    yield {"finish_reason": "length"}
                 mapped = cohere_stream_event(event)
                 if not mapped:
                     continue
@@ -1057,6 +1078,9 @@ class GeminiProvider(BaseProvider):
                         for i, c in enumerate(calls)
                     ]}
                     emitted += len(calls)
+                ended = str(getattr(candidates[0], "finish_reason", "") or "")
+                if "MAX_TOKENS" in ended.upper():
+                    yield {"finish_reason": "length"}
         except Exception as e:
             raise ProviderError("gemini", "api_error", str(e),
                                 retryable=_gemini_error_is_retryable(e))
@@ -1178,6 +1202,8 @@ class OllamaProvider(BaseProvider):
                                 for i, c in enumerate(calls)
                             ]}
                         if data.get("done"):
+                            if finish_reason(data.get("done_reason"), []) == "length":
+                                yield {"finish_reason": "length"}
                             break
         except ProviderError:
             raise
@@ -1261,6 +1287,9 @@ def missing_provider_sdk(provider: str) -> Optional[str]:
     return None if found else f'pip install "tokenmizer[{extra}]"'
 
 
+_SETTINGS_DEFAULT_MODEL = "claude-sonnet-4-6"   # Settings.default_model's default
+
+
 def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
     """Build the correct provider from settings. `model` overrides
     settings.default_model on the same provider (used by the extraction
@@ -1268,6 +1297,15 @@ def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
     provider = settings.provider.lower()
     key = settings.get_api_key_for_provider(provider)
     model = model or settings.default_model
+    # default_model's own default is a Claude model. With provider: ollama
+    # (or gemini, deepseek...) and no default_model set, that name was sent
+    # to a server that has never heard of it. Fall back to the provider's
+    # own default instead — but only for the untouched default; a model the
+    # operator chose is always used as given.
+    if provider not in ("anthropic", "claude", "openrouter") \
+            and model == _SETTINGS_DEFAULT_MODEL:
+        model = ""
+
     _warn_on_model_provider_mismatch(provider, model)
     openai_base = (getattr(settings, "openai_base_url", "") or "").strip() or None
     ollama_base = (getattr(settings, "ollama_base_url", "") or "").strip() \
@@ -1276,8 +1314,8 @@ def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
     mapping = {
         "anthropic": lambda: AnthropicProvider(key, model),
         "claude": lambda: AnthropicProvider(key, model),
-        "openai": lambda: OpenAIProvider(key, model, base_url=openai_base),
-        "gpt": lambda: OpenAIProvider(key, model, base_url=openai_base),
+        "openai": lambda: OpenAIProvider(key, model or "gpt-4o", base_url=openai_base),
+        "gpt": lambda: OpenAIProvider(key, model or "gpt-4o", base_url=openai_base),
         "deepseek": lambda: DeepSeekProvider(key, model or "deepseek-chat"),
         "mistral": lambda: MistralProvider(key, model or "mistral-large-latest"),
         "grok": lambda: GrokProvider(key, model or "grok-3"),

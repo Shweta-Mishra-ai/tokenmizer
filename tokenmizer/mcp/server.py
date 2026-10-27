@@ -50,7 +50,26 @@ TOKENMIZER_API_KEY = os.environ.get("TOKENMIZER_API_KEY", "")
 # Where the graph lives when these tools read it directly. Matches the
 # proxy's own default (graph_checkpoint.storage_dir), so a local read sees
 # exactly what a running proxy would have written.
-TOKENMIZER_STORAGE_DIR = os.environ.get("TOKENMIZER_STORAGE_DIR", "./checkpoints")
+def _default_storage_dir() -> str:
+    """The proxy's storage_dir, as an absolute path.
+
+    "./checkpoints" was resolved against the MCP process's working
+    directory — usually the project an editor launched it in — while the
+    proxy wrote under its own. Offline writes then went to a store the
+    proxy never read. Reading the same setting the proxy reads, and
+    reporting the absolute path, makes any remaining mismatch visible.
+    """
+    explicit = os.environ.get("TOKENMIZER_STORAGE_DIR")
+    if explicit:
+        return os.path.abspath(explicit)
+    try:
+        from tokenmizer.config.settings import get_settings
+        return os.path.abspath(get_settings().graph_checkpoint.storage_dir)
+    except Exception:
+        return os.path.abspath("./checkpoints")
+
+
+TOKENMIZER_STORAGE_DIR = _default_storage_dir()
 
 # The MCP server is installed by a plugin; the proxy is a separate process
 # nobody started. So the single most likely state on a fresh install is

@@ -167,6 +167,22 @@ class PreferenceStore:
         )
         return False
 
+    def reassign(self, from_principal: str, to_principal: str) -> int:
+        """Move a principal's preferences to another (see
+        OwnershipStore.reassign). Keys the target already has are kept."""
+        if not self.available or from_principal == to_principal:
+            return 0
+        try:
+            with closing(self._connect()) as conn, conn:
+                cur = conn.execute(
+                    "UPDATE OR IGNORE preferences SET principal=? WHERE principal=?",
+                    (to_principal, from_principal))
+                conn.execute("DELETE FROM preferences WHERE principal=?", (from_principal,))
+                return cur.rowcount
+        except Exception as e:
+            logger.warning("Preference reassign failed: %s", e)
+            return 0
+
     def observe(self, principal: str, text: str) -> str | None:
         """Record `text` if it states a preference. Returns the key, or None.
 

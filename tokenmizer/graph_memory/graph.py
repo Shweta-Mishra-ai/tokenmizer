@@ -259,6 +259,12 @@ class GraphMemory:
         # are in-memory: the node itself is persisted like any other, and
         # on a reload the first windowed turn re-selects over the whole
         # span, which is correct rather than merely cheap.
+        # Provenance, for the proxy's "is every fact already in the payload"
+        # test: True once a node exists that did NOT come from extracting a
+        # message (added directly through the library or API, or a summary
+        # of windowed turns). Such a node cannot be found in any payload.
+        self._extracting = False
+        self._unsourced_nodes = False
         self._summary_node_id: str | None = None
         self._summarised_turns = 0
         # True if the SQLite DB could not be reinitialized after corruption —
@@ -336,6 +342,10 @@ class GraphMemory:
     def _load(self) -> None:
         from tokenmizer.graph_memory.persistence import load
         load(self)
+        # Stored nodes with no record of the messages they came from were
+        # added directly; provenance is not persisted beyond this.
+        if self._nodes and not (self._processed_hashes - {_HASHES_TRIMMED}):
+            self._unsourced_nodes = True
 
     # ── Nodes ────────────────────────────────────────────────────────────────
 
@@ -376,6 +386,8 @@ class GraphMemory:
             return ""
 
         label, summary = redact_node(label, summary)
+        if not self._extracting:
+            self._unsourced_nodes = True
 
         stored_label = label[:120]
         stored_summary = summary[:300]
@@ -1006,7 +1018,11 @@ class GraphMemory:
                                                    prior_message=prior_message)
         data = extracted_data if isinstance(extracted_data, dict) \
             else self._extracted_to_dict(extracted_data)
-        self._apply_extracted(data, new_messages)
+        self._extracting = True
+        try:
+            self._apply_extracted(data, new_messages)
+        finally:
+            self._extracting = False
 
         # Hashed as sent, not as scrubbed: the next call compares against the
         # raw messages.

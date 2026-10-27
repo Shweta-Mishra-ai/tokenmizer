@@ -363,6 +363,13 @@ def _get_provider():
     return _provider
 
 
+def _provider_or_none():
+    try:
+        return _get_provider()
+    except Exception:
+        return None
+
+
 def _provider_failure_detail(correlation_id: str) -> str:
     """The client-facing text of a failed provider call. It stays opaque (SDK
     exceptions embed URLs and other internals), except for one cause that is
@@ -782,12 +789,15 @@ class ChatMessage(BaseModel):
         from tokenmizer.graph_memory.helpers import _content_to_text
         return _content_to_text(self.content)
 
-    def non_text_blocks(self) -> int:
+    def media_blocks(self) -> list:
         """Content blocks text() drops (images, documents, audio)."""
         if not isinstance(self.content, list):
-            return 0
-        return sum(1 for b in self.content
-                   if isinstance(b, dict) and b.get("type") not in (None, "text"))
+            return []
+        return [b for b in self.content
+                if isinstance(b, dict) and b.get("type") not in (None, "text")]
+
+    def non_text_blocks(self) -> int:
+        return len(self.media_blocks())
 
     def to_dict(self) -> dict:
         """The pipeline's message shape: role + text content, plus the
@@ -801,6 +811,12 @@ class ChatMessage(BaseModel):
             d["tool_call_id"] = self.tool_call_id
         if self.name:
             d["name"] = self.name
+        # Images and other non-text blocks ride beside the text, untouched
+        # by every layer, and are put back just before the provider call
+        # (see _with_media) for a provider that accepts them.
+        media = self.media_blocks()
+        if media:
+            d["_media"] = media
         return d
 
 
@@ -993,7 +1009,14 @@ def _window_messages(messages: list[dict], graph, model: str) -> tuple[list[dict
         messages, settings.memory.max_tokens_before_summary, model
     ):
         return messages, 0
-    return _smart_window.apply(messages, graph, model, stable=_stable_window())
+    stable = _stable_window()
+    min_tail = 0
+    if stable:
+        from tokenmizer.providers.providers import _cache_minimum
+        # A quarter over the minimum: the bridge and system prompt sit in
+        # front, and token counts here are estimates of the provider's.
+        min_tail = int(_cache_minimum(model) * 1.25)
+    return _smart_window.apply(messages, graph, model, stable=stable, min_tail=min_tail)
 
 
 def _stable_window() -> bool:
@@ -1068,6 +1091,23 @@ def _already_in_payload(node, message_words: list[frozenset]) -> bool:
     if not words:
         return False
     return any(words <= mw for mw in message_words)
+
+
+def _payload_covers_graph(graph, raw_messages: list[dict], savings: dict) -> bool:
+    """True when nothing the graph knows is missing from what is sent.
+
+    The graph is built only from messages it has processed. If every one of
+    them is in this request, verbatim — windowing dropped none, file
+    intelligence digested none, and the processed set was never trimmed —
+    there is no fact the graph could add."""
+    if savings.get("windowing") or savings.get("file_extraction"):
+        return False
+    if getattr(graph, "_unsourced_nodes", True):
+        return False
+    known = graph._processed_hashes
+    if not known or "#trimmed" in known:
+        return False
+    return known <= set(graph._history_hashes(raw_messages))
 
 
 _ALWAYS_INJECTABLE = frozenset({"goal", "decision"})
@@ -1370,6 +1410,13 @@ async def _update_graph(
             )
         else:
             relevant_pairs = [(n, session_id) for n in graph.query(retrieval_query, top_k=8)]
+        # When the payload still carries every message this session's graph
+        # was built from, each of its nodes restates something the model is
+        # already reading in full: on a short session that is all of them,
+        # and injecting them made the proxy cost more than no proxy at all.
+        # Only facts from OTHER sessions can add anything then.
+        if _payload_covers_graph(graph, raw_messages, savings):
+            relevant_pairs = [(n, sid) for n, sid in relevant_pairs if sid != session_id]
         if relevant_pairs:
             # Drop what the payload already says. Measured against the
             # payload as it leaves — after windowing — so a fact whose turn
@@ -1517,6 +1564,25 @@ def _should_retry_untransformed(e: Exception) -> bool:
     return True
 
 
+def _with_media(messages: list[dict], provider) -> list[dict]:
+    """The messages as the provider should receive them: each message's
+    non-text blocks restored after its text when the provider accepts
+    images, and the internal `_media` key removed either way."""
+    keep = getattr(provider, "supports_images", False)
+    out = []
+    for m in messages:
+        media = m.get("_media")
+        if not media:
+            out.append(m)
+            continue
+        m = {k: v for k, v in m.items() if k != "_media"}
+        if keep:
+            text = m.get("content") or ""
+            m["content"] = ([{"type": "text", "text": text}] if text else []) + list(media)
+        out.append(m)
+    return out
+
+
 def _net_saved(savings: dict, orig: int, sent: int, cache_hit: bool) -> int:
     """Input tokens the provider was NOT sent, net of what the proxy added.
 
@@ -1579,7 +1645,7 @@ async def _call_provider(
     kwargs = dict(model=model, max_tokens=_max_tokens(req), stream=False,
                   **_sampling_kwargs(req), **_tool_kwargs(req))
     try:
-        resp = await provider.chat(messages=messages, **kwargs)
+        resp = await provider.chat(messages=_with_media(messages, provider), **kwargs)
     except Exception as e:
         # The request that failed is the one TokenMizer BUILT — windowed,
         # compressed, with context injected. If it differs from what the
@@ -1602,7 +1668,8 @@ async def _call_provider(
                 f"messages: {type(e).__name__}"
             )
             try:
-                resp = await provider.chat(messages=raw_messages, **kwargs)
+                resp = await provider.chat(messages=_with_media(raw_messages, provider),
+                                           **kwargs)
             except Exception as e2:
                 logger.error(f"Provider error [{correlation_id}] (both attempts): "
                              f"transformed={e!r}; untransformed={e2!r}")
@@ -1734,6 +1801,8 @@ def _stream_response(req, messages, model, user_content, session_id,
             yield resp.text
         if resp.tool_calls:
             yield {"tool_calls": [{**tc, "index": i} for i, tc in enumerate(resp.tool_calls)]}
+        if resp.finish_reason == "length":
+            yield {"finish_reason": "length"}
 
     async def _gen():
         full_text = ""
@@ -1742,6 +1811,7 @@ def _stream_response(req, messages, model, user_content, session_id,
         cache_hit = False
         stream_failed = False
         transform_rejected = False
+        stream_finish = None
         yield _chunk({"role": "assistant"})
         try:
             cached = (
@@ -1764,6 +1834,7 @@ def _stream_response(req, messages, model, user_content, session_id,
                 succeeded = False
                 for attempt, candidate in enumerate(candidates):
                     last_error = None
+                    candidate = _with_media(candidate, provider)
                     try:
                         pieces = (
                             _buffered_tool_stream(candidate) if buffered_tools
@@ -1775,6 +1846,9 @@ def _stream_response(req, messages, model, user_content, session_id,
                             )
                         )
                         async for piece in pieces:
+                            if isinstance(piece, dict) and "finish_reason" in piece:
+                                stream_finish = piece["finish_reason"]
+                                continue
                             if isinstance(piece, dict):
                                 # A tool-call delta (see OpenAIProvider.
                                 # chat_stream): re-emitted in the same
@@ -1846,7 +1920,8 @@ def _stream_response(req, messages, model, user_content, session_id,
                            "type": "internal_error"}}
             ) + "\n\n"
         yield _chunk(
-            {}, finish="tool_calls" if saw_tool_calls else "stop",
+            {}, finish="tool_calls" if saw_tool_calls else (
+                "length" if stream_finish == "length" else "stop"),
             extra={"tokenmizer": {"fallback": {"transform_rejected": True}}}
             if transform_rejected else None,
         )
@@ -1867,7 +1942,8 @@ def _stream_response(req, messages, model, user_content, session_id,
         # truncated answer to every future matching prompt, long after the
         # provider recovered. Re-writing a cache HIT is equally pointless.
         if (settings.cache.enabled and user_content and full_text
-                and not stream_failed and not cache_hit and not saw_tool_calls):
+                and not stream_failed and not cache_hit and not saw_tool_calls
+                and stream_finish != "length"):
             _cache.set(user_content, full_text, input_tokens=input_tokens,
                        output_tokens=output_tokens, session_id=session_id,
                        context=cache_ctx)
@@ -1980,12 +2056,15 @@ async def chat_completions(req: ChatRequest, request: Request):
     # Redacting once here means every downstream path is safe by construction
     # instead of relying on each call site to remember to redact.
     raw_messages = [m.to_dict() for m in req.messages]
-    dropped_blocks = sum(m.non_text_blocks() for m in req.messages)
+    has_media = any(m.get("_media") for m in raw_messages)
+    dropped_blocks = 0
+    if has_media and not getattr(_provider_or_none(), "supports_images", False):
+        dropped_blocks = sum(m.non_text_blocks() for m in req.messages)
     if dropped_blocks:
         logger.warning(
             "Request for session %r carried %d non-text content block(s) "
-            "(images, files); TokenMizer forwards text only, so the model "
-            "will not see them.", session_id, dropped_blocks)
+            "(images, files) and provider %r does not accept them, so the "
+            "model will not see them.", session_id, dropped_blocks, settings.provider)
     sec = settings.security
     if sec.redact_provider_messages:
         raw_messages = redact_messages(raw_messages, emails=sec.redact_emails_to_provider)
@@ -2007,7 +2086,17 @@ async def chat_completions(req: ChatRequest, request: Request):
     # cacheable: the answer is a step in a plan, not a reply to a
     # question, and user_content="" disables both lookup and write.
     ends_on_user = bool(raw_messages) and raw_messages[-1].get("role") == "user"
-    user_content = user_query if (ends_on_user and not req.tools) else ""
+    # An image changes the question without changing its text, so a turn
+    # carrying one is never answered from, or written to, the cache.
+    #
+    # Nor is a request that asked for variety (temperature > 0) or said
+    # no-cache. A client's "regenerate" resends the identical conversation,
+    # which is exactly what the session-scoped cache matches — so it got
+    # the same answer back for an hour, at temperature 0.7.
+    cacheable = (ends_on_user and not req.tools and not raw_messages[-1].get("_media")
+                 and not (req.temperature is not None and req.temperature > 0)
+                 and "no-cache" not in request.headers.get("cache-control", "").lower())
+    user_content = user_query if cacheable else ""
 
     # Layer 0-2: file intelligence, compression, terse injection
     messages = _apply_compression_layers(messages, settings, savings)

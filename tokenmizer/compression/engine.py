@@ -777,30 +777,21 @@ class CompressionPipeline:
         buys is in what the model writes back, and that is measured after
         the fact by the output trimmer's numbers, never estimated here.
         """
+        # Every token here is paid on every request, so each wording is the
+        # shortest statement of the rule (measured: "full" was 50 tokens,
+        # "minimal" 114 — on a short session, most of the proxy's overhead).
         if style == "minimal":
             return (
-                "Work like a senior engineer who writes as little as possible: "
-                "reuse what exists in this codebase, then the standard library, "
-                "then a dependency, before adding new code. Ship the shortest "
-                "diff that works \u2014 no speculative abstractions, no "
-                "scaffolding, no config for values that never change. Fix the "
-                "root cause once, not each call site. Answer first, then at "
-                "most three lines on what was skipped. No preamble, no "
-                "closing. Preserve code, paths and URLs exactly."
+                "Write as little as possible: reuse existing code, then the "
+                "standard library, then a dependency. The shortest diff that works; no "
+                "speculative abstractions or scaffolding. Fix root causes once. "
+                "Answer first, then at most three lines on what was skipped. "
+                "Preserve code, paths and URLs exactly."
             )
         levels = {
-            "lite": (
-                "Be concise. No preamble (e.g., 'Sure!', 'Great question!'). "
-                "No closing remarks. Start answer immediately."
-            ),
-            "full": (
-                "Respond like a senior engineer: no filler, no preamble, no 'I'd be happy to', "
-                "no closing fluff. Use fragments when clear. Preserve code/paths/URLs exactly. "
-                "Technical accuracy 100%. Start with the answer."
-            ),
-            "ultra": (
-                "Ultra-terse. Fragments only. No articles if obvious. "
-                "No preamble or closing. Code/paths exact. Maximum compression."
-            ),
+            "lite": "Be concise: no preamble or closing remarks.",
+            "full": ("Answer first, tersely: no preamble, filler or closing; "
+                     "fragments are fine. Keep code, paths and URLs exact."),
+            "ultra": "Ultra-terse fragments. No preamble or closing. Keep code and paths exact.",
         }
         return levels.get(level, levels["full"])
