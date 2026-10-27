@@ -286,7 +286,14 @@ class SmartMessageWindow:
             # only the cache floor is added here.
             target, ceiling = min_tail, self.max_tail_tokens // 2
         else:
-            target = max(min_tail, self.token_budget // 2)
+            # Down to the cache floor, not to half the budget: every cut
+            # rewrites the cached prefix (1.25x), so a smaller tail makes
+            # that rewrite cheaper AND leaves more room before the next
+            # cut. Measured on the savings benchmark, half-the-budget cuts
+            # recurred every ~30 turns and each took ~20 turns to pay back
+            # (100 turns: 1.6% MORE than a caching client); to the floor,
+            # 9% less, and 150 turns went from 17% to 23% less.
+            target = min_tail
             ceiling = self.token_budget - self.graph_context_budget
         # Never back to the first step: a cut that drops nothing is no cut.
         while len(starts) > 1 and count_messages_tokens(conv[split:], model) < target:

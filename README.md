@@ -428,7 +428,7 @@ is a small sample and the same person wrote every label.
 **Retrieval is measured separately.** `python -m
 benchmarks.graph_retrieval.query_eval` scores what `query()` returns for
 questions phrased the way a person asks them, not in the node's own
-words: **recall@6 88% over 40 cases**, keyword ranking only. The eval was
+words: **recall@6 95% over 40 cases** (was 88%), keyword ranking only. The eval was
 13 cases until this branch, where one case flipping moved the headline by
 8 points; every case is checked to be answerable from its own transcript,
 because an ungrounded question measures extraction and reads as a
@@ -439,13 +439,12 @@ quoted for it predates the enlarged eval and has not been re-measured.
 **Input cost is measured end to end.** `python -m
 benchmarks.savings.runner` replays a conversation through the real proxy
 against a stand-in that applies Anthropic's documented prompt-caching
-rules. Against a client sending its history with no caching, input cost
-is **63% lower at 40 turns, 89% at 150 and 94% at 300**; against a client
-that already caches its own history, 4% higher at 40 turns, **17% lower at
-150 and 48% lower at 300**. A ten-turn session costs 11% more input, and
-all of that is the 26-token brevity instruction, which is there to shorten
-the (unmeasured, more expensive) output; with it off, short sessions cost
-exactly what the client alone costs.
+rules. A short session costs **exactly** what the client alone costs
+(0.0% at 4, 10, 40 and 50 turns): the proxy adds nothing until it has
+something to save. Against a client sending its history with no caching,
+input cost is **65% lower at 40 turns, 90% at 150 and 95% at 300**; against
+a client that already caches its own history, **11% lower at 100 turns, 25%
+at 150 and 54% at 300**.
 Details and caveats in [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
 **Agent sessions are measured separately**, because tool output, not prose,

@@ -406,10 +406,46 @@ def find_contradicting_decisions(
         if existing_topics & new_topics:
             if _is_same_decision(new_label, node.label):
                 continue  # same decision — not a contradiction
+            if _refines_or_endorses(new_label, new_summary, node.label):
+                continue
             if _same_slot(new_label, new_summary, node.label, node.summary):
                 to_supersede.append(node_id)
 
     return to_supersede
+
+
+_REPLACEMENT_CUE = re.compile(
+    r"\b(?:instead|rather\s+than|replac\w*|switch\w*|migrat\w*|mov(?:e|ed|ing)\s+(?:to|off|away)|"
+    r"from\s+\S+\s+to|drop(?:ped|ping)?|ditch\w*|abandon\w*|no\s+longer|"
+    # A reversal names the same product and is still a replacement.
+    r"disabl\w*|enabl\w*|turn(?:ed|ing)?\s+(?:off|on)|remov\w*|revert\w*|"
+    r"roll(?:ed|ing)?\s*back|stop(?:ped|ping)?|downgrad\w*|upgrad\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _refines_or_endorses(new_label: str, new_summary: str, old_label: str) -> bool:
+    """True when the new decision keeps the old one's choice.
+
+    "TypeScript and Recharts for charts" followed by "TypeScript for type
+    safety" restates half of it; "Recharts for data visualization (good
+    React integration)" builds on "Use React". Both named only technologies
+    the old decision already named, and the tracker superseded the old
+    decision anyway — so the resume reported React and the chart stack as
+    abandoned. A decision that names nothing new, and says nothing about
+    replacing anything, cannot have replaced it."""
+    from tokenmizer.graph_memory.patterns import canonical_word
+    text = f"{new_label} {new_summary or ''}"
+    if _REPLACEMENT_CUE.search(text):
+        return False
+    # Products only: a category word ("runtime", "database") names a slot,
+    # not a choice, so it says nothing about whether the choice changed.
+    categories = {t.replace("_", " ") for t in _TOPIC_KEYWORDS} | set(_TOPIC_KEYWORDS)
+    new_kw = {canonical_word(k) for k in _matched_topic_keywords(text, "")
+              if k not in categories}
+    old_kw = {canonical_word(k) for k in _matched_topic_keywords(old_label, "")
+              if k not in categories}
+    return bool(new_kw) and new_kw <= old_kw
 
 
 def find_contested_decisions(

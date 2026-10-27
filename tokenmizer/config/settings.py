@@ -87,7 +87,7 @@ class GraphCheckpointSettings(BaseModel):
     # The pair once quoted here — recall@6 85% keyword vs 92% with
     # embeddings — came from a 13-case eval, where one question flipping
     # moves the headline by 8 points. That eval is now 40 cases and
-    # keyword ranking scores 88% on it; the 92% figure has NOT been
+    # keyword ranking scores 95% on it; the 92% figure has NOT been
     # re-measured against it and must not be quoted (docs/roadmap.md and
     # README.md say the same, and this comment used to contradict them).
     #
@@ -105,7 +105,7 @@ class GraphCheckpointSettings(BaseModel):
     #
     #   "auto" (the default) — on when the model is actually loadable, off
     #                          otherwise. Measured on the retrieval eval:
-    #                          keyword ranking gets recall@6 88% over 40
+    #                          keyword ranking gets recall@6 95% over 40
     #                          paraphrased questions, and the misses are
     #                          exactly the paraphrases embeddings exist
     #                          for. A capability that is present should not
@@ -212,7 +212,10 @@ class PreferenceSettings(BaseModel):
 
 
 class TerseOutputSettings(BaseModel):
-    enabled: bool = True
+    # true / false, or "auto": add the instruction only once a request is
+    # large enough for the provider to cache it, so a short session never
+    # pays more input than it would without the proxy. See app._terse_wanted.
+    enabled: Union[bool, Literal["auto"]] = "auto"
     level: Literal["lite", "full", "ultra"] = "full"
     # What the injected instruction asks for.
     #   terse    — shorter answers: no preamble, no closing, fragments allowed.

@@ -84,10 +84,18 @@ def principal_for_key(api_key: str) -> str:
 class OwnershipStore:
     """SQLite-backed session -> owner map."""
 
+    _ALLOWED_TTL = 30.0
+
     def __init__(self, storage_dir: str = "./checkpoints"):
         self._dir = Path(storage_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._db_path = self._dir / "sessions.db"
+        # (session, principal) pairs confirmed allowed, with when. Every
+        # request opened the database to re-confirm an answer that only an
+        # administrative reassign can change; it is now re-read at most
+        # every _ALLOWED_TTL seconds. Only grants are cached, never denials,
+        # and reassign() clears the cache in this process.
+        self._allowed: dict[tuple[str, str], float] = {}
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -191,6 +199,7 @@ class OwnershipStore:
         """
         if from_principal == to_principal:
             return 0
+        self._allowed.clear()
         try:
             conn = self._connect()
             try:
@@ -213,6 +222,10 @@ class OwnershipStore:
         than silently creating an ownership record as a side effect of a
         GET.
         """
+        key = (session_id, principal)
+        hit = self._allowed.get(key)
+        if hit is not None and time.monotonic() - hit < self._ALLOWED_TTL:
+            return
         if claim:
             owner = self.claim(session_id, principal)
         else:
@@ -221,3 +234,6 @@ class OwnershipStore:
                 return  # never claimed — nothing to protect yet
         if owner != principal:
             raise SessionAccessDenied(session_id)
+        self._allowed[key] = time.monotonic()
+        if len(self._allowed) > 50_000:
+            self._allowed.clear()

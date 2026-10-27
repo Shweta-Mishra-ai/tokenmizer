@@ -958,10 +958,47 @@ async def _check_rate_limit(request: Request) -> None:
         )
 
 
+# Sessions whose requests already carry the brevity instruction ("auto").
+_terse_sessions: "OrderedDict[str, bool]" = OrderedDict()
+
+
+def _terse_wanted(messages: list[dict], session_id: Optional[str], model: str) -> bool:
+    """Whether this request gets the brevity instruction.
+
+    `auto` (the default) adds it only from the request where windowing
+    first cuts the history. Before that, every request pays for the
+    instruction and nothing pays it back on the input side: a short
+    session cost more input than the client alone, which is the one thing
+    it must never do (measured: 0.9% more at 20-40 turns even when the
+    instruction was cached). The first cut replaces the start of the
+    request anyway, so the instruction joins a prefix that is being
+    rewritten regardless, and from then on rides in the cached prefix
+    while windowing saves far more than it costs. It stays on for the
+    session from then: switching it off would change the prefix again.
+    """
+    mode = settings.terse_output.enabled
+    if mode is True or mode is False:
+        return mode
+    if session_id and session_id in _terse_sessions:
+        _terse_sessions.move_to_end(session_id)
+        return True
+    if not (session_id and settings.graph_checkpoint.enabled and settings.memory.enabled):
+        return False        # no windowing will ever happen for this request
+    if not needs_windowing(messages, settings.memory.max_tokens_before_summary,
+                           model or settings.default_model):
+        return False
+    _terse_sessions[session_id] = True
+    while len(_terse_sessions) > _SESSION_LOCK_MAX * 10:
+        _terse_sessions.popitem(last=False)
+    return True
+
+
 def _apply_compression_layers(
     messages: list[dict],
     settings,
     savings: dict,
+    session_id: Optional[str] = None,
+    model: str = "",
 ) -> list[dict]:
     """
     Layer 0-2: file intelligence, compression, terse injection.
@@ -988,7 +1025,7 @@ def _apply_compression_layers(
         savings["compression"] = saved
 
     # Layer 2: Terse output injection
-    if settings.terse_output.enabled:
+    if _terse_wanted(messages, session_id, model):
         terse = _compression.terse_system_prompt(
             settings.terse_output.level, style=settings.terse_output.style)
         has_system = any(m.get("role") == "system" for m in messages)
@@ -2099,7 +2136,7 @@ async def chat_completions(req: ChatRequest, request: Request):
     user_content = user_query if cacheable else ""
 
     # Layer 0-2: file intelligence, compression, terse injection
-    messages = _apply_compression_layers(messages, settings, savings)
+    messages = _apply_compression_layers(messages, settings, savings, session_id, model)
 
     orig_input_tokens = count_messages_tokens(raw_messages, model)
 

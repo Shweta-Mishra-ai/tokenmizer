@@ -217,6 +217,57 @@ def _names_file(name: str, text: str) -> bool:
 _INFLECTION = r"(?:s|es|d|ed|r|er|ers|ing|ment|ql)?"
 
 
+_TOKEN_SPLIT = re.compile(r"[\s/\\|<>=,;()\[\]{}\"'`]+")
+_PART_SPLIT = re.compile(r"[_\-.]+")
+
+
+# ── Query intent ─────────────────────────────────────────────────────────────
+#
+# A question says what KIND of memory it wants before it says what about:
+# "what broke when signing up" wants an error, "what is still outstanding"
+# wants open work, "which library did we settle on" a decision. Token
+# overlap cannot see that — "broke" shares no word with "422 Unprocessable
+# Entity on /signup" — and with every node scoring on importance alone, the
+# goal and the highest-importance decisions filled the top results instead.
+# The intent is a boost to the types that answer it, never a filter.
+
+_INTENT_PATTERNS = {
+    "failure": re.compile(
+        r"\b(?:broke|broken|break(?:s|ing)?|fail(?:s|ed|ing|ure)?|wrong|errors?|bugs?|"
+        r"crash(?:ed|es)?|complain(?:s|ed)?|issues?|problems?|exceptions?|regress\w*)\b", re.I),
+    "open": re.compile(
+        r"\b(?:still|outstanding|left|remaining|todo|pending|next|unfinished|"
+        r"not\s+(?:yet|safe|done|fixed)|open)\b", re.I),
+    "choice": re.compile(
+        r"\b(?:which|chose|choose|chosen|decided?|settle[d]?|pick(?:ed)?|"
+        r"go(?:ing)?\s+with|went\s+with|switch(?:ed)?|using|on\s+now)\b", re.I),
+}
+
+
+def _query_intent(task: str) -> frozenset:
+    return frozenset(k for k, p in _INTENT_PATTERNS.items() if p.search(task or ""))
+
+
+def _intent_boost(intent: frozenset, node: "MemoryNode") -> float:
+    if not intent:
+        return 1.0
+    boost = 1.0
+    if "failure" in intent and node.type == NodeType.ERROR:
+        # Resolved ones too: "what broke" is usually asked after the fix.
+        boost *= 2.0
+    if "open" in intent and (
+            (node.type == NodeType.TASK and node.status != NodeStatus.COMPLETED)
+            or (node.type == NodeType.ERROR and node.status == NodeStatus.FAILED)):
+        boost *= 1.5
+    if "choice" in intent and node.type == NodeType.DECISION:
+        boost *= 1.3
+    # A question about one kind of thing is not answered by the session
+    # goal, which otherwise tops every list on importance alone.
+    if node.type == NodeType.GOAL:
+        boost *= 0.7
+    return boost
+
+
 # ── Graph ────────────────────────────────────────────────────────────────────
 
 class GraphMemory:
@@ -1377,19 +1428,27 @@ class GraphMemory:
 
     _EXCEPTION_NAME = re.compile(r"\b([A-Z]\w*(?:Error|Exception|Failure))\b")
     _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+    _HTTP_STATUS = re.compile(r"(?<![\d.])([45]\d\d)(?![\d.])")
 
     def _open_error_resolved_by(self, label: str) -> str:
         """Id of the one open ERROR that `label` (a resolved error) closes,
         or "". Same exception class AND at least one other shared
         identifier, and unambiguous — two candidates close neither."""
         kinds = set(self._EXCEPTION_NAME.findall(label))
-        if not kinds:
+        # An HTTP status ("Login keeps returning 422" / "Fixed: 422 error was
+        # missing email validation") names the failure as precisely as an
+        # exception class does, and needs no second shared word.
+        codes = set(self._HTTP_STATUS.findall(label))
+        if not kinds and not codes:
             return ""
         words = {w.lower() for w in self._IDENT.findall(label)} - {k.lower() for k in kinds}
         words -= self._STOP_WORDS | {"fixed", "fix", "error", "the", "was", "now"}
         matches = []
         for nid, n in self._nodes.items():
             if n.type != NodeType.ERROR or n._evicted or n.status != NodeStatus.FAILED:
+                continue
+            if codes & set(self._HTTP_STATUS.findall(n.label)):
+                matches.append(nid)
                 continue
             if not kinds & set(self._EXCEPTION_NAME.findall(n.label)):
                 continue
@@ -1431,6 +1490,25 @@ class GraphMemory:
         "ts":           frozenset({"ts", "typescript"}),
         "typescript":   frozenset({"ts", "typescript"}),
         "js":           frozenset({"js", "javascript", "node", "nodejs"}),
+        # Everyday words for the same engineering concern.
+        "slow":         frozenset({"slow", "latency", "performance", "perf", "render",
+                                   "renders", "rerender", "re-render", "speed"}),
+        "fast":         frozenset({"fast", "latency", "performance", "perf", "speed"}),
+        "speed":        frozenset({"speed", "latency", "performance", "perf", "fast", "slow"}),
+        "check":        frozenset({"check", "checking", "verify", "verified", "validate",
+                                   "count", "counts", "compare"}),
+        "checking":     frozenset({"check", "checking", "verify", "verified", "validate",
+                                   "count", "counts", "compare"}),
+        "lost":         frozenset({"lost", "loss", "missing", "dropped"}),
+        "sign":         frozenset({"sign", "signin", "signup", "login", "logon",
+                                   "register", "registration"}),
+        "signing":      frozenset({"sign", "signin", "signup", "login", "logon",
+                                   "register", "registration"}),
+        "login":        frozenset({"login", "signin", "sign", "logon"}),
+        "logout":       frozenset({"logout", "signout"}),
+        "cleanup":      frozenset({"cleanup", "clean", "cleaned", "teardown", "tear"}),
+        "cleaned":      frozenset({"cleanup", "clean", "cleaned", "teardown", "tear"}),
+        "teardown":     frozenset({"cleanup", "clean", "cleaned", "teardown", "tear"}),
     }
 
     def _find_decision(self, text: str) -> str:
@@ -1618,15 +1696,21 @@ class GraphMemory:
         the singular; before this, "which datastore for orders" shared no
         word with "PostgreSQL for order storage"."""
         out = set()
-        for w in text.split():
+        # Split on paths and punctuation too, and add the parts of a
+        # compound identifier: "POST /api/auth/login" was ONE token,
+        # "/api/auth/login", so "how do people sign in" could never reach
+        # the login endpoint, and neither could "login_success".
+        for w in _TOKEN_SPLIT.split(text):
             w = w.strip(".,!?:;()[]\"'").lower()
             if len(w) <= 2:
                 continue
-            out.add(w)
-            if len(w) > 4 and w.endswith("ies"):
-                out.add(w[:-3] + "y")
-            elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
-                out.add(w[:-1])
+            forms = {w} | {p for p in _PART_SPLIT.split(w) if len(p) > 2}
+            for f in forms:
+                out.add(f)
+                if len(f) > 4 and f.endswith("ies"):
+                    out.add(f[:-3] + "y")
+                elif len(f) > 3 and f.endswith("s") and not f.endswith("ss"):
+                    out.add(f[:-1])
         return frozenset(out)
 
     def _search_words(self, node: MemoryNode) -> frozenset:
@@ -1657,7 +1741,11 @@ class GraphMemory:
         without the semantic pass on; that pass is what turns "related"
         into something the ranker can measure.
         """
-        query_words = self._expand_with_aliases(self._query_tokens(task))
+        # Each word of the question counts once, matched through any of its
+        # aliases. Expanding the question first and dividing by the expanded
+        # size penalised a question for using a word with many aliases.
+        base_words = self._query_tokens(task)
+        word_forms = [self._expand_with_aliases(frozenset({w})) for w in base_words]
         # Nodes the keyword pass rejected. Kept because they are exactly the
         # ones a semantic pass exists to rescue: a node sharing no vocabulary
         # with the question is the case token overlap cannot serve.
@@ -1678,6 +1766,7 @@ class GraphMemory:
         }
 
         scored: list[tuple[float, MemoryNode]] = []
+        intent = _query_intent(task)
 
         for node in self._nodes.values():
             if node._evicted:
@@ -1690,9 +1779,10 @@ class GraphMemory:
             if not node_words:
                 continue
 
-            overlap = len(query_words & node_words) / max(1, len(query_words))
+            overlap = (sum(1 for forms in word_forms if forms & node_words)
+                       / max(1, len(word_forms)))
             recency = 1.0 / (1.0 + node.age_days() * 0.1)
-            type_boost = _TYPE_BOOST.get(node.type, 1.0)
+            type_boost = _TYPE_BOOST.get(node.type, 1.0) * _intent_boost(intent, node)
 
             # Score: overlap is primary signal; importance and recency are tiebreakers
             score = (overlap * 0.6 + node.importance * 0.3 + recency * 0.1) * type_boost

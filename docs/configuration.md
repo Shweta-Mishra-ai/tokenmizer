@@ -107,7 +107,7 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_PREFERENCES__ENABLED` | `false` | Cross-session preference memory. Off by default on purpose — see the section below before enabling it |
 | `TOKENMIZER_PREFERENCES__MAX_ITEMS` | `4` | Preference lines injected into the system prompt |
 | `TOKENMIZER_PREFERENCES__MAX_CHARS` | `400` | Total size of those lines |
-| `TOKENMIZER_TERSE_OUTPUT__ENABLED` | `true` | Inject the output-style instruction at all |
+| `TOKENMIZER_TERSE_OUTPUT__ENABLED` | `auto` | Inject the output-style instruction. `auto` adds it from the request where windowing first cuts the history, so a short session never pays for it; `true` / `false` force it |
 | `TOKENMIZER_TERSE_OUTPUT__LEVEL` | `full` | How hard `lite`/`full`/`ultra` push, both in the injected instruction and in how much boilerplate the response trimmer strips. Ignored for the injected prompt when `style: minimal`, which is a single fixed instruction |
 | `TOKENMIZER_TERSE_OUTPUT__STYLE` | `terse` | Output-style prompt injected each turn: `terse`, `minimal`, or `off` |
 | `TOKENMIZER_SECURITY__REDACT_PROVIDER_MESSAGES` | `true` | Scrub credentials from messages before they reach the provider. Only the value is replaced (`api_key=[REDACTED]`); code such as `api_key: Optional[str]` or `password = os.environ[...]` is left alone. Stored memory is redacted regardless of this setting |

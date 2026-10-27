@@ -20,7 +20,7 @@ import json
 import logging
 import sqlite3
 import time
-from dataclasses import asdict
+from dataclasses import fields
 from typing import TYPE_CHECKING
 
 from tokenmizer.graph_memory.filelock import LockUnavailable, session_lock
@@ -311,18 +311,26 @@ def load_transitions(graph: "GraphMemory") -> None:
         graph._transitions = []
 
 
+_NODE_FIELDS = tuple(f.name for f in fields(MemoryNode))
+_EDGE_FIELDS = tuple(f.name for f in fields(MemoryEdge))
+
+
 def _serialize_state(graph: "GraphMemory") -> tuple[dict, dict]:
     """Current nodes and edges as {key: canonical_json}.
 
     sort_keys makes the JSON canonical, so string equality against the
     previously written value is a reliable "did this row change?" test.
     """
+    # Field-by-field rather than dataclasses.asdict(): every field is a
+    # primitive or a str-Enum, so the JSON is byte-identical, and asdict's
+    # recursive deep copy was a third of the cost of a persist on every turn.
     nodes = {
-        nid: json.dumps(asdict(n), sort_keys=True, default=str)
+        nid: json.dumps({f: getattr(n, f) for f in _NODE_FIELDS}, sort_keys=True, default=str)
         for nid, n in graph._nodes.items()
     }
     edges = {
-        edge_key(e): json.dumps(asdict(e), sort_keys=True, default=str)
+        edge_key(e): json.dumps({f: getattr(e, f) for f in _EDGE_FIELDS},
+                                sort_keys=True, default=str)
         for e in graph._edges
     }
     return nodes, edges

@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+### A short session costs exactly what it costs without the proxy
+
+`python -m benchmarks.savings.runner`, against a client caching its own
+history: 2, 4, 10, 30, 40 and 50 turns **0.0%** (was 30% more at 4 turns,
+11% more at 10, 4% more at 40); 100 turns **11% less**, 150 **25% less**,
+300 **54% less** (were 9%, 17%, 48%).
+
+- `terse_output.enabled` defaults to `auto`: the brevity instruction joins
+  a session's requests at the first windowing cut, which rewrites the start
+  of the request anyway, and stays from then on. Before that cut nothing is
+  added to the request.
+- A windowing cut keeps the tail at the cache minimum rather than half the
+  budget: each cut rewrites the cached prefix, so a smaller tail is a
+  cheaper rewrite and a longer run before the next cut.
+- One-off dips remain at exactly two points, both recovered within a few
+  turns: right after the history first becomes cacheable (20 turns, vs a
+  client that does not cache) and right after the first cut (70 turns).
+
+### Retrieval recall@6 88% → 95%
+
+- Query intent: "what broke", "what is still outstanding", "which did we
+  settle on" boost errors, open work and decisions respectively; the
+  session goal no longer tops every list on importance alone.
+- Paths and identifiers are split into words, so "how do people sign in"
+  reaches `POST /api/auth/login` and `login_success`.
+- Overlap is scored per question word through its aliases; expanding first
+  penalised a question for using a word with many synonyms.
+- Everyday synonyms: slow ↔ latency/performance/render, check ↔ verify,
+  sign in/up ↔ login/register, clean up ↔ teardown.
+
+### Extraction
+
+- Environment recall 67% → 100% on the retrieval benchmark: a version after
+  ~70 runtimes, frameworks and platforms ("FastAPI 0.111", "Node 20",
+  "CUDA 12.1", "Kubernetes 1.29"). Ambiguous names (go, rust, react, pip)
+  need a dotted version, so "pip 3 times" is not an environment.
+- A decision that only restates or builds on an earlier one ("Recharts …
+  (good React integration)" after "Use React") no longer supersedes it; a
+  reversal ("Disable JWT auth" after "Enable") still does.
+- A fix naming an HTTP status ("Fixed: 422 error was …") closes the open
+  error carrying that status.
+
+### Speed
+
+About 12% less time per request in the pipeline: graph rows serialised
+field by field (byte-identical to the stored format, so nothing is
+rewritten) and session-ownership grants cached for 30 seconds instead of a
+database round trip on every request.
+
 ### Short sessions no longer cost more than no proxy; long sessions cost less
 
 Measured with `python -m benchmarks.savings.runner` (input only, against a

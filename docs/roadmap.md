@@ -17,7 +17,7 @@ benchmark, the suite is right and this file is a bug.
 |---|---|---|
 | Extraction, macro F1 on the labelled corpus | 97% overall; **91% on real transcripts**, 98% synthetic | `python -m benchmarks.eval` |
 | Label quality | 0% truncated mid-word; 0 near-duplicate pairs over 169 labels | same run |
-| Retrieval, recall@6 on paraphrased questions | **88% keyword, n=40** (was 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
+| Retrieval, recall@6 on paraphrased questions | **95% keyword, n=40** (was 88%; 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
 | Extraction outside coding | **93%** macro F1 with a domain pack, **11%** without | `benchmarks.eval --corpus benchmarks/eval/corpus_domains` |
 | Out-of-ontology facts surviving windowing | **0% to 100%**, at +25 tokens of resume per session | `benchmarks.resume_quality.runner` |
 | Checkpoint accuracy | 80% task / 100% decision / 100% file recall, 207-token resume | `benchmarks.checkpoint_accuracy.runner` |
@@ -129,7 +129,7 @@ no longer gets quietly worse ranking than the same deployment's proxy.
 The eval is enlarged from 13 cases to **40**, across every corpus session
 including the six captured transcripts, with a grounding check that
 refuses a question its own transcript cannot answer. Keyword ranking
-scores **recall@6 88%** on it. The two misses, named rather than
+scores **recall@6 95%** on it. The two misses, named rather than
 characterised, are `real_audit_concurrency` / "what is still not safe
 across workers" (expects a node about per-process state; returns the
 advisory-lock nodes) and `real_audit_extraction` / "what were we getting

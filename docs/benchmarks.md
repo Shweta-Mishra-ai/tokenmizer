@@ -91,10 +91,12 @@ cache marker, per-model minimum, reads at 0.1x the input price, writes at
 
 | Turns | History | Client alone, no caching | Client caching its own history | Through TokenMizer |
 |---:|---:|---:|---:|---:|
-| 10 | 462 | 2,333 | 2,333 | 2,593 (**11% more**) |
-| 40 | 2,057 | 41,556 | 14,745 | 15,324 (**63% less** / 4% more) |
-| 150 | 7,967 | 596,900 | 77,998 | 64,894 (**89% less** / **17% less**) |
-| 300 | 16,040 | 2,399,067 | 268,767 | 138,954 (**94% less** / **48% less**) |
+| 4 | 163 | 342 | 342 | 342 (**same**) |
+| 10 | 462 | 2,333 | 2,333 | 2,333 (**same**) |
+| 40 | 2,057 | 41,556 | 14,745 | 14,745 (**65% less** / same) |
+| 100 | 5,272 | 264,239 | 41,215 | 36,769 (**86% less** / **11% less**) |
+| 150 | 7,967 | 596,900 | 77,998 | 58,613 (**90% less** / **25% less**) |
+| 300 | 16,040 | 2,399,067 | 268,767 | 124,555 (**95% less** / **54% less**) |
 
 The two percentages are against the two client columns. Where the saving
 comes from: below about 4,000 tokens of history, prompt caching — the
@@ -102,18 +104,22 @@ proxy marks the history cacheable and keeps every earlier byte of the
 request identical; above it, windowing, with the cut held still between
 cuts so the windowed history is cached too.
 
-**What a short session pays, and why.** With `terse_output.enabled: false`
-the proxy costs exactly what the client alone costs at 4, 10 and 40 turns
-(0.0% difference, measured): it adds nothing to the request. With it on,
-the only addition is the brevity instruction, 26 tokens a request, which
-exists to shorten what the model writes back — output costs several times
-more per token than input, so it pays for itself if it trims about five
-output tokens a reply. This benchmark returns a fixed one-word answer and
-so charges the instruction while crediting it nothing.
+**A short session costs exactly what the client alone costs.** Measured at
+2, 4, 10, 30, 40 and 50 turns: 0.0% difference against a client caching
+its own history. The proxy adds nothing to a request until windowing first
+cuts the history; the brevity instruction (`terse_output.enabled: auto`,
+the default) joins at that cut, when the start of the request is being
+rewritten anyway.
 
-Three changes produced these numbers (previous figures in brackets:
-10 turns 21% more, 40 turns 10% more than a caching client, 150 level,
-300 41% less):
+Two lengths show a one-off dip, and why: 20 turns is 2.6% above a client
+that does *not* cache, because the history has just crossed the cache
+minimum and the first cache write has not yet been read back; 70 turns is
+3.3% above a caching client, because the first windowing cut happened a
+few turns before the session ended. Both are recovered within a few turns
+(80 turns: 2.3% less).
+
+What produced these numbers (before: 10 turns 21% more, 40 turns 10%
+more than a caching client, 150 level, 300 41% less):
 
 * **No context block when the request already carries every fact.** On a
   session whose every message is still in the payload — no windowing, no
@@ -128,8 +134,11 @@ Three changes produced these numbers (previous figures in brackets:
   minimum — so for a dozen requests after each cut nothing was cached and
   everything was paid in full, while a client that never windowed paid a
   tenth of the price for its cached history. The cut now keeps at least
-  the cache minimum (plus a margin), and in chat about half the budget, so
-  the tail grows back over several requests before the next cut.
+  the cache minimum (plus a margin) — and no more: every cut rewrites the
+  cached prefix, so a smaller tail makes each rewrite cheaper and leaves
+  more room before the next one.
+* **The brevity instruction waits for the first cut** (`auto`), so nothing
+  is added to a request that windowing has not yet made cheaper.
 
 Read before quoting:
 
@@ -243,7 +252,7 @@ re-render"). If the question quoted the answer, the person would not have
 needed to ask — and those are exactly the cases token-overlap ranking
 cannot serve.
 
-**recall@6 88%** with keyword ranking. Every case is checked to be
+**recall@6 95%** with keyword ranking (88% before query-intent ranking, path-aware tokens and per-word alias scoring). Every case is checked to be
 answerable from its own transcript before scoring: an ungrounded question
 measures extraction, not retrieval, and reads as a retrieval failure
 forever.

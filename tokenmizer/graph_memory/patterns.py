@@ -1914,9 +1914,26 @@ _DEPENDENCY = re.compile(
     re.IGNORECASE,
 )
 
+# A runtime, framework or platform with its version: "FastAPI 0.111",
+# "Node 20", "CUDA 12.1", "Kubernetes 1.29". The list was ten names, so a
+# stack line named three components and two were kept. Names that are also
+# ordinary words ("go", "rust", "react", "spring") need a dotted version;
+# the rest also take a bare major version ("Postgres 15", "Java 21").
+_ENV_ANY_VERSION = (
+    r"Python|Node(?:\.?js)?|Docker|Redis|Postgres(?:QL)?|"
+    r"SQLite|MongoDB|MySQL|MariaDB|Linux|macOS|Windows|Ubuntu|Debian|Alpine|"
+    r"CentOS|Fedora|RHEL|Java|JDK|OpenJDK|Kotlin|Scala|Ruby|PHP|Perl|Elixir|"
+    r"Erlang/OTP|\.NET|dotnet|TypeScript|Deno|Bun|Django|Flask|FastAPI|"
+    r"Rails|Laravel|Angular|Next\.js|Nuxt|Svelte|Vite|webpack|Kubernetes|k8s|"
+    r"Helm|Terraform|Ansible|Kafka|RabbitMQ|Elasticsearch|OpenSearch|nginx|"
+    r"CUDA|cuDNN|PyTorch|TensorFlow|JAX|NumPy|pandas|Spark|Airflow|iOS|Android|"
+    r"Xcode|Gradle|Maven|Clang|GCC|LLVM"
+)
+_ENV_DOTTED_ONLY = (r"Go|Golang|Rust|React|Vue|Spring(?:\s+Boot)?|Swift|Dart|Flutter|"
+                    r"npm|pnpm|yarn|pip")
 _ENV = re.compile(
-    r'(?:Python|Node\.?js?|npm|pip|Docker|Redis|PostgreSQL|SQLite|MongoDB|'
-    r'Linux|macOS|Windows|Ubuntu|Debian)\s+([\d\.]+\+?)',
+    r"\b(?:(?:" + _ENV_ANY_VERSION + r")\s+v?\d+(?:\.\d+)*\+?"
+    r"|(?:" + _ENV_DOTTED_ONLY + r")\s+v?\d+(?:\.\d+)+\+?)(?![\w.])",
     re.IGNORECASE,
 )
 

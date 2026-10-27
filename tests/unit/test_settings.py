@@ -147,7 +147,7 @@ class TestNestedSubconfigsDoNotReadBareEnvVars:
             "sub-configs must only be settable via TOKENMIZER_ prefixed / "
             "__-nested vars on the outer Settings object"
         )
-        assert TerseOutputSettings().enabled is True
+        assert TerseOutputSettings().enabled == "auto"
         assert CompressionSettings().enabled is True
         assert MemorySettings().enabled is True
 

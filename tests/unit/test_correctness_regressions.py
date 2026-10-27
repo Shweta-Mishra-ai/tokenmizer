@@ -528,3 +528,108 @@ def test_the_mcp_server_uses_an_absolute_storage_dir():
 
     from tokenmizer.mcp import server
     assert os.path.isabs(server.TOKENMIZER_STORAGE_DIR)
+
+
+# ── Round 3: zero-overhead short sessions, retrieval, extraction, speed ──────
+
+def test_terse_auto_is_off_until_the_first_windowing_cut(monkeypatch):
+    from tokenmizer.api import app as app_module
+    monkeypatch.setattr(app_module.settings.terse_output, "enabled", "auto")
+    sid = f"terse-{time.time_ns()}"
+    short = [{"role": "user", "content": "hello there"}]
+    assert not app_module._terse_wanted(short, sid, "claude-sonnet-4-6")
+    long_ = [{"role": "user", "content": "word " * 6000}]
+    assert app_module._terse_wanted(long_, sid, "claude-sonnet-4-6")
+    # Sticky: switching it off again would rewrite the cached prefix.
+    assert app_module._terse_wanted(short, sid, "claude-sonnet-4-6")
+    assert not app_module._terse_wanted(long_, None, "claude-sonnet-4-6")
+
+
+def test_a_failure_question_ranks_the_error_first(tmp_path):
+    g = GraphMemory("q", storage_dir=str(tmp_path))
+    g.add_node(NodeType.DECISION, "Use PostgreSQL for the user database",
+               NodeStatus.COMPLETED, importance=0.9)
+    g.add_node(NodeType.TASK, "Implemented the signup form validation",
+               NodeStatus.COMPLETED, importance=0.8)
+    err = g.add_node(NodeType.ERROR, "422 Unprocessable Entity on /api/register",
+                     NodeStatus.COMPLETED, importance=0.5)
+    assert g.query("what broke last week", top_k=1)[0].id == err
+
+
+def test_path_tokens_are_searchable(tmp_path):
+    g = GraphMemory("q", storage_dir=str(tmp_path))
+    g.add_node(NodeType.DECISION, "Use PostgreSQL for the user database",
+               NodeStatus.COMPLETED, importance=0.9)
+    ep = g.add_node(NodeType.ENDPOINT, "POST /api/auth/login", NodeStatus.COMPLETED)
+    assert ep in [n.id for n in g.query("how do people sign in", top_k=2)]
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Environment: Python 3.12, FastAPI 0.111, PostgreSQL 16",
+     ["Python 3.12", "FastAPI 0.111", "PostgreSQL 16"]),
+    ("Stack: Go 1.22, Redis 7, Kubernetes 1.29", ["Go 1.22", "Redis 7", "Kubernetes 1.29"]),
+    ("I ran pip 3 times, let's go 2 steps back", []),
+])
+def test_versioned_environment_items_are_extracted(text, expected):
+    from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
+    got = get_hybrid_extractor(None).heuristic_extract(
+        [{"role": "user", "content": text}]).environments
+    assert got == expected
+
+
+def test_a_decision_that_builds_on_another_does_not_supersede_it(tmp_path):
+    g = GraphMemory("d", storage_dir=str(tmp_path))
+    react = g.add_node(NodeType.DECISION, "Use React and WebSockets", NodeStatus.COMPLETED)
+    g.add_node(NodeType.DECISION,
+               "Recharts for data visualization (good React integration)",
+               NodeStatus.COMPLETED)
+    assert g._nodes[react].status == NodeStatus.COMPLETED
+
+
+def test_a_reversal_of_the_same_product_still_supersedes(tmp_path):
+    g = GraphMemory("d", storage_dir=str(tmp_path))
+    on = g.add_node(NodeType.DECISION, "Enable JWT auth for the API", NodeStatus.COMPLETED)
+    g.add_node(NodeType.DECISION, "Disable JWT auth for the API", NodeStatus.COMPLETED)
+    assert g._nodes[on].status == NodeStatus.SUPERSEDED
+
+
+def test_a_fix_naming_the_http_status_closes_the_error(tmp_path):
+    g = GraphMemory("e", storage_dir=str(tmp_path))
+    _extract_turn_by_turn(g, [
+        {"role": "user", "content": "Login keeps returning 422"},
+        {"role": "assistant", "content": "Fixed: 422 error was missing email validation in "
+                                         "LoginRequest. Login endpoint working now."},
+    ])
+    errors = [n for n in g._nodes.values() if n.type == NodeType.ERROR]
+    assert errors and all(n.status == NodeStatus.COMPLETED for n in errors)
+
+
+def test_fast_serialisation_matches_the_stored_format(tmp_path):
+    import json
+    from dataclasses import asdict
+
+    from tokenmizer.graph_memory.persistence import _serialize_state
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    a = g.add_node(NodeType.DECISION, "Use PostgreSQL for orders", NodeStatus.COMPLETED)
+    b = g.add_node(NodeType.FILE, "db/schema.sql", NodeStatus.IN_PROGRESS)
+    g.add_edge(a, b, __import__("tokenmizer.graph_memory.types",
+                                fromlist=["EdgeType"]).EdgeType.RELATED_TO)
+    nodes, edges = _serialize_state(g)
+    for nid, n in g._nodes.items():
+        assert nodes[nid] == json.dumps(asdict(n), sort_keys=True, default=str)
+    assert list(edges.values()) == [json.dumps(asdict(e), sort_keys=True, default=str)
+                                    for e in g._edges]
+
+
+def test_ownership_cache_is_cleared_by_a_reassign(tmp_path):
+    from tokenmizer.security.ownership import (
+        OwnershipStore,
+        SessionAccessDenied,
+        principal_for_key,
+    )
+    store = OwnershipStore(storage_dir=str(tmp_path))
+    old, new = principal_for_key("a"), principal_for_key("b")
+    store.check_access("s", old, claim=True)
+    store.reassign(old, new)
+    with pytest.raises(SessionAccessDenied):
+        store.check_access("s", old, claim=False)
