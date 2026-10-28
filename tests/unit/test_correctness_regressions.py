@@ -450,8 +450,12 @@ def test_a_stable_cut_keeps_the_request_above_the_cache_minimum(tmp_path):
     g = GraphMemory("w", storage_dir=str(tmp_path))
     conv = []
     for i in range(60):
-        conv.append({"role": "user", "content": f"question {i} " + "about the system " * 8})
-        conv.append({"role": "assistant", "content": f"answer {i} " + "with some detail " * 8})
+        conv.append({"role": "user", "content": f"question {i} " + "about the system " * 24})
+        conv.append({"role": "assistant", "content": f"answer {i} " + "with some detail " * 24})
+    # Well over budget under any tokenizer: at 8 repeats the history was
+    # 5,000 tokens by the char/4 estimate but ~3,700 by tiktoken, so with
+    # the real vocabulary nothing was cut and the test checked nothing.
+    assert count_messages_tokens(conv, "claude-sonnet-4-6") > 2 * 4000
     w = SmartMessageWindow(token_budget=4000, protect_recent=10, max_tail_tokens=0,
                            tool_index_tokens=0)
     out, saved = w.apply(conv, g, "claude-sonnet-4-6", stable=True, min_tail=1280)
