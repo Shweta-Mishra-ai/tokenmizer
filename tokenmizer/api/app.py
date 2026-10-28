@@ -1212,9 +1212,10 @@ def _append_volatile(messages: list[dict], fenced: str) -> None:
 def _inject_context(messages: list[dict], session_id: str,
                     relevant_pairs: list[tuple]) -> None:
     """Append the ranked nodes to this turn, fenced."""
+    from tokenmizer.graph_memory.patterns import clip_words
     ctx_parts = [
         f"  {n.type.value}: {n.label}"
-        + (f" ({n.summary[:50]})" if n.summary else "")
+        + (f" ({clip_words(n.summary, 50)})" if n.summary else "")
         # Tag only nodes recalled from a DIFFERENT session.
         + (f" [from session {sid}]" if sid != session_id else "")
         for n, sid in relevant_pairs[:6]

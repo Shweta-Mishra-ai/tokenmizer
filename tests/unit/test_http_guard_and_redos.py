@@ -304,3 +304,65 @@ def test_supersession_reason_is_its_own_sentence():
         "date-fns because the bundle was too large."}])
     reasons = [d["reason"] for d in out.decisions if d["label"] == "Use date-fns"]
     assert reasons and "TODO" not in reasons[0] and "bundle" in reasons[0]
+
+
+# ── Found by the live end-to-end run ─────────────────────────────────────────
+
+def test_keys_listed_only_in_api_keys_still_require_auth(proxy, monkeypatch):
+    """With `api_keys` set and no primary `api_key`, auth read only the
+    primary, saw "", and ran in dev mode: every request got in and every
+    caller shared one principal."""
+    c, app_module = proxy
+    monkeypatch.setattr(app_module.settings, "api_keys", ["key-alice", "key-bob"], raising=False)
+    assert c.post("/v1/chat/completions", json=_CHAT).status_code == 401
+    r = c.post("/v1/chat/completions", json=_CHAT, headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 401
+    r = c.post("/v1/chat/completions", json={**_CHAT, "session_id": "alice-only"},
+               headers={"X-API-Key": "key-alice"})
+    assert r.status_code == 200
+    r = c.get("/api/graph/alice-only", headers={"X-API-Key": "key-bob"})
+    assert r.status_code in (403, 404)
+
+
+def _decision_states(tmp_path, turns):
+    from tokenmizer.graph_memory.graph import GraphMemory, NodeType
+    g = GraphMemory("s", storage_dir=str(tmp_path))
+    msgs = []
+    for t in turns:
+        msgs += [{"role": "user", "content": t}, {"role": "assistant", "content": "Done."}]
+        g.extract_from_messages(msgs)
+    return {n.label: (n.status.value, n.summary)
+            for n in g._nodes.values() if n.type == NodeType.DECISION}
+
+
+def test_restating_a_decision_as_a_switch_keeps_it_active(tmp_path):
+    """"Use MySQL", the replaced side of "switched from MySQL to
+    PostgreSQL", went through topic detection as the newest database
+    decision and superseded the PostgreSQL one; nothing stayed active."""
+    states = _decision_states(tmp_path, [
+        "Decided: use PostgreSQL for the orders database.",
+        "We switched from MySQL to PostgreSQL because we need JSONB."])
+    assert states["use PostgreSQL for the orders database"][0] == "completed"
+    assert states["Use MySQL"][0] == "superseded"
+
+
+def test_a_genuine_switch_still_supersedes_the_earlier_choice(tmp_path):
+    states = _decision_states(tmp_path, [
+        "Decided: use MySQL for the orders database.",
+        "We switched from MySQL to PostgreSQL because we need JSONB."])
+    assert states["use MySQL for the orders database"][0] == "superseded"
+    assert states["Use PostgreSQL"][0] == "completed"
+
+
+def test_a_switch_that_opens_the_message_keeps_its_first_letter(tmp_path):
+    states = _decision_states(tmp_path, [
+        "We switched from moment.js to date-fns because the bundle was too large."])
+    assert states["Use date-fns"][1].startswith("We switched")
+
+
+def test_clip_words_never_cuts_mid_word():
+    from tokenmizer.graph_memory.patterns import clip_words
+    out = clip_words("We switched from moment.js to date-fns because the bundle was too large", 50)
+    assert out == "We switched from moment.js to date-fns because…"
+    assert clip_words("short", 50) == "short"
+    assert len(clip_words("x" * 80, 20)) == 20

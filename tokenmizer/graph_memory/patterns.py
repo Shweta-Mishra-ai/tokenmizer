@@ -830,6 +830,20 @@ def _content_words(text: str) -> int:
     return len({w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2})
 
 
+def clip_words(text: str, max_chars: int) -> str:
+    """`text` within `max_chars`, cut at a word boundary and marked with an
+    ellipsis. A plain slice injected "(We switched from moment.js to
+    date-fns because the )" into the request: half a reason, read by the
+    model as a whole one."""
+    text = " ".join((text or "").split())
+    if len(text) <= max_chars:
+        return text
+    head = text[:max_chars - 1]
+    if " " in head and not text[max_chars - 1].isspace():
+        head = head.rsplit(" ", 1)[0]
+    return head.rstrip(" ,;:-") + "…"
+
+
 def _clip(text: str, max_chars: int = 90) -> str:
     """Trim a captured span to one readable clause.
 

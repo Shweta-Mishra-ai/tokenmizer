@@ -1393,7 +1393,9 @@ class HybridExtractor:
             # window: 60 characters back reached into the sentence before,
             # and "TODO: add rate limiting" became the reason date-fns won.
             lo = max(0, m_start - 160)
-            start = max(content.rfind(". ", lo, m_start) + 2, content.rfind("\n", lo, m_start) + 1, lo)
+            dot = content.rfind(". ", lo, m_start)
+            # -1 + 2 would start at index 1: "We switched" became "e switched".
+            start = max(dot + 2 if dot != -1 else lo, content.rfind("\n", lo, m_start) + 1, lo)
             brk = _SENTENCE_BREAK.search(content, m_start, m_start + 200)
             end = min(brk.start() if brk else len(content), m_start + 200)
             surrounding = content[start:end].replace("\n", " ").strip().rstrip(".")

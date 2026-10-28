@@ -6,6 +6,13 @@
 
 Reproduced against the default (keyless, localhost) setup, then fixed:
 
+- **Authentication bypass with `api_keys` only.** A deployment that set
+  `api_keys` and no primary `api_key` ran with no authentication at all,
+  and every caller shared one principal, so sessions were not isolated.
+  `TOKENMIZER_ENV=production` booted into that state, because its startup
+  check counted `api_keys` while the request check did not. Auth is now
+  decided from every configured key, and fails closed (503) if the list
+  cannot be read.
 - **Cross-site writes.** `POST /api/decision/invalidate?...` and
   `POST /api/checkpoint?...` are "simple" requests, so any web page could
   send them through the browser with no CORS preflight. Browser writes from
@@ -33,6 +40,18 @@ Reproduced against the default (keyless, localhost) setup, then fixed:
   pip/setuptools/wheel first.
 - Invisible and bidirectional control characters in the injection-fence
   source are written as escapes (Trojan Source).
+
+### Memory (found by a live end-to-end run)
+
+- Restating a decision as a switch erased it. "Decided: use PostgreSQL",
+  then later "we switched from MySQL to PostgreSQL", superseded the
+  PostgreSQL decision with "Use MySQL" (the replaced side of the switch,
+  read as the newest choice), and the session was left with no active
+  database decision. Asked "what database did we choose?", the proxy
+  injected unrelated facts. The replaced side is now recorded as history.
+- A switch stated at the start of a message lost its first letter in the
+  recorded reason ("e switched from…"), and injected reasons were cut
+  mid-phrase ("…because the )"). Both are now cut at a word boundary.
 
 ### Dashboard
 

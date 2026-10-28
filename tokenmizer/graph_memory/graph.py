@@ -416,6 +416,7 @@ class GraphMemory:
         importance: float = 0.5,
         confidence: float = 0.7,
         source_role: str | None = "assistant",
+        detect_conflicts: bool = True,
     ) -> str:
         from tokenmizer.security.fencing import is_injection_text
         from tokenmizer.security.redaction import redact_node
@@ -666,7 +667,7 @@ class GraphMemory:
         self._dirty = True
 
         # Decision contradiction detection — capture full transition story
-        if node_type == NodeType.DECISION and status == NodeStatus.COMPLETED:
+        if node_type == NodeType.DECISION and status == NodeStatus.COMPLETED and detect_conflicts:
             try:
                 from tokenmizer.graph_memory.decision_tracker import (
                     find_contested_decisions,
@@ -844,9 +845,10 @@ class GraphMemory:
         self._transitions.append(transition)
         self._persist_transition(transition)
 
+        from tokenmizer.graph_memory.patterns import clip_words
         old_node.summary = (
-            f"Superseded by: {new_node.label[:60]}"
-            + (f" — {reason_text[:40]}" if reason_text else "")
+            f"Superseded by: {clip_words(new_node.label, 60)}"
+            + (f" — {clip_words(reason_text, 40)}" if reason_text else "")
         )
         self.add_edge(new_id, old_id, EdgeType.SUPERSEDES, weight=1.0)
         self._dirty = True
@@ -1208,6 +1210,15 @@ class GraphMemory:
                 for gid in goal_ids:
                     self.add_edge(nid, gid, EdgeType.PART_OF)
 
+        # The replaced side of each switch the transcript states ("switched
+        # from MySQL to PostgreSQL" emits "Use MySQL" and "Use PostgreSQL").
+        # It is history, not a new choice: run through topic detection as
+        # the newest database decision, "Use MySQL" superseded an earlier
+        # "use PostgreSQL for orders", then was itself superseded by it, and
+        # the session was left with no active database decision at all.
+        replaced = {f"Use {sup.get('old', '')}" for sup in data.get("superseded", [])
+                    if isinstance(sup, dict) and sup.get("old")}
+
         # Decisions — linked to tasks that share vocabulary
         for d in data.get("decisions", []):
             label = d.get("label", "")
@@ -1228,7 +1239,8 @@ class GraphMemory:
             nid = self.add_node(NodeType.DECISION, label, NodeStatus.COMPLETED,
                                 summary=summary, importance=0.9,
                                 confidence=node_confidence,
-                                source_role=d.get("source_role") or "assistant")
+                                source_role=d.get("source_role") or "assistant",
+                                detect_conflicts=label not in replaced)
             if nid:
                 decision_ids.append(nid)
                 # A decision naming a file that was already in the graph.
