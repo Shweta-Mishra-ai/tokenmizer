@@ -46,7 +46,8 @@ logger = logging.getLogger(__name__)
 # ─── Code-block protection ──────────────────────────────────────────────────
 
 # Matches fenced code blocks: ```lang\n...\n``` or ```\n...\n```
-_FENCED_CODE_RE = re.compile(r'```[^\n]*\n.*?```', re.DOTALL)
+# Info string capped; see graph_memory.patterns._FENCED.
+_FENCED_CODE_RE = re.compile(r'```[^\n]{0,200}\n.*?```', re.DOTALL)
 # Matches inline code spans: `like this`
 _INLINE_CODE_RE = re.compile(r'`[^`\n]+`')
 

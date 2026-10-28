@@ -257,6 +257,16 @@ class SecuritySettings(BaseModel):
     # The keyword filter that answers 400 to well-known jailbreak
     # phrasings. A speed bump, not a defence; see security/middleware.py.
     injection_filter: bool = True
+    # Hosts this server answers to, by Host header. Empty (the default):
+    # localhost only when no api_key is set — which blocks DNS-rebinding
+    # pages from reading memory through the visitor's browser — and any
+    # host once a key is required. List the names you reach it by
+    # (e.g. "tokenmizer.internal") to serve them without a key; "*" allows all.
+    trusted_hosts: List[str] = Field(default_factory=list)
+    # Largest request body accepted, in bytes. 32 MiB covers an agent turn
+    # carrying large tool output; beyond it a request is a 413, not a
+    # memory spike.
+    max_request_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
 
 
 class FileIntelligenceSettings(BaseModel):

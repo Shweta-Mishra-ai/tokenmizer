@@ -110,8 +110,11 @@ def _key_value_sub(m: "re.Match") -> str:
 # keep out of stored memory, but it is also the content of countless
 # legitimate requests ("send the report to alice@acme.com"), so the copy
 # sent to the provider keeps it unless the operator asks otherwise. The
-# lookahead leaves `git@github.com:org/repo` alone.
-_EMAIL = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b(?!:)')
+# lookahead leaves `git@github.com:org/repo` alone. The parts are capped at
+# RFC 5321's limits (64-char local part, 253-char domain): unbounded, a
+# 40k-char run of "1.1.1..." with no "@" was rescanned from every start
+# position and took 1.3s (quadratic).
+_EMAIL = re.compile(r'\b[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,253}\.[A-Za-z]{2,63}\b(?!:)')
 
 _MEMO_MAX_ENTRIES = 32_768
 _MEMO_MAX_CHARS = 64_000

@@ -471,19 +471,23 @@ def _is_example_mention(text: str, pos: int) -> bool:
     # ("index.md" in "docs/index.md") is judged by what precedes the path.
     while pos > 0 and not text[pos - 1].isspace() and text[pos - 1] not in "(`'\"":
         pos -= 1
-    start = max(text.rfind(c, 0, pos) for c in ".!?\n") + 1
-    clause = text[max(start, pos - 160):pos]
+    lo = max(0, pos - 160)
+    start = max(text.rfind(c, lo, pos) for c in ".!?\n") + 1
+    clause = text[max(start, lo):pos]
     if _EXAMPLE_LEAD.search(clause):
         return True
     return bool(_CATEGORY_BEFORE_PAREN.search(clause)) and not _WORK_VERB.search(clause)
 
 
-_MODULE_PATH = re.compile(r"(?:[A-Za-z_]\w*\.){1,6}")
+# Identifier parts are capped at 80 characters. With `\w*` these run once
+# per typed error, each attempt backtracking over the whole line, and
+# 16k chars of "AbcError" with no newline took minutes.
+_MODULE_PATH = re.compile(r"(?:[A-Za-z_]\w{0,80}\.){1,6}")
 _TRACEBACK_LAST_LINE = re.compile(
-    r"(?:(?:[A-Za-z_]\w*\.){0,6}[A-Z]\w*(?:Error|Exception|Warning|Exit|Interrupt)\w*"
+    r"(?:(?:[A-Za-z_]\w{0,80}\.){0,6}[A-Z]\w{0,80}?(?:Error|Exception|Warning|Exit|Interrupt)\w{0,80}"
     # A class under an exceptions module needs no suffix:
     # "django.core.exceptions.ImproperlyConfigured: Requested setting ...".
-    r"|(?:[A-Za-z_]\w*\.){0,5}(?:exceptions?|errors?|exc)\.[A-Z]\w*): \S")
+    r"|(?:[A-Za-z_]\w{0,80}\.){0,5}(?:exceptions?|errors?|exc)\.[A-Z]\w{0,80}): \S")
 
 
 _IMPORT_BEFORE = re.compile(r"\bimport\s+$")
@@ -774,6 +778,11 @@ class ExtractedData:
     evidence: list[dict] = field(default_factory=list)
     # Confidence per category (filled by merger)
     confidence: dict[str, float] = field(default_factory=dict)
+
+
+# The end of a sentence: punctuation followed by whitespace or the end, or
+# a newline. "moment.js" has no space after its dot and is not one.
+_SENTENCE_BREAK = re.compile(r"[.!?](?=\s|$)|\n")
 
 
 class HybridExtractor:
@@ -1380,8 +1389,14 @@ class HybridExtractor:
         # pattern recorded the rationale as the replacement decision.
         for old_label, new_label, m_start, m_end in find_supersessions(content):
             result.superseded.append({"old": old_label, "new": new_label})
-            start = max(0, m_start - 60)
-            surrounding = content[start:m_end + 80].replace("\n", " ").strip()
+            # The sentence that states the switch, not a fixed character
+            # window: 60 characters back reached into the sentence before,
+            # and "TODO: add rate limiting" became the reason date-fns won.
+            lo = max(0, m_start - 160)
+            start = max(content.rfind(". ", lo, m_start) + 2, content.rfind("\n", lo, m_start) + 1, lo)
+            brk = _SENTENCE_BREAK.search(content, m_start, m_start + 200)
+            end = min(brk.start() if brk else len(content), m_start + 200)
+            surrounding = content[start:end].replace("\n", " ").strip().rstrip(".")
             for label in (f"Use {old_label}", f"Use {new_label}"):
                 norm = self._normalize(label)
                 if norm not in seen_decisions and len(norm) > 6:

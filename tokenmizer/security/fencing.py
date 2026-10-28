@@ -56,7 +56,10 @@ _PREAMBLE = (
 # every UI a reviewer would use to read a message, so a phrase carrying
 # them passes a denylist and reads normally to the model.
 _INVISIBLE = re.compile(
-    r"[​-‏‪-‮⁠-⁤﻿­]"
+    # Escaped, never literal: raw bidirectional controls in source are the
+    # "Trojan Source" pattern (CVE-2021-42574) — they reorder how the code
+    # itself displays to a reviewer.
+    "[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad]"
 )
 
 # Injection phrasings, applied to text ABOUT to be remembered. Narrower

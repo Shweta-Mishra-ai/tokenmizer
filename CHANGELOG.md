@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+### Security
+
+Reproduced against the default (keyless, localhost) setup, then fixed:
+
+- **Cross-site writes.** `POST /api/decision/invalidate?...` and
+  `POST /api/checkpoint?...` are "simple" requests, so any web page could
+  send them through the browser with no CORS preflight. Browser writes from
+  an origin not in `cors_origins` (or the proxy's own) now get 403. Clients
+  that send no `Origin` header (SDKs, curl, agents) are unaffected.
+- **DNS rebinding.** With no `api_key`, only `localhost`/`127.0.0.1`/`::1`
+  are answered (421 otherwise), so a page whose domain re-resolves to
+  127.0.0.1 cannot read graphs or resume blocks. New setting
+  `security.trusted_hosts` for LAN or reverse-proxy hostnames.
+- **Request size.** Bodies over `security.max_request_bytes` (32 MiB) get
+  413 before parsing; a 60 MB body used to be read and processed. Session
+  ids over 256 characters get 422 (a 20,000-character id was stored).
+- **Quadratic regexes (CPU DoS).** Inputs with no sentence break made
+  clause scans and several patterns rescan the text from every position:
+  100k chars of "Decided: " took 8.7s in extraction (now 0.3s); 40k chars
+  of "1.1.1..." took 1.3s in redaction; 16k chars of "AbcError" took over
+  two minutes in one traceback pattern. Every pattern in the package was
+  timed at two input sizes; all now scale linearly.
+- **Dashboard.** The session graph preview runs in a sandboxed frame, so
+  nothing in it can read the API key the dashboard holds. Every response
+  carries `nosniff` and `no-referrer`; HTML pages refuse framing.
+- **Dependencies.** Floors raised past published advisories: `certifi`,
+  `opentelemetry-*` (observability extra), `pypdf` (files extra; the
+  unmaintained PyPDF2 fallback is gone). The Docker image upgrades
+  pip/setuptools/wheel first.
+- Invisible and bidirectional control characters in the injection-fence
+  source are written as escapes (Trojan Source).
+
+### Dashboard
+
+- The layer badges show the server's real configuration from `/health`
+  instead of a hard-coded "Active".
+- `/health` reports counts, and the panel called `.forEach` on them and
+  threw, leaving the health indicator stuck.
+- With an API key set, loading the page asked for the key three times
+  (one prompt per parallel request); it now asks once.
+- Graph nodes at the edge of one group no longer overlap the next group.
+- A supersession's reason is the sentence that states it, not the tail of
+  the sentence before.
+
 ### A short session costs exactly what it costs without the proxy
 
 `python -m benchmarks.savings.runner`, against a client caching its own

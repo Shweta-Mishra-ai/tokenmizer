@@ -678,22 +678,20 @@ class PDFExtractor:
             import pypdf  # type: ignore
             reader = pypdf.PdfReader(io.BytesIO(content_bytes))
         except ImportError:
-            try:
-                import PyPDF2 as pypdf  # type: ignore
-                reader = pypdf.PdfReader(io.BytesIO(content_bytes))
-            except ImportError:
-                # Fallback: treat as text
-                text = content_bytes.decode("utf-8", errors="ignore")
-                truncated, was_cut = _truncate_to_budget(text, token_budget)
-                return FileExtractionResult(
-                    file_type="pdf", original_size_bytes=len(content_bytes),
-                    original_tokens=original_tokens,
-                    extracted_tokens=count_tokens(truncated),
-                    tokens_saved=original_tokens - count_tokens(truncated),
-                    savings_pct=0.0, content=truncated,
-                    summary="PDF (no parser, text fallback)",
-                    strategy_used="text_fallback", was_truncated=was_cut,
-                )
+            # No fallback to PyPDF2: it is unmaintained and carries the
+            # crafted-PDF denial-of-service bugs pypdf has since fixed.
+            # Without pypdf the bytes are read as text.
+            text = content_bytes.decode("utf-8", errors="ignore")
+            truncated, was_cut = _truncate_to_budget(text, token_budget)
+            return FileExtractionResult(
+                file_type="pdf", original_size_bytes=len(content_bytes),
+                original_tokens=original_tokens,
+                extracted_tokens=count_tokens(truncated),
+                tokens_saved=original_tokens - count_tokens(truncated),
+                savings_pct=0.0, content=truncated,
+                summary="PDF (no parser, text fallback)",
+                strategy_used="text_fallback", was_truncated=was_cut,
+            )
 
         num_pages = len(reader.pages)
         parts = [f"File: {filename} | {num_pages} pages"]

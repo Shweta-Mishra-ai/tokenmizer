@@ -743,9 +743,13 @@ function layoutRadial(){
   const maxExt=vis.reduce((m,n)=>Math.max(m,labelExtent(n)),0);
   const R=Math.max(220,maxExt*2.6,Math.min(W,H)*0.30);
   const total=vis.length;
+  // The gap between two types, in radians, is at least ~34px on screen:
+  // as a fixed angle it was 12px on a small ring, and the last node of one
+  // type sat on the first node of the next, labels and all.
+  const gap=Math.min(Math.max(GROUP_GAP,34/R),(2*Math.PI)/(groups.length*3));
   // Share the circle by node count, then lift every group to MIN_ARC and
   // take the difference back off the groups big enough to spare it.
-  const free=2*Math.PI-GROUP_GAP*groups.length;
+  const free=2*Math.PI-gap*groups.length;
   const raw=groups.map(g=>free*(g.items.length/total));
   const lifted=raw.map(a=>Math.max(a,MIN_ARC));
   const over=lifted.reduce((s,a)=>s+a,0)-free;
@@ -754,20 +758,21 @@ function layoutRadial(){
     if(slack>0)for(let i=0;i<lifted.length;i++)
       lifted[i]-=Math.max(0,lifted[i]-MIN_ARC)/slack*over;
   }
-  let angle=-Math.PI/2+GROUP_GAP/2;   // start at 12 o'clock
+  let angle=-Math.PI/2+gap/2;   // start at 12 o'clock
   const bands=[];
   groups.forEach((g,gi)=>{
     const arc=lifted[gi];
-    // One item would sit on the arc's leading edge; centre it instead.
-    const step=g.items.length>1?arc/(g.items.length-1):0;
-    const start=g.items.length>1?angle:angle+arc/2;
+    // Each node at the centre of its own equal slot of the arc, so the ends
+    // of neighbouring types are a half-slot plus the gap apart rather than
+    // touching across it.
+    const step=arc/g.items.length;
     g.items.forEach((n,i)=>{
-      const a=start+i*step;
+      const a=angle+(i+0.5)*step;
       n._a=a; n.fx=cx+Math.cos(a)*R; n.fy=cy+Math.sin(a)*R;
       n.x=n.fx; n.y=n.fy;
     });
-    bands.push({type:g.type,a0:angle-GROUP_GAP*0.30,a1:angle+arc+GROUP_GAP*0.30});
-    angle+=arc+GROUP_GAP;
+    bands.push({type:g.type,a0:angle-gap*0.30,a1:angle+arc+gap*0.30});
+    angle+=arc+gap;
   });
   // The ring of type names sits OUTSIDE every node label, so the picture
   // reads dot, then the thing's own name, then the name of its layer. Put

@@ -546,15 +546,23 @@ class SemanticCache:
         re.compile(r'sk-ant-|sk-proj-|sk-[A-Za-z0-9]{20,}|ghp_|AIza|Bearer\s', re.I),
         re.compile(r'\b(my|our)\s+(name|email|password|key|secret|token|api[_\s]key)\b', re.I),
         re.compile(r'(?:DATABASE_URL|REDIS_URL|MONGO_URL|postgres://|mysql://|redis://)', re.I),
-        re.compile(r'[A-Z_]{4,}\s*=\s*\S{4,}'),
-        re.compile(r'\b(project|company|client|internal|private)\b.*?\b(config|secret|key|token)\b', re.I | re.S),
+        # Starts only at the head of a capitalised run; see preferences.py.
+        re.compile(r'(?<![A-Z_])[A-Z_]{4,}\s*=\s*\S{4,}'),
     ]
+    # "<owner word> ... <secret word>", checked as two linear searches. As one
+    # `A.*?B` pattern under re.S, every A with no B after it scanned to the
+    # end of the prompt: quadratic in the number of A words.
+    _OWNER_WORD = re.compile(r'\b(?:project|company|client|internal|private)\b', re.I)
+    _SECRET_WORD = re.compile(r'\b(?:config|secret|key|token)\b', re.I)
 
     def _is_session_sensitive(self, prompt: str) -> bool:
         """True if prompt contains session-specific content — never share cross-session."""
         for pat in self._SENSITIVE_PATTERNS:
             if pat.search(prompt):
                 return True
+        owner = self._OWNER_WORD.search(prompt)
+        if owner and self._SECRET_WORD.search(prompt, owner.end()):
+            return True
         # Long prompts with code/data are likely session-specific
         if len(prompt) > 800 and ("\n" in prompt or "```" in prompt):
             return True

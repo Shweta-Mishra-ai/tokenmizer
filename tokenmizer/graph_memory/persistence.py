@@ -793,7 +793,8 @@ def load(graph: "GraphMemory") -> None:
                 # tables are where its data actually lives; `graphs` is
                 # only the v1 rollback copy.
                 for table in ("graph_nodes", "graph_edges", "graph_meta", "graphs"):
-                    conn.execute(f"DELETE FROM {table} WHERE session_id=?",
+                    # `table` is one of four literals above, never input.
+                    conn.execute(f"DELETE FROM {table} WHERE session_id=?",  # nosec B608
                                  (graph.session_id,))
                 conn.commit()
             finally:

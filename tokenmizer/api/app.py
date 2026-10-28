@@ -755,6 +755,17 @@ async def _validation_error(request: Request, exc: RequestValidationError) -> Re
     body = json.dumps({"detail": jsonable_encoder(exc.errors())}, ensure_ascii=True)
     return Response(content=body, status_code=422, media_type="application/json")
 
+# Outermost: runs before routing and before any body is read. See
+# security/http_guard.py for the four attacks it closes.
+from tokenmizer.security.http_guard import MAX_SESSION_ID_LENGTH, HTTPGuard  # noqa: E402
+
+app.add_middleware(
+    HTTPGuard,
+    auth_configured=lambda: bool(settings.api_key or any(settings.api_keys)),
+    trusted_hosts=lambda: settings.security.trusted_hosts,
+    cors_origins=lambda: settings.cors_origins,
+    max_body_bytes=settings.security.max_request_bytes,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,  # defaults: localhost:3000, localhost:8000
@@ -864,6 +875,8 @@ class ChatRequest(BaseModel):
                 v.encode("utf-8")
             except UnicodeEncodeError:
                 raise ValueError("session_id must be valid Unicode text") from None
+            if len(v) > MAX_SESSION_ID_LENGTH:
+                raise ValueError(f"session_id is longer than {MAX_SESSION_ID_LENGTH} characters")
         return v
 
 
@@ -2333,6 +2346,16 @@ async def health():
         "checkpoint_data_loss": checkpoints_data_loss,
         "privacy": privacy.status(settings),
         "provider_sdk_missing": missing_provider_sdk(settings.provider),
+        # Which layers are switched on. Configuration, not data, and read by
+        # the dashboard so its badges show what this server actually does.
+        "layers": {
+            "graph_memory": bool(settings.graph_checkpoint.enabled),
+            "semantic_cache": bool(settings.cache.enabled),
+            "compression": bool(settings.compression.enabled),
+            "file_intelligence": bool(settings.file_intelligence.enabled),
+            "terse_output": settings.terse_output.enabled,
+            "model_map": len(settings.model_map),
+        },
     }
 
 

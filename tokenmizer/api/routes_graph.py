@@ -196,7 +196,10 @@ async def analyze_file(req: AnalyzeRequest):
         raise HTTPException(status_code=422, detail="filename is required.")
 
     try:
-        result = app_module._file_intelligence.process(
+        # Parsing a large CSV or PDF is CPU work measured in seconds; on the
+        # event loop it stalled every other request for that long.
+        result = await asyncio.to_thread(
+            app_module._file_intelligence.process,
             req.content, req.filename,
             token_budget=req.token_budget, query=req.query,
         )

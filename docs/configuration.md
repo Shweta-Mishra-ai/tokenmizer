@@ -113,6 +113,8 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_SECURITY__REDACT_PROVIDER_MESSAGES` | `true` | Scrub credentials from messages before they reach the provider. Only the value is replaced (`api_key=[REDACTED]`); code such as `api_key: Optional[str]` or `password = os.environ[...]` is left alone. Stored memory is redacted regardless of this setting |
 | `TOKENMIZER_SECURITY__REDACT_EMAILS_TO_PROVIDER` | `false` | Also replace email addresses in what the provider sees. Stored memory always redacts them |
 | `TOKENMIZER_SECURITY__INJECTION_FILTER` | `true` | The keyword filter that answers 400 to well-known jailbreak phrasings. Quoted text is not scanned, so discussing a phrase is not using it |
+| `TOKENMIZER_SECURITY__TRUSTED_HOSTS` | `[]` | Host names the proxy answers to. With no `api_key` set and this list empty, only `localhost`, `127.0.0.1` and `::1` are accepted (421 otherwise), which stops DNS-rebinding pages from reading your graphs through the browser. List your hostname here when serving keyless on a LAN or behind a proxy; `["*"]` disables the check. With an `api_key` set, any Host is accepted |
+| `TOKENMIZER_SECURITY__MAX_REQUEST_BYTES` | `33554432` (32 MiB) | Largest request body accepted; larger bodies get 413 before any of it is parsed |
 | `TOKENMIZER_FILE_INTELLIGENCE__ENABLED` | `true` | Replace large pasted files in **older** turns with a digest |
 | `TOKENMIZER_FILE_INTELLIGENCE__TOKEN_BUDGET_PER_FILE` | `600` | Size of each digest |
 | `TOKENMIZER_FILE_INTELLIGENCE__DIGEST_CURRENT_TURN` | `false` | Also digest the turn being asked. Off: a digest is a sample, and "which line is wrong" or "sum this column" cannot be answered from one |

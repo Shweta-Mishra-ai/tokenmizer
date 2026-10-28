@@ -356,11 +356,25 @@ _WORK_CLAUSE_START = re.compile(
 )
 
 
+# How far either side of a match the clause helpers look for a sentence
+# boundary. Without a cap, a message with no ".!?\n" made every match scan
+# the whole text: 100k chars of "Decided: " took 8.7s (quadratic). A
+# negation or question mark further away than this belongs to another
+# thought in practice.
+_CLAUSE_SCAN = 400
+_SENTENCE_END_FWD = re.compile(r"[.!?\n]")
+
+
 def _clause_start(content: str, pos: int) -> int:
-    for i in range(pos - 1, -1, -1):
-        if content[i] in ".!?\n":
-            return i + 1
-    return 0
+    lo = max(0, pos - _CLAUSE_SCAN)
+    cut = max(content.rfind(c, lo, pos) for c in ".!?\n")
+    return cut + 1 if cut >= 0 else lo
+
+
+def _sentence_end(content: str, match_start: int) -> int:
+    hi = min(len(content), match_start + _CLAUSE_SCAN)
+    m = _SENTENCE_END_FWD.search(content, match_start, hi)
+    return m.start() if m else hi
 
 
 def _tech_mention_is_a_decision(content: str, start: int, end: int) -> bool:
@@ -438,24 +452,15 @@ _CLAUSE_BREAK_BACK = re.compile(r"[.!?\n,;:]|\s(?:but|and|so|then|however)\s",
 def _is_negated_context(content: str, match_start: int) -> bool:
     """True if `match_start` in `content` falls inside a negated clause, or
     in a clause that reports someone else's choice or a rejected option."""
-    clause_start = 0
-    for i in range(match_start - 1, -1, -1):
-        if content[i] in ".!?\n":
-            clause_start = i + 1
-            break
-    if _NEGATION_WORDS.search(content[clause_start:match_start]):
-        return True
-    sentence_end = len(content)
-    for i in range(match_start, len(content)):
-        if content[i] in ".!?\n":
-            sentence_end = i
-            break
+    clause_start = _clause_start(content, match_start)
     before = content[clause_start:match_start]
+    if _NEGATION_WORDS.search(before):
+        return True
     breaks = list(_CLAUSE_BREAK_BACK.finditer(before))
     clause = before[breaks[-1].end():] if breaks else before
     if _REPORTED_CHOICE.search(clause):
         return True
-    return bool(_REJECTED_AFTER.search(content[match_start:sentence_end]))
+    return bool(_REJECTED_AFTER.search(content[match_start:_sentence_end(content, match_start)]))
 
 
 # A label that names no option at all ("our choice", "the plan") or states
@@ -479,11 +484,7 @@ def is_bogus_decision_label(label: str) -> bool:
 # is ahead, not behind.
 def _is_question_context(content: str, match_start: int) -> bool:
     """True if the clause containing `match_start` ends in a question mark."""
-    clause_end = len(content)
-    for i in range(match_start, len(content)):
-        if content[i] in ".!?\n":
-            clause_end = i
-            break
+    clause_end = _sentence_end(content, match_start)
     return content[clause_end:clause_end + 1] == "?"
 
 
@@ -2131,7 +2132,9 @@ def looks_english(text: str) -> bool:
 # exception, `FAILED tests/…`, `error: …` — is left visible. And a quoted
 # span naming an exception or a status code is the error message itself
 # ('I get "TypeError: x is undefined"'), so it is left visible too.
-_FENCED = re.compile(r"(```|~~~)[^\n]*\n.*?(?:\1|\Z)", re.DOTALL)
+# The info string after the opening fence is capped: unbounded, a run of
+# backticks with no newline was rescanned from every position (quadratic).
+_FENCED = re.compile(r"(```|~~~)[^\n]{0,200}\n.*?(?:\1|\Z)", re.DOTALL)
 _TABLE_ROW = re.compile(r"^[ \t]*\|.*\|[ \t]*$", re.MULTILINE)
 _QUOTED = re.compile(r'"[^"\n]{1,300}"|“[^”\n]{1,300}”')
 _LOG_ERROR_LINE = re.compile(

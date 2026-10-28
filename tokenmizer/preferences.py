@@ -59,7 +59,9 @@ _EXCLUSIONS = [
     re.compile(r'\b(?:password|secret|key|token|credential)\b', re.I),
     re.compile(r'\b(?:project|client|customer|company)\b.{3,30}\b'
                r'(?:specific|only|internal)\b', re.I),
-    re.compile(r'[A-Z_]{5,}\s*=\s*\S'),          # env var
+    # The lookbehind starts a match only at the head of a capitalised run;
+    # unanchored, a long run was rescanned from every position (quadratic).
+    re.compile(r'(?<![A-Z_])[A-Z_]{5,}\s*=\s*\S'),   # env var
     re.compile(r'sk-|ghp_|AIza'),                 # API key shapes
     # A complaint is not a standing instruction. "I hate this bug" and "I
     # hate that the tests are flaky" are about today; the signal list

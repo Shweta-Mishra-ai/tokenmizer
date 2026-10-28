@@ -12,6 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # an editable/-e install here would fail because hatchling can't find the
 # package dir). tomllib is stdlib in 3.11+.
 COPY pyproject.toml README.md ./
+# The base image's pip, setuptools and wheel carry known path-traversal and
+# code-execution advisories in their install paths; upgrade them before
+# they install anything.
+RUN pip install --no-cache-dir --upgrade "pip>=26.2" "setuptools>=84.1.0" "wheel>=0.46.2"
 RUN python -c "import tomllib; \
     deps = tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']; \
     print('\n'.join(deps))" > /tmp/reqs.txt \

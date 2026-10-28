@@ -402,7 +402,7 @@ class GraphMemory:
 
     def _node_id(self, node_type: str, label: str) -> str:
         normalized = f"{node_type}:{label.lower().strip()}"
-        return hashlib.sha1(normalized.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+        return hashlib.sha1(normalized.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:12]
 
     def _normalize_label(self, label: str) -> str:
         return label.lower().strip().rstrip(".,!?")
@@ -895,7 +895,7 @@ class GraphMemory:
                 # "yes" accepting a later proposal was lost. Chained to the
                 # message before it, each occurrence is its own message.
                 if fp is None and hashes and len(_content_to_text(m.get("content"))) <= 24:
-                    h = hashlib.sha1((hashes[-1] + h).encode()).hexdigest()[:16]
+                    h = hashlib.sha1((hashes[-1] + h).encode(), usedforsecurity=False).hexdigest()[:16]
             hashes.append(h)
             cache.append((fp, h))
         self._hash_cache = cache
@@ -953,8 +953,8 @@ class GraphMemory:
                 )
             except (TypeError, ValueError):
                 payload = repr(msg)
-            return hashlib.sha1(payload.encode("utf-8", "surrogatepass")).hexdigest()[:16]
-        return hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+            return hashlib.sha1(payload.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:16]
+        return hashlib.sha1(text.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:16]
 
     @staticmethod
     def _extracted_to_dict(extracted) -> dict:
