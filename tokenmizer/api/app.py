@@ -33,8 +33,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tokenmizer import __version__
 from tokenmizer.analytics.engine import AnalyticsEngine
@@ -733,7 +733,26 @@ async def lifespan(app: FastAPI):
 # The data files that cannot import Python (server.json, plugin.json,
 # marketplace.json) still pin literals, and tests/unit/test_version_
 # consistency.py holds those to __version__.
+class _SafeJSONResponse(JSONResponse):
+    r"""JSON that cannot fail to render.
+
+    A route that echoes client text (a checkpoint's resume block, a
+    filename, a query) crashed in Starlette's UTF-8 encode when that text
+    held a lone surrogate, and the client got a bare "Internal Server
+    Error". Escaping to ASCII writes it back as the same `\ud83d` the
+    client sent; ordinary responses keep the compact UTF-8 form.
+    """
+
+    def render(self, content) -> bytes:
+        try:
+            return super().render(content)
+        except UnicodeEncodeError:
+            return json.dumps(content, ensure_ascii=True, allow_nan=False,
+                              separators=(",", ":")).encode("ascii")
+
+
 app = FastAPI(
+    default_response_class=_SafeJSONResponse,
     title="TokenMizer",
     description="Never lose your AI context again.",
     version=__version__,
@@ -777,6 +796,31 @@ app.add_middleware(
 
 # ── Request / Response models ─────────────────────────────────────────────────
 
+_LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def _scrub_surrogates(value):
+    r"""`value` with every lone UTF-16 surrogate replaced by U+FFFD.
+
+    JSON accepts "\ud83d" on its own and json.loads keeps it, but UTF-8
+    cannot encode it: the provider SDK failed to serialise the request,
+    which was never sent, and the client got a 502 "provider request
+    failed" for its own malformed input. Valid pairs are already joined
+    into one character by the JSON parser, so anything left is lone.
+    """
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+            return value
+        except UnicodeEncodeError:
+            return _LONE_SURROGATE.sub("\ufffd", value)
+    if isinstance(value, list):
+        return [_scrub_surrogates(v) for v in value]
+    if isinstance(value, dict):
+        return {_scrub_surrogates(k): _scrub_surrogates(v) for k, v in value.items()}
+    return value
+
+
 class ChatMessage(BaseModel):
     """OpenAI-style message. `content` accepts a plain string OR a list of
     content blocks (multimodal format). Blocks are normalized to text —
@@ -795,6 +839,11 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[list] = None
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _valid_text(cls, data):
+        return _scrub_surrogates(data)
 
     def text(self) -> str:
         from tokenmizer.graph_memory.helpers import _content_to_text
@@ -862,6 +911,13 @@ class ChatRequest(BaseModel):
     tools: Optional[list[dict]] = None
     tool_choice: Optional[str | dict] = None
     parallel_tool_calls: Optional[bool] = None
+
+    @field_validator("tools", "stop", mode="before")
+    @classmethod
+    def _valid_text(cls, v):
+        # Sent to the provider verbatim, so the same rule as message
+        # content: see _scrub_surrogates.
+        return _scrub_surrogates(v)
 
     @field_validator("session_id")
     @classmethod
@@ -1970,12 +2026,16 @@ def _stream_response(req, messages, model, user_content, session_id,
                 {"error": {"message": f"Stream failed (ref: {correlation_id})",
                            "type": "internal_error"}}
             ) + "\n\n"
-        yield _chunk(
-            {}, finish="tool_calls" if saw_tool_calls else (
-                "length" if stream_finish == "length" else "stop"),
-            extra={"tokenmizer": {"fallback": {"transform_rejected": True}}}
-            if transform_rejected else None,
-        )
+        # No finish chunk after an error event: "stop" told a client that
+        # reads finish_reason and ignores unknown keys that the truncated
+        # text it had was the whole answer.
+        if not stream_failed:
+            yield _chunk(
+                {}, finish="tool_calls" if saw_tool_calls else (
+                    "length" if stream_finish == "length" else "stop"),
+                extra={"tokenmizer": {"fallback": {"transform_rejected": True}}}
+                if transform_rejected else None,
+            )
         yield "data: [DONE]\n\n"
 
         # Post-stream bookkeeping. When the transformed request was

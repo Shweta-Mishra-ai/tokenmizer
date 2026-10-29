@@ -674,13 +674,7 @@ class PDFExtractor:
     ) -> FileExtractionResult:
         original_tokens = count_tokens(content_bytes.decode("utf-8", errors="ignore"))
 
-        try:
-            import pypdf  # type: ignore
-            reader = pypdf.PdfReader(io.BytesIO(content_bytes))
-        except ImportError:
-            # No fallback to PyPDF2: it is unmaintained and carries the
-            # crafted-PDF denial-of-service bugs pypdf has since fixed.
-            # Without pypdf the bytes are read as text.
+        def text_fallback(why: str) -> FileExtractionResult:
             text = content_bytes.decode("utf-8", errors="ignore")
             truncated, was_cut = _truncate_to_budget(text, token_budget)
             return FileExtractionResult(
@@ -689,11 +683,28 @@ class PDFExtractor:
                 extracted_tokens=count_tokens(truncated),
                 tokens_saved=original_tokens - count_tokens(truncated),
                 savings_pct=0.0, content=truncated,
-                summary="PDF (no parser, text fallback)",
+                summary=f"PDF ({why}, text fallback)",
                 strategy_used="text_fallback", was_truncated=was_cut,
             )
 
-        num_pages = len(reader.pages)
+        try:
+            import pypdf  # type: ignore
+        except ImportError:
+            # No fallback to PyPDF2: it is unmaintained and carries the
+            # crafted-PDF denial-of-service bugs pypdf has since fixed.
+            # Without pypdf the bytes are read as text.
+            return text_fallback("no parser")
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+            num_pages = len(reader.pages)
+        except Exception as e:
+            # A truncated or mislabelled file ("Stream has ended
+            # unexpectedly") is the caller's input, not a server fault:
+            # it used to fail /api/analyze with a 500. Read it as text.
+            logger.warning("%s is not a readable PDF (%s: %s); reading it as text",
+                           filename, type(e).__name__, e)
+            return text_fallback("unreadable")
+
         parts = [f"File: {filename} | {num_pages} pages"]
 
         # Metadata

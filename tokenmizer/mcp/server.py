@@ -287,6 +287,15 @@ def _is_transport_error(exc: Exception) -> bool:
     return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
 
 
+def _response_detail(response) -> str:
+    """The `detail` string of a proxy error response, or ""."""
+    try:
+        detail = response.json().get("detail")
+    except Exception:
+        return ""
+    return detail[:300] if isinstance(detail, str) else ""
+
+
 def _explain(exc: Exception) -> str:
     """Turn a transport failure into something the reader can act on.
 
@@ -321,14 +330,19 @@ def _explain(exc: Exception) -> str:
         )
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
-        if code in (401, 403):
+        if code == 404:
+            return "Not found — nothing has been checkpointed under that session id yet."
+        # A 4xx `detail` says what to change: a 421 names the setting for
+        # an untrusted Host, a 429 when to retry, a 413 the size limit.
+        # "HTTP 421" alone said none of it. 5xx details are not passed on:
+        # some name the session, which this reply keeps out (see above).
+        detail = _response_detail(exc.response) if 400 <= code < 500 else ""
+        if code == 401 or (code == 403 and not detail):
             return (
                 f"TokenMizer rejected the request ({code}). Set TOKENMIZER_API_KEY "
                 "in the MCP server's env to match the proxy's api_key."
             )
-        if code == 404:
-            return "Not found — nothing has been checkpointed under that session id yet."
-        return f"TokenMizer returned HTTP {code}."
+        return f"TokenMizer returned HTTP {code}" + (f": {detail}" if detail else ".")
     return f"{type(exc).__name__}"
 
 

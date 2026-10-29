@@ -53,6 +53,32 @@ Reproduced against the default (keyless, localhost) setup, then fixed:
   recorded reason ("e switched from…"), and injected reasons were cut
   mid-phrase ("…because the )"). Both are now cut at a word boundary.
 
+### Malformed input (found by fuzzing the API)
+
+Hundreds of malformed but valid JSON requests against every endpoint; each
+of these returned a server error before:
+
+- A lone UTF-16 surrogate in a message (`"\ud83d"`, valid JSON) made the
+  provider SDK fail to encode the request, which was never sent; the client
+  got **502 "provider request failed"** for its own input. Message content,
+  `tools` and `stop` are scrubbed to U+FFFD at ingestion.
+- A route echoing such text (a checkpoint's resume block) crashed while
+  rendering the response, giving a bare "Internal Server Error". Every JSON
+  response now falls back to ASCII escapes instead.
+- `/api/analyze` with a truncated or mislabelled PDF answered 500. An
+  unreadable PDF is now read as text, as when `pypdf` is not installed.
+- After a mid-stream provider error, the stream still sent
+  `finish_reason: "stop"`, telling a client that reads it the truncated
+  text was the whole answer. It now ends with the error event and `[DONE]`.
+- The MCP tools reported "TokenMizer returned HTTP 421." with no hint; they
+  now pass on the proxy's explanation for 4xx answers (which setting to
+  change, when to retry). 5xx detail stays out, since it can name the
+  session.
+- With an API key set, the dashboard's graph link wrote the
+  conversation-derived page straight into a tab of its own origin, which
+  starts with a copy of its `sessionStorage` (the key). It now loads in the
+  same sandboxed frame as the preview.
+
 ### Defaults
 
 - Rate limit raised from 60/min (burst 10) to **600/min (burst 100)** per

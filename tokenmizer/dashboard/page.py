@@ -341,8 +341,21 @@ async function openGraph(ev) {
     const r = await dashboardFetch(link.getAttribute('href'));
     if (!r.ok) { if (tab) tab.close(); return; }
     const html = await r.text();
+    // Inside a sandboxed frame, as in the preview: written straight into
+    // the tab, conversation-derived HTML ran in this page's origin, and a
+    // tab opened from here starts with a copy of its sessionStorage (the
+    // API key included).
     const doc = tab ? tab.document : document;
-    doc.open(); doc.write(html); doc.close();
+    doc.open();
+    doc.write('<!DOCTYPE html><meta charset="UTF-8"><title>Session graph</title>' +
+      '<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%;display:block}</style>' +
+      '<body></body>');
+    doc.close();
+    const frame = doc.createElement('iframe');
+    frame.setAttribute('sandbox', 'allow-scripts allow-downloads');
+    frame.setAttribute('title', 'Session graph');
+    frame.srcdoc = html;
+    doc.body.appendChild(frame);
   } catch (e) {
     if (tab) tab.close();
     console.warn('Graph page load failed:', e);
