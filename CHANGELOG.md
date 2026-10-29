@@ -53,6 +53,14 @@ Reproduced against the default (keyless, localhost) setup, then fixed:
   recorded reason ("e switched from…"), and injected reasons were cut
   mid-phrase ("…because the )"). Both are now cut at a word boundary.
 
+### Defaults
+
+- Rate limit raised from 60/min (burst 10) to **600/min (burst 100)** per
+  client address. On localhost the agent, the dashboard and the MCP server
+  share one address, and an agent loop or parallel sub-agents hit 429 from
+  the proxy mid-task. Set `rate_limit.requests_per_minute` / `burst` to
+  restore the old limits.
+
 ### Dashboard
 
 - The layer badges show the server's real configuration from `/health`

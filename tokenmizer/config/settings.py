@@ -285,8 +285,12 @@ class FileIntelligenceSettings(BaseModel):
 
 class RateLimitSettings(BaseModel):
     enabled: bool = True
-    requests_per_minute: int = Field(default=60, ge=1)
-    burst: int = Field(default=10, ge=0)
+    # Per client address, and on localhost the agent, the dashboard and the
+    # MCP server all share one address. At 60/min (burst 10) a busy agent
+    # loop or parallel sub-agents got 429 from the proxy mid-task; 10/s
+    # still stops a runaway loop from draining the provider budget.
+    requests_per_minute: int = Field(default=600, ge=1)
+    burst: int = Field(default=100, ge=0)
 
 
 class Settings(BaseSettings):

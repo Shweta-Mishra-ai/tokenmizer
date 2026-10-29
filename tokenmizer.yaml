@@ -145,8 +145,8 @@ proxy_port: 8000
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 rate_limit:
   enabled: true
-  requests_per_minute: 60     # per client address
-  burst: 10
+  requests_per_minute: 600    # per client address (agent, dashboard and MCP share one on localhost)
+  burst: 100
 
 # ── Request-altering layers ───────────────────────────────────────────────────
 # Each has false positives, so each can be switched off.

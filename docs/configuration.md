@@ -119,8 +119,8 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_FILE_INTELLIGENCE__TOKEN_BUDGET_PER_FILE` | `600` | Size of each digest |
 | `TOKENMIZER_FILE_INTELLIGENCE__DIGEST_CURRENT_TURN` | `false` | Also digest the turn being asked. Off: a digest is a sample, and "which line is wrong" or "sum this column" cannot be answered from one |
 | `TOKENMIZER_RATE_LIMIT__ENABLED` | `true` | Per-client rate limiting |
-| `TOKENMIZER_RATE_LIMIT__REQUESTS_PER_MINUTE` | `60` | Sustained rate per client address |
-| `TOKENMIZER_RATE_LIMIT__BURST` | `10` | Requests allowed above the sustained rate in a burst |
+| `TOKENMIZER_RATE_LIMIT__REQUESTS_PER_MINUTE` | `600` | Sustained rate per client address. On localhost the agent, the dashboard and the MCP server share one address |
+| `TOKENMIZER_RATE_LIMIT__BURST` | `100` | Requests allowed above the sustained rate in a burst |
 | `TOKENMIZER_OPENAI_BASE_URL` | *(empty)* | Send `openai` requests to a compatible gateway (vLLM, LM Studio, a corporate proxy). Empty = OpenAI itself |
 | `TOKENMIZER_OLLAMA_BASE_URL` | `http://localhost:11434` | Where the Ollama server is. In Docker, point it at the host (e.g. `http://host.docker.internal:11434`) |
 | `TIKTOKEN_CACHE_DIR` | *(unset)* | Where tiktoken looks for its BPE vocabulary. Set it, and pre-download, to run without egress — the Docker image does this at build time |

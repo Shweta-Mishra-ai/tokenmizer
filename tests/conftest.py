@@ -46,7 +46,7 @@ def set_test_env():
 @pytest.fixture(autouse=True)
 def _fresh_rate_limit_buckets():
     """Every TestClient request in the suite comes from one address and hits
-    one process-global token bucket (60/min, burst 10). The suite as a
+    one process-global token bucket (600/min, burst 100 by default). The suite as a
     whole makes more requests than that, so which test got the 429 depended
     on file order and on how many proxy tests the suite had gained since
     the last time someone noticed. Buckets are reset per test; the limiter
