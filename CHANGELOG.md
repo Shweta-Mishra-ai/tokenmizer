@@ -53,6 +53,32 @@ Reproduced against the default (keyless, localhost) setup, then fixed:
   recorded reason ("e switched from…"), and injected reasons were cut
   mid-phrase ("…because the )"). Both are now cut at a word boundary.
 
+### Anthropic (found end to end through the real SDK)
+
+Run against a server applying the Messages API's request rules, with the
+OpenAI SDK as the client:
+
+- **`temperature` or `top_p` failed every Anthropic request.** anthropic
+  2.x, which the `>=0.30` floor installs, removed both parameters: the SDK
+  raised "unexpected keyword argument" before sending anything, and the
+  client got a 502. They are now forwarded only when the installed SDK
+  accepts them (dropped with one log line otherwise), and `temperature` is
+  clamped to Anthropic's 0-1 where it is sent.
+- **An empty or whitespace turn failed the request.** OpenAI clients send
+  `"content": ""` routinely; Anthropic rejects blank text blocks, so the
+  conversation came back as a 502. Blank earlier turns are now left out.
+- Verified unchanged: tool calls (buffered and streamed), 40-step agent
+  loops with a tool call every turn through windowing, images, stop
+  sequences, `max_tokens` cut-offs, mid-stream overload, 300 concurrent
+  requests, and recovery after `kill -9` under load (all stores pass
+  `integrity_check`).
+
+### CLI
+
+- `tokenmizer stats <session>` printed the global totals for any session,
+  one that never existed included: `/api/stats` ignored `session_id` with a
+  single API key. It now reports that session.
+
 ### Malformed input (found by fuzzing the API)
 
 Hundreds of malformed but valid JSON requests against every endpoint; each

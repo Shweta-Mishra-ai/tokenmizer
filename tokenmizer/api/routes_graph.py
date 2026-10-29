@@ -152,6 +152,13 @@ async def stats(request: Request, session_id: Optional[str] = None):
     # With several API keys each key is a tenant, and the deployment-wide
     # totals are other tenants' traffic. Each sees its own sessions (and
     # its own session-less requests, recorded under its anonymous scope).
+    #
+    # A session_id narrows it to that session; access to it was checked by
+    # verify_session_access. It used to be ignored with one key, so
+    # `tokenmizer stats <session>` printed the global totals for any id,
+    # one that never existed included.
+    if session_id:
+        return app_module._analytics.summary(scope={session_id})
     if not _multi_tenant():
         return app_module._analytics.summary()
     principal = getattr(request.state, "principal", DEV_PRINCIPAL)

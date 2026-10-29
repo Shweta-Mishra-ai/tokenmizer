@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import logging
 import re
 import time
@@ -399,6 +400,43 @@ def _anthropic_input(usage) -> tuple[int, int, int]:
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 
+_dropped_anthropic_params: set[str] = set()
+
+
+def _anthropic_sampling(kwargs: dict, method) -> dict:
+    """Sampling params in Anthropic's shape, limited to what `method` (the
+    installed SDK's messages.create or messages.stream) accepts.
+
+    anthropic 2.x removed `temperature` and `top_p` from both methods, and
+    any pyproject floor (>=0.30) installs it: every request from a client
+    that set either one failed in the SDK with "unexpected keyword
+    argument" before anything was sent, and came back as a 502. They are
+    dropped instead, with one log line each. Where the SDK still takes
+    `temperature`, it is clamped to Anthropic's 0-1 (OpenAI clients send
+    up to 2, which the API rejects).
+    """
+    out = _sampling(kwargs)
+    if "stop" in out:
+        out["stop_sequences"] = _as_stop_list(out.pop("stop"))
+    try:
+        params = inspect.signature(method).parameters
+        accepts_any = any(p.kind is p.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        params, accepts_any = {}, True
+    for name in ("temperature", "top_p"):
+        if name not in out:
+            continue
+        if not accepts_any and name not in params:
+            out.pop(name)
+            if name not in _dropped_anthropic_params:
+                _dropped_anthropic_params.add(name)
+                logger.warning("The installed anthropic SDK has no `%s` parameter; "
+                               "it is dropped from requests to Anthropic.", name)
+        elif name == "temperature":
+            out[name] = min(max(out[name], 0.0), 1.0)
+    return out
+
+
 class AnthropicProvider(BaseProvider):
 
     supports_tools = True
@@ -441,10 +479,8 @@ class AnthropicProvider(BaseProvider):
         system_text = "\n\n".join(sys_parts) if sys_parts else None
 
         try:
-            kwargs_clean = _sampling(kwargs)
-            # Anthropic SDK uses `stop_sequences`, not OpenAI's `stop`
-            if "stop" in kwargs_clean:
-                kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
+            kwargs_clean = _anthropic_sampling(
+                kwargs, client.messages.stream if stream else client.messages.create)
             if system_text:
                 kwargs_clean["system"] = _anthropic_system_param(system_text, model)
             kwargs_clean.update(self._tool_params(kwargs))
@@ -516,9 +552,7 @@ class AnthropicProvider(BaseProvider):
             sys_parts.insert(0, system)
         conv = _mark_history_cacheable(
             anthropic_messages(conversation_messages(messages)))
-        kwargs_clean = _sampling(kwargs)
-        if "stop" in kwargs_clean:
-            kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
+        kwargs_clean = _anthropic_sampling(kwargs, client.messages.stream)
         kwargs_clean.update(self._tool_params(kwargs))
         if sys_parts:
             # Same cacheability rule as the non-streaming path — this used
