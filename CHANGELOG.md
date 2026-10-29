@@ -79,6 +79,20 @@ OpenAI SDK as the client:
   one that never existed included: `/api/stats` ignored `session_id` with a
   single API key. It now reports that session.
 
+### Benchmarks
+
+- `benchmarks/latency/runner.py` counted error answers (502, 429) as
+  latency samples and printed "50/50 succeeded", and exited 0 when the
+  server was unreachable or requests failed. Non-200 answers are now
+  failures and the exit code is the verdict.
+- It reports cache hits and the p50 of misses and hits separately: its five
+  prompts repeat, so on a warm cache the overall p50 is the cache, not the
+  proxy. Against the same local fake upstream, warm cache misses take
+  25 ms p50 (469 ms before: every request without a session id was given a
+  new session that was persisted and checkpointed), and repeats are now
+  answered from the cache (45 of 50; none before, since each request was a
+  new session).
+
 ### Malformed input (found by fuzzing the API)
 
 Hundreds of malformed but valid JSON requests against every endpoint; each
