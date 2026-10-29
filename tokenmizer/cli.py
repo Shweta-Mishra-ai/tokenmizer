@@ -230,13 +230,12 @@ def serve(
 
     if workers > 1:
         console.print(
-            f"[yellow]Warning:[/yellow] --workers {workers} starts multiple "
-            "OS processes. TokenMizer's SQLite-backed graph/checkpoint "
-            "storage is NOT safe for concurrent multi-process writers to "
-            "the same session — the last process to persist a session "
-            "silently overwrites what an earlier one wrote (tracked as "
-            "issue #27). Until that lands: run a single worker, or route "
-            "each session_id to a fixed worker at your load balancer."
+            f"[yellow]Note:[/yellow] --workers {workers} starts multiple "
+            "OS processes. Graph and checkpoint writes are safe across them "
+            "(per-row storage under a cross-process lock), but analytics, "
+            "the semantic cache and — unless state_backend is sqlite — rate "
+            "limits are per process. Keep storage_dir on a local disk: "
+            "file locks are unreliable on NFS."
         )
 
     console.print(Panel.fit(
@@ -375,6 +374,10 @@ def checkpoint(
     """Create a manual checkpoint and show resume context."""
     from urllib.parse import quote
 
+    if level not in ("critical", "standard", "full"):
+        console.print(f"[red]Invalid --level {level!r}: use critical, standard or full[/red]")
+        raise typer.Exit(2)
+
     session_id = _resolve_session_id(session_id)
 
     headers = {}
@@ -399,7 +402,7 @@ def checkpoint(
         f"[dim]Nodes:         {data.get('node_count', 0)}[/dim]\n"
         f"[dim]Resume tokens: {data['resume_tokens']}[/dim]\n\n"
         f"[bold]Resume context ({level}):[/bold]\n"
-        f"{data.get('resume_standard', '')}",
+        f"{data.get('resume_' + level) or data.get('resume_standard', '')}",
         border_style="green",
     ))
 
@@ -451,6 +454,46 @@ def resume(
               f"({data['token_count']} tokens, from {source})[/green]",
         border_style="green",
     ))
+
+
+@app.command("reassign-sessions")
+def reassign_sessions(
+    to_key: str = typer.Option(..., "--to-key", envvar="TOKENMIZER_NEW_API_KEY",
+                               help="The API key that should own the sessions"),
+    from_key: Optional[str] = typer.Option(None, "--from-key",
+                                           help="The old API key"),
+    from_dev: bool = typer.Option(False, "--from-dev",
+                                  help="Sessions created while no API key was set"),
+    config: Optional[str] = typer.Option(None, help="Path to tokenmizer.yaml"),
+):
+    """Give an old key's sessions to a new key, after rotating it.
+
+    Sessions belong to the key that created them, so after a rotation (or
+    after setting the first key on a dev-mode deployment) they are
+    unreachable until moved. Run on the host that holds storage_dir.
+    """
+    import os
+
+    from tokenmizer.preferences import PreferenceStore
+    from tokenmizer.security.ownership import (
+        DEV_PRINCIPAL,
+        OwnershipStore,
+        principal_for_key,
+    )
+
+    if from_dev == bool(from_key):
+        console.print("[red]Pass exactly one of --from-key or --from-dev.[/red]")
+        raise typer.Exit(2)
+    if config:
+        os.environ["TOKENMIZER_CONFIG"] = config
+    from tokenmizer.config.settings import get_settings
+    storage = get_settings().graph_checkpoint.storage_dir
+    old = DEV_PRINCIPAL if from_dev else principal_for_key(from_key)
+    new = principal_for_key(to_key)
+    moved = OwnershipStore(storage_dir=storage).reassign(old, new)
+    prefs = PreferenceStore(storage_dir=storage).reassign(old, new)
+    # Ownership is read from disk on every request: no restart needed.
+    console.print(f"Moved {moved} session(s) and {prefs} preference(s) in {storage}.")
 
 
 @app.command()

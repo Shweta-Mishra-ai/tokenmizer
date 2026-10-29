@@ -102,7 +102,8 @@ async def test_anthropic_streaming_uses_real_usage_for_input_tokens(monkeypatch)
     # proving the system prompt's tokens are no longer silently dropped.
     assert resp.input_tokens == 999
     assert resp.output_tokens == 3
-    assert resp.finish_reason == "end_turn"
+    # OpenAI-compatible: Anthropic's end_turn is reported as "stop".
+    assert resp.finish_reason == "stop"
 
 
 @dataclass

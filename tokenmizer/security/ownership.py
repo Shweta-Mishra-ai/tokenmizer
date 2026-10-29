@@ -84,10 +84,18 @@ def principal_for_key(api_key: str) -> str:
 class OwnershipStore:
     """SQLite-backed session -> owner map."""
 
+    _ALLOWED_TTL = 30.0
+
     def __init__(self, storage_dir: str = "./checkpoints"):
         self._dir = Path(storage_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._db_path = self._dir / "sessions.db"
+        # (session, principal) pairs confirmed allowed, with when. Every
+        # request opened the database to re-confirm an answer that only an
+        # administrative reassign can change; it is now re-read at most
+        # every _ALLOWED_TTL seconds. Only grants are cached, never denials,
+        # and reassign() clears the cache in this process.
+        self._allowed: dict[tuple[str, str], float] = {}
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -179,6 +187,32 @@ class OwnershipStore:
             raise OwnershipUnavailable(str(e)) from e
         return [r[0] for r in rows]
 
+    def reassign(self, from_principal: str, to_principal: str) -> int:
+        """Move every session `from_principal` owns to `to_principal`.
+        Returns how many moved.
+
+        A principal is derived from the API key, so rotating a key — or
+        adding the first key to a deployment that ran in dev mode — left
+        every existing session owned by a principal no request could ever
+        present again: permanently unreachable. This is the administrative
+        way across: run it once with the old and new key.
+        """
+        if from_principal == to_principal:
+            return 0
+        self._allowed.clear()
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute(
+                    "UPDATE session_owners SET owner=? WHERE owner=?",
+                    (to_principal, from_principal))
+                conn.commit()
+                return cur.rowcount
+            finally:
+                conn.close()
+        except Exception as e:
+            raise OwnershipUnavailable(str(e)) from e
+
     def check_access(self, session_id: str, principal: str, *, claim: bool = True) -> None:
         """Raise SessionAccessDenied if `principal` may not touch this
         session. With claim=True an unowned session is claimed.
@@ -188,6 +222,10 @@ class OwnershipStore:
         than silently creating an ownership record as a side effect of a
         GET.
         """
+        key = (session_id, principal)
+        hit = self._allowed.get(key)
+        if hit is not None and time.monotonic() - hit < self._ALLOWED_TTL:
+            return
         if claim:
             owner = self.claim(session_id, principal)
         else:
@@ -196,3 +234,6 @@ class OwnershipStore:
                 return  # never claimed — nothing to protect yet
         if owner != principal:
             raise SessionAccessDenied(session_id)
+        self._allowed[key] = time.monotonic()
+        if len(self._allowed) > 50_000:
+            self._allowed.clear()

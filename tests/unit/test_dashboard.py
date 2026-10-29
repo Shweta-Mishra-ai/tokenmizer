@@ -29,10 +29,14 @@ def test_graph_link_uses_bearer_when_key_is_stored():
     copy-link) and a click handler takes over only when a key is
     stored: open the tab first, then fetch with the key and hand the
     tab the page by writing the document (no blob: navigation, which
-    embedded browsers refuse)."""
+    embedded browsers refuse). The page goes into a sandboxed frame in
+    that document, not the document itself: see
+    test_input_robustness.test_the_key_mode_graph_tab_is_sandboxed."""
     assert 'href="/api/graph/' in DASHBOARD_HTML
     assert "openGraph" in DASHBOARD_HTML
-    assert "doc.write(html)" in DASHBOARD_HTML
+    body = DASHBOARD_HTML.split("async function openGraph", 1)[1].split("\nlet ", 1)[0]
+    assert "doc.write(" in body and "frame.srcdoc = html" in body
+    assert "blob:" not in body.split("*/")[-1] and "createObjectURL" not in body
     # The tab must be opened synchronously inside the click, before any
     # await, or the user gesture is gone and popup blocking eats it.
     assert "window.open('', '_blank')" in DASHBOARD_HTML

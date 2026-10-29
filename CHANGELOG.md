@@ -2,6 +2,320 @@
 
 ## [Unreleased]
 
+### Security
+
+Reproduced against the default (keyless, localhost) setup, then fixed:
+
+- **Authentication bypass with `api_keys` only.** A deployment that set
+  `api_keys` and no primary `api_key` ran with no authentication at all,
+  and every caller shared one principal, so sessions were not isolated.
+  `TOKENMIZER_ENV=production` booted into that state, because its startup
+  check counted `api_keys` while the request check did not. Auth is now
+  decided from every configured key, and fails closed (503) if the list
+  cannot be read.
+- **Cross-site writes.** `POST /api/decision/invalidate?...` and
+  `POST /api/checkpoint?...` are "simple" requests, so any web page could
+  send them through the browser with no CORS preflight. Browser writes from
+  an origin not in `cors_origins` (or the proxy's own) now get 403. Clients
+  that send no `Origin` header (SDKs, curl, agents) are unaffected.
+- **DNS rebinding.** With no `api_key`, only `localhost`/`127.0.0.1`/`::1`
+  are answered (421 otherwise), so a page whose domain re-resolves to
+  127.0.0.1 cannot read graphs or resume blocks. New setting
+  `security.trusted_hosts` for LAN or reverse-proxy hostnames.
+- **Request size.** Bodies over `security.max_request_bytes` (32 MiB) get
+  413 before parsing; a 60 MB body used to be read and processed. Session
+  ids over 256 characters get 422 (a 20,000-character id was stored).
+- **Quadratic regexes (CPU DoS).** Inputs with no sentence break made
+  clause scans and several patterns rescan the text from every position:
+  100k chars of "Decided: " took 8.7s in extraction (now 0.3s); 40k chars
+  of "1.1.1..." took 1.3s in redaction; 16k chars of "AbcError" took over
+  two minutes in one traceback pattern. Every pattern in the package was
+  timed at two input sizes; all now scale linearly.
+- **Dashboard.** The session graph preview runs in a sandboxed frame, so
+  nothing in it can read the API key the dashboard holds. Every response
+  carries `nosniff` and `no-referrer`; HTML pages refuse framing.
+- **Dependencies.** Floors raised past published advisories: `certifi`,
+  `opentelemetry-*` (observability extra), `pypdf` (files extra; the
+  unmaintained PyPDF2 fallback is gone). The Docker image upgrades
+  pip/setuptools/wheel first.
+- Invisible and bidirectional control characters in the injection-fence
+  source are written as escapes (Trojan Source).
+
+### Memory (found by a live end-to-end run)
+
+- Restating a decision as a switch erased it. "Decided: use PostgreSQL",
+  then later "we switched from MySQL to PostgreSQL", superseded the
+  PostgreSQL decision with "Use MySQL" (the replaced side of the switch,
+  read as the newest choice), and the session was left with no active
+  database decision. Asked "what database did we choose?", the proxy
+  injected unrelated facts. The replaced side is now recorded as history.
+- A switch stated at the start of a message lost its first letter in the
+  recorded reason ("e switched from…"), and injected reasons were cut
+  mid-phrase ("…because the )"). Both are now cut at a word boundary.
+
+### Anthropic (found end to end through the real SDK)
+
+Run against a server applying the Messages API's request rules, with the
+OpenAI SDK as the client:
+
+- **`temperature` or `top_p` failed every Anthropic request.** anthropic
+  2.x, which the `>=0.30` floor installs, removed both parameters: the SDK
+  raised "unexpected keyword argument" before sending anything, and the
+  client got a 502. They are now forwarded only when the installed SDK
+  accepts them (dropped with one log line otherwise), and `temperature` is
+  clamped to Anthropic's 0-1 where it is sent.
+- **An empty or whitespace turn failed the request.** OpenAI clients send
+  `"content": ""` routinely; Anthropic rejects blank text blocks, so the
+  conversation came back as a 502. Blank earlier turns are now left out.
+- Verified unchanged: tool calls (buffered and streamed), 40-step agent
+  loops with a tool call every turn through windowing, images, stop
+  sequences, `max_tokens` cut-offs, mid-stream overload, 300 concurrent
+  requests, and recovery after `kill -9` under load (all stores pass
+  `integrity_check`).
+
+### CLI
+
+- `tokenmizer stats <session>` printed the global totals for any session,
+  one that never existed included: `/api/stats` ignored `session_id` with a
+  single API key. It now reports that session.
+
+### Benchmarks
+
+- `benchmarks/latency/runner.py` counted error answers (502, 429) as
+  latency samples and printed "50/50 succeeded", and exited 0 when the
+  server was unreachable or requests failed. Non-200 answers are now
+  failures and the exit code is the verdict.
+- It reports cache hits and the p50 of misses and hits separately: its five
+  prompts repeat, so on a warm cache the overall p50 is the cache, not the
+  proxy. Against the same local fake upstream, warm cache misses take
+  25 ms p50 (469 ms before: every request without a session id was given a
+  new session that was persisted and checkpointed), and repeats are now
+  answered from the cache (45 of 50; none before, since each request was a
+  new session).
+
+### Malformed input (found by fuzzing the API)
+
+Hundreds of malformed but valid JSON requests against every endpoint; each
+of these returned a server error before:
+
+- A lone UTF-16 surrogate in a message (`"\ud83d"`, valid JSON) made the
+  provider SDK fail to encode the request, which was never sent; the client
+  got **502 "provider request failed"** for its own input. Message content,
+  `tools` and `stop` are scrubbed to U+FFFD at ingestion.
+- A route echoing such text (a checkpoint's resume block) crashed while
+  rendering the response, giving a bare "Internal Server Error". Every JSON
+  response now falls back to ASCII escapes instead.
+- `/api/analyze` with a truncated or mislabelled PDF answered 500. An
+  unreadable PDF is now read as text, as when `pypdf` is not installed.
+- After a mid-stream provider error, the stream still sent
+  `finish_reason: "stop"`, telling a client that reads it the truncated
+  text was the whole answer. It now ends with the error event and `[DONE]`.
+- The MCP tools reported "TokenMizer returned HTTP 421." with no hint; they
+  now pass on the proxy's explanation for 4xx answers (which setting to
+  change, when to retry). 5xx detail stays out, since it can name the
+  session.
+- With an API key set, the dashboard's graph link wrote the
+  conversation-derived page straight into a tab of its own origin, which
+  starts with a copy of its `sessionStorage` (the key). It now loads in the
+  same sandboxed frame as the preview.
+
+### Defaults
+
+- Rate limit raised from 60/min (burst 10) to **600/min (burst 100)** per
+  client address. On localhost the agent, the dashboard and the MCP server
+  share one address, and an agent loop or parallel sub-agents hit 429 from
+  the proxy mid-task. Set `rate_limit.requests_per_minute` / `burst` to
+  restore the old limits.
+
+### Dashboard
+
+- The layer badges show the server's real configuration from `/health`
+  instead of a hard-coded "Active".
+- `/health` reports counts, and the panel called `.forEach` on them and
+  threw, leaving the health indicator stuck.
+- With an API key set, loading the page asked for the key three times
+  (one prompt per parallel request); it now asks once.
+- Graph nodes at the edge of one group no longer overlap the next group.
+- A supersession's reason is the sentence that states it, not the tail of
+  the sentence before.
+
+### A short session costs exactly what it costs without the proxy
+
+`python -m benchmarks.savings.runner`, against a client caching its own
+history: 2, 4, 10, 30, 40 and 50 turns **0.0%** (was 30% more at 4 turns,
+11% more at 10, 4% more at 40); 100 turns **11% less**, 150 **25% less**,
+300 **54% less** (were 9%, 17%, 48%).
+
+- `terse_output.enabled` defaults to `auto`: the brevity instruction joins
+  a session's requests at the first windowing cut, which rewrites the start
+  of the request anyway, and stays from then on. Before that cut nothing is
+  added to the request.
+- A windowing cut keeps the tail at the cache minimum rather than half the
+  budget: each cut rewrites the cached prefix, so a smaller tail is a
+  cheaper rewrite and a longer run before the next cut.
+- One-off dips remain at exactly two points, both recovered within a few
+  turns: right after the history first becomes cacheable (20 turns, vs a
+  client that does not cache) and right after the first cut (70 turns).
+
+### Retrieval recall@6 88% → 95%
+
+- Query intent: "what broke", "what is still outstanding", "which did we
+  settle on" boost errors, open work and decisions respectively; the
+  session goal no longer tops every list on importance alone.
+- Paths and identifiers are split into words, so "how do people sign in"
+  reaches `POST /api/auth/login` and `login_success`.
+- Overlap is scored per question word through its aliases; expanding first
+  penalised a question for using a word with many synonyms.
+- Everyday synonyms: slow ↔ latency/performance/render, check ↔ verify,
+  sign in/up ↔ login/register, clean up ↔ teardown.
+
+### Extraction
+
+- Environment recall 67% → 100% on the retrieval benchmark: a version after
+  ~70 runtimes, frameworks and platforms ("FastAPI 0.111", "Node 20",
+  "CUDA 12.1", "Kubernetes 1.29"). Ambiguous names (go, rust, react, pip)
+  need a dotted version, so "pip 3 times" is not an environment.
+- A decision that only restates or builds on an earlier one ("Recharts …
+  (good React integration)" after "Use React") no longer supersedes it; a
+  reversal ("Disable JWT auth" after "Enable") still does.
+- A fix naming an HTTP status ("Fixed: 422 error was …") closes the open
+  error carrying that status.
+
+### Speed
+
+About 12% less time per request in the pipeline: graph rows serialised
+field by field (byte-identical to the stored format, so nothing is
+rewritten) and session-ownership grants cached for 30 seconds instead of a
+database round trip on every request.
+
+### Short sessions no longer cost more than no proxy; long sessions cost less
+
+Measured with `python -m benchmarks.savings.runner` (input only, against a
+client that caches its own history): 10 turns 21% more → 11% more, 40
+turns 10% more → 4% more, 150 turns level → **17% less**, 300 turns 41% less
+→ **48% less**. With `terse_output.enabled: false`, 4-, 10- and 40-turn
+sessions now cost exactly what the client alone costs.
+
+- No context block when the request already carries every message the
+  graph was built from — on a short session each node only restated what
+  the model was reading in full.
+- The brevity instruction is 26 tokens (was 50) and the fence preamble 25
+  (was 57); both are paid on every request.
+- A held windowing cut never leaves a request under the provider's
+  prompt-cache minimum. It used to cut to about 800 tokens, below the
+  1,024-token minimum, and nothing cached for a dozen requests after each
+  cut.
+
+### Remaining gaps closed
+
+- Streams report `finish_reason: "length"` when the provider cut them off
+  (Anthropic, OpenAI-compatible, Ollama, Gemini, Cohere), and a truncated
+  stream is not cached.
+- Image blocks are forwarded to providers that accept them (Anthropic —
+  converted to its own image shape — and OpenAI-compatible, except
+  DeepSeek) instead of being dropped; the cache is skipped for a turn
+  carrying one.
+- `tokenmizer reassign-sessions` moves sessions (and preferences) to a new
+  API key after a rotation, or from dev mode to the first key.
+- The semantic cache no longer answers a "regenerate" at temperature > 0,
+  and honours `Cache-Control: no-cache`.
+- The MCP server's offline fallback uses the proxy's configured
+  `storage_dir`, as an absolute path, instead of `./checkpoints` relative to
+  wherever it was launched.
+- A non-Claude provider with no `default_model` set uses its own default
+  model instead of being sent `claude-sonnet-4-6`.
+
+### Request content is no longer silently changed or dropped
+
+- **File intelligence no longer digests the turn being asked.** A fenced
+  ` ```python ` block in the current message was read as CSV (`python` was
+  used as a file extension) and replaced by a ~65-token sample, so the model
+  answered a "find the bug" question without the code. Only older turns are
+  digested now, fence languages map to real extensions, and the layer can be
+  configured (`file_intelligence.*`).
+- **Redaction keeps code intact.** `api_key: Optional[str]` became
+  `[REDACTED][str]` and `password = os.environ[...]` became
+  `[REDACTED][...]`. Only a credential's value is replaced now, and only
+  when it is a literal. Email addresses reach the provider unless
+  `security.redact_emails_to_provider` is set; stored memory still redacts
+  them. `security.redact_provider_messages` turns provider-side redaction off.
+- **The injection filter stops blocking ordinary requests.** "Repeat the
+  above steps in TypeScript" and "Print instructions for installing…" were
+  400s. The patterns now require the model as the object ("your system
+  prompt"), quoted text is not scanned, and `security.injection_filter` turns
+  the filter off.
+- **Compression keeps indentation and repeated statements** in un-fenced
+  code in older turns.
+- Images and other non-text blocks the proxy cannot forward are counted in
+  `tokenmizer.dropped_non_text_blocks` and logged, rather than vanishing.
+
+### Memory correctness
+
+- An incidental or negative mention no longer supersedes a decision: "many
+  teams use MongoDB, but we are sticking with our choice", "we decided not to
+  use MongoDB" and "I considered MySQL but rejected it" each replaced the
+  active PostgreSQL decision in the resume.
+- Nodes added after a transient "database is locked" on load were dropped by
+  the next persist, which reported success. They are now written.
+- A validator type correction no longer overwrites an existing node.
+- A SUMMARY node with the default confidence no longer raises.
+- "Fixed the ImportError: …" now closes the open ImportError instead of
+  leaving it open beside a resolved twin.
+- A user's "yes" to an assistant's "Should we use Redis…?" is recorded as a
+  decision, including a second "yes" later in the session.
+- Corruption recovery deletes the session's rows from the tables that hold
+  them (it targeted the legacy blob table), and quarantine moves the `-wal`
+  and `-shm` files with the database.
+- Graph read routes and decision invalidation take the session lock, so
+  they cannot iterate a graph while extraction mutates it in a thread.
+
+### Proxy behaviour
+
+- A request with no `session_id` (and no `X-Session-ID` header, now read) is
+  stateless: no session is claimed, persisted or checkpointed for it.
+- `/health` is degraded only when stored data was not written; a failed
+  background extraction or a transient upstream error no longer degrades it
+  for the life of the process. It reports counts, not session ids.
+- A transient provider error (rate limit, 5xx, timeout) is no longer retried
+  with the untransformed messages and reported as a TokenMizer bug.
+- Cache keys include the model and the sampling and length parameters, and a
+  truncated answer is not cached.
+- `usage.completion_tokens` is the provider's figure; trimmed output is
+  reported as `tokenmizer.output_trimmed_tokens`. `total_saved` is net of
+  what the proxy adds to the prompt.
+- Auto-checkpoints run off the event loop and at most once per 10 new
+  messages once over the threshold.
+- Injected context is limited to goals, decisions and nodes that share
+  vocabulary with the turn.
+- Streaming errors no longer send the provider's raw error text.
+- `/api/stats` is scoped to the caller's sessions when several API keys are
+  configured, and unclaimed sessions are not readable in that mode.
+- Context windows: bare `gpt-4` is 8k and Gemini 1.0 32k (both were
+  overstated, so the checkpoint never fired).
+- Rate limits are configurable (`rate_limit.*`), and the shared limiter no
+  longer blocks the event loop.
+
+### Providers
+
+- Anthropic stop reasons map to OpenAI values (`end_turn` → `stop`,
+  `max_tokens` → `length`).
+- OpenAI reasoning models (`o*`, `gpt-5`) receive `max_completion_tokens`.
+- Retries are bounded by `request_timeout` as a whole, and SDK clients are
+  reused per event loop instead of built and leaked per request.
+- `openai_base_url` and `ollama_base_url` settings.
+
+### Other
+
+- A failed `analytics.db` initialisation no longer creates a database file
+  named `None` in the working directory; the committed copy is removed.
+- The MCP server falls back to local storage only when the proxy cannot be
+  reached, not when it is slow (a read timeout extracted the transcript twice).
+- `tokenmizer checkpoint --level` prints the requested level.
+- `docker-compose.yml` publishes the port on loopback only.
+- Stale guidance corrected: the multi-worker warning, the Dockerfile comment,
+  the LLM-extraction cost, the recall figure in `tokenmizer.yaml`, and `.env`
+  values now override the YAML file as documented.
+
 ### Documentation
 
 The README's Contributors avatars are now listed explicitly, one per author of

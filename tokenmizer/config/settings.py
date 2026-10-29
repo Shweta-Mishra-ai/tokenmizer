@@ -66,8 +66,12 @@ class GraphCheckpointSettings(BaseModel):
     trigger_at_percent: float = Field(default=0.85, ge=0.5, le=0.99)
     storage_dir: str = "./checkpoints"
     max_resume_tokens: int = 400
-    use_llm_extraction: bool = False  # set True for 80%+ recall (needs API key, ~$0.001/turn)
-    extraction_model: str = ""        # leave empty = auto-pick cheapest model for your provider
+    # True = the configured chat provider and model also run a background
+    # extraction call each turn. That is a second call to the SAME model
+    # you chat with, so its cost is comparable to a chat turn's input, not
+    # a cheap-model fraction of it.
+    use_llm_extraction: bool = False
+    extraction_model: str = ""        # empty = the chat model; set one to use a cheaper model
     # Output-token budget for the LLM extraction call. A model that reasons
     # before it answers spends part of this on reasoning, so a budget sized
     # for the JSON alone can be exhausted before the JSON is complete; raise
@@ -83,7 +87,7 @@ class GraphCheckpointSettings(BaseModel):
     # The pair once quoted here — recall@6 85% keyword vs 92% with
     # embeddings — came from a 13-case eval, where one question flipping
     # moves the headline by 8 points. That eval is now 40 cases and
-    # keyword ranking scores 88% on it; the 92% figure has NOT been
+    # keyword ranking scores 95% on it; the 92% figure has NOT been
     # re-measured against it and must not be quoted (docs/roadmap.md and
     # README.md say the same, and this comment used to contradict them).
     #
@@ -101,7 +105,7 @@ class GraphCheckpointSettings(BaseModel):
     #
     #   "auto" (the default) — on when the model is actually loadable, off
     #                          otherwise. Measured on the retrieval eval:
-    #                          keyword ranking gets recall@6 88% over 40
+    #                          keyword ranking gets recall@6 95% over 40
     #                          paraphrased questions, and the misses are
     #                          exactly the paraphrases embeddings exist
     #                          for. A capability that is present should not
@@ -208,7 +212,10 @@ class PreferenceSettings(BaseModel):
 
 
 class TerseOutputSettings(BaseModel):
-    enabled: bool = True
+    # true / false, or "auto": add the instruction only once a request is
+    # large enough for the provider to cache it, so a short session never
+    # pays more input than it would without the proxy. See app._terse_wanted.
+    enabled: Union[bool, Literal["auto"]] = "auto"
     level: Literal["lite", "full", "ultra"] = "full"
     # What the injected instruction asks for.
     #   terse    — shorter answers: no preamble, no closing, fragments allowed.
@@ -232,6 +239,58 @@ class PrivacySettings(BaseModel):
     # inference server. Loopback is always allowed. An HTTP proxy must be
     # listed to be reachable, and then so is everything behind it.
     allowed_hosts: List[str] = Field(default_factory=list)
+
+
+class SecuritySettings(BaseModel):
+    """The layers that change or refuse what a client sent.
+
+    Each one has false positives, so each one can be turned off by the
+    operator who would rather have the request untouched.
+    """
+    # Scrub credentials from messages before they reach the provider.
+    # Stored memory (graph nodes, checkpoints) is redacted regardless.
+    redact_provider_messages: bool = True
+    # Also replace email addresses in what the provider sees. Off by
+    # default: an address is usually the subject of the request ("send the
+    # report to alice@acme.com"). Stored memory always redacts them.
+    redact_emails_to_provider: bool = False
+    # The keyword filter that answers 400 to well-known jailbreak
+    # phrasings. A speed bump, not a defence; see security/middleware.py.
+    injection_filter: bool = True
+    # Hosts this server answers to, by Host header. Empty (the default):
+    # localhost only when no api_key is set — which blocks DNS-rebinding
+    # pages from reading memory through the visitor's browser — and any
+    # host once a key is required. List the names you reach it by
+    # (e.g. "tokenmizer.internal") to serve them without a key; "*" allows all.
+    trusted_hosts: List[str] = Field(default_factory=list)
+    # Largest request body accepted, in bytes. 32 MiB covers an agent turn
+    # carrying large tool output; beyond it a request is a 413, not a
+    # memory spike.
+    max_request_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
+
+
+class FileIntelligenceSettings(BaseModel):
+    """Layer 0: large pasted files in OLDER turns are replaced by a digest.
+
+    The turn being asked about is never digested — the question is about
+    exactly that content.
+    """
+    enabled: bool = True
+    token_budget_per_file: int = Field(default=600, ge=50)
+    # Also digest the turn being asked (e.g. a pasted 5 MB CSV). Off: a
+    # digest is a sample, and a question about the exact content — "which
+    # line is wrong", "sum this column" — cannot be answered from one.
+    digest_current_turn: bool = False
+
+
+class RateLimitSettings(BaseModel):
+    enabled: bool = True
+    # Per client address, and on localhost the agent, the dashboard and the
+    # MCP server all share one address. At 60/min (burst 10) a busy agent
+    # loop or parallel sub-agents got 429 from the proxy mid-task; 10/s
+    # still stops a runaway loop from draining the provider budget.
+    requests_per_minute: int = Field(default=600, ge=1)
+    burst: int = Field(default=100, ge=0)
 
 
 class Settings(BaseSettings):
@@ -347,6 +406,15 @@ class Settings(BaseSettings):
     preferences: PreferenceSettings = Field(default_factory=PreferenceSettings)
     terse_output: TerseOutputSettings = Field(default_factory=TerseOutputSettings)
     privacy: PrivacySettings = Field(default_factory=PrivacySettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
+    file_intelligence: FileIntelligenceSettings = Field(default_factory=FileIntelligenceSettings)
+    rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
+
+    # Where the provider lives, for the two that are commonly self-hosted
+    # or fronted by a gateway. Empty base URL = the vendor's own endpoint
+    # (the OpenAI SDK still honours OPENAI_BASE_URL).
+    openai_base_url: str = ""
+    ollama_base_url: str = "http://localhost:11434"
 
     # How long an upstream provider call may hang before it is
     # abandoned. Every vendor SDK used by providers/providers.py
@@ -416,6 +484,27 @@ _ENV_PREFIX = "TOKENMIZER_"
 _ENV_NESTED_DELIM = "__"
 
 
+def _environment_names() -> set:
+    """Upper-cased names of every variable the env source will read: the
+    process environment AND the `.env` file. pydantic-settings matches
+    names case-insensitively and reads `.env` too, so checking only
+    `os.environ` as typed let a `.env` value or a lower-case variable
+    lose to the YAML file it is documented to override."""
+    import os
+    names = {k.upper() for k in os.environ}
+    try:
+        with open(".env", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.lower().startswith("export "):
+                    line = line[7:].lstrip()
+                if line and not line.startswith("#") and "=" in line:
+                    names.add(line.split("=", 1)[0].strip().upper())
+    except OSError:
+        pass
+    return names
+
+
 def _strip_env_overridden(data: dict, _prefix: str = _ENV_PREFIX) -> dict:
     """Remove YAML keys that an environment variable also sets, so the env
     value wins. Mirrors the env_prefix / env_nested_delimiter scheme
@@ -428,11 +517,11 @@ def _strip_env_overridden(data: dict, _prefix: str = _ENV_PREFIX) -> dict:
     set. Nested dicts are pruned per-key rather than wholesale, so
     setting one nested env var does not discard its YAML siblings.
     """
-    import os
     out: dict = {}
+    env_names = _environment_names()
     for key, value in data.items():
         env_name = f"{_prefix}{key}".upper()
-        if env_name in os.environ:
+        if env_name in env_names:
             continue  # env sets this outright — let the env source supply it
         if isinstance(value, dict):
             pruned = _strip_env_overridden(value, f"{env_name}{_ENV_NESTED_DELIM}")
@@ -562,7 +651,7 @@ def get_settings() -> Settings:
         # set api_key at all — no typo, no load error, just a genuine
         # config gap — would otherwise get a perfectly "successful" boot
         # into the same unauthenticated state.
-        if production and not loaded.api_key:
+        if production and not (loaded.api_key or any(loaded.api_keys)):
             logger.error(
                 "TOKENMIZER_ENV=production but no api_key is configured — "
                 "refusing to start unauthenticated."

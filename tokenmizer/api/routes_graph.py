@@ -25,8 +25,10 @@ Pure code motion — no behavior changes.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -46,6 +48,22 @@ from tokenmizer.security.redaction import redact_messages
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@asynccontextmanager
+async def _locked_graph(session_id: str):
+    """The session's graph, with its lock held while the caller reads it.
+
+    Extraction runs in a worker thread under this lock, mutating the node
+    dict; a route iterating that dict without the lock could fail with
+    "dictionary changed size during iteration" while a chat turn for the
+    same session was in flight. Marked in use too, so cache eviction does
+    not detach the instance mid-read.
+    """
+    graph = await app_module._get_graph_async(session_id)
+    async with app_module._get_session_lock(session_id):
+        with app_module._session_in_use(session_id):
+            yield graph
 
 
 async def verify_session_access(request: Request) -> None:
@@ -77,6 +95,13 @@ async def verify_session_access(request: Request) -> None:
     claim = request.method not in ("GET", "HEAD", "OPTIONS")
     try:
         app_module._ownership.check_access(session_id, principal, claim=claim)
+        # An unclaimed session can still hold data — written by the MCP
+        # server's offline fallback or the Memory library, neither of which
+        # claims. With several tenants, "nobody owns it" must not mean
+        # "anybody may read it".
+        if (not claim and _multi_tenant()
+                and app_module._ownership.owner_of(session_id) is None):
+            raise SessionAccessDenied(session_id)
     except SessionAccessDenied:
         logger.warning(
             f"Denied {request.method} {request.url.path} — session "
@@ -123,8 +148,30 @@ def _internal_error(context: str, e: Exception) -> HTTPException:
 
 
 @router.get("/api/stats", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
-async def stats(session_id: Optional[str] = None):
-    return app_module._analytics.summary()
+async def stats(request: Request, session_id: Optional[str] = None):
+    # With several API keys each key is a tenant, and the deployment-wide
+    # totals are other tenants' traffic. Each sees its own sessions (and
+    # its own session-less requests, recorded under its anonymous scope).
+    #
+    # A session_id narrows it to that session; access to it was checked by
+    # verify_session_access. It used to be ignored with one key, so
+    # `tokenmizer stats <session>` printed the global totals for any id,
+    # one that never existed included.
+    if session_id:
+        return app_module._analytics.summary(scope={session_id})
+    if not _multi_tenant():
+        return app_module._analytics.summary()
+    principal = getattr(request.state, "principal", DEV_PRINCIPAL)
+    try:
+        owned = set(app_module._ownership.sessions_for(principal))
+    except OwnershipUnavailable:
+        raise HTTPException(status_code=503, detail="Session ownership state unavailable.")
+    owned.add(f"__anon__:{principal}")
+    return app_module._analytics.summary(scope=owned)
+
+
+def _multi_tenant() -> bool:
+    return any(getattr(app_module.settings, "api_keys", []) or [])
 
 
 class AnalyzeRequest(BaseModel):
@@ -156,7 +203,10 @@ async def analyze_file(req: AnalyzeRequest):
         raise HTTPException(status_code=422, detail="filename is required.")
 
     try:
-        result = app_module._file_intelligence.process(
+        # Parsing a large CSV or PDF is CPU work measured in seconds; on the
+        # event loop it stalled every other request for that long.
+        result = await asyncio.to_thread(
+            app_module._file_intelligence.process,
             req.content, req.filename,
             token_budget=req.token_budget, query=req.query,
         )
@@ -233,30 +283,30 @@ async def get_graph_history(session_id: str, at_time: float = 0.0, top_k: int = 
     Useful for: debugging decision changes, audit trail, "what did we decide
     at 2pm?" queries.
     """
-    graph = await app_module._get_graph_async(session_id)
-    if at_time == 0.0:
-        nodes = graph.query("", top_k=top_k)
-    else:
-        nodes = graph.query_at_time("", at_time=at_time, top_k=top_k)
-    return {
-        "session_id": session_id,
-        "at_time": at_time or None,
-        "nodes": [
-            {
-                "id": n.id, "label": n.label, "type": n.type.value,
-                "status": n.status.value, "importance": n.importance,
-                "valid_from": n.valid_from, "valid_until": n.valid_until or None,
-            }
-            for n in nodes
-        ],
-        "count": len(nodes),
-    }
+    async with _locked_graph(session_id) as graph:
+        if at_time == 0.0:
+            nodes = graph.query("", top_k=top_k)
+        else:
+            nodes = graph.query_at_time("", at_time=at_time, top_k=top_k)
+        return {
+            "session_id": session_id,
+            "at_time": at_time or None,
+            "nodes": [
+                {
+                    "id": n.id, "label": n.label, "type": n.type.value,
+                    "status": n.status.value, "importance": n.importance,
+                    "valid_from": n.valid_from, "valid_until": n.valid_until or None,
+                }
+                for n in nodes
+            ],
+            "count": len(nodes),
+        }
 
 
 @router.get("/api/graph/{session_id}", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_graph(session_id: str):
-    graph = await app_module._get_graph_async(session_id)
-    return graph.stats()
+    async with _locked_graph(session_id) as graph:
+        return graph.stats()
 
 
 @router.get("/api/graph/{session_id}/viz", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
@@ -266,8 +316,8 @@ async def get_graph_viz(session_id: str):
     {nodes: [...], edges: [...], meta: {...}}
     Used by the dashboard Graph tab and any external viz tool.
     """
-    graph = await app_module._get_graph_async(session_id)
-    return graph.to_vis_json()
+    async with _locked_graph(session_id) as graph:
+        return graph.to_vis_json()
 
 
 @router.get("/api/graph/{session_id}/html", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
@@ -275,8 +325,8 @@ async def get_graph_html(session_id: str):
     """Shareable standalone interactive graph — open in a browser, drag/zoom,
     screenshot, share. Self-contained dark-theme D3 force layout."""
     from tokenmizer.graph_memory.visualization import to_share_html
-    graph = await app_module._get_graph_async(session_id)
-    return HTMLResponse(to_share_html(graph))
+    async with _locked_graph(session_id) as graph:
+        return HTMLResponse(to_share_html(graph))
 
 
 @router.get("/api/ontology", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
@@ -295,8 +345,8 @@ async def get_graph_why(session_id: str, q: str):
     and returns the old→new trail with trigger/reason/evidence per hop,
     plus the currently active choice."""
     from tokenmizer.graph_memory.reasoning import why
-    graph = await app_module._get_graph_async(session_id)
-    return why(graph, q)
+    async with _locked_graph(session_id) as graph:
+        return why(graph, q)
 
 
 @router.get("/api/graph/{session_id}/reasoning", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
@@ -305,8 +355,8 @@ async def get_graph_reasoning(session_id: str):
     changes, decision history grouped by topic, and an ontology-based
     consistency audit (contradictions, missing/dangling transitions)."""
     from tokenmizer.graph_memory.reasoning import summarize_reasoning
-    graph = await app_module._get_graph_async(session_id)
-    return summarize_reasoning(graph)
+    async with _locked_graph(session_id) as graph:
+        return summarize_reasoning(graph)
 
 
 @router.get("/api/graph/{session_id}/obsidian", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
@@ -317,44 +367,44 @@ async def get_graph_obsidian(session_id: str):
     """
     import json as _json
 
-    graph = await app_module._get_graph_async(session_id)
-    canvas = graph.to_obsidian_canvas()
-    # The header is Latin-1 by the HTTP spec, and the id is client-supplied:
-    # a Hindi or emoji session id raised while the response was built (a
-    # 500), and quotes or semicolons would reach the header. Same allowlist
-    # as the lock-file name.
-    safe = "".join(c if (c.isascii() and (c.isalnum() or c in "-_")) else "_"
-                   for c in session_id[:12])
-    filename = f"tokenmizer-{safe}.canvas"
-    return Response(
-        content=_json.dumps(canvas, indent=2),
-        media_type="application/json",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
+    async with _locked_graph(session_id) as graph:
+        canvas = graph.to_obsidian_canvas()
+        # The header is Latin-1 by the HTTP spec, and the id is client-supplied:
+        # a Hindi or emoji session id raised while the response was built (a
+        # 500), and quotes or semicolons would reach the header. Same allowlist
+        # as the lock-file name.
+        safe = "".join(c if (c.isascii() and (c.isalnum() or c in "-_")) else "_"
+                       for c in session_id[:12])
+        filename = f"tokenmizer-{safe}.canvas"
+        return Response(
+            content=_json.dumps(canvas, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
 
 
 @router.get("/api/graph/{session_id}/transitions", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def get_transitions(session_id: str):
     """Full decision transition history — trigger, reason, evidence, confidence_delta."""
-    graph = await app_module._get_graph_async(session_id)
-    return {
-        "session_id": session_id,
-        "transitions": [
-            {
-                "id": t.id,
-                "from_label": t.from_label,
-                "to_label": t.to_label,
-                "trigger": t.trigger,
-                "reason": t.reason,
-                "evidence": t.evidence,
-                "confidence_delta": t.confidence_delta,
-                "timestamp": t.timestamp,
-                "context_line": t.to_context_line(),
-            }
-            for t in graph.get_transitions()
-        ],
-        "count": len(graph.get_transitions()),
-    }
+    async with _locked_graph(session_id) as graph:
+        return {
+            "session_id": session_id,
+            "transitions": [
+                {
+                    "id": t.id,
+                    "from_label": t.from_label,
+                    "to_label": t.to_label,
+                    "trigger": t.trigger,
+                    "reason": t.reason,
+                    "evidence": t.evidence,
+                    "confidence_delta": t.confidence_delta,
+                    "timestamp": t.timestamp,
+                    "context_line": t.to_context_line(),
+                }
+                for t in graph.get_transitions()
+            ],
+            "count": len(graph.get_transitions()),
+        }
 
 
 class CheckpointBody(BaseModel):
@@ -401,7 +451,9 @@ async def create_manual_checkpoint(session_id: str, body: CheckpointBody | None 
         raw_messages = [m.to_dict() for m in (body.messages if body else [])]
         raw_messages = redact_messages(raw_messages)
         async with app_module._get_session_lock(session_id):
-            ckpt = app_module._checkpoint_mgr.create(
+            # Extraction over up to 500 messages: off the event loop.
+            ckpt = await asyncio.to_thread(
+                app_module._checkpoint_mgr.create,
                 session_id=session_id,
                 messages=raw_messages,
                 graph=graph,
@@ -414,10 +466,31 @@ async def create_manual_checkpoint(session_id: str, body: CheckpointBody | None 
             "node_count": len(ckpt.graph_snapshot.get("nodes", [])),
             "resume_tokens": ckpt.resume_tokens,
             "resume_standard": ckpt.resume_standard,
+            "resume_critical": ckpt.resume_critical,
+            "resume_full": ckpt.resume_full,
             "trigger": ckpt.trigger,
         }
     except Exception as e:
         raise _internal_error(f"Manual checkpoint failed for session {session_id}", e)
+
+
+def _session_summary(session_id: str, graph) -> dict:
+    stats = graph.stats()
+    return {
+        "session_id": session_id,
+        "node_count": stats.get("node_count", 0),
+        "edge_count": stats.get("edge_count", 0),
+        "by_type": stats.get("by_type", {}),
+        "updated_at": max((n.updated_at for n in graph._nodes.values()), default=0.0),
+        "graph_url": f"/api/graph/{session_id}/html",
+    }
+
+
+def _load_session_summary(session_id: str) -> dict:
+    from tokenmizer.graph_memory.graph import GraphMemory
+    graph = GraphMemory(session_id,
+                        storage_dir=app_module.settings.graph_checkpoint.storage_dir)
+    return _session_summary(session_id, graph)
 
 
 @router.get("/api/sessions", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
@@ -444,16 +517,17 @@ async def list_sessions(request: Request):
 
     sessions = []
     for session_id in owned:
-        graph = await app_module._get_graph_async(session_id)
-        stats = graph.stats()
-        sessions.append({
-            "session_id": session_id,
-            "node_count": stats.get("node_count", 0),
-            "edge_count": stats.get("edge_count", 0),
-            "by_type": stats.get("by_type", {}),
-            "updated_at": max((n.updated_at for n in graph._nodes.values()), default=0.0),
-            "graph_url": f"/api/graph/{session_id}/html",
-        })
+        # A cached graph is read under its lock. An uncached one is loaded
+        # for this listing only, off the event loop, and NOT put in the LRU:
+        # listing a principal with hundreds of sessions used to cycle all of
+        # them through the 200-entry cache, evicting (and force-persisting)
+        # the sessions that were actually in use.
+        if session_id in app_module._graph_cache:
+            async with _locked_graph(session_id) as graph:
+                summary = _session_summary(session_id, graph)
+        else:
+            summary = await asyncio.to_thread(_load_session_summary, session_id)
+        sessions.append(summary)
     sessions.sort(key=lambda s: s["updated_at"], reverse=True)
     return {"sessions": sessions, "count": len(sessions)}
 
@@ -508,67 +582,67 @@ async def invalidate_decision(
         import re
 
         from tokenmizer.graph_memory.graph import NodeStatus, NodeType
-        graph = await app_module._get_graph_async(session_id)
+        async with _locked_graph(session_id) as graph:
 
-        invalidated: list[dict] = []
+            invalidated: list[dict] = []
 
-        if node_id is not None:
-            node = graph._nodes.get(node_id)
-            if (node is not None and node.type == NodeType.DECISION
-                    and node.status == NodeStatus.COMPLETED):
-                node.status = NodeStatus.INVALIDATED
-                node.summary = (
-                    f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
-                )
-                invalidated.append({"node_id": node_id, "label": node.label})
-        else:
-            label_lower = decision_label.lower().strip()
-            pattern = re.compile(r'\b' + re.escape(label_lower) + r'\b')
-            # Only ACTIVE (COMPLETED) decisions are eligible: matching
-            # across all statuses would let a label overwrite SUPERSEDED
-            # history nodes with INVALIDATED, destroying their
-            # supersession record. The response lists every affected node
-            # so multi-matches are visible.
-            for nid, node in graph._nodes.items():
-                if (node.type == NodeType.DECISION and
-                        node.status == NodeStatus.COMPLETED and
-                        pattern.search(node.label.lower())):
+            if node_id is not None:
+                node = graph._nodes.get(node_id)
+                if (node is not None and node.type == NodeType.DECISION
+                        and node.status == NodeStatus.COMPLETED):
                     node.status = NodeStatus.INVALIDATED
                     node.summary = (
                         f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
                     )
-                    invalidated.append({"node_id": nid, "label": node.label})
+                    invalidated.append({"node_id": node_id, "label": node.label})
+            else:
+                label_lower = decision_label.lower().strip()
+                pattern = re.compile(r'\b' + re.escape(label_lower) + r'\b')
+                # Only ACTIVE (COMPLETED) decisions are eligible: matching
+                # across all statuses would let a label overwrite SUPERSEDED
+                # history nodes with INVALIDATED, destroying their
+                # supersession record. The response lists every affected node
+                # so multi-matches are visible.
+                for nid, node in graph._nodes.items():
+                    if (node.type == NodeType.DECISION and
+                            node.status == NodeStatus.COMPLETED and
+                            pattern.search(node.label.lower())):
+                        node.status = NodeStatus.INVALIDATED
+                        node.summary = (
+                            f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
+                        )
+                        invalidated.append({"node_id": nid, "label": node.label})
 
-        if not invalidated:
-            target = node_id if node_id is not None else decision_label
-            raise HTTPException(
-                status_code=404,
-                detail=(f"No ACTIVE decision matching '{target}' found in "
-                        f"session '{session_id}' (superseded/archived decisions "
-                        f"are not invalidatable — they are already inactive)")
-            )
-        # direct node mutation above bypasses add_node's dirty-tracking —
-        # force=True is required here or this write is silently skipped
-        # (caught in a final accuracy pass; same class of bug the
-        # eviction path and prune() were already protected against).
-        # _persist() now returns bool  — check it, since claiming
-        # "status": "invalidated" while the write actually failed is the
-        # same silent-data-loss pattern this whole audit is about.
-        if not graph._persist(force=True):
-            raise HTTPException(
-                status_code=500,
-                detail=(f"Decision(s) marked invalidated in memory, but the "
-                        f"write to disk FAILED for session '{session_id}' — "
-                        f"the change did not persist and will be lost on "
-                        f"restart or cache eviction. Retry the request."),
-            )
-        return {
-            "session_id": session_id,
-            "invalidated": node_id if node_id is not None else decision_label,
-            "affected_nodes": invalidated,
-            "reason": reason,
-            "status": "invalidated",
-        }
+            if not invalidated:
+                target = node_id if node_id is not None else decision_label
+                raise HTTPException(
+                    status_code=404,
+                    detail=(f"No ACTIVE decision matching '{target}' found in "
+                            f"session '{session_id}' (superseded/archived decisions "
+                            f"are not invalidatable — they are already inactive)")
+                )
+            # direct node mutation above bypasses add_node's dirty-tracking —
+            # force=True is required here or this write is silently skipped
+            # (caught in a final accuracy pass; same class of bug the
+            # eviction path and prune() were already protected against).
+            # _persist() now returns bool  — check it, since claiming
+            # "status": "invalidated" while the write actually failed is the
+            # same silent-data-loss pattern this whole audit is about.
+            if not graph._persist(force=True):
+                raise HTTPException(
+                    status_code=500,
+                    detail=(f"Decision(s) marked invalidated in memory, but the "
+                            f"write to disk FAILED for session '{session_id}' — "
+                            f"the change did not persist and will be lost on "
+                            f"restart or cache eviction. Retry the request."),
+                )
+            return {
+                "session_id": session_id,
+                "invalidated": node_id if node_id is not None else decision_label,
+                "affected_nodes": invalidated,
+                "reason": reason,
+                "status": "invalidated",
+            }
     except HTTPException:
         raise
     except Exception as e:
@@ -615,39 +689,39 @@ async def get_resume(session_id: str, level: str = "standard"):
         if level not in ("critical", "standard", "full"):
             level = "standard"
         ckpt = app_module._checkpoint_mgr.get_latest(session_id)
-        graph = await app_module._get_graph_async(session_id)
-        live_nodes = [n for n in graph._nodes.values() if not n._evicted]
-        graph_updated_at = max((n.updated_at for n in live_nodes), default=0.0)
+        async with _locked_graph(session_id) as graph:
+            live_nodes = [n for n in graph._nodes.values() if not n._evicted]
+            graph_updated_at = max((n.updated_at for n in live_nodes), default=0.0)
 
-        if not ckpt and not live_nodes:
-            raise HTTPException(
-                status_code=404,
-                detail="No checkpoint found for session, and its graph memory is "
-                       "empty — nothing has been recorded under this session_id yet.",
-            )
+            if not ckpt and not live_nodes:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No checkpoint found for session, and its graph memory is "
+                           "empty — nothing has been recorded under this session_id yet.",
+                )
 
-        # Prefer the graph whenever it is newer than the snapshot. A one
-        # second grace absorbs the extraction the checkpoint itself ran.
-        use_live = live_nodes and (ckpt is None or graph_updated_at > ckpt.created_at + 1.0)
-        if use_live:
-            text = _live_resume(graph, level, ckpt.next_action if ckpt else "")
-            source = "live_graph"
-        else:
-            resume_map = {
-                "critical": ckpt.resume_critical,
-                "standard": ckpt.resume_standard,
-                "full": ckpt.resume_full,
+            # Prefer the graph whenever it is newer than the snapshot. A one
+            # second grace absorbs the extraction the checkpoint itself ran.
+            use_live = live_nodes and (ckpt is None or graph_updated_at > ckpt.created_at + 1.0)
+            if use_live:
+                text = _live_resume(graph, level, ckpt.next_action if ckpt else "")
+                source = "live_graph"
+            else:
+                resume_map = {
+                    "critical": ckpt.resume_critical,
+                    "standard": ckpt.resume_standard,
+                    "full": ckpt.resume_full,
+                }
+                text = resume_map.get(level, ckpt.resume_standard)
+                source = "checkpoint"
+            return {
+                "session_id": session_id,
+                "checkpoint_id": ckpt.checkpoint_id if ckpt else None,
+                "source": source,
+                "level": level,
+                "resume_context": text,
+                "token_count": count_tokens(text),
             }
-            text = resume_map.get(level, ckpt.resume_standard)
-            source = "checkpoint"
-        return {
-            "session_id": session_id,
-            "checkpoint_id": ckpt.checkpoint_id if ckpt else None,
-            "source": source,
-            "level": level,
-            "resume_context": text,
-            "token_count": count_tokens(text),
-        }
     except HTTPException:
         raise
     except Exception as e:

@@ -12,7 +12,7 @@ python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
 python -m benchmarks.savings.runner                 # input cost, with and without
-pytest tests/ -q                                     # 2131 tests
+pytest tests/ -q                                     # 2244 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -91,10 +91,12 @@ cache marker, per-model minimum, reads at 0.1x the input price, writes at
 
 | Turns | History | Client alone, no caching | Client caching its own history | Through TokenMizer |
 |---:|---:|---:|---:|---:|
-| 10 | 462 | 2,333 | 2,333 | 2,833 (**21% more**) |
-| 40 | 2,057 | 41,556 | 14,745 | 16,158 (**61% less** / 10% more) |
-| 150 | 7,967 | 596,900 | 77,998 | 77,472 (**87% less** / level) |
-| 300 | 16,040 | 2,399,067 | 268,767 | 157,818 (**93% less** / **41% less**) |
+| 4 | 163 | 342 | 342 | 342 (**same**) |
+| 10 | 462 | 2,333 | 2,333 | 2,333 (**same**) |
+| 40 | 2,057 | 41,556 | 14,745 | 14,745 (**65% less** / same) |
+| 100 | 5,272 | 264,239 | 41,215 | 36,769 (**86% less** / **11% less**) |
+| 150 | 7,967 | 596,900 | 77,998 | 58,613 (**90% less** / **25% less**) |
+| 300 | 16,040 | 2,399,067 | 268,767 | 124,555 (**95% less** / **54% less**) |
 
 The two percentages are against the two client columns. Where the saving
 comes from: below about 4,000 tokens of history, prompt caching — the
@@ -102,13 +104,41 @@ proxy marks the history cacheable and keeps every earlier byte of the
 request identical; above it, windowing, with the cut held still between
 cuts so the windowed history is cached too.
 
-**Short sessions still cost more on input**, and this is why: a ten-turn
-session of 462 tokens is under the model's cache minimum, so nothing can
-be cached, and the proxy adds its ~50-token brevity instruction to every
-request. That instruction exists to shorten what the model writes back,
-which costs several times more per token than input; this benchmark
-returns a fixed one-word answer and so charges the instruction while
-crediting it nothing. `terse_output.enabled: false` removes it.
+**A short session costs exactly what the client alone costs.** Measured at
+2, 4, 10, 30, 40 and 50 turns: 0.0% difference against a client caching
+its own history. The proxy adds nothing to a request until windowing first
+cuts the history; the brevity instruction (`terse_output.enabled: auto`,
+the default) joins at that cut, when the start of the request is being
+rewritten anyway.
+
+Two lengths show a one-off dip, and why: 20 turns is 2.6% above a client
+that does *not* cache, because the history has just crossed the cache
+minimum and the first cache write has not yet been read back; 70 turns is
+3.3% above a caching client, because the first windowing cut happened a
+few turns before the session ended. Both are recovered within a few turns
+(80 turns: 2.3% less).
+
+What produced these numbers (before: 10 turns 21% more, 40 turns 10%
+more than a caching client, 150 level, 300 41% less):
+
+* **No context block when the request already carries every fact.** On a
+  session whose every message is still in the payload — no windowing, no
+  digest — each graph node restates something the model is reading in
+  full. The block is now sent only when the graph knows something the
+  payload does not (a windowed turn, a turn the client truncated, another
+  session).
+* **Shorter fixed text.** The brevity instruction went from 50 tokens to 26
+  and the fence preamble around injected context from 57 to 25.
+* **A windowed request never falls below the cache minimum.** Cutting down
+  to the last ten messages left about 800 tokens — under the 1,024-token
+  minimum — so for a dozen requests after each cut nothing was cached and
+  everything was paid in full, while a client that never windowed paid a
+  tenth of the price for its cached history. The cut now keeps at least
+  the cache minimum (plus a margin) — and no more: every cut rewrites the
+  cached prefix, so a smaller tail makes each rewrite cheaper and leaves
+  more room before the next one.
+* **The brevity instruction waits for the first cut** (`auto`), so nothing
+  is added to a request that windowing has not yet made cheaper.
 
 Read before quoting:
 
@@ -222,7 +252,7 @@ re-render"). If the question quoted the answer, the person would not have
 needed to ask — and those are exactly the cases token-overlap ranking
 cannot serve.
 
-**recall@6 88%** with keyword ranking. Every case is checked to be
+**recall@6 95%** with keyword ranking (88% before query-intent ranking, path-aware tokens and per-word alias scoring). Every case is checked to be
 answerable from its own transcript before scoring: an ungrounded question
 measures extraction, not retrieval, and reads as a retrieval failure
 forever.

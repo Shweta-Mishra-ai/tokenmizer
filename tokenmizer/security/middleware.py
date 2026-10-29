@@ -60,13 +60,22 @@ _INJECTION_PATTERNS = [
     re.compile(r'disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?', re.IGNORECASE),
     re.compile(r'forget\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?', re.IGNORECASE),
     re.compile(r'you\s+are\s+now\s+(?:DAN|jailbreak(?:ed)?|unrestricted|in\s+developer\s+mode)', re.IGNORECASE),
-    re.compile(r'print\s+(?:your\s+)?(?:system\s+prompt|instructions)', re.IGNORECASE),
-    re.compile(r'reveal\s+(?:your\s+)?(?:system\s+prompt|instructions|api\s+key)', re.IGNORECASE),
-    re.compile(r'repeat\s+(?:the\s+|your\s+)?(?:words?\s+)?above', re.IGNORECASE),
-    re.compile(r'bypass\s+(?:your\s+)?(?:safety|filter|restriction|guardrails?)', re.IGNORECASE),
+    # Addressed to the model ("your"), never a bare "print instructions":
+    # "Print instructions for installing the CLI" is an ordinary request.
+    re.compile(r'(?:print|reveal)\s+your\s+(?:system\s+prompt|instructions|api\s+key)', re.IGNORECASE),
+    re.compile(r'(?:print|reveal)\s+(?:the\s+)?system\s+prompt', re.IGNORECASE),
+    # "repeat the words above" is the extraction trick; "repeat the above
+    # steps in TypeScript" is not, so the object must be the prompt text.
+    re.compile(r'repeat\s+(?:the\s+|your\s+)?(?:words|text|prompt|instructions)\s+above', re.IGNORECASE),
+    re.compile(r'bypass\s+your\s+(?:safety|filters?|restrictions?|guardrails?)', re.IGNORECASE),
     re.compile(r'pretend\s+(?:you\s+have\s+no|there\s+(?:are|is)\s+no)\s+(?:restrictions?|rules?|filters?)', re.IGNORECASE),
     re.compile(r'this\s+is\s+a\s+(?:test|simulation)[,.]?\s+(?:ignore|disregard|skip)', re.IGNORECASE),
 ]
+
+# Text inside quotes is being talked ABOUT ("make the bot refuse 'ignore
+# previous instructions'"), not said to the model. Removed before matching.
+_QUOTED = re.compile(r'"[^"\n]{0,300}"|\u201c[^\u201d\n]{0,300}\u201d|'
+                     r"(?<![A-Za-z])'[^'\n]{0,300}'(?![A-Za-z])|`[^`\n]{0,300}`")
 
 
 def _content_to_plain_text(content) -> str:
@@ -114,7 +123,7 @@ def _scan_messages(messages: list[dict]) -> bool:
     content would let an attacker bypass the filter completely by
     wrapping the text in a one-element content-block list."""
     for msg in _new_user_turns(messages):
-        text = _content_to_plain_text(msg.get("content"))
+        text = _QUOTED.sub(" ", _content_to_plain_text(msg.get("content")))
         if not text:
             continue
         for pat in _INJECTION_PATTERNS:
@@ -133,6 +142,13 @@ async def injection_guard(request: Request) -> None:
         from fastapi import HTTPException
     except ImportError:
         return  # not running under FastAPI — skip
+
+    try:
+        from tokenmizer.config.settings import get_settings
+        if not get_settings().security.injection_filter:
+            return
+    except Exception:
+        pass  # unreadable settings: keep the filter on
 
     if request.method == "POST" and "chat" in request.url.path:
         try:

@@ -50,7 +50,26 @@ TOKENMIZER_API_KEY = os.environ.get("TOKENMIZER_API_KEY", "")
 # Where the graph lives when these tools read it directly. Matches the
 # proxy's own default (graph_checkpoint.storage_dir), so a local read sees
 # exactly what a running proxy would have written.
-TOKENMIZER_STORAGE_DIR = os.environ.get("TOKENMIZER_STORAGE_DIR", "./checkpoints")
+def _default_storage_dir() -> str:
+    """The proxy's storage_dir, as an absolute path.
+
+    "./checkpoints" was resolved against the MCP process's working
+    directory — usually the project an editor launched it in — while the
+    proxy wrote under its own. Offline writes then went to a store the
+    proxy never read. Reading the same setting the proxy reads, and
+    reporting the absolute path, makes any remaining mismatch visible.
+    """
+    explicit = os.environ.get("TOKENMIZER_STORAGE_DIR")
+    if explicit:
+        return os.path.abspath(explicit)
+    try:
+        from tokenmizer.config.settings import get_settings
+        return os.path.abspath(get_settings().graph_checkpoint.storage_dir)
+    except Exception:
+        return os.path.abspath("./checkpoints")
+
+
+TOKENMIZER_STORAGE_DIR = _default_storage_dir()
 
 # The MCP server is installed by a plugin; the proxy is a separate process
 # nobody started. So the single most likely state on a fresh install is
@@ -255,15 +274,26 @@ def _get(path: str) -> dict:
 def _is_transport_error(exc: Exception) -> bool:
     """True if the proxy could not be reached at all.
 
-    A connect failure or a timeout means nothing answered. An HTTP status
-    means something did, and its answer stands — see the OFFLINE note.
+    Only a failure to CONNECT means nothing answered. A read timeout means
+    the proxy received the request and is still working on it — a slow
+    checkpoint of a long transcript — so answering from local storage as
+    well would extract the same conversation twice. An HTTP status means
+    something answered, and its answer stands — see the OFFLINE note.
     """
     try:
         import httpx
     except ImportError:
         return False
-    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
-                           httpx.ReadTimeout, httpx.TimeoutException))
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+
+
+def _response_detail(response) -> str:
+    """The `detail` string of a proxy error response, or ""."""
+    try:
+        detail = response.json().get("detail")
+    except Exception:
+        return ""
+    return detail[:300] if isinstance(detail, str) else ""
 
 
 def _explain(exc: Exception) -> str:
@@ -300,14 +330,19 @@ def _explain(exc: Exception) -> str:
         )
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
-        if code in (401, 403):
+        if code == 404:
+            return "Not found — nothing has been checkpointed under that session id yet."
+        # A 4xx `detail` says what to change: a 421 names the setting for
+        # an untrusted Host, a 429 when to retry, a 413 the size limit.
+        # "HTTP 421" alone said none of it. 5xx details are not passed on:
+        # some name the session, which this reply keeps out (see above).
+        detail = _response_detail(exc.response) if 400 <= code < 500 else ""
+        if code == 401 or (code == 403 and not detail):
             return (
                 f"TokenMizer rejected the request ({code}). Set TOKENMIZER_API_KEY "
                 "in the MCP server's env to match the proxy's api_key."
             )
-        if code == 404:
-            return "Not found — nothing has been checkpointed under that session id yet."
-        return f"TokenMizer returned HTTP {code}."
+        return f"TokenMizer returned HTTP {code}" + (f": {detail}" if detail else ".")
     return f"{type(exc).__name__}"
 
 

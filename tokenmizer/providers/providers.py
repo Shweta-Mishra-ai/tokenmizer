@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import logging
 import re
 import time
@@ -183,6 +184,9 @@ class BaseProvider(ABC):
     # cannot see the tools for.
     supports_tools: bool = False
     supports_tool_stream: bool = False
+    # Whether image content blocks can be forwarded (see api/app.py
+    # _with_media). Without it they are dropped, and the response says so.
+    supports_images: bool = False
 
     # How long an upstream call may hang before it is abandoned.
     #
@@ -203,6 +207,26 @@ class BaseProvider(ABC):
         self.api_key = api_key
         self.default_model = model
         self._retry_delays = [1.0, 2.0, 4.0]
+
+    def _client(self, factory, **kwargs):
+        """One SDK client per event loop, reused across calls.
+
+        A client was built for every request and never closed: a fresh
+        connection pool (and TLS handshake) per call, and the old pools
+        left for the garbage collector. Keyed weakly on the running loop
+        because an async HTTP client is bound to the loop that created it;
+        and on the factory and its arguments, so a different key, timeout
+        or patched constructor gets its own client."""
+        import weakref
+        cache = self.__dict__.setdefault("_client_cache", weakref.WeakKeyDictionary())
+        loop = asyncio.get_running_loop()
+        per_loop = cache.setdefault(loop, {})
+        key = (id(factory), tuple(sorted((k, repr(v)) for k, v in kwargs.items())))
+        entry = per_loop.get(key)
+        if entry is None or entry[0] is not factory:
+            entry = (factory, factory(**kwargs))
+            per_loop[key] = entry
+        return entry[1]
 
     @property
     def _timeout_kwargs(self) -> dict:
@@ -233,9 +257,16 @@ class BaseProvider(ABC):
     ) -> LLMResponse:
         model = model or self.default_model
         t0 = time.monotonic()
+        # request_timeout bounds each attempt; this bounds them together.
+        # Four attempts at 120s each was an eight-minute request.
+        budget = self.request_timeout if self.request_timeout and self.request_timeout > 0 else None
 
         for attempt, delay in enumerate([0] + self._retry_delays):
             if delay:
+                if budget is not None and time.monotonic() - t0 + delay >= budget:
+                    raise ProviderError(self.__class__.__name__, "timeout",
+                                        f"retries exhausted the {budget:.0f}s request budget",
+                                        retryable=False)
                 await asyncio.sleep(delay)
             try:
                 resp = await self._call(messages, model, max_tokens, stream, system, **kwargs)
@@ -369,9 +400,47 @@ def _anthropic_input(usage) -> tuple[int, int, int]:
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 
+_dropped_anthropic_params: set[str] = set()
+
+
+def _anthropic_sampling(kwargs: dict, method) -> dict:
+    """Sampling params in Anthropic's shape, limited to what `method` (the
+    installed SDK's messages.create or messages.stream) accepts.
+
+    anthropic 2.x removed `temperature` and `top_p` from both methods, and
+    any pyproject floor (>=0.30) installs it: every request from a client
+    that set either one failed in the SDK with "unexpected keyword
+    argument" before anything was sent, and came back as a 502. They are
+    dropped instead, with one log line each. Where the SDK still takes
+    `temperature`, it is clamped to Anthropic's 0-1 (OpenAI clients send
+    up to 2, which the API rejects).
+    """
+    out = _sampling(kwargs)
+    if "stop" in out:
+        out["stop_sequences"] = _as_stop_list(out.pop("stop"))
+    try:
+        params = inspect.signature(method).parameters
+        accepts_any = any(p.kind is p.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        params, accepts_any = {}, True
+    for name in ("temperature", "top_p"):
+        if name not in out:
+            continue
+        if not accepts_any and name not in params:
+            out.pop(name)
+            if name not in _dropped_anthropic_params:
+                _dropped_anthropic_params.add(name)
+                logger.warning("The installed anthropic SDK has no `%s` parameter; "
+                               "it is dropped from requests to Anthropic.", name)
+        elif name == "temperature":
+            out[name] = min(max(out[name], 0.0), 1.0)
+    return out
+
+
 class AnthropicProvider(BaseProvider):
 
     supports_tools = True
+    supports_images = True
     # text_stream carries only text, so the raw event stream is read
     # instead: content_block_start(tool_use) then input_json_delta. See
     # chat_stream.
@@ -398,8 +467,8 @@ class AnthropicProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install anthropic")
 
-        client = anthropic.AsyncAnthropic(api_key=self.api_key,
-                                          **self._timeout_kwargs)
+        client = self._client(anthropic.AsyncAnthropic, api_key=self.api_key,
+                              **self._timeout_kwargs)
 
         # Separate system messages from conversation
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
@@ -410,10 +479,8 @@ class AnthropicProvider(BaseProvider):
         system_text = "\n\n".join(sys_parts) if sys_parts else None
 
         try:
-            kwargs_clean = _sampling(kwargs)
-            # Anthropic SDK uses `stop_sequences`, not OpenAI's `stop`
-            if "stop" in kwargs_clean:
-                kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
+            kwargs_clean = _anthropic_sampling(
+                kwargs, client.messages.stream if stream else client.messages.create)
             if system_text:
                 kwargs_clean["system"] = _anthropic_system_param(system_text, model)
             kwargs_clean.update(self._tool_params(kwargs))
@@ -444,8 +511,7 @@ class AnthropicProvider(BaseProvider):
                                    cache_write_tokens=write,
                                    output_tokens=final.usage.output_tokens,
                                    model=model, provider="anthropic",
-                                   finish_reason=(finish_reason(final.stop_reason, calls)
-                                                  if calls else final.stop_reason or "stop"),
+                                   finish_reason=finish_reason(final.stop_reason, calls),
                                    tool_calls=calls)
 
             resp = await client.messages.create(
@@ -461,8 +527,7 @@ class AnthropicProvider(BaseProvider):
                 output_tokens=resp.usage.output_tokens,
                 model=model,
                 provider="anthropic",
-                finish_reason=(finish_reason(resp.stop_reason, calls)
-                               if calls else resp.stop_reason or "stop"),
+                finish_reason=finish_reason(resp.stop_reason, calls),
                 tool_calls=calls,
             )
         except anthropic.RateLimitError as e:
@@ -479,17 +544,15 @@ class AnthropicProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install anthropic")
         model = model or self.default_model
-        client = anthropic.AsyncAnthropic(api_key=self.api_key,
-                                          **self._timeout_kwargs)
+        client = self._client(anthropic.AsyncAnthropic, api_key=self.api_key,
+                              **self._timeout_kwargs)
 
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
             sys_parts.insert(0, system)
         conv = _mark_history_cacheable(
             anthropic_messages(conversation_messages(messages)))
-        kwargs_clean = _sampling(kwargs)
-        if "stop" in kwargs_clean:
-            kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
+        kwargs_clean = _anthropic_sampling(kwargs, client.messages.stream)
         kwargs_clean.update(self._tool_params(kwargs))
         if sys_parts:
             # Same cacheability rule as the non-streaming path — this used
@@ -546,6 +609,12 @@ class AnthropicProvider(BaseProvider):
                                 "function": {
                                     "arguments": getattr(delta, "partial_json", "") or ""},
                             }]}
+                    elif kind == "message_delta":
+                        # Why the stream ended. A stream cut off at
+                        # max_tokens used to be reported "stop" — and cached.
+                        stop = getattr(getattr(event, "delta", None), "stop_reason", None)
+                        if stop and finish_reason(stop, []) == "length":
+                            yield {"finish_reason": "length"}
         except anthropic.RateLimitError as e:
             raise ProviderError("anthropic", "rate_limit", str(e), retryable=True)
         except anthropic.APIStatusError as e:
@@ -582,11 +651,24 @@ class OpenAIProvider(BaseProvider):
     # through, streamed or not.
     supports_tools = True
     supports_tool_stream = True
+    # Image blocks pass through in the same shape. Subclasses whose API has
+    # no vision input set this back to False.
+    supports_images = True
 
     def __init__(self, api_key: str, model: str = "gpt-4o",
                  base_url: Optional[str] = None):
         super().__init__(api_key, model)
         self._base_url = base_url
+
+    # OpenAI's reasoning models reject `max_tokens` and take
+    # `max_completion_tokens`. Only for OpenAI itself: gateways and the
+    # OpenAI-compatible vendors below still expect `max_tokens`.
+    _COMPLETION_TOKENS_MODELS = re.compile(r"^(?:o\d|gpt-5)", re.IGNORECASE)
+
+    def _limit_kwargs(self, model: str, max_tokens: int) -> dict:
+        if self._base_url is None and self._COMPLETION_TOKENS_MODELS.match(model or ""):
+            return {"max_completion_tokens": max_tokens}
+        return {"max_tokens": max_tokens}
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
@@ -594,7 +676,8 @@ class OpenAIProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install openai")
 
-        client = AsyncOpenAI(
+        client = self._client(
+            AsyncOpenAI,
             api_key=self.api_key,
             **({"base_url": self._base_url} if self._base_url else {}),
             **self._timeout_kwargs,
@@ -603,6 +686,7 @@ class OpenAIProvider(BaseProvider):
         all_messages = messages[:]
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
+        limit = self._limit_kwargs(model, max_tokens)
 
         try:
             sampling = _sampling(kwargs)  # OpenAI SDK accepts temperature/top_p/stop natively
@@ -611,7 +695,7 @@ class OpenAIProvider(BaseProvider):
                 full_text = ""
                 input_tokens = count_messages_tokens(all_messages, model)
                 async for chunk in await client.chat.completions.create(
-                    model=model, messages=all_messages, max_tokens=max_tokens,
+                    model=model, messages=all_messages, **limit,
                     stream=True, **sampling
                 ):
                     delta = chunk.choices[0].delta.content or ""
@@ -622,7 +706,7 @@ class OpenAIProvider(BaseProvider):
                                    model=model, provider="openai")
 
             resp = await client.chat.completions.create(
-                model=model, messages=all_messages, max_tokens=max_tokens, **sampling
+                model=model, messages=all_messages, **limit, **sampling
             )
             choice = resp.choices[0]
             calls = normalize_tool_calls(getattr(choice.message, "tool_calls", None))
@@ -648,7 +732,8 @@ class OpenAIProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install openai")
         model = model or self.default_model
-        client = AsyncOpenAI(
+        client = self._client(
+            AsyncOpenAI,
             api_key=self.api_key,
             **({"base_url": self._base_url} if self._base_url else {}),
             **self._timeout_kwargs,
@@ -658,7 +743,7 @@ class OpenAIProvider(BaseProvider):
             all_messages = [{"role": "system", "content": system}] + all_messages
         try:
             stream = await client.chat.completions.create(
-                model=model, messages=all_messages, max_tokens=max_tokens,
+                model=model, messages=all_messages, **self._limit_kwargs(model, max_tokens),
                 stream=True, **_sampling(kwargs), **tool_kwargs(kwargs),
             )
             async for chunk in stream:
@@ -675,6 +760,9 @@ class OpenAIProvider(BaseProvider):
                 calls = getattr(delta, "tool_calls", None)
                 if calls:
                     yield {"tool_calls": [_stream_tool_call_delta(tc) for tc in calls]}
+                ended = getattr(chunk.choices[0], "finish_reason", None)
+                if isinstance(ended, str) and finish_reason(ended, []) == "length":
+                    yield {"finish_reason": "length"}
         except Exception as e:
             raise ProviderError(self.__class__.__name__.lower().replace("provider", ""),
                                 "api_error", str(e),
@@ -684,6 +772,7 @@ class OpenAIProvider(BaseProvider):
 # ── DeepSeek ──────────────────────────────────────────────────────────────────
 
 class DeepSeekProvider(OpenAIProvider):
+    supports_images = False
     def __init__(self, api_key: str, model: str = "deepseek-chat"):
         super().__init__(api_key, model, base_url="https://api.deepseek.com/v1")
         self.default_model = model
@@ -807,6 +896,10 @@ class CohereProvider(BaseProvider):
                                         max_tokens=max_tokens,
                                         **self._chat_kwargs(kwargs))
             async for event in stream:
+                delta = getattr(event, "delta", None)
+                ended = str(getattr(delta, "finish_reason", "") or "")
+                if ended.upper() == "MAX_TOKENS":
+                    yield {"finish_reason": "length"}
                 mapped = cohere_stream_event(event)
                 if not mapped:
                     continue
@@ -1019,6 +1112,9 @@ class GeminiProvider(BaseProvider):
                         for i, c in enumerate(calls)
                     ]}
                     emitted += len(calls)
+                ended = str(getattr(candidates[0], "finish_reason", "") or "")
+                if "MAX_TOKENS" in ended.upper():
+                    yield {"finish_reason": "length"}
         except Exception as e:
             raise ProviderError("gemini", "api_error", str(e),
                                 retryable=_gemini_error_is_retryable(e))
@@ -1140,6 +1236,8 @@ class OllamaProvider(BaseProvider):
                                 for i, c in enumerate(calls)
                             ]}
                         if data.get("done"):
+                            if finish_reason(data.get("done_reason"), []) == "length":
+                                yield {"finish_reason": "length"}
                             break
         except ProviderError:
             raise
@@ -1223,6 +1321,9 @@ def missing_provider_sdk(provider: str) -> Optional[str]:
     return None if found else f'pip install "tokenmizer[{extra}]"'
 
 
+_SETTINGS_DEFAULT_MODEL = "claude-sonnet-4-6"   # Settings.default_model's default
+
+
 def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
     """Build the correct provider from settings. `model` overrides
     settings.default_model on the same provider (used by the extraction
@@ -1230,19 +1331,31 @@ def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
     provider = settings.provider.lower()
     key = settings.get_api_key_for_provider(provider)
     model = model or settings.default_model
+    # default_model's own default is a Claude model. With provider: ollama
+    # (or gemini, deepseek...) and no default_model set, that name was sent
+    # to a server that has never heard of it. Fall back to the provider's
+    # own default instead — but only for the untouched default; a model the
+    # operator chose is always used as given.
+    if provider not in ("anthropic", "claude", "openrouter") \
+            and model == _SETTINGS_DEFAULT_MODEL:
+        model = ""
+
     _warn_on_model_provider_mismatch(provider, model)
+    openai_base = (getattr(settings, "openai_base_url", "") or "").strip() or None
+    ollama_base = (getattr(settings, "ollama_base_url", "") or "").strip() \
+        or "http://localhost:11434"
 
     mapping = {
         "anthropic": lambda: AnthropicProvider(key, model),
         "claude": lambda: AnthropicProvider(key, model),
-        "openai": lambda: OpenAIProvider(key, model),
-        "gpt": lambda: OpenAIProvider(key, model),
+        "openai": lambda: OpenAIProvider(key, model or "gpt-4o", base_url=openai_base),
+        "gpt": lambda: OpenAIProvider(key, model or "gpt-4o", base_url=openai_base),
         "deepseek": lambda: DeepSeekProvider(key, model or "deepseek-chat"),
         "mistral": lambda: MistralProvider(key, model or "mistral-large-latest"),
         "grok": lambda: GrokProvider(key, model or "grok-3"),
         "cohere": lambda: CohereProvider(key, model or "command-r-plus"),
         "gemini": lambda: GeminiProvider(key, model or "gemini-1.5-pro"),
-        "ollama": lambda: OllamaProvider(model or "llama3"),
+        "ollama": lambda: OllamaProvider(model or "llama3", base_url=ollama_base),
         "openrouter": lambda: OpenRouterProvider(key, model),
     }
 

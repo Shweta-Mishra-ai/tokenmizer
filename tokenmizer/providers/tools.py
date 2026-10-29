@@ -143,6 +143,39 @@ def anthropic_tool_choice(tool_choice: Any, parallel_tool_calls: Optional[bool] 
     return choice
 
 
+def anthropic_content(content):
+    """OpenAI content blocks -> Anthropic's, for the one shape that differs:
+    an `image_url` block becomes an `image` block with a base64 or URL
+    source. Anything else passes through unchanged."""
+    if not isinstance(content, list):
+        return content
+    out = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image_url":
+            url = (block.get("image_url") or {}).get("url", "") \
+                if isinstance(block.get("image_url"), dict) else str(block.get("image_url") or "")
+            if url.startswith("data:") and ";base64," in url:
+                media_type, data = url[5:].split(";base64,", 1)
+                out.append({"type": "image", "source": {
+                    "type": "base64", "media_type": media_type, "data": data}})
+            elif url:
+                out.append({"type": "image", "source": {"type": "url", "url": url}})
+            continue
+        out.append(block)
+    return out
+
+
+def _blank(content) -> bool:
+    """True for content Anthropic rejects as empty: no text but whitespace
+    and nothing else (an image or tool block is never blank)."""
+    if content is None or isinstance(content, str):
+        return not (content or "").strip()
+    if isinstance(content, list):
+        return all(isinstance(b, dict) and b.get("type") == "text"
+                   and not (b.get("text") or "").strip() for b in content)
+    return False
+
+
 def anthropic_messages(conv: list[dict]) -> list[dict]:
     """OpenAI-shaped conversation -> Anthropic messages.
 
@@ -150,11 +183,18 @@ def anthropic_messages(conv: list[dict]) -> list[dict]:
     - a `role: "tool"` turn becomes a tool_result block inside a user
       message; consecutive tool turns share one user message, which is
       what Anthropic requires for the results of one tool_use batch
+    - an earlier turn with no text ("" or whitespace, common for an
+      assistant turn from an OpenAI client) is dropped: Anthropic answers
+      400 "text content blocks must contain non-whitespace text", which
+      the client saw as a 502 for a conversation that is valid in its own
+      format. Consecutive same-role turns that leaves are combined by the
+      API. The final turn is kept: it is the question being asked.
 
     System messages must already be stripped (see conversation_messages).
     """
     out: list[dict] = []
-    for m in conv:
+    last = len(conv) - 1
+    for i, m in enumerate(conv):
         role = m.get("role")
         if role == "tool":
             block = {
@@ -174,7 +214,7 @@ def anthropic_messages(conv: list[dict]) -> list[dict]:
             if isinstance(text, str) and text.strip():
                 blocks.append({"type": "text", "text": text})
             elif isinstance(text, list):
-                blocks.extend(b for b in text if isinstance(b, dict))
+                blocks.extend(b for b in text if isinstance(b, dict) and not _blank([b]))
             for tc in normalize_tool_calls(m["tool_calls"]):
                 blocks.append({
                     "type": "tool_use",
@@ -185,10 +225,20 @@ def anthropic_messages(conv: list[dict]) -> list[dict]:
             out.append({"role": "assistant", "content": blocks})
             continue
 
-        out.append({"role": role, "content": m.get("content")})
+        content = anthropic_content(m.get("content"))
+        if i != last and _blank(content):
+            continue
+        out.append({"role": role, "content": content})
 
     for m in out:
         m.pop("_tool_results", None)
+    # Dropping a blank first turn can leave an assistant turn first, which
+    # Anthropic rejects the same way conversation_messages() guards. Only
+    # a first turn this function dropped is repaired; other input keeps
+    # its shape.
+    if conv and conv[0].get("role") == "user":
+        while out and out[0]["role"] != "user":
+            out.pop(0)
     return out
 
 

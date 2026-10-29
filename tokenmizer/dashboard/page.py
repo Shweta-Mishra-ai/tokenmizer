@@ -183,23 +183,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <h3>Pipeline layers</h3>
       <div class="layer-row">
         <span class="layer-name">Graph memory + checkpoint</span>
-        <span class="layer-badge badge-graph">Core</span>
+        <span class="layer-badge badge-routing" id="layer-graph">…</span>
       </div>
       <div class="layer-row">
         <span class="layer-name">Semantic cache</span>
-        <span class="layer-badge badge-cache">Cache</span>
+        <span class="layer-badge badge-routing" id="layer-cache">…</span>
+      </div>
+      <div class="layer-row">
+        <span class="layer-name">File digests (older turns)</span>
+        <span class="layer-badge badge-routing" id="layer-files">…</span>
       </div>
       <div class="layer-row">
         <span class="layer-name">Prompt compression</span>
-        <span class="layer-badge badge-active">Active</span>
+        <span class="layer-badge badge-routing" id="layer-compression">…</span>
       </div>
       <div class="layer-row">
         <span class="layer-name">Terse output</span>
-        <span class="layer-badge badge-terse">Active</span>
+        <span class="layer-badge badge-routing" id="layer-terse" title="Auto: added from the first time a long session's history is windowed, so short sessions pay nothing for it.">…</span>
       </div>
       <div class="layer-row">
         <span class="layer-name">Model map</span>
-        <span class="layer-badge badge-routing" title="model_map rewrites a client's model name before dispatch; empty by default. The old routing.* block is deprecated and does nothing.">Config only</span>
+        <span class="layer-badge badge-routing" id="layer-model-map" title="model_map rewrites a client's model name before dispatch; empty by default. The old routing.* block is deprecated and does nothing.">Config only</span>
       </div>
       <div class="faint" style="margin-top:0.9rem">
         Savings per layer are in <code>/api/stats</code> and on every chat response
@@ -221,7 +225,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div class="card" style="margin-bottom:1.5rem">
     <h3>Session graph <em id="preview-meta"></em></h3>
-    <iframe class="preview" id="preview" title="Session graph"></iframe>
+    <!-- Sandboxed without allow-same-origin: the graph is built from
+         conversation text, and an unsandboxed srcdoc frame shares this
+         page's origin, API key in sessionStorage included. -->
+    <iframe class="preview" id="preview" title="Session graph" sandbox="allow-scripts allow-downloads"></iframe>
     <div class="faint" style="margin-top:0.75rem">
       Nodes filled by detected community, ringed by type. Open the full page for the
       timeline view, decision history and PNG export.
@@ -288,14 +295,23 @@ async function requestApiKey() {
 }
 
 async function dashboardFetch(path) {
-  let apiKey = getStoredApiKey();
-  let response = await fetch(path, authOptions(apiKey));
+  const used = getStoredApiKey();
+  const response = await fetch(path, authOptions(used));
   if (response.status !== 401) return response;
 
-  if (apiKey) {
-    sessionStorage.removeItem(API_KEY_STORAGE_KEY);
+  // The dashboard loads several endpoints at once, so their 401s arrive
+  // one after another — and window.prompt() blocks, so the first prompt
+  // had already resolved (and cleared the shared promise) before the
+  // second 401 was handled. Each one asked for the key again: three
+  // prompts on every load. A key stored since this request was sent is
+  // the answer to that same question; retry with it instead of asking.
+  const current = getStoredApiKey();
+  if (current && current !== used) return fetch(path, authOptions(current));
+
+  if (used) {
+    sessionStorage.removeItem(API_KEY_STORAGE_KEY);  // it was rejected
   }
-  apiKey = await requestApiKey();
+  const apiKey = await requestApiKey();
   if (!apiKey) return response;
 
   return fetch(path, authOptions(apiKey));
@@ -325,8 +341,21 @@ async function openGraph(ev) {
     const r = await dashboardFetch(link.getAttribute('href'));
     if (!r.ok) { if (tab) tab.close(); return; }
     const html = await r.text();
+    // Inside a sandboxed frame, as in the preview: written straight into
+    // the tab, conversation-derived HTML ran in this page's origin, and a
+    // tab opened from here starts with a copy of its sessionStorage (the
+    // API key included).
     const doc = tab ? tab.document : document;
-    doc.open(); doc.write(html); doc.close();
+    doc.open();
+    doc.write('<!DOCTYPE html><meta charset="UTF-8"><title>Session graph</title>' +
+      '<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%;display:block}</style>' +
+      '<body></body>');
+    doc.close();
+    const frame = doc.createElement('iframe');
+    frame.setAttribute('sandbox', 'allow-scripts allow-downloads');
+    frame.setAttribute('title', 'Session graph');
+    frame.srcdoc = html;
+    doc.body.appendChild(frame);
   } catch (e) {
     if (tab) tab.close();
     console.warn('Graph page load failed:', e);
@@ -415,7 +444,28 @@ async function loadPreview(id) {
   }
 }
 
+// The pipeline badges show what the server is actually configured to do.
+// They were literal "Active" text, whatever the config said.
+function renderLayers(layers) {
+  if (!layers) return;
+  const set = (id, on, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = label || (on ? 'Active' : 'Off');
+    el.className = 'layer-badge ' + (on ? 'badge-active' : 'badge-routing');
+  };
+  set('layer-graph', layers.graph_memory);
+  set('layer-cache', layers.semantic_cache);
+  set('layer-compression', layers.compression);
+  set('layer-files', layers.file_intelligence);
+  const t = layers.terse_output;
+  set('layer-terse', t !== false, t === 'auto' ? 'Auto' : null);
+  const m = Number(layers.model_map) || 0;
+  set('layer-model-map', m > 0, m > 0 ? `${m} mapped` : 'Config only');
+}
+
 function renderHealth(h) {
+  renderLayers(h && h.layers);
   const pill = document.getElementById('health');
   const text = document.getElementById('health-text');
   const banner = document.getElementById('degraded');
@@ -432,12 +482,21 @@ function renderHealth(h) {
   const f = h.persist_failures || {};
   Object.keys(f).sort().forEach(k => lines.push(
     `<b>${esc(k)}</b> failed ${f[k]} time${f[k] === 1 ? '' : 's'} since start.`));
-  (h.sessions_with_unreadable_graph || []).forEach(s => lines.push(
-    `Stored graph for <code>${esc(s)}</code> could not be read. Nothing was lost; it retries.`));
-  (h.sessions_without_durable_storage || []).forEach(s => lines.push(
-    `<code>${esc(s)}</code> is running without durable storage — it will not survive a restart.`));
-  (h.sessions_with_data_loss || []).forEach(s => lines.push(
-    `Memory for <code>${esc(s)}</code> was displaced during database recovery.`));
+  // /health reports COUNTS here (it is unauthenticated, and session ids
+  // belong to whoever claimed them). Older servers sent lists of ids, so
+  // both shapes are read; calling forEach on a number threw and left the
+  // banner empty exactly when something had gone wrong.
+  const count = v => Array.isArray(v) ? v.length : (Number(v) || 0);
+  const plural = (k, one, many) => `${k} session${k === 1 ? '' : 's'} ${k === 1 ? one : many}`;
+  const unreadable = count(h.sessions_with_unreadable_graph);
+  if (unreadable) lines.push(plural(unreadable, 'has a stored graph that could not be read',
+    'have stored graphs that could not be read') + '. Nothing was lost; it retries.');
+  const volatile = count(h.sessions_without_durable_storage);
+  if (volatile) lines.push(plural(volatile, 'is', 'are') +
+    ' running without durable storage — they will not survive a restart.');
+  const displaced = count(h.sessions_with_data_loss);
+  if (displaced) lines.push(plural(displaced, 'had its', 'had their') +
+    ' memory displaced during database recovery.');
   if (h.checkpoint_storage_broken) lines.push('Checkpoint storage could not be initialised.');
   if (h.checkpoint_data_loss) lines.push('The checkpoint database was quarantined after corruption.');
   lines.push('Full detail is in the server log and under <code>/api/stats</code>.');

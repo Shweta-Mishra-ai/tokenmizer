@@ -30,9 +30,9 @@ def scans(monkeypatch):
     calls = []
     real = R._scrub
 
-    def counting(text):
+    def counting(text, *args):
         calls.append(text)
-        return real(text)
+        return real(text, *args)
 
     monkeypatch.setattr(R, "_scrub", counting)
     return calls

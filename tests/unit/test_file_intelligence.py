@@ -208,7 +208,7 @@ class TestFileIntelligence:
         messages = [
             {"role": "user", "content": f"Analyze this data:\n{csv_block}"}
         ]
-        processed, saved = fi.process_message_files(messages, token_budget_per_file=300)
+        processed, saved = fi.process_message_files(messages, token_budget_per_file=300, digest_current_turn=True)
         # FIXED: was `assert saved >= 0` (always true, and the comment
         # "saved some tokens" wasn't actually checked). This masked a real
         # bug: the "Analyze this data:" preamble line diluted the tabular-
@@ -224,7 +224,7 @@ class TestFileIntelligence:
     def test_process_message_files_skips_short_messages(self):
         fi = FileIntelligence()
         messages = [{"role": "user", "content": "Hello, how are you?"}]
-        processed, saved = fi.process_message_files(messages)
+        processed, saved = fi.process_message_files(messages, digest_current_turn=True)
         assert processed == messages  # unchanged
         assert saved == 0
 
@@ -234,7 +234,7 @@ class TestFileIntelligence:
         messages = [
             {"role": "user", "content": f"Here's my data:\n```csv\n{large_csv}\n```\nAnalyze it."}
         ]
-        processed, saved = fi.process_message_files(messages, token_budget_per_file=300)
+        processed, saved = fi.process_message_files(messages, token_budget_per_file=300, digest_current_turn=True)
         assert saved > 0
 
     def test_budget_respected(self):

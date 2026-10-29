@@ -19,7 +19,8 @@ import json
 import logging
 import sqlite3
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
@@ -61,6 +62,8 @@ _COST_PER_1K = {
     "deepseek":  (0.0014, 0.0028),
     "mistral":   (0.002,  0.006),
     "default":   (0.003,  0.015),
+    # Local inference: nothing billed, so nothing to save in dollars.
+    "ollama":    (0.0,    0.0),
 }
 
 
@@ -139,11 +142,17 @@ class AnalyticsEngine:
 
         if self._db_path is not None:
             self._init_db()
+        # Re-checked: a failed _init_db() disables persistence by setting
+        # _db_path to None, and _load() then opened sqlite3.connect("None") —
+        # a database file literally named "None" in the working directory.
+        if self._db_path is not None:
             self._load()
 
     # ── Durability ───────────────────────────────────────────────────────────
 
     def _connect(self) -> sqlite3.Connection:
+        if self._db_path is None:
+            raise RuntimeError("analytics persistence is disabled")
         conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -162,7 +171,7 @@ class AnalyticsEngine:
         """
         try:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS requests (
                         timestamp REAL NOT NULL,
@@ -192,7 +201,7 @@ class AnalyticsEngine:
         """Restore the retained window and the lifetime counters."""
         cutoff = time.time() - self.MAX_RECORD_AGE_SECONDS
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 rows = conn.execute(
                     "SELECT timestamp, session_id, provider, model, "
                     "input_tokens_original, input_tokens_sent, output_tokens, "
@@ -237,7 +246,7 @@ class AnalyticsEngine:
             return True
         batch, self._pending = self._pending, []
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.executemany(
                     "INSERT INTO requests VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     [(r.timestamp, r.session_id, r.provider, r.model,
@@ -350,10 +359,12 @@ class AnalyticsEngine:
             else:
                 del self._by_provider[prov]
 
-    def _period_stats(self, cutoff: float) -> PeriodStats:
+    def _period_stats(self, cutoff: float, scope=None) -> PeriodStats:
         stats = PeriodStats()
         for r in self._records:
             if r.timestamp < cutoff:
+                continue
+            if scope is not None and r.session_id not in scope:
                 continue
             stats.requests += 1
             stats.tokens_saved += r.tokens_saved
@@ -378,9 +389,11 @@ class AnalyticsEngine:
     def monthly(self) -> PeriodStats:
         return self._period_stats(time.time() - 30 * 86_400)
 
-    def layer_breakdown(self) -> Dict[str, int]:
+    def layer_breakdown(self, scope=None) -> Dict[str, int]:
         totals: Dict[str, int] = defaultdict(int)
         for r in self._records:
+            if scope is not None and r.session_id not in scope:
+                continue
             for layer, saved in r.layer_savings.items():
                 totals[layer] += saved
         return dict(totals)
@@ -398,13 +411,25 @@ class AnalyticsEngine:
             suggestions.append("Semantic cache has no hits yet — similar queries will be cached automatically.")
         return suggestions
 
-    def summary(self) -> dict:
-        d, w, m = self.daily, self.weekly, self.monthly
+    def summary(self, scope=None) -> dict:
+        """Savings figures. `scope`, a set of session ids, limits them to
+        those sessions — how one tenant is shown its own numbers and not
+        the whole deployment's."""
+        now = time.time()
+        d = self._period_stats(now - 86_400, scope)
+        w = self._period_stats(now - 7 * 86_400, scope)
+        m = self._period_stats(now - 30 * 86_400, scope)
+        if scope is None:
+            total, by_provider = self._total_requests, dict(self._provider_totals)
+        else:
+            mine = [r for r in self._records if r.session_id in scope]
+            total = len(mine)
+            by_provider = dict(Counter(r.provider for r in mine))
         return {
             # Lifetime count, not len(self._records) — that would silently
-            # shrink as old records are trimmed.
-            "total_requests": self._total_requests,
-            "retained_records": len(self._records),
+            # shrink as old records are trimmed. Scoped: retained records.
+            "total_requests": total,
+            "retained_records": len(self._records) if scope is None else total,
             "daily": {
                 "requests": d.requests,
                 "tokens_saved": d.tokens_saved,
@@ -423,8 +448,8 @@ class AnalyticsEngine:
                 "savings_pct": round(m.savings_pct, 1),
                 "cost_saved_usd": round(m.cost_saved, 4),
             },
-            "layer_breakdown": self.layer_breakdown(),
-            "by_provider": dict(self._provider_totals),
+            "layer_breakdown": self.layer_breakdown(scope),
+            "by_provider": by_provider,
             "suggestions": self.generate_suggestions(),
             # persistence failures (checkpoint/graph/redis writes that
             # silently failed) are now visible here instead of only in logs.

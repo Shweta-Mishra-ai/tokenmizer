@@ -63,6 +63,19 @@ _FILE_EXTENSIONS = {
 }
 
 
+# Code-fence language tags -> the extension detect_file_type() knows.
+_FENCE_LANG_EXT = {
+    "python": "py", "py3": "py", "python3": "py",
+    "javascript": "js", "jsx": "js", "node": "js", "mjs": "js",
+    "typescript": "ts", "tsx": "ts",
+    "golang": "go", "rust": "rs", "ruby": "rb",
+    "bash": "sh", "shell": "sh", "zsh": "sh", "console": "sh",
+    "c++": "cpp", "cxx": "cpp", "cc": "cpp", "h": "c", "hpp": "cpp",
+    "postgres": "sql", "postgresql": "sql", "mysql": "sql", "sqlite": "sql",
+    "yml": "yaml", "markdown": "md", "plaintext": "text", "txt": "text",
+}
+
+
 # ── Result dataclass ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -661,28 +674,37 @@ class PDFExtractor:
     ) -> FileExtractionResult:
         original_tokens = count_tokens(content_bytes.decode("utf-8", errors="ignore"))
 
+        def text_fallback(why: str) -> FileExtractionResult:
+            text = content_bytes.decode("utf-8", errors="ignore")
+            truncated, was_cut = _truncate_to_budget(text, token_budget)
+            return FileExtractionResult(
+                file_type="pdf", original_size_bytes=len(content_bytes),
+                original_tokens=original_tokens,
+                extracted_tokens=count_tokens(truncated),
+                tokens_saved=original_tokens - count_tokens(truncated),
+                savings_pct=0.0, content=truncated,
+                summary=f"PDF ({why}, text fallback)",
+                strategy_used="text_fallback", was_truncated=was_cut,
+            )
+
         try:
             import pypdf  # type: ignore
-            reader = pypdf.PdfReader(io.BytesIO(content_bytes))
         except ImportError:
-            try:
-                import PyPDF2 as pypdf  # type: ignore
-                reader = pypdf.PdfReader(io.BytesIO(content_bytes))
-            except ImportError:
-                # Fallback: treat as text
-                text = content_bytes.decode("utf-8", errors="ignore")
-                truncated, was_cut = _truncate_to_budget(text, token_budget)
-                return FileExtractionResult(
-                    file_type="pdf", original_size_bytes=len(content_bytes),
-                    original_tokens=original_tokens,
-                    extracted_tokens=count_tokens(truncated),
-                    tokens_saved=original_tokens - count_tokens(truncated),
-                    savings_pct=0.0, content=truncated,
-                    summary="PDF (no parser, text fallback)",
-                    strategy_used="text_fallback", was_truncated=was_cut,
-                )
+            # No fallback to PyPDF2: it is unmaintained and carries the
+            # crafted-PDF denial-of-service bugs pypdf has since fixed.
+            # Without pypdf the bytes are read as text.
+            return text_fallback("no parser")
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+            num_pages = len(reader.pages)
+        except Exception as e:
+            # A truncated or mislabelled file ("Stream has ended
+            # unexpectedly") is the caller's input, not a server fault:
+            # it used to fail /api/analyze with a 500. Read it as text.
+            logger.warning("%s is not a readable PDF (%s: %s); reading it as text",
+                           filename, type(e).__name__, e)
+            return text_fallback("unreadable")
 
-        num_pages = len(reader.pages)
         parts = [f"File: {filename} | {num_pages} pages"]
 
         # Metadata
@@ -1105,6 +1127,7 @@ class FileIntelligence:
         messages: list[dict],
         token_budget_per_file: int = 800,
         query: str = "",
+        digest_current_turn: bool = False,
     ) -> tuple[list[dict], int]:
         """
         Scan messages for large file content blocks and extract intelligently.
@@ -1116,9 +1139,21 @@ class FileIntelligence:
         """
         total_saved = 0
         processed = []
+        # The new input — every message after the last assistant turn — is
+        # what the question is ABOUT. Digesting it replaced code the user
+        # asked about with a sample of it, and the model answered without
+        # the line in question. Only older turns are digested.
+        protect_from = len(messages)
+        for idx in range(len(messages) - 1, -1, -1) if not digest_current_turn else ():
+            if messages[idx].get("role") == "assistant":
+                break
+            protect_from = idx
 
-        for msg in messages:
+        for idx, msg in enumerate(messages):
             content = msg.get("content", "")
+            if idx >= protect_from:
+                processed.append(msg)
+                continue
             if not isinstance(content, str) or len(content) < 500:
                 processed.append(msg)
                 continue
@@ -1154,9 +1189,13 @@ class FileIntelligence:
             content,
         )
         if code_fence:
-            lang = code_fence.group(1) or "text"
+            lang = (code_fence.group(1) or "text").lower()
             block = code_fence.group(2)
-            filename = f"attachment.{lang}" if lang != "text" else "attachment.txt"
+            # The fence names a LANGUAGE, not an extension. "python" became
+            # "attachment.python", matched no type, and the block was
+            # content-sniffed — as CSV, because code has commas.
+            ext = _FENCE_LANG_EXT.get(lang, lang)
+            filename = f"attachment.{ext}" if ext != "text" else "attachment.txt"
             pre = content[:code_fence.start()].strip()
             post = content[code_fence.end():].strip()
             return block, filename, pre, post

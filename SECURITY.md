@@ -107,6 +107,30 @@ Key comparison uses `hmac.compare_digest` — constant-time, immune to timing at
 
 In development mode (no key set), the proxy accepts all requests. **Do not expose the proxy to the internet without setting an API key.**
 
+### Browser protections (always on)
+
+Development mode is still reachable by every web page you visit, through
+your browser. Three guards close that, whatever the key setting:
+
+- **Cross-origin writes are refused (403).** A `POST`/`PUT`/`DELETE` whose
+  `Origin` header is neither in `cors_origins` nor the proxy's own origin
+  never reaches a route. Requests with no `Origin` (SDKs, curl, agents)
+  are unaffected.
+- **Host allowlist with no key set (421).** Only `localhost`,
+  `127.0.0.1` and `::1` are answered, which defeats DNS rebinding (a page
+  whose domain re-resolves to 127.0.0.1 and then reads your graphs as
+  same-origin). Reaching a keyless proxy by any other name, such as
+  `host.docker.internal` or a LAN address, needs that name in
+  `security.trusted_hosts`; `["*"]` turns the check off. `/health` is
+  exempt so container probes keep working. With an API key set, every
+  Host is accepted, because nothing is readable without the key.
+- **Size limits.** Bodies over `security.max_request_bytes` (32 MiB) get
+  413 before parsing; session ids over 256 characters get 422.
+
+The dashboard renders the session graph in a sandboxed frame, so text
+captured from a conversation cannot reach the API key the dashboard
+holds in `sessionStorage`.
+
 ### Production mode: `TOKENMIZER_ENV=production`
 
 By default (`TOKENMIZER_ENV` unset, or anything other than `production`),
