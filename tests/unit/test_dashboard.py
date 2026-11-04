@@ -85,3 +85,26 @@ class TestDashboardShowsRealState:
     def test_selecting_a_session_drives_both_panels(self):
         assert "function selectSession" in DASHBOARD_HTML
         assert "loadResume(id)" in DASHBOARD_HTML and "loadPreview(id)" in DASHBOARD_HTML
+
+
+def test_endpoint_list_is_one_row_per_endpoint():
+    """The list was nine lines of text in a div with normal white-space, so
+    the browser ran every endpoint together into one paragraph."""
+    box = DASHBOARD_HTML.split('<div class="endpoint-box">', 1)[1].split("    </div>\n  </div>", 1)[0]
+    rows = [r for r in box.split("\n") if r.strip()]
+    assert len(rows) == 9 and all(r.strip().startswith("<div>") for r in rows)
+
+
+def test_zero_savings_with_requests_is_not_called_no_requests():
+    """'No requests yet' sat under TOKENS SAVED whenever savings were 0%,
+    beside a REQUESTS TODAY count of 10."""
+    assert "d.requests ? `${(d.savings_pct || 0).toFixed(1)}% reduction vs original`" in DASHBOARD_HTML
+    assert "d.savings_pct ? `" not in DASHBOARD_HTML
+
+
+def test_graph_fits_a_phone_width_frame():
+    """A 360px floor on the canvas width overflowed the dashboard's graph
+    frame on a phone (306px wide), cutting the right of the graph off."""
+    from tokenmizer.graph_memory import visualization
+    src = open(visualization.__file__).read()
+    assert "Math.max(360," not in src

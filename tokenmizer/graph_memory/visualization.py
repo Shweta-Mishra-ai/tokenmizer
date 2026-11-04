@@ -662,7 +662,7 @@ function sideW(){return PREVIEW||(innerWidth||1280)<900?0:380}
 let SIDE=sideW();
 function applySide(){document.documentElement.classList.toggle("nopanel",!SIDE)}
 applySide();
-let W=Math.max(360,(innerWidth||1280)-SIDE), H=Math.max(300,innerHeight||800);
+let W=Math.max(240,(innerWidth||1280)-SIDE), H=Math.max(300,innerHeight||800);
 const NS="http://www.w3.org/2000/svg";
 function el(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
@@ -671,7 +671,7 @@ function when(ts){return ts?new Date(ts*1000).toLocaleString():""}
 function colorOf(t){return COLOR[t]||"#8a8f9e"}
 
 const svg=el("svg",{width:W,height:H,"font-family":"Inter,system-ui,sans-serif"},document.body);
-addEventListener("resize",()=>{PREVIEW=previewSize();SIDE=sideW();applySide();W=Math.max(360,innerWidth-SIDE);H=Math.max(300,innerHeight);
+addEventListener("resize",()=>{PREVIEW=previewSize();SIDE=sideW();applySide();W=Math.max(240,innerWidth-SIDE);H=Math.max(300,innerHeight);
   svg.setAttribute("width",W);svg.setAttribute("height",H);
   // A layout computed for one canvas is not framed for another, and a
   // resize is the one moment the reader is looking at the whole picture.

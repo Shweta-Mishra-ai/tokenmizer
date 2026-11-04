@@ -103,39 +103,28 @@ def _memory(session_id: str):
 
 # ── MCP Tool definitions ──────────────────────────────────────────────────────
 
+# Every request an MCP client makes carries these schemas, so each word here
+# is paid on every turn of every session: keep them to what a model needs to
+# pick the tool and fill its arguments.
+_SID = {"type": "string", "description": "Session ID"}
 TOOLS = [
     {
         "name": "checkpoint_session",
-        "description": (
-            "Save the current AI session to TokenMizer's graph memory. "
-            "Creates a checkpoint that can be resumed later with full context. "
-            "Use this when: finishing a work session, before switching tasks, "
-            "or when the conversation is getting long."
-        ),
+        "description": "Save the session to graph memory so it can be resumed later. "
+                       "Use at the end of a session or before switching tasks.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Unique identifier for this session (e.g. 'my-project-auth')",
-                },
-                # The conversation so far. This tool runs beside the
-                # conversation rather than through the proxy, so without
-                # it the checkpoint has nothing to extract from and the
-                # session is recorded with zero nodes.
+                "session_id": _SID,
+                # This tool runs beside the conversation, not through the
+                # proxy: without the transcript there is nothing to extract.
                 "messages": {
                     "type": "array",
-                    "description": (
-                        "The conversation to save, as {role, content} objects "
-                        "(user/assistant). Decisions, tasks, files and errors "
-                        "are extracted from it into the session's graph memory."
-                    ),
+                    "description": "The conversation so far, as {role, content}",
                     "items": {
                         "type": "object",
-                        "properties": {
-                            "role": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
+                        "properties": {"role": {"type": "string"},
+                                       "content": {"type": "string"}},
                         "required": ["role", "content"],
                     },
                 },
@@ -145,103 +134,55 @@ TOOLS = [
     },
     {
         "name": "resume_session",
-        "description": (
-            "Get the resume context for a previous session. "
-            "Returns a compact summary of what was done, decided, and what's pending. "
-            "Inject this into the system prompt when starting a new session on the same project."
-        ),
+        "description": "Get a compact summary of a previous session (done, decided, "
+                       "pending) to start a new session on the same project.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Session ID to resume",
-                },
-                "level": {
-                    "type": "string",
-                    "enum": ["critical", "standard", "full"],
-                    "description": "critical=~100 tokens, standard=~300 tokens, full=~600 tokens",
-                    "default": "standard",
-                },
+                "session_id": _SID,
+                "level": {"type": "string", "enum": ["critical", "standard", "full"],
+                          "description": "~100 / ~300 / ~600 tokens",
+                          "default": "standard"},
             },
             "required": ["session_id"],
         },
     },
     {
         "name": "get_graph_stats",
-        "description": (
-            "See the knowledge graph stats for a session: "
-            "how many tasks, decisions, files, and errors are tracked."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Session ID to inspect",
-                },
-            },
-            "required": ["session_id"],
-        },
+        "description": "Count the tasks, decisions, files and errors tracked for a session.",
+        "inputSchema": {"type": "object", "properties": {"session_id": _SID},
+                        "required": ["session_id"]},
     },
     {
         "name": "analyze_file",
-        "description": (
-            "Analyze a large file (CSV, Excel, PDF, JSON) and return a token-efficient summary. "
-            "Instead of pasting thousands of rows into the chat, use this to get schema, "
-            "statistics, and sample data in ~300-500 tokens."
-        ),
+        "description": "Summarise a large CSV, Excel, PDF or JSON file (schema, stats, "
+                       "samples) instead of pasting it into the chat.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "Absolute path to the file to analyze",
-                },
-                "token_budget": {
-                    "type": "integer",
-                    "description": "Max tokens for the summary (default: 500)",
-                    "default": 500,
-                },
-                "query": {
-                    "type": "string",
-                    "description": "What you want to know about the file (improves relevance)",
-                    "default": "",
-                },
+                "file_path": {"type": "string", "description": "Absolute path"},
+                "token_budget": {"type": "integer", "default": 500},
+                "query": {"type": "string", "description": "What you want to know",
+                          "default": ""},
             },
             "required": ["file_path"],
         },
     },
     {
         "name": "get_savings_stats",
-        "description": "Get token savings analytics — how many tokens were saved today/this week.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "description": "Tokens saved today and this week.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "why_decision",
-        "description": (
-            "Reason over the session's decision history: why is something "
-            "the current choice? Traces the supersession chain (old → new "
-            "with trigger, reason, and evidence per hop) for decisions "
-            "matching the query, and reports the currently active choice. "
-            "Use when the user asks 'why did we pick X', 'what happened to "
-            "Y', or 'what was the previous approach'."
-        ),
+        "description": "Explain why a decision is the current one: the chain of earlier "
+                       "choices it replaced, with reasons. For 'why did we pick X'.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Session whose decision history to query",
-                },
-                "query": {
-                    "type": "string",
-                    "description": "Substring of the decision to explain (e.g. 'react', 'postgres')",
-                },
+                "session_id": _SID,
+                "query": {"type": "string",
+                          "description": "Part of the decision, e.g. 'postgres'"},
             },
             "required": ["session_id", "query"],
         },

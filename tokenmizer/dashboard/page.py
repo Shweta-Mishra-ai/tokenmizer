@@ -95,7 +95,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .endpoint-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
     padding: 1rem 1.25rem; font-family: ui-monospace, monospace; font-size: 0.8rem;
     color: var(--muted); line-height: 1.9; overflow-x: auto; }
-  .endpoint-box .method { color: var(--green); font-weight: 700; }
+  .endpoint-box > div { white-space: nowrap; }
+  .endpoint-box .method { color: var(--green); font-weight: 700; display: inline-block; width: 3.5em; }
   .endpoint-box .path { color: var(--text); }
 
   footer { border-top: 1px solid var(--border); padding: 1.5rem 2rem; text-align: center;
@@ -238,15 +239,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card">
     <h3>API endpoints</h3>
     <div class="endpoint-box">
-<span class="method">POST</span> <span class="path">/v1/chat/completions</span>  &mdash; drop-in OpenAI-compatible proxy, tools included
-<span class="method">POST</span> <span class="path">/api/checkpoint?session_id=</span>  &mdash; checkpoint, optionally with a transcript
-<span class="method">GET </span> <span class="path">/api/resume/{session_id}</span>  &mdash; resume context, live from the graph
-<span class="method">GET </span> <span class="path">/api/graph/{session_id}/html</span>  &mdash; interactive session graph
-<span class="method">GET </span> <span class="path">/api/graph/{session_id}/why?q=</span>  &mdash; why a decision is the current one
-<span class="method">GET </span> <span class="path">/api/sessions</span>  &mdash; your sessions
-<span class="method">GET </span> <span class="path">/api/stats</span>  &mdash; savings analytics
-<span class="method">GET </span> <span class="path">/health</span>  &mdash; liveness and durability counters
-<span class="method">GET </span> <span class="path">/docs</span>  &mdash; interactive API docs (Swagger)
+      <div><span class="method">POST</span> <span class="path">/v1/chat/completions</span>  &mdash; drop-in OpenAI-compatible proxy, tools included</div>
+      <div><span class="method">POST</span> <span class="path">/api/checkpoint?session_id=</span>  &mdash; checkpoint, optionally with a transcript</div>
+      <div><span class="method">GET</span> <span class="path">/api/resume/{session_id}</span>  &mdash; resume context, live from the graph</div>
+      <div><span class="method">GET</span> <span class="path">/api/graph/{session_id}/html</span>  &mdash; interactive session graph</div>
+      <div><span class="method">GET</span> <span class="path">/api/graph/{session_id}/why?q=</span>  &mdash; why a decision is the current one</div>
+      <div><span class="method">GET</span> <span class="path">/api/sessions</span>  &mdash; your sessions</div>
+      <div><span class="method">GET</span> <span class="path">/api/stats</span>  &mdash; savings analytics</div>
+      <div><span class="method">GET</span> <span class="path">/health</span>  &mdash; liveness and durability counters</div>
+      <div><span class="method">GET</span> <span class="path">/docs</span>  &mdash; interactive API docs (Swagger)</div>
     </div>
   </div>
 
@@ -527,7 +528,7 @@ async function loadStats() {
       document.getElementById('req-today').textContent = (d.requests || 0).toLocaleString();
       document.getElementById('tokens-saved').textContent = (d.tokens_saved || 0).toLocaleString();
       document.getElementById('savings-pct').textContent =
-        d.savings_pct ? `${d.savings_pct.toFixed(1)}% reduction vs original` : 'No requests yet';
+        d.requests ? `${(d.savings_pct || 0).toFixed(1)}% reduction vs original` : 'No requests yet';
     }
 
     if (cacheRes && cacheRes.ok) {

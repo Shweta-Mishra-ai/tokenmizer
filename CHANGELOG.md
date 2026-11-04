@@ -79,6 +79,21 @@ OpenAI SDK as the client:
   one that never existed included: `/api/stats` ignored `session_id` with a
   single API key. It now reports that session.
 
+### Dashboard and MCP (found in a headless browser run)
+
+- The API endpoint list ran all nine endpoints together into one paragraph;
+  it is one row per endpoint again.
+- TOKENS SAVED read "No requests yet" whenever savings were 0%, beside a
+  non-zero REQUESTS TODAY. It now shows "0.0% reduction vs original" once
+  there are requests.
+- On a phone the embedded session graph was drawn 360px wide in a 306px
+  frame, cutting off its right side. The canvas now follows the frame width
+  (floor 240px).
+- The MCP tool schemas are about a third smaller (≈770 → ≈520 tokens by a
+  chars/4 estimate). A client sends them with every request while the server
+  is connected, so in a short session they cost more than the conversation.
+  Tools, arguments and behaviour are unchanged.
+
 ### Benchmarks
 
 - `benchmarks/latency/runner.py` counted error answers (502, 429) as
