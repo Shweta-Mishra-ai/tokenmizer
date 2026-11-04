@@ -110,17 +110,21 @@ _SID = {"type": "string", "description": "Session ID"}
 TOOLS = [
     {
         "name": "checkpoint_session",
-        "description": "Save the session to graph memory so it can be resumed later. "
-                       "Use at the end of a session or before switching tasks.",
+        "description": "Save the session to graph memory so it can be resumed later "
+                       "with full context. Use when finishing a session, before "
+                       "switching tasks, or when the conversation is getting long.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": _SID,
+                "session_id": {"type": "string",
+                               "description": "Stable ID for this work, e.g. 'my-project-auth'"},
                 # This tool runs beside the conversation, not through the
                 # proxy: without the transcript there is nothing to extract.
                 "messages": {
                     "type": "array",
-                    "description": "The conversation so far, as {role, content}",
+                    "description": "The conversation so far, as {role, content}. "
+                                   "Decisions, tasks, files and errors are extracted "
+                                   "from it; without it nothing is saved.",
                     "items": {
                         "type": "object",
                         "properties": {"role": {"type": "string"},
@@ -135,13 +139,14 @@ TOOLS = [
     {
         "name": "resume_session",
         "description": "Get a compact summary of a previous session (done, decided, "
-                       "pending) to start a new session on the same project.",
+                       "pending). Put it in the system prompt when starting a new "
+                       "session on the same project.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "session_id": _SID,
                 "level": {"type": "string", "enum": ["critical", "standard", "full"],
-                          "description": "~100 / ~300 / ~600 tokens",
+                          "description": "critical ~100, standard ~300, full ~600 tokens",
                           "default": "standard"},
             },
             "required": ["session_id"],
@@ -156,13 +161,15 @@ TOOLS = [
     {
         "name": "analyze_file",
         "description": "Summarise a large CSV, Excel, PDF or JSON file (schema, stats, "
-                       "samples) instead of pasting it into the chat.",
+                       "samples) in ~300-500 tokens instead of pasting it into the chat.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "Absolute path"},
-                "token_budget": {"type": "integer", "default": 500},
-                "query": {"type": "string", "description": "What you want to know",
+                "token_budget": {"type": "integer", "default": 500,
+                                 "description": "Max tokens for the summary"},
+                "query": {"type": "string",
+                          "description": "What you want to know (improves relevance)",
                           "default": ""},
             },
             "required": ["file_path"],
@@ -176,13 +183,16 @@ TOOLS = [
     {
         "name": "why_decision",
         "description": "Explain why a decision is the current one: the chain of earlier "
-                       "choices it replaced, with reasons. For 'why did we pick X'.",
+                       "choices it replaced, with trigger and reason per step. For 'why "
+                       "did we pick X', 'what happened to Y', 'what was the previous "
+                       "approach'.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "session_id": _SID,
                 "query": {"type": "string",
-                          "description": "Part of the decision, e.g. 'postgres'"},
+                          "description": "Words from the decision, e.g. 'postgres' "
+                                         "(substring or similar meaning)"},
             },
             "required": ["session_id", "query"],
         },

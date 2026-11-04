@@ -290,4 +290,4 @@ def test_tool_schemas_stay_small():
     import json
 
     from tokenmizer.mcp.server import TOOLS
-    assert len(json.dumps(TOOLS, separators=(",", ":"))) // 4 <= 550
+    assert len(json.dumps(TOOLS, separators=(",", ":"))) // 4 <= 650

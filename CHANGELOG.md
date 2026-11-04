@@ -89,10 +89,13 @@ OpenAI SDK as the client:
 - On a phone the embedded session graph was drawn 360px wide in a 306px
   frame, cutting off its right side. The canvas now follows the frame width
   (floor 240px).
-- The MCP tool schemas are about a third smaller (≈770 → ≈520 tokens by a
-  chars/4 estimate). A client sends them with every request while the server
-  is connected, so in a short session they cost more than the conversation.
-  Tools, arguments and behaviour are unchanged.
+- The MCP tool schemas are 18% smaller (≈770 → ≈630 tokens by a chars/4
+  estimate). A client sends them with every request while the server is
+  connected, so in a short session they cost more than the conversation.
+  Only wording was shortened: every hint a model uses to choose or fill a
+  tool is kept (when to checkpoint, that `messages` is what gets saved, where
+  the resume block goes, the size levels), and names, required fields,
+  types, enums and defaults are identical.
 
 ### Benchmarks
 
