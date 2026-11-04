@@ -22,6 +22,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 | `/api/preferences` | DELETE | Forget one (`?key=...`) or all of this principal's preferences |
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
 | `/api/sessions` | GET | The caller's sessions with node counts, last activity and a link to each graph page. Scoped by ownership: one API key never sees another's sessions |
+| `/api/sessions/{session_id}` | DELETE | Forget a session: graph memory, decision history, checkpoints, cached answers and its owner. Owner only (anyone else gets 404). Analytics keep the request counts with the session id cleared. With several workers, a worker that holds the session in memory and receives a new request for it will start a new session under the same id |
 | `/api/graph/{id}` | GET | Session graph stats |
 | `/api/graph/{id}/html` | GET | **Interactive graph page** — nodes grouped and colored by detected community with a toggleable community panel, click-to-inspect node detail, decision-history timeline, supersession arcs, search, fit/zoom/pan, PNG export; an empty graph explains why. Zero external dependencies (works offline) |
 | `/api/graph/{id}/why?q=` | GET | **Reasoning:** causal chain behind a decision (old → new with trigger/reason/evidence) |
@@ -78,6 +79,7 @@ tokenmizer serve [--port 8000]
 tokenmizer checkpoint [session-id]      # default: the working directory name
 tokenmizer resume [session-id] [--level standard|full|critical]
 tokenmizer stats
+tokenmizer forget my-session            # delete a session's memory (asks first; --yes to skip)
 tokenmizer reassign-sessions --from-key OLD --to-key NEW   # after rotating a key
 tokenmizer reassign-sessions --from-dev --to-key NEW       # after setting the first key
 ```

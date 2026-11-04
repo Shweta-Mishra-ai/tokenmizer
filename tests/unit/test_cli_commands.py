@@ -415,3 +415,31 @@ class TestMcpCommand:
         res = runner.invoke(app, ["mcp"])
         assert res.exit_code == 0, res.output
         assert calls == [True]
+
+
+class TestForgetCommand:
+
+    def test_deletes_after_confirmation_and_encodes_the_id(self, monkeypatch):
+        captured = {}
+
+        def fake_delete(url, **kwargs):
+            captured["url"] = url
+            return _FakeResponse(200, {"deleted": {"graph_rows": 4, "checkpoints": 1,
+                                                   "cached_answers": 2}})
+
+        monkeypatch.setattr(httpx, "delete", fake_delete)
+        result = runner.invoke(app, ["forget", "a/b c"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert captured["url"].endswith("/api/sessions/a%2Fb%20c")
+        assert "4 graph rows" in result.output
+
+    def test_declining_the_prompt_deletes_nothing(self, monkeypatch):
+        monkeypatch.setattr(httpx, "delete", lambda *a, **k: pytest.fail("deleted"))
+        result = runner.invoke(app, ["forget", "s"], input="n\n")
+        assert result.exit_code == 1
+
+    def test_a_session_with_nothing_stored_says_so(self, monkeypatch):
+        monkeypatch.setattr(httpx, "delete", lambda url, **k: _FakeResponse(
+            200, {"deleted": {"graph_rows": 0, "checkpoints": 0, "cached_answers": 0}}))
+        result = runner.invoke(app, ["forget", "s", "--yes"])
+        assert result.exit_code == 0 and "Nothing was stored" in result.output

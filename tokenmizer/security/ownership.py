@@ -187,6 +187,23 @@ class OwnershipStore:
             raise OwnershipUnavailable(str(e)) from e
         return [r[0] for r in rows]
 
+    def release(self, session_id: str) -> bool:
+        """Forget who owns `session_id`; True if it was owned. Once its data
+        is deleted, the id is free to be claimed again."""
+        for key in [k for k in self._allowed if k[0] == session_id]:
+            del self._allowed[key]
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute("DELETE FROM session_owners WHERE session_id=?",
+                                   (session_id,))
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+        except Exception as e:
+            raise OwnershipUnavailable(str(e)) from e
+
     def reassign(self, from_principal: str, to_principal: str) -> int:
         """Move every session `from_principal` owns to `to_principal`.
         Returns how many moved.

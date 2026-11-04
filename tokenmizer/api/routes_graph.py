@@ -493,6 +493,51 @@ def _load_session_summary(session_id: str) -> dict:
     return _session_summary(session_id, graph)
 
 
+@router.delete("/api/sessions/{session_id}",
+               dependencies=[Depends(verify_api_key), Depends(verify_session_access),
+                             Depends(app_module._check_rate_limit)])
+async def delete_session(session_id: str):
+    """Forget a session: its graph memory, decision history, checkpoints and
+    cached answers, and who owned it. Request counts in the analytics stay,
+    with the session id cleared, so totals do not move.
+
+    There was no way to do this short of deleting SQLite files by hand,
+    and a session can hold anything a user pasted into it. Only the owner
+    may delete (anyone else gets the same 404 as a session that does not
+    exist). Held under the session's lock so an in-flight request cannot
+    write the graph back, and the cached graph is dropped WITHOUT being
+    persisted, for the same reason."""
+    from tokenmizer.graph_memory.filelock import LockUnavailable
+    from tokenmizer.graph_memory.persistence import delete_session as delete_graph
+
+    async with app_module._get_session_lock(session_id):
+        app_module._graph_cache.pop(session_id, None)
+        app_module._last_auto_checkpoint.pop(session_id, None)
+        app_module._terse_sessions.pop(session_id, None)
+        cached = app_module._cache.drop_scope(session_id)
+        storage = app_module.settings.graph_checkpoint.storage_dir
+        try:
+            graph_rows = await asyncio.to_thread(delete_graph, storage, session_id)
+            checkpoints = await asyncio.to_thread(
+                app_module._checkpoint_mgr.delete_session, session_id)
+        except LockUnavailable:
+            raise HTTPException(status_code=503,
+                                detail="Session is being written by another worker; retry.")
+        except Exception as e:
+            raise _internal_error("Session delete failed", e)
+        analytics = await asyncio.to_thread(app_module._analytics.forget_session, session_id)
+        try:
+            app_module._ownership.release(session_id)
+        except OwnershipUnavailable as e:
+            logger.error(f"Ownership store unavailable deleting {session_id!r}: {e}")
+            raise HTTPException(status_code=503, detail="Session ownership state unavailable.")
+    logger.info(f"Deleted session {session_id!r}: {graph_rows} graph rows, "
+                f"{checkpoints} checkpoints, {cached} cached answers")
+    return {"session_id": session_id, "deleted": {
+        "graph_rows": graph_rows, "checkpoints": checkpoints,
+        "cached_answers": cached, "analytics_rows_unlinked": analytics}}
+
+
 @router.get("/api/sessions", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
 async def list_sessions(request: Request):
     """The caller's sessions, with size and recency, newest first.

@@ -234,6 +234,15 @@ class CheckpointManager:
         )
         return ckpt
 
+    def delete_session(self, session_id: str) -> int:
+        """Remove every checkpoint of `session_id`. Returns how many."""
+        from contextlib import closing
+        with closing(self._db_connect()) as conn, conn:
+            n = conn.execute("DELETE FROM checkpoints WHERE session_id=?",
+                             (session_id,)).rowcount
+        self._prev_snapshots.pop(session_id, None)
+        return n
+
     def _prune_auto_checkpoints(self, session_id: str) -> None:
         """
         Cap AUTO-triggered checkpoints at self._auto_retention for this

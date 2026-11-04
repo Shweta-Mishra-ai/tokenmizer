@@ -79,6 +79,15 @@ def _cli_post(url: str, headers: dict, timeout: float):
         raise typer.Exit(1)
 
 
+def _cli_delete(url: str, headers: dict, timeout: float):
+    import httpx
+    try:
+        return httpx.delete(url, headers=headers, timeout=timeout)
+    except httpx.HTTPError as e:
+        _report_unreachable(e)
+        raise typer.Exit(1)
+
+
 def _resolve_session_id(session_id: Optional[str]) -> str:
     """Use the id given, else derive one from the working directory.
 
@@ -454,6 +463,36 @@ def resume(
               f"({data['token_count']} tokens, from {source})[/green]",
         border_style="green",
     ))
+
+
+@app.command()
+def forget(
+    session_id: str = typer.Argument(..., help="Session to delete"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation"),
+    server: str = typer.Option("http://localhost:8000", help="TokenMizer server URL"),
+    api_key: Optional[str] = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
+):
+    """Delete a session's memory, checkpoints and cached answers."""
+    from urllib.parse import quote
+
+    if not yes and not typer.confirm(
+            f"Delete everything TokenMizer remembers about '{session_id}'? "
+            "This cannot be undone"):
+        raise typer.Exit(1)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    r = _cli_delete(f"{server}/api/sessions/{quote(session_id, safe='')}", headers, timeout=30)
+    if r.status_code == 404:
+        console.print(f"[yellow]No session '{session_id}' that this key owns.[/yellow]")
+        raise typer.Exit(1)
+    if r.status_code != 200:
+        console.print(f"[red]Error: {r.text}[/red]")
+        raise typer.Exit(1)
+    d = r.json().get("deleted", {})
+    if not any(v for k, v in d.items() if k != "analytics_rows_unlinked"):
+        console.print(f"[yellow]Nothing was stored for '{session_id}'.[/yellow]")
+        return
+    console.print(f"[green]Forgot '{session_id}':[/green] {d.get('graph_rows', 0)} graph rows, "
+                  f"{d.get('checkpoints', 0)} checkpoints, {d.get('cached_answers', 0)} cached answers.")
 
 
 @app.command("reassign-sessions")

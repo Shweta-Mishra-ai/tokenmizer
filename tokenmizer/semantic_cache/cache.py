@@ -411,6 +411,13 @@ class SemanticCache:
         if self._bytes < 0:  # belt and braces: never report a negative size
             self._bytes = 0
 
+    def drop_scope(self, scope: str) -> int:
+        """Remove every entry stored under `scope` (a session id)."""
+        keys = [k for k, e in self._exact.items() if e.scope == scope]
+        for k in keys:
+            self._drop(k)
+        return len(keys)
+
     def _evict_lru(self) -> None:
         """Remove the least-recently-used entry."""
         if not self._exact:

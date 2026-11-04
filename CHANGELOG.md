@@ -79,6 +79,59 @@ OpenAI SDK as the client:
   one that never existed included: `/api/stats` ignored `session_id` with a
   single API key. It now reports that session.
 
+### Deleting a session
+
+- New `DELETE /api/sessions/{session_id}` and `tokenmizer forget <session>`:
+  removes a session's graph memory, decision history, checkpoints, cached
+  answers and owner. Owner only. There was no way to do this short of
+  deleting SQLite files by hand. Analytics keep the request counts with the
+  session id cleared, so totals do not move.
+- A graph object that predates the delete (held by a background
+  extraction waiting on the session lock, or evicted but still referenced)
+  can no longer write the session back.
+
+### Providers (found by driving each SDK against a fake of its API)
+
+- Gemini: parallel tool results went as one user turn each, which Gemini
+  rejects (the response count must match the call count), so every
+  parallel tool call was a 502. Base64 images were dropped though Gemini
+  reads them; they now go as inline data (an image by URL is not fetched).
+- Gemini and Cohere: a non-streamed answer cut off at `max_tokens` was
+  reported as `finish_reason: "stop"` (an enum and an upper-case string
+  were matched as given), so clients took half an answer for a whole one.
+- Cohere returned only the first text item of a reply, and float token
+  counts; it now joins every item and reports ints. Its client honours
+  `request_timeout`.
+- Ollama: an `{"error": ...}` line mid-stream was skipped, so a model that
+  crashed mid-answer returned its partial text as a finished reply.
+- Gemini, Cohere and Ollama reuse one client per event loop instead of
+  building one (and a connection pool) per request.
+
+### Configuration
+
+- Fifteen settings accepted any number and failed at runtime instead of at
+  startup. `cache.similarity_threshold: -1` matched every prompt, so
+  unrelated questions got another prompt's cached answer; `1.5` silently
+  disabled the layer. `cache.max_size: 0` made the first cache write spin
+  forever. `request_timeout: 0`, `proxy_port: 99999`, `min_confidence: 5`
+  and others were taken at face value. Each now has bounds.
+
+### File digests
+
+- A line longer than the token budget was dropped with everything after
+  it: the digest of a 50,000-column CSV was 11 tokens of a 400-token
+  budget. The line is now cut at a separator and marked.
+- JSON nested deeper than the interpreter stack raised out of the
+  extractor; it falls back to truncation.
+- Excel: rows past the 100,000-row cap are counted rather than held in
+  memory (400,000 rows: 258 → 166 MB peak, same output), and a workbook
+  that would inflate past 1 GiB of XML is refused before it is expanded.
+
+### Security
+
+- `__anon__:` is reserved as a session id prefix: it is the cache scope of
+  requests with no session, and a client could claim another principal's.
+
 ### Dashboard and MCP (found in a headless browser run)
 
 - The API endpoint list ran all nine endpoints together into one paragraph;

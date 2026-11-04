@@ -245,8 +245,51 @@ def init_db(graph: "GraphMemory") -> None:
         conn.close()
 
 
+# session_id -> monotonic time it was deleted in this process. A graph
+# object created before that time is an orphan of the deleted session (a
+# background extraction captured it, or it was evicted and is still held)
+# and must not write the session back; one created after it is a new
+# session that happens to reuse the id.
+_DELETED_AT: dict[str, float] = {}
+
+
+def _orphaned(graph: "GraphMemory") -> bool:
+    t = _DELETED_AT.get(graph.session_id)
+    return t is not None and getattr(graph, "_created_at", 0.0) <= t
+
+
+def delete_session(storage_dir, session_id: str) -> int:
+    """Remove every row `session_id` has in the graph store: nodes, edges,
+    meta, the v1 blob and its decision history. Returns rows deleted.
+
+    Under the same cross-process lock as a write, so it cannot interleave
+    with another worker persisting the session."""
+    from pathlib import Path
+    db = Path(storage_dir) / "graph_memory.db"
+    _DELETED_AT[session_id] = time.monotonic()
+    if not db.exists():
+        return 0
+    with session_lock(db.parent, session_id):
+        conn = sqlite3.connect(str(db), timeout=5.0)
+        try:
+            n = 0
+            for table in ("graph_nodes", "graph_edges", "graph_meta", "graphs",
+                          "decision_transitions"):
+                try:
+                    n += conn.execute(f"DELETE FROM {table} WHERE session_id=?",
+                                      (session_id,)).rowcount
+                except sqlite3.OperationalError:
+                    pass  # table absent in an older database
+            conn.commit()
+            return n
+        finally:
+            conn.close()
+
+
 def persist_transition(graph: "GraphMemory", t: DecisionTransition) -> None:
     """Persist a single DecisionTransition to its own SQLite table."""
+    if _orphaned(graph):
+        return
     try:
         conn = graph._db_connect()
         try:
@@ -366,6 +409,8 @@ def persist(graph: "GraphMemory", force: bool = False) -> bool:
 
     force=True rewrites every row regardless of the diff.
     """
+    if _orphaned(graph):
+        return True   # the session was deleted; nothing of it is to be kept
     if not graph._dirty and not force:
         return True
 

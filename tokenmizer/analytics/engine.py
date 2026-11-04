@@ -269,6 +269,25 @@ class AnalyticsEngine:
                          len(self._pending), e)
             return False
 
+    def forget_session(self, session_id: str) -> int:
+        """Unlink `session_id` from its request rows: the counts stay (the
+        totals must not move) and the id is cleared. Returns rows changed."""
+        n = 0
+        for rec in self._records + self._pending:
+            if rec.session_id == session_id:
+                rec.session_id = None
+                n += 1
+        if self._db_path is not None:
+            try:
+                with closing(self._connect()) as conn, conn:
+                    n = max(n, conn.execute(
+                        "UPDATE requests SET session_id=NULL WHERE session_id=?",
+                        (session_id,)).rowcount)
+            except Exception as e:
+                logger.warning("Could not unlink session %r from analytics: %s",
+                               session_id, e)
+        return n
+
     def record_silent_failure(self, source: str) -> None:
         """Track a failure that would otherwise be invisible outside debug
         logs — persistence (checkpoint save, graph eviction, Redis write)

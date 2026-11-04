@@ -350,6 +350,9 @@ class GraphMemory:
         # True if this session's data came from the v1 blob table and is
         # awaiting its first per-row write.
         self._migrated_from_blob = False
+        # Compared with persistence._DELETED_AT: an object older than its
+        # session's deletion is an orphan and does not write.
+        self._created_at = time.monotonic()
         self._db_path = Path(storage_dir) / "graph_memory.db"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._safe_init_db()
