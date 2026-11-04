@@ -122,19 +122,45 @@ def _truncate_to_budget(text: str, token_budget: int) -> tuple[str, bool]:
     if count_tokens(text) <= token_budget:
         return text, False
 
-    # Binary search for the right truncation point
     lines = text.split("\n")
     result_lines = []
     running = 0
     for line in lines:
         line_tokens = count_tokens(line)
         if running + line_tokens > token_budget:
+            # The line that does not fit used to be dropped whole, with
+            # everything after it. One long line (the column list of a
+            # 50,000-column CSV, a single huge field) then left a digest of
+            # a few tokens out of a budget of hundreds. Keep as much of it
+            # as fits, cut at a separator, and mark the cut.
+            head = _prefix_within(line, token_budget - running - 1)
+            if head:
+                result_lines.append(head + "…")
             break
         result_lines.append(line)
         running += line_tokens
 
     truncated = "\n".join(result_lines)
     return truncated, True
+
+
+def _prefix_within(line: str, budget: int) -> str:
+    """The longest start of `line` within `budget` tokens, ending at a
+    separator where there is one in its last fifth."""
+    if budget < 8:
+        return ""
+    lo, hi = 0, min(len(line), budget * 8)   # no token is longer than ~8 chars
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if count_tokens(line[:mid]) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    head = line[:lo]
+    cut = max(head.rfind(c) for c in (" ", ",", "\t", ";"))
+    if cut > len(head) * 4 // 5:
+        head = head[:cut]
+    return head.rstrip(" ,\t;")
 
 
 # ── CSV / TSV extractor ───────────────────────────────────────────────────────
@@ -574,7 +600,9 @@ class JSONExtractor:
 
         try:
             data = json.loads(content)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
+            # RecursionError: nesting deeper than the interpreter's stack
+            # ("[" * 200_000) escaped this handler and failed the request.
             # Try JSONL
             lines = [line.strip() for line in content.splitlines() if line.strip()]
             try:
@@ -818,10 +846,12 @@ class ExcelExtractor:
     We extract per-sheet summaries using the same CSV strategy.
     """
 
-    # Rows per sheet handed to the CSV strategy. The sheet is already in
-    # memory by then; the cap bounds the CSV re-serialisation, and when it
-    # applies the summary says so.
+    # Rows per sheet handed to the CSV strategy; when the cap applies the
+    # summary says so. Rows past it are counted, not kept.
     MAX_ROWS_PER_SHEET = 100_000
+    # An .xlsx is a zip of XML. A few MB of it can inflate to gigabytes;
+    # past this the workbook is refused before openpyxl expands anything.
+    MAX_UNCOMPRESSED_BYTES = 1 << 30
 
     def extract(
         self,
@@ -832,6 +862,23 @@ class ExcelExtractor:
     ) -> FileExtractionResult:
         original_tokens = len(content_bytes) // 3  # rough estimate for binary
 
+        try:
+            import zipfile
+            with zipfile.ZipFile(io.BytesIO(content_bytes)) as zf:
+                inflated = sum(i.file_size for i in zf.infolist())
+            if inflated > self.MAX_UNCOMPRESSED_BYTES:
+                return FileExtractionResult(
+                    file_type="excel", original_size_bytes=len(content_bytes),
+                    original_tokens=original_tokens, extracted_tokens=30,
+                    tokens_saved=max(0, original_tokens - 30), savings_pct=99.0,
+                    content=(f"File: {filename}\nNot read: the workbook expands to "
+                             f"{inflated / (1 << 30):.1f} GiB, over the "
+                             f"{self.MAX_UNCOMPRESSED_BYTES >> 30} GiB limit."),
+                    summary="Excel too large when expanded",
+                    strategy_used="refused_oversize", was_truncated=True,
+                )
+        except zipfile.BadZipFile:
+            pass  # openpyxl below reports the parse error
         try:
             import openpyxl  # type: ignore
             wb = openpyxl.load_workbook(io.BytesIO(content_bytes), read_only=True, data_only=True)
@@ -867,7 +914,15 @@ class ExcelExtractor:
         all_results = []
         for sheet_name in sheet_names[:8]:  # max 8 sheets
             ws = wb[sheet_name]
-            rows_data = list(ws.iter_rows(values_only=True))
+            # Keep the header and the rows the CSV strategy will see; count
+            # the rest so the summary can still give the sheet's true size.
+            # list() held every row of a 400,000-row sheet in memory.
+            rows_data, extra_rows = [], 0
+            for row in ws.iter_rows(values_only=True):
+                if len(rows_data) <= self.MAX_ROWS_PER_SHEET:
+                    rows_data.append(row)
+                else:
+                    extra_rows += 1
             if not rows_data or len(rows_data) < 2:
                 parts.append(f"\n[Sheet: {sheet_name}] — empty")
                 continue
@@ -886,7 +941,7 @@ class ExcelExtractor:
                 token_budget=budget_per_sheet,
                 sample_rows=3,
                 query=query,
-                rows_in_source=len(rows_data) - 1,
+                rows_in_source=len(rows_data) - 1 + extra_rows,
             )
             parts.append(f"\n[Sheet: {sheet_name}]\n{result.content}")
             all_results.append(result)
