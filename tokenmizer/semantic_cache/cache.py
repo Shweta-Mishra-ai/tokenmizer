@@ -643,7 +643,11 @@ class SemanticCache:
         # byte budget rather than a fraction over it.
         incoming = nbytes + (self._EMBEDDING_BYTES
                              if self._embedder.available else 0)
-        while len(self._exact) >= self.max_size:
+        # `self._exact and`: with max_size < 1 the bound can never be met,
+        # and evicting from an empty cache spun this loop forever.
+        if self.max_size < 1:
+            return
+        while self._exact and len(self._exact) >= self.max_size:
             self._evict_lru()
         while self._exact and self._bytes + incoming > self.max_bytes:
             self._evict_lru()
@@ -712,7 +716,7 @@ class SemanticCache:
         return {
             "entries": len(self._exact),
             "max_size": self.max_size,
-            "utilization_pct": round(len(self._exact) / self.max_size * 100, 1),
+            "utilization_pct": round(len(self._exact) / max(1, self.max_size) * 100, 1),
             # What the entry count does not tell an operator: how much
             # memory this is. A cache at 12% of its entry cap can be at
             # 100% of its byte cap, and only one of those two numbers

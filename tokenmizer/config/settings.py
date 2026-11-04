@@ -21,13 +21,13 @@ class CompressionSettings(BaseModel):
     enabled: bool = True
     engine: Literal["llmlingua2", "heuristic", "none"] = "heuristic"
     ratio: float = Field(default=0.5, ge=0.1, le=1.0)
-    min_tokens_to_compress: int = 300
+    min_tokens_to_compress: int = Field(default=300, ge=0)
 
 
 class MemorySettings(BaseModel):
     enabled: bool = True
-    max_tokens_before_summary: int = 4000
-    recent_turns_verbatim: int = 10
+    max_tokens_before_summary: int = Field(default=4000, ge=0)
+    recent_turns_verbatim: int = Field(default=10, ge=0)
     # Hold the windowing cut still between cuts instead of sliding it one
     # turn per request, so the provider's prompt cache can serve the
     # history. Sends more tokens (the verbatim tail grows back to the
@@ -65,7 +65,7 @@ class GraphCheckpointSettings(BaseModel):
     enabled: bool = True
     trigger_at_percent: float = Field(default=0.85, ge=0.5, le=0.99)
     storage_dir: str = "./checkpoints"
-    max_resume_tokens: int = 400
+    max_resume_tokens: int = Field(default=400, ge=1)
     # True = the configured chat provider and model also run a background
     # extraction call each turn. That is a second call to the SAME model
     # you chat with, so its cost is comparable to a chat turn's input, not
@@ -77,7 +77,7 @@ class GraphCheckpointSettings(BaseModel):
     # for the JSON alone can be exhausted before the JSON is complete; raise
     # it if the log reports a truncated extraction reply.
     extraction_max_tokens: int = Field(default=2048, ge=256, le=16384)
-    min_confidence: float = 0.65      # minimum validation confidence threshold
+    min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)  # minimum validation confidence threshold
     # Blend embedding similarity into GraphMemory.query(), the ranker that
     # decides which nodes get injected into the prompt each turn.
     #
@@ -160,28 +160,32 @@ class RoutingSettings(BaseModel):
     simple_model: str = "claude-haiku-4-5"
     medium_model: str = "claude-sonnet-4-6"
     complex_model: str = "claude-sonnet-4-6"
-    complexity_threshold: float = 0.6
+    complexity_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
 
 
 class CacheSettings(BaseModel):
     enabled: bool = True
-    similarity_threshold: float = 0.92
-    ttl_seconds: int = 3600
-    max_size: int = 10_000
+    # Below ~0.9 a merely related prompt is answered with another prompt's
+    # cached reply, so the floor keeps it a near-duplicate test. Unbounded,
+    # -1 matched everything and 1.5 silently disabled the layer.
+    similarity_threshold: float = Field(default=0.92, ge=0.5, le=1.0)
+    ttl_seconds: int = Field(default=3600, ge=1)
+    # 0 made the first write spin forever in the eviction loop.
+    max_size: int = Field(default=10_000, ge=1)
     # A cap on ENTRIES is not a cap on memory. An entry holds a full LLM
     # response, and 10,000 of those at 60 KB each is 600 MB resident with
     # nothing in the process to stop it — the operator sees
     # "utilization_pct: 100" and no indication that it means a gigabyte.
     # Both bounds are enforced; whichever binds first wins.
-    max_bytes: int = 256 * 1024 * 1024
+    max_bytes: int = Field(default=256 * 1024 * 1024, ge=1024)
     # One pathological response must not be able to spend the whole
     # budget. Above this an answer is served but not remembered.
-    max_entry_bytes: int = 1024 * 1024
+    max_entry_bytes: int = Field(default=1024 * 1024, ge=1)
     # The semantic layer is an O(n) Python loop over the cache on every
     # MISS, which is the request path. Scanning the most recent N is a
     # bound on the worst case; the entries it skips are the coldest ones,
     # which are also the least likely to match.
-    max_semantic_scan: int = 2_000
+    max_semantic_scan: int = Field(default=2_000, ge=0)
     # "session" (default): every cached prompt is scoped to its session_id,
     # never shared across sessions — safe by default for hosted/team use.
     # "shared": non-sensitive prompts are shared globally across sessions
@@ -207,8 +211,8 @@ class PreferenceSettings(BaseModel):
     enabled: bool = False
     # How many lines, and how much prompt they may take. The cost of the
     # feature is exactly this.
-    max_items: int = 4
-    max_chars: int = 400
+    max_items: int = Field(default=4, ge=0)
+    max_chars: int = Field(default=400, ge=0)
 
 
 class TerseOutputSettings(BaseModel):
@@ -394,7 +398,7 @@ class Settings(BaseSettings):
     # How many right-hand entries of X-Forwarded-For are your own proxies.
     # With one load balancer this is 1: the last entry is what your LB
     # appended, and the entry before it is the real client.
-    trusted_proxy_hops: int = 1
+    trusted_proxy_hops: int = Field(default=1, ge=0)
 
     # Sub-configs
     compression: CompressionSettings = Field(default_factory=CompressionSettings)
@@ -425,7 +429,7 @@ class Settings(BaseSettings):
     # matches what the Ollama adapter already used before this was a
     # setting. 0 or less restores each SDK's own default, for anyone who
     # genuinely wants to wait.
-    request_timeout: float = 120.0
+    request_timeout: float = Field(default=120.0, gt=0)
 
     # Server
     # Was "0.0.0.0" (all interfaces) — the CLI's `serve` command didn't
@@ -434,7 +438,7 @@ class Settings(BaseSettings):
     # safe default; the documented Docker deployment path is unaffected
     # since the Dockerfile always passes --host 0.0.0.0 explicitly.
     proxy_host: str = "127.0.0.1"
-    proxy_port: int = 8000
+    proxy_port: int = Field(default=8000, ge=1, le=65535)
 
     def get_api_key_for_provider(self, provider: str) -> str:
         mapping = {
