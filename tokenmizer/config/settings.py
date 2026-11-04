@@ -21,13 +21,13 @@ class CompressionSettings(BaseModel):
     enabled: bool = True
     engine: Literal["llmlingua2", "heuristic", "none"] = "heuristic"
     ratio: float = Field(default=0.5, ge=0.1, le=1.0)
-    min_tokens_to_compress: int = 300
+    min_tokens_to_compress: int = Field(default=300, ge=0)
 
 
 class MemorySettings(BaseModel):
     enabled: bool = True
-    max_tokens_before_summary: int = 4000
-    recent_turns_verbatim: int = 10
+    max_tokens_before_summary: int = Field(default=4000, ge=0)
+    recent_turns_verbatim: int = Field(default=10, ge=0)
     # Hold the windowing cut still between cuts instead of sliding it one
     # turn per request, so the provider's prompt cache can serve the
     # history. Sends more tokens (the verbatim tail grows back to the
@@ -65,15 +65,19 @@ class GraphCheckpointSettings(BaseModel):
     enabled: bool = True
     trigger_at_percent: float = Field(default=0.85, ge=0.5, le=0.99)
     storage_dir: str = "./checkpoints"
-    max_resume_tokens: int = 400
-    use_llm_extraction: bool = False  # set True for 80%+ recall (needs API key, ~$0.001/turn)
-    extraction_model: str = ""        # leave empty = auto-pick cheapest model for your provider
+    max_resume_tokens: int = Field(default=400, ge=1)
+    # True = the configured chat provider and model also run a background
+    # extraction call each turn. That is a second call to the SAME model
+    # you chat with, so its cost is comparable to a chat turn's input, not
+    # a cheap-model fraction of it.
+    use_llm_extraction: bool = False
+    extraction_model: str = ""        # empty = the chat model; set one to use a cheaper model
     # Output-token budget for the LLM extraction call. A model that reasons
     # before it answers spends part of this on reasoning, so a budget sized
     # for the JSON alone can be exhausted before the JSON is complete; raise
     # it if the log reports a truncated extraction reply.
     extraction_max_tokens: int = Field(default=2048, ge=256, le=16384)
-    min_confidence: float = 0.65      # minimum validation confidence threshold
+    min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)  # minimum validation confidence threshold
     # Blend embedding similarity into GraphMemory.query(), the ranker that
     # decides which nodes get injected into the prompt each turn.
     #
@@ -83,7 +87,7 @@ class GraphCheckpointSettings(BaseModel):
     # The pair once quoted here — recall@6 85% keyword vs 92% with
     # embeddings — came from a 13-case eval, where one question flipping
     # moves the headline by 8 points. That eval is now 40 cases and
-    # keyword ranking scores 88% on it; the 92% figure has NOT been
+    # keyword ranking scores 95% on it; the 92% figure has NOT been
     # re-measured against it and must not be quoted (docs/roadmap.md and
     # README.md say the same, and this comment used to contradict them).
     #
@@ -101,7 +105,7 @@ class GraphCheckpointSettings(BaseModel):
     #
     #   "auto" (the default) — on when the model is actually loadable, off
     #                          otherwise. Measured on the retrieval eval:
-    #                          keyword ranking gets recall@6 88% over 40
+    #                          keyword ranking gets recall@6 95% over 40
     #                          paraphrased questions, and the misses are
     #                          exactly the paraphrases embeddings exist
     #                          for. A capability that is present should not
@@ -156,28 +160,32 @@ class RoutingSettings(BaseModel):
     simple_model: str = "claude-haiku-4-5"
     medium_model: str = "claude-sonnet-4-6"
     complex_model: str = "claude-sonnet-4-6"
-    complexity_threshold: float = 0.6
+    complexity_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
 
 
 class CacheSettings(BaseModel):
     enabled: bool = True
-    similarity_threshold: float = 0.92
-    ttl_seconds: int = 3600
-    max_size: int = 10_000
+    # Below ~0.9 a merely related prompt is answered with another prompt's
+    # cached reply, so the floor keeps it a near-duplicate test. Unbounded,
+    # -1 matched everything and 1.5 silently disabled the layer.
+    similarity_threshold: float = Field(default=0.92, ge=0.5, le=1.0)
+    ttl_seconds: int = Field(default=3600, ge=1)
+    # 0 made the first write spin forever in the eviction loop.
+    max_size: int = Field(default=10_000, ge=1)
     # A cap on ENTRIES is not a cap on memory. An entry holds a full LLM
     # response, and 10,000 of those at 60 KB each is 600 MB resident with
     # nothing in the process to stop it — the operator sees
     # "utilization_pct: 100" and no indication that it means a gigabyte.
     # Both bounds are enforced; whichever binds first wins.
-    max_bytes: int = 256 * 1024 * 1024
+    max_bytes: int = Field(default=256 * 1024 * 1024, ge=1024)
     # One pathological response must not be able to spend the whole
     # budget. Above this an answer is served but not remembered.
-    max_entry_bytes: int = 1024 * 1024
+    max_entry_bytes: int = Field(default=1024 * 1024, ge=1)
     # The semantic layer is an O(n) Python loop over the cache on every
     # MISS, which is the request path. Scanning the most recent N is a
     # bound on the worst case; the entries it skips are the coldest ones,
     # which are also the least likely to match.
-    max_semantic_scan: int = 2_000
+    max_semantic_scan: int = Field(default=2_000, ge=0)
     # "session" (default): every cached prompt is scoped to its session_id,
     # never shared across sessions — safe by default for hosted/team use.
     # "shared": non-sensitive prompts are shared globally across sessions
@@ -203,12 +211,15 @@ class PreferenceSettings(BaseModel):
     enabled: bool = False
     # How many lines, and how much prompt they may take. The cost of the
     # feature is exactly this.
-    max_items: int = 4
-    max_chars: int = 400
+    max_items: int = Field(default=4, ge=0)
+    max_chars: int = Field(default=400, ge=0)
 
 
 class TerseOutputSettings(BaseModel):
-    enabled: bool = True
+    # true / false, or "auto": add the instruction only once a request is
+    # large enough for the provider to cache it, so a short session never
+    # pays more input than it would without the proxy. See app._terse_wanted.
+    enabled: Union[bool, Literal["auto"]] = "auto"
     level: Literal["lite", "full", "ultra"] = "full"
     # What the injected instruction asks for.
     #   terse    — shorter answers: no preamble, no closing, fragments allowed.
@@ -232,6 +243,58 @@ class PrivacySettings(BaseModel):
     # inference server. Loopback is always allowed. An HTTP proxy must be
     # listed to be reachable, and then so is everything behind it.
     allowed_hosts: List[str] = Field(default_factory=list)
+
+
+class SecuritySettings(BaseModel):
+    """The layers that change or refuse what a client sent.
+
+    Each one has false positives, so each one can be turned off by the
+    operator who would rather have the request untouched.
+    """
+    # Scrub credentials from messages before they reach the provider.
+    # Stored memory (graph nodes, checkpoints) is redacted regardless.
+    redact_provider_messages: bool = True
+    # Also replace email addresses in what the provider sees. Off by
+    # default: an address is usually the subject of the request ("send the
+    # report to alice@acme.com"). Stored memory always redacts them.
+    redact_emails_to_provider: bool = False
+    # The keyword filter that answers 400 to well-known jailbreak
+    # phrasings. A speed bump, not a defence; see security/middleware.py.
+    injection_filter: bool = True
+    # Hosts this server answers to, by Host header. Empty (the default):
+    # localhost only when no api_key is set — which blocks DNS-rebinding
+    # pages from reading memory through the visitor's browser — and any
+    # host once a key is required. List the names you reach it by
+    # (e.g. "tokenmizer.internal") to serve them without a key; "*" allows all.
+    trusted_hosts: List[str] = Field(default_factory=list)
+    # Largest request body accepted, in bytes. 32 MiB covers an agent turn
+    # carrying large tool output; beyond it a request is a 413, not a
+    # memory spike.
+    max_request_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
+
+
+class FileIntelligenceSettings(BaseModel):
+    """Layer 0: large pasted files in OLDER turns are replaced by a digest.
+
+    The turn being asked about is never digested — the question is about
+    exactly that content.
+    """
+    enabled: bool = True
+    token_budget_per_file: int = Field(default=600, ge=50)
+    # Also digest the turn being asked (e.g. a pasted 5 MB CSV). Off: a
+    # digest is a sample, and a question about the exact content — "which
+    # line is wrong", "sum this column" — cannot be answered from one.
+    digest_current_turn: bool = False
+
+
+class RateLimitSettings(BaseModel):
+    enabled: bool = True
+    # Per client address, and on localhost the agent, the dashboard and the
+    # MCP server all share one address. At 60/min (burst 10) a busy agent
+    # loop or parallel sub-agents got 429 from the proxy mid-task; 10/s
+    # still stops a runaway loop from draining the provider budget.
+    requests_per_minute: int = Field(default=600, ge=1)
+    burst: int = Field(default=100, ge=0)
 
 
 class Settings(BaseSettings):
@@ -335,7 +398,7 @@ class Settings(BaseSettings):
     # How many right-hand entries of X-Forwarded-For are your own proxies.
     # With one load balancer this is 1: the last entry is what your LB
     # appended, and the entry before it is the real client.
-    trusted_proxy_hops: int = 1
+    trusted_proxy_hops: int = Field(default=1, ge=0)
 
     # Sub-configs
     compression: CompressionSettings = Field(default_factory=CompressionSettings)
@@ -347,6 +410,15 @@ class Settings(BaseSettings):
     preferences: PreferenceSettings = Field(default_factory=PreferenceSettings)
     terse_output: TerseOutputSettings = Field(default_factory=TerseOutputSettings)
     privacy: PrivacySettings = Field(default_factory=PrivacySettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
+    file_intelligence: FileIntelligenceSettings = Field(default_factory=FileIntelligenceSettings)
+    rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
+
+    # Where the provider lives, for the two that are commonly self-hosted
+    # or fronted by a gateway. Empty base URL = the vendor's own endpoint
+    # (the OpenAI SDK still honours OPENAI_BASE_URL).
+    openai_base_url: str = ""
+    ollama_base_url: str = "http://localhost:11434"
 
     # How long an upstream provider call may hang before it is
     # abandoned. Every vendor SDK used by providers/providers.py
@@ -357,7 +429,7 @@ class Settings(BaseSettings):
     # matches what the Ollama adapter already used before this was a
     # setting. 0 or less restores each SDK's own default, for anyone who
     # genuinely wants to wait.
-    request_timeout: float = 120.0
+    request_timeout: float = Field(default=120.0, gt=0)
 
     # Server
     # Was "0.0.0.0" (all interfaces) — the CLI's `serve` command didn't
@@ -366,7 +438,7 @@ class Settings(BaseSettings):
     # safe default; the documented Docker deployment path is unaffected
     # since the Dockerfile always passes --host 0.0.0.0 explicitly.
     proxy_host: str = "127.0.0.1"
-    proxy_port: int = 8000
+    proxy_port: int = Field(default=8000, ge=1, le=65535)
 
     def get_api_key_for_provider(self, provider: str) -> str:
         mapping = {
@@ -416,6 +488,27 @@ _ENV_PREFIX = "TOKENMIZER_"
 _ENV_NESTED_DELIM = "__"
 
 
+def _environment_names() -> set:
+    """Upper-cased names of every variable the env source will read: the
+    process environment AND the `.env` file. pydantic-settings matches
+    names case-insensitively and reads `.env` too, so checking only
+    `os.environ` as typed let a `.env` value or a lower-case variable
+    lose to the YAML file it is documented to override."""
+    import os
+    names = {k.upper() for k in os.environ}
+    try:
+        with open(".env", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.lower().startswith("export "):
+                    line = line[7:].lstrip()
+                if line and not line.startswith("#") and "=" in line:
+                    names.add(line.split("=", 1)[0].strip().upper())
+    except OSError:
+        pass
+    return names
+
+
 def _strip_env_overridden(data: dict, _prefix: str = _ENV_PREFIX) -> dict:
     """Remove YAML keys that an environment variable also sets, so the env
     value wins. Mirrors the env_prefix / env_nested_delimiter scheme
@@ -428,11 +521,11 @@ def _strip_env_overridden(data: dict, _prefix: str = _ENV_PREFIX) -> dict:
     set. Nested dicts are pruned per-key rather than wholesale, so
     setting one nested env var does not discard its YAML siblings.
     """
-    import os
     out: dict = {}
+    env_names = _environment_names()
     for key, value in data.items():
         env_name = f"{_prefix}{key}".upper()
-        if env_name in os.environ:
+        if env_name in env_names:
             continue  # env sets this outright — let the env source supply it
         if isinstance(value, dict):
             pruned = _strip_env_overridden(value, f"{env_name}{_ENV_NESTED_DELIM}")
@@ -562,7 +655,7 @@ def get_settings() -> Settings:
         # set api_key at all — no typo, no load error, just a genuine
         # config gap — would otherwise get a perfectly "successful" boot
         # into the same unauthenticated state.
-        if production and not loaded.api_key:
+        if production and not (loaded.api_key or any(loaded.api_keys)):
             logger.error(
                 "TOKENMIZER_ENV=production but no api_key is configured — "
                 "refusing to start unauthenticated."

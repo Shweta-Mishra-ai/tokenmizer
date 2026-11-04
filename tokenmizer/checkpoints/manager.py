@@ -195,7 +195,12 @@ class CheckpointManager:
         next_action = ""
         for msg in reversed(messages):
             if msg.get("role") == "user":
-                next_action = msg.get("content", "")[:200]
+                from tokenmizer.graph_memory.helpers import _content_to_text
+                from tokenmizer.security.redaction import redact
+                # Stored memory is redacted in full (emails included), even
+                # when the copy sent to the provider was not. Content may be
+                # a block list or None, not only a string.
+                next_action = redact(_content_to_text(msg.get("content")))[:200]
                 break
 
         # Build tiered resume blocks
@@ -228,6 +233,15 @@ class CheckpointManager:
             f"context={context_pct:.0%} resume_tokens={ckpt.resume_tokens}"
         )
         return ckpt
+
+    def delete_session(self, session_id: str) -> int:
+        """Remove every checkpoint of `session_id`. Returns how many."""
+        from contextlib import closing
+        with closing(self._db_connect()) as conn, conn:
+            n = conn.execute("DELETE FROM checkpoints WHERE session_id=?",
+                             (session_id,)).rowcount
+        self._prev_snapshots.pop(session_id, None)
+        return n
 
     def _prune_auto_checkpoints(self, session_id: str) -> None:
         """

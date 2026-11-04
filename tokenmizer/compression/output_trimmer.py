@@ -63,30 +63,35 @@ _OPENING_FILLERS = [
 
 # Closing boilerplate. Each is additionally gated by _carries_information()
 # below, so a sign-off that happens to carry a fact is kept whole.
+#
+# The `(?<!\n)` before each leading `\n+` lets a match begin only at the
+# first newline of a run. Any match starting later in the run also starts
+# at its head, so nothing is lost; without it a long run of newlines was
+# rescanned from every position (quadratic: 16k newlines took 1.8s).
 _CLOSING_FILLERS = [
-    re.compile(r"\n+Let me know if (?:you(?:'d like| need| have))[^.!?]*[.!?]\s*$", re.IGNORECASE),
-    re.compile(r"\n+Feel free to (?:ask|reach out)[^.!?]*[.!?]\s*$", re.IGNORECASE),
-    re.compile(r"\n+(?:Don't hesitate|Please don't hesitate) to (?:ask|reach out)[^.!?]*[.!?]\s*$", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+Let me know if (?:you(?:'d like| need| have))[^.!?]*[.!?]\s*$", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+Feel free to (?:ask|reach out)[^.!?]*[.!?]\s*$", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+(?:Don't hesitate|Please don't hesitate) to (?:ask|reach out)[^.!?]*[.!?]\s*$", re.IGNORECASE),
     # "anything else" must be followed by the generic continuation. Without
     # that, "Is there anything else in the 003 batch you want rolled back?"
     # matched and a real question was deleted.
     re.compile(
-        r"\n+Is there anything (?:else|more)"
+        r"(?<!\n)\n+Is there anything (?:else|more)"
         r"(?: (?:I can (?:help|do|assist)|you(?:'d| would) like|you need|"
         r"you want))?[^.!?]{0,40}[.!?]\s*$",
         re.IGNORECASE),
-    re.compile(r"\n+Hope (?:this|that) helps?[.!?]\s*$", re.IGNORECASE),
-    re.compile(r"\n+I hope (?:this|that) (?:answer|explanation|helps?)[^.!?]*[.!?]\s*$", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+Hope (?:this|that) helps?[.!?]\s*$", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+I hope (?:this|that) (?:answer|explanation|helps?)[^.!?]*[.!?]\s*$", re.IGNORECASE),
 ]
 
 _INLINE_REDUNDANCIES = [
     # "In summary, ..." paragraphs that just restate the answer
-    re.compile(r"\n+In summary[,:]?\s*[^\n]{0,200}\n+", re.IGNORECASE),
-    re.compile(r"\n+To summarize[,:]?\s*[^\n]{0,200}\n+", re.IGNORECASE),
-    re.compile(r"\n+In conclusion[,:]?\s*[^\n]{0,200}\n+", re.IGNORECASE),
-    re.compile(r"\n+To recap[,:]?\s*[^\n]{0,200}\n+", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+In summary[,:]?\s*[^\n]{0,200}\n+", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+To summarize[,:]?\s*[^\n]{0,200}\n+", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+In conclusion[,:]?\s*[^\n]{0,200}\n+", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+To recap[,:]?\s*[^\n]{0,200}\n+", re.IGNORECASE),
     # Excessive disclaimer on simple code/math tasks
-    re.compile(r"\n+Note: This (?:code|implementation|solution) (?:is|should be) (?:tested|reviewed)[^.]*\.\s*\n", re.IGNORECASE),
+    re.compile(r"(?<!\n)\n+Note: This (?:code|implementation|solution) (?:is|should be) (?:tested|reviewed)[^.]*\.\s*\n", re.IGNORECASE),
 ]
 
 # What makes a fragment worth keeping even though it matched a filler

@@ -281,3 +281,13 @@ class TestProxyRequestFailuresAreLogged:
         assert any("connection refused" in rec.message for rec in caplog.records), (
             f"expected a warning log mentioning the failure, got: {[r.message for r in caplog.records]}"
         )
+
+
+def test_tool_schemas_stay_small():
+    """An MCP client sends every tool schema on every request, so their size
+    is paid on each turn: about 770 tokens (chars/4) before they were trimmed,
+    more than a whole five-turn conversation."""
+    import json
+
+    from tokenmizer.mcp.server import TOOLS
+    assert len(json.dumps(TOOLS, separators=(",", ":"))) // 4 <= 650

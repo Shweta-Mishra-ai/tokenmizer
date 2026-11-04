@@ -32,6 +32,7 @@ import logging
 import re
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,9 @@ _EXCLUSIONS = [
     re.compile(r'\b(?:password|secret|key|token|credential)\b', re.I),
     re.compile(r'\b(?:project|client|customer|company)\b.{3,30}\b'
                r'(?:specific|only|internal)\b', re.I),
-    re.compile(r'[A-Z_]{5,}\s*=\s*\S'),          # env var
+    # The lookbehind starts a match only at the head of a capitalised run;
+    # unanchored, a long run was rescanned from every position (quadratic).
+    re.compile(r'(?<![A-Z_])[A-Z_]{5,}\s*=\s*\S'),   # env var
     re.compile(r'sk-|ghp_|AIza'),                 # API key shapes
     # A complaint is not a standing instruction. "I hate this bug" and "I
     # hate that the tests are flaky" are about today; the signal list
@@ -150,7 +153,7 @@ class PreferenceStore:
         for _ in range(6):
             try:
                 self._db_path.parent.mkdir(parents=True, exist_ok=True)
-                with self._connect() as conn:
+                with closing(self._connect()) as conn, conn:
                     conn.execute(_SCHEMA)
                 return True
             except sqlite3.OperationalError as e:
@@ -165,6 +168,22 @@ class PreferenceStore:
             "remembered across sessions; nothing else is affected.", last,
         )
         return False
+
+    def reassign(self, from_principal: str, to_principal: str) -> int:
+        """Move a principal's preferences to another (see
+        OwnershipStore.reassign). Keys the target already has are kept."""
+        if not self.available or from_principal == to_principal:
+            return 0
+        try:
+            with closing(self._connect()) as conn, conn:
+                cur = conn.execute(
+                    "UPDATE OR IGNORE preferences SET principal=? WHERE principal=?",
+                    (to_principal, from_principal))
+                conn.execute("DELETE FROM preferences WHERE principal=?", (from_principal,))
+                return cur.rowcount
+        except Exception as e:
+            logger.warning("Preference reassign failed: %s", e)
+            return 0
 
     def observe(self, principal: str, text: str) -> str | None:
         """Record `text` if it states a preference. Returns the key, or None.
@@ -185,7 +204,7 @@ class PreferenceStore:
         if existing:
             key = existing
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.execute(
                     "INSERT INTO preferences (principal, key, value, updated_at) "
                     "VALUES (?, ?, ?, ?) ON CONFLICT(principal, key) DO UPDATE SET "
@@ -247,7 +266,7 @@ class PreferenceStore:
         if not self.available:
             return []
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 return [
                     (row[0], row[1]) for row in conn.execute(
                         "SELECT key, value FROM preferences WHERE principal = ? "
@@ -282,7 +301,7 @@ class PreferenceStore:
         if not self.available:
             return 0
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 if key:
                     cur = conn.execute(
                         "DELETE FROM preferences WHERE principal = ? AND key = ?",

@@ -17,8 +17,12 @@
 services:
   tokenmizer:
     build: .
+    # Published on loopback only. With TOKENMIZER_API_KEY unset the proxy
+    # has no auth, and publishing on every interface would let anyone who
+    # can reach this host spend your provider key and read every session.
+    # Set TOKENMIZER_API_KEY before widening this to "8000:8000".
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - TOKENMIZER_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - TOKENMIZER_OPENAI_API_KEY=${OPENAI_API_KEY:-}

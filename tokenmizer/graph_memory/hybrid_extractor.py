@@ -147,6 +147,7 @@ from tokenmizer.graph_memory.patterns import (
     _tech_mention_is_a_decision,
     clause_subject,
     find_supersessions,
+    is_bogus_decision_label,
     is_library_name,
     looks_english,
     mask_mentions,
@@ -470,19 +471,23 @@ def _is_example_mention(text: str, pos: int) -> bool:
     # ("index.md" in "docs/index.md") is judged by what precedes the path.
     while pos > 0 and not text[pos - 1].isspace() and text[pos - 1] not in "(`'\"":
         pos -= 1
-    start = max(text.rfind(c, 0, pos) for c in ".!?\n") + 1
-    clause = text[max(start, pos - 160):pos]
+    lo = max(0, pos - 160)
+    start = max(text.rfind(c, lo, pos) for c in ".!?\n") + 1
+    clause = text[max(start, lo):pos]
     if _EXAMPLE_LEAD.search(clause):
         return True
     return bool(_CATEGORY_BEFORE_PAREN.search(clause)) and not _WORK_VERB.search(clause)
 
 
-_MODULE_PATH = re.compile(r"(?:[A-Za-z_]\w*\.){1,6}")
+# Identifier parts are capped at 80 characters. With `\w*` these run once
+# per typed error, each attempt backtracking over the whole line, and
+# 16k chars of "AbcError" with no newline took minutes.
+_MODULE_PATH = re.compile(r"(?:[A-Za-z_]\w{0,80}\.){1,6}")
 _TRACEBACK_LAST_LINE = re.compile(
-    r"(?:(?:[A-Za-z_]\w*\.){0,6}[A-Z]\w*(?:Error|Exception|Warning|Exit|Interrupt)\w*"
+    r"(?:(?:[A-Za-z_]\w{0,80}\.){0,6}[A-Z]\w{0,80}?(?:Error|Exception|Warning|Exit|Interrupt)\w{0,80}"
     # A class under an exceptions module needs no suffix:
     # "django.core.exceptions.ImproperlyConfigured: Requested setting ...".
-    r"|(?:[A-Za-z_]\w*\.){0,5}(?:exceptions?|errors?|exc)\.[A-Z]\w*): \S")
+    r"|(?:[A-Za-z_]\w{0,80}\.){0,5}(?:exceptions?|errors?|exc)\.[A-Z]\w{0,80}): \S")
 
 
 _IMPORT_BEFORE = re.compile(r"\bimport\s+$")
@@ -773,6 +778,11 @@ class ExtractedData:
     evidence: list[dict] = field(default_factory=list)
     # Confidence per category (filled by merger)
     confidence: dict[str, float] = field(default_factory=dict)
+
+
+# The end of a sentence: punctuation followed by whitespace or the end, or
+# a newline. "moment.js" has no space after its dot and is not one.
+_SENTENCE_BREAK = re.compile(r"[.!?](?=\s|$)|\n")
 
 
 class HybridExtractor:
@@ -1379,8 +1389,16 @@ class HybridExtractor:
         # pattern recorded the rationale as the replacement decision.
         for old_label, new_label, m_start, m_end in find_supersessions(content):
             result.superseded.append({"old": old_label, "new": new_label})
-            start = max(0, m_start - 60)
-            surrounding = content[start:m_end + 80].replace("\n", " ").strip()
+            # The sentence that states the switch, not a fixed character
+            # window: 60 characters back reached into the sentence before,
+            # and "TODO: add rate limiting" became the reason date-fns won.
+            lo = max(0, m_start - 160)
+            dot = content.rfind(". ", lo, m_start)
+            # -1 + 2 would start at index 1: "We switched" became "e switched".
+            start = max(dot + 2 if dot != -1 else lo, content.rfind("\n", lo, m_start) + 1, lo)
+            brk = _SENTENCE_BREAK.search(content, m_start, m_start + 200)
+            end = min(brk.start() if brk else len(content), m_start + 200)
+            surrounding = content[start:end].replace("\n", " ").strip().rstrip(".")
             for label in (f"Use {old_label}", f"Use {new_label}"):
                 norm = self._normalize(label)
                 if norm not in seen_decisions and len(norm) > 6:
@@ -1744,6 +1762,12 @@ class HybridExtractor:
         # Proposals from the most recent user turn, waiting for the next
         # assistant turn to accept or ignore them.
         open_proposals: list[str] = []
+        # Proposals the ASSISTANT put forward ("Should we use Redis for the
+        # session cache?"), waiting for the user's next turn to accept.
+        assistant_proposals: list[str] = []
+        if prior_message and prior_message.get("role") == "assistant":
+            assistant_proposals = self._question_proposals(
+                _content_to_text(prior_message.get("content", "")))
         if prior_message and prior_message.get("role") == "user":
             prior_text = _strip_emphasis(_content_to_text(prior_message.get("content", "")))
             if prior_text.strip() and looks_english(prior_text):
@@ -1780,8 +1804,17 @@ class HybridExtractor:
                         result.decisions.append(
                             {"label": label, "reason": "", "source_role": "user"})
                         seen_decisions.add(norm)
+            if role == "user" and assistant_proposals:
+                for label in self._accepted_proposals(assistant_proposals, content):
+                    norm = self._normalize(label)
+                    if norm not in seen_decisions:
+                        result.decisions.append(
+                            {"label": label, "reason": "", "source_role": "user"})
+                        seen_decisions.add(norm)
             if role != "system":
                 open_proposals = []
+                assistant_proposals = (self._question_proposals(content)
+                                       if role == "assistant" else [])
 
             self._extract_one_message(
                 content, role, i, is_recent,
@@ -1798,10 +1831,21 @@ class HybridExtractor:
         # this return value directly, so it is the only place the
         # de-duplication can happen for heuristic-only extraction.
         result.files = self._drop_shadowed_paths(result.files)
-        result.decisions = self._drop_vaguer_decisions(result.decisions)
+        result.decisions = self._drop_vaguer_decisions(self._drop_bogus_decisions(result.decisions))
         result.errors = self._drop_restated_errors(result.errors)
         return result
 
+
+    @staticmethod
+    def _question_proposals(text: str) -> list[str]:
+        """Options a turn put forward as a question ("Should we use Redis
+        for the session cache?"). A proposal only, until a reply accepts it."""
+        out = []
+        for m in _PROPOSAL.finditer(text or ""):
+            label = _clip(m.group(1))
+            if len(label) >= 3 and not is_bogus_decision_label(label):
+                out.append(label)
+        return out
 
     @staticmethod
     def _accepted_proposals(proposals: list[str], reply: str) -> list[str]:
@@ -2016,7 +2060,7 @@ class HybridExtractor:
                     seen.add(norm)
             setattr(result, attr, deduped[:15])
         result.files = self._drop_shadowed_paths(result.files)
-        result.decisions = self._drop_vaguer_decisions(data.decisions)
+        result.decisions = self._drop_vaguer_decisions(self._drop_bogus_decisions(data.decisions))
         result.errors = self._drop_restated_errors(result.errors)
         result.superseded = data.superseded
         result.evidence = data.evidence
@@ -2094,6 +2138,12 @@ class HybridExtractor:
                        and restates(a, b, k) for b in labels):
                     dropped.add(a)
         return [e for e in errors if e not in dropped]
+
+    @staticmethod
+    def _drop_bogus_decisions(decisions: list) -> list:
+        return [d for d in decisions
+                if not is_bogus_decision_label(
+                    d.get("label", "") if isinstance(d, dict) else str(d))]
 
     def _drop_vaguer_decisions(self, decisions: list) -> list:
         """Collapse "Use X" into a longer decision that also names X.

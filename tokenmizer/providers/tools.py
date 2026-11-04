@@ -19,6 +19,8 @@ Everything in this module is pure: no I/O, no SDK imports.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import uuid
@@ -143,6 +145,39 @@ def anthropic_tool_choice(tool_choice: Any, parallel_tool_calls: Optional[bool] 
     return choice
 
 
+def anthropic_content(content):
+    """OpenAI content blocks -> Anthropic's, for the one shape that differs:
+    an `image_url` block becomes an `image` block with a base64 or URL
+    source. Anything else passes through unchanged."""
+    if not isinstance(content, list):
+        return content
+    out = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image_url":
+            url = (block.get("image_url") or {}).get("url", "") \
+                if isinstance(block.get("image_url"), dict) else str(block.get("image_url") or "")
+            if url.startswith("data:") and ";base64," in url:
+                media_type, data = url[5:].split(";base64,", 1)
+                out.append({"type": "image", "source": {
+                    "type": "base64", "media_type": media_type, "data": data}})
+            elif url:
+                out.append({"type": "image", "source": {"type": "url", "url": url}})
+            continue
+        out.append(block)
+    return out
+
+
+def _blank(content) -> bool:
+    """True for content Anthropic rejects as empty: no text but whitespace
+    and nothing else (an image or tool block is never blank)."""
+    if content is None or isinstance(content, str):
+        return not (content or "").strip()
+    if isinstance(content, list):
+        return all(isinstance(b, dict) and b.get("type") == "text"
+                   and not (b.get("text") or "").strip() for b in content)
+    return False
+
+
 def anthropic_messages(conv: list[dict]) -> list[dict]:
     """OpenAI-shaped conversation -> Anthropic messages.
 
@@ -150,11 +185,18 @@ def anthropic_messages(conv: list[dict]) -> list[dict]:
     - a `role: "tool"` turn becomes a tool_result block inside a user
       message; consecutive tool turns share one user message, which is
       what Anthropic requires for the results of one tool_use batch
+    - an earlier turn with no text ("" or whitespace, common for an
+      assistant turn from an OpenAI client) is dropped: Anthropic answers
+      400 "text content blocks must contain non-whitespace text", which
+      the client saw as a 502 for a conversation that is valid in its own
+      format. Consecutive same-role turns that leaves are combined by the
+      API. The final turn is kept: it is the question being asked.
 
     System messages must already be stripped (see conversation_messages).
     """
     out: list[dict] = []
-    for m in conv:
+    last = len(conv) - 1
+    for i, m in enumerate(conv):
         role = m.get("role")
         if role == "tool":
             block = {
@@ -174,7 +216,7 @@ def anthropic_messages(conv: list[dict]) -> list[dict]:
             if isinstance(text, str) and text.strip():
                 blocks.append({"type": "text", "text": text})
             elif isinstance(text, list):
-                blocks.extend(b for b in text if isinstance(b, dict))
+                blocks.extend(b for b in text if isinstance(b, dict) and not _blank([b]))
             for tc in normalize_tool_calls(m["tool_calls"]):
                 blocks.append({
                     "type": "tool_use",
@@ -185,10 +227,20 @@ def anthropic_messages(conv: list[dict]) -> list[dict]:
             out.append({"role": "assistant", "content": blocks})
             continue
 
-        out.append({"role": role, "content": m.get("content")})
+        content = anthropic_content(m.get("content"))
+        if i != last and _blank(content):
+            continue
+        out.append({"role": role, "content": content})
 
     for m in out:
         m.pop("_tool_results", None)
+    # Dropping a blank first turn can leave an assistant turn first, which
+    # Anthropic rejects the same way conversation_messages() guards. Only
+    # a first turn this function dropped is repaired; other input keeps
+    # its shape.
+    if conv and conv[0].get("role") == "user":
+        while out and out[0]["role"] != "user":
+            out.pop(0)
     return out
 
 
@@ -405,14 +457,21 @@ def gemini_contents(conv: list[dict]) -> list[dict]:
             # the OpenAI shape only carries the id — so the name is looked
             # up from the assistant turn that requested it, above.
             name = m.get("name") or _tool_name_for(conv, m.get("tool_call_id"))
-            out.append({"role": "user", "parts": [{"function_response": {
+            part = {"function_response": {
                 "name": name or "tool",
                 "response": {"result": m.get("content") or ""},
-            }}]})
+            }}
+            # The results of parallel calls go in ONE user turn: Gemini
+            # rejects a turn whose function_response count differs from
+            # the function_call count of the model turn before it, so one
+            # turn per result failed every parallel tool call.
+            if out and out[-1]["role"] == "user" and all(
+                    "function_response" in p for p in out[-1]["parts"]):
+                out[-1]["parts"].append(part)
+            else:
+                out.append({"role": "user", "parts": [part]})
             continue
-        parts: list[dict] = []
-        if m.get("content"):
-            parts.append({"text": m["content"]})
+        parts = gemini_parts(m.get("content"))
         for tc in normalize_tool_calls(m.get("tool_calls")):
             parts.append({"function_call": {
                 "name": tc["function"]["name"],
@@ -422,6 +481,44 @@ def gemini_contents(conv: list[dict]) -> list[dict]:
             continue
         out.append({"role": "user" if role == "user" else "model", "parts": parts})
     return out
+
+
+def gemini_parts(content) -> list[dict]:
+    """A message's content as google-genai parts. Text blocks become text
+    parts and a base64 `data:` image becomes inline_data. An image given
+    by http(s) URL is left out, with a warning: inline_data needs the
+    bytes, and fetching a client-supplied URL from the proxy would let any
+    caller make it request internal addresses."""
+    if not isinstance(content, list):
+        return [{"text": content}] if content else []
+    parts: list[dict] = []
+    skipped = 0
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            if block.get("text"):
+                parts.append({"text": block["text"]})
+        elif block.get("type") == "image_url":
+            raw = block.get("image_url")
+            url = (raw or {}).get("url", "") if isinstance(raw, dict) else str(raw or "")
+            if url.startswith("data:") and ";base64," in url:
+                mime, data = url[5:].split(";base64,", 1)
+                try:
+                    parts.append({"inline_data": {"mime_type": mime or "image/png",
+                                                  "data": base64.b64decode(data, validate=False)}})
+                except (binascii.Error, ValueError):
+                    skipped += 1
+            else:
+                skipped += 1
+        else:
+            skipped += 1
+    if skipped:
+        logger.warning(
+            "%d content block(s) not sent to Gemini: only text and base64 "
+            "data: images are forwarded (an image by URL must be sent inline).",
+            skipped)
+    return parts
 
 
 def _tool_name_for(conv: list[dict], call_id: Optional[str]) -> Optional[str]:
@@ -441,7 +538,11 @@ def finish_reason(native: Optional[str], tool_calls: list[dict]) -> str:
     model asked for a tool, whatever the provider called it."""
     if tool_calls:
         return "tool_calls"
-    if native in ("length", "max_tokens"):
+    # Gemini's SDK gives an enum (FinishReason.MAX_TOKENS) and Cohere an
+    # upper-case string; matched as given, both reported a cut-off answer
+    # as "stop", so a client took half an answer for a whole one.
+    name = str(getattr(native, "value", native) or "").lower()
+    if name in ("length", "max_tokens"):
         return "length"
     return "stop"
 

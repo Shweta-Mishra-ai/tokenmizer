@@ -1,12 +1,13 @@
 """
 Authentication middleware.
 
-When TOKENMIZER_API_KEY is set, all non-health endpoints require:
+When TOKENMIZER_API_KEY or TOKENMIZER_API_KEYS is set, all non-health
+endpoints require:
   Authorization: Bearer <key>
   or
   X-API-Key: <key>
 
-When empty (default), auth is skipped — dev mode.
+When both are empty (default), auth is skipped — dev mode.
 Uses constant-time comparison to prevent timing attacks.
 """
 from __future__ import annotations
@@ -88,9 +89,34 @@ async def verify_api_key(request: Request) -> None:
                    "This is a server-side configuration problem, not a client error.",
         )
 
-    if not configured:
+    # Dev mode is decided from EVERY configured credential, not the primary
+    # alone. Reading only `api_key` meant a deployment configured with
+    # `api_keys` and no primary key ran with no authentication at all (and
+    # every caller shared one principal), even under TOKENMIZER_ENV=
+    # production, whose start-up check does count `api_keys`.
+    try:
+        candidates = _get_configured_keys()
+    except Exception as e:
+        if not configured:
+            # No primary key and the list is unreadable: whether auth is
+            # required is unknown, so refuse rather than open up.
+            logger.error("Could not read the list of API keys (%s: %s) and no "
+                         "primary key is set; failing CLOSED.", type(e).__name__, e)
+            raise HTTPException(
+                status_code=503,
+                detail="Auth configuration unavailable — request rejected for safety. "
+                       "This is a server-side configuration problem, not a client error.",
+            ) from e
+        # The primary key alone keeps auth closed. Keys beyond it are
+        # being refused, and that should be visible.
+        logger.warning("Could not read the full list of API keys (%s: %s); "
+                       "only the primary key is being accepted.",
+                       type(e).__name__, e)
+        candidates = [configured]
+
+    if not candidates:
         request.state.principal = DEV_PRINCIPAL
-        return  # dev mode — auth disabled (explicit empty key, not an error)
+        return  # dev mode — no credential configured (explicit, not an error)
 
     # Try Authorization header first, then X-API-Key
     key = ""
@@ -109,16 +135,6 @@ async def verify_api_key(request: Request) -> None:
     # Constant-time comparison against every configured credential.
     # Every candidate is compared (no early break) so that response time
     # does not reveal WHICH key matched, or how many are configured.
-    try:
-        candidates = _get_configured_keys()
-    except Exception as e:
-        # Fall back to the single key already read, which keeps auth
-        # closed. But the multi-key lookup failing means keys added beyond
-        # the first are being refused, and that should be visible.
-        logger.warning("Could not read the full list of API keys (%s: %s); "
-                       "only the primary key is being accepted.",
-                       type(e).__name__, e)
-        candidates = [configured]
     presented = hashlib.sha256(key.encode()).digest()
     valid = False
     for candidate in candidates:

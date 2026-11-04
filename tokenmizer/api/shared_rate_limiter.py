@@ -28,9 +28,11 @@ otherwise.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -117,7 +119,7 @@ class SQLiteRateLimiter:
         for _ in range(6):
             try:
                 self._db_path.parent.mkdir(parents=True, exist_ok=True)
-                with self._connect() as conn:
+                with closing(self._connect()) as conn, conn:
                     conn.execute(_SCHEMA)
                 return True
             except sqlite3.OperationalError as e:
@@ -136,7 +138,15 @@ class SQLiteRateLimiter:
         return False
 
     async def check(self, client_id: str) -> tuple[bool, float]:
-        """`(allowed, retry_after_seconds)`; retry_after is 0.0 if allowed."""
+        """`(allowed, retry_after_seconds)`; retry_after is 0.0 if allowed.
+
+        In a worker thread: the check is a SQLite write transaction that may
+        wait up to the 5 s busy timeout under contention, and on the event
+        loop that wait stalled every request in the process, not just this one.
+        """
+        return await asyncio.to_thread(self._check_sync, client_id)
+
+    def _check_sync(self, client_id: str) -> tuple[bool, float]:
         if not self.available:
             # One failed init is not a life sentence. A database that was
             # locked at startup is usually fine seconds later, and the
@@ -225,7 +235,7 @@ class SQLiteRateLimiter:
             return
         self._last_cleanup = now
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.execute("DELETE FROM rate_buckets WHERE last_refill < ?",
                              (now - stale_after,))
                 over = conn.execute(

@@ -63,6 +63,19 @@ _FILE_EXTENSIONS = {
 }
 
 
+# Code-fence language tags -> the extension detect_file_type() knows.
+_FENCE_LANG_EXT = {
+    "python": "py", "py3": "py", "python3": "py",
+    "javascript": "js", "jsx": "js", "node": "js", "mjs": "js",
+    "typescript": "ts", "tsx": "ts",
+    "golang": "go", "rust": "rs", "ruby": "rb",
+    "bash": "sh", "shell": "sh", "zsh": "sh", "console": "sh",
+    "c++": "cpp", "cxx": "cpp", "cc": "cpp", "h": "c", "hpp": "cpp",
+    "postgres": "sql", "postgresql": "sql", "mysql": "sql", "sqlite": "sql",
+    "yml": "yaml", "markdown": "md", "plaintext": "text", "txt": "text",
+}
+
+
 # ── Result dataclass ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -109,19 +122,45 @@ def _truncate_to_budget(text: str, token_budget: int) -> tuple[str, bool]:
     if count_tokens(text) <= token_budget:
         return text, False
 
-    # Binary search for the right truncation point
     lines = text.split("\n")
     result_lines = []
     running = 0
     for line in lines:
         line_tokens = count_tokens(line)
         if running + line_tokens > token_budget:
+            # The line that does not fit used to be dropped whole, with
+            # everything after it. One long line (the column list of a
+            # 50,000-column CSV, a single huge field) then left a digest of
+            # a few tokens out of a budget of hundreds. Keep as much of it
+            # as fits, cut at a separator, and mark the cut.
+            head = _prefix_within(line, token_budget - running - 1)
+            if head:
+                result_lines.append(head + "…")
             break
         result_lines.append(line)
         running += line_tokens
 
     truncated = "\n".join(result_lines)
     return truncated, True
+
+
+def _prefix_within(line: str, budget: int) -> str:
+    """The longest start of `line` within `budget` tokens, ending at a
+    separator where there is one in its last fifth."""
+    if budget < 8:
+        return ""
+    lo, hi = 0, min(len(line), budget * 8)   # no token is longer than ~8 chars
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if count_tokens(line[:mid]) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    head = line[:lo]
+    cut = max(head.rfind(c) for c in (" ", ",", "\t", ";"))
+    if cut > len(head) * 4 // 5:
+        head = head[:cut]
+    return head.rstrip(" ,\t;")
 
 
 # ── CSV / TSV extractor ───────────────────────────────────────────────────────
@@ -561,7 +600,9 @@ class JSONExtractor:
 
         try:
             data = json.loads(content)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
+            # RecursionError: nesting deeper than the interpreter's stack
+            # ("[" * 200_000) escaped this handler and failed the request.
             # Try JSONL
             lines = [line.strip() for line in content.splitlines() if line.strip()]
             try:
@@ -661,28 +702,37 @@ class PDFExtractor:
     ) -> FileExtractionResult:
         original_tokens = count_tokens(content_bytes.decode("utf-8", errors="ignore"))
 
+        def text_fallback(why: str) -> FileExtractionResult:
+            text = content_bytes.decode("utf-8", errors="ignore")
+            truncated, was_cut = _truncate_to_budget(text, token_budget)
+            return FileExtractionResult(
+                file_type="pdf", original_size_bytes=len(content_bytes),
+                original_tokens=original_tokens,
+                extracted_tokens=count_tokens(truncated),
+                tokens_saved=original_tokens - count_tokens(truncated),
+                savings_pct=0.0, content=truncated,
+                summary=f"PDF ({why}, text fallback)",
+                strategy_used="text_fallback", was_truncated=was_cut,
+            )
+
         try:
             import pypdf  # type: ignore
-            reader = pypdf.PdfReader(io.BytesIO(content_bytes))
         except ImportError:
-            try:
-                import PyPDF2 as pypdf  # type: ignore
-                reader = pypdf.PdfReader(io.BytesIO(content_bytes))
-            except ImportError:
-                # Fallback: treat as text
-                text = content_bytes.decode("utf-8", errors="ignore")
-                truncated, was_cut = _truncate_to_budget(text, token_budget)
-                return FileExtractionResult(
-                    file_type="pdf", original_size_bytes=len(content_bytes),
-                    original_tokens=original_tokens,
-                    extracted_tokens=count_tokens(truncated),
-                    tokens_saved=original_tokens - count_tokens(truncated),
-                    savings_pct=0.0, content=truncated,
-                    summary="PDF (no parser, text fallback)",
-                    strategy_used="text_fallback", was_truncated=was_cut,
-                )
+            # No fallback to PyPDF2: it is unmaintained and carries the
+            # crafted-PDF denial-of-service bugs pypdf has since fixed.
+            # Without pypdf the bytes are read as text.
+            return text_fallback("no parser")
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+            num_pages = len(reader.pages)
+        except Exception as e:
+            # A truncated or mislabelled file ("Stream has ended
+            # unexpectedly") is the caller's input, not a server fault:
+            # it used to fail /api/analyze with a 500. Read it as text.
+            logger.warning("%s is not a readable PDF (%s: %s); reading it as text",
+                           filename, type(e).__name__, e)
+            return text_fallback("unreadable")
 
-        num_pages = len(reader.pages)
         parts = [f"File: {filename} | {num_pages} pages"]
 
         # Metadata
@@ -796,10 +846,12 @@ class ExcelExtractor:
     We extract per-sheet summaries using the same CSV strategy.
     """
 
-    # Rows per sheet handed to the CSV strategy. The sheet is already in
-    # memory by then; the cap bounds the CSV re-serialisation, and when it
-    # applies the summary says so.
+    # Rows per sheet handed to the CSV strategy; when the cap applies the
+    # summary says so. Rows past it are counted, not kept.
     MAX_ROWS_PER_SHEET = 100_000
+    # An .xlsx is a zip of XML. A few MB of it can inflate to gigabytes;
+    # past this the workbook is refused before openpyxl expands anything.
+    MAX_UNCOMPRESSED_BYTES = 1 << 30
 
     def extract(
         self,
@@ -810,6 +862,23 @@ class ExcelExtractor:
     ) -> FileExtractionResult:
         original_tokens = len(content_bytes) // 3  # rough estimate for binary
 
+        try:
+            import zipfile
+            with zipfile.ZipFile(io.BytesIO(content_bytes)) as zf:
+                inflated = sum(i.file_size for i in zf.infolist())
+            if inflated > self.MAX_UNCOMPRESSED_BYTES:
+                return FileExtractionResult(
+                    file_type="excel", original_size_bytes=len(content_bytes),
+                    original_tokens=original_tokens, extracted_tokens=30,
+                    tokens_saved=max(0, original_tokens - 30), savings_pct=99.0,
+                    content=(f"File: {filename}\nNot read: the workbook expands to "
+                             f"{inflated / (1 << 30):.1f} GiB, over the "
+                             f"{self.MAX_UNCOMPRESSED_BYTES >> 30} GiB limit."),
+                    summary="Excel too large when expanded",
+                    strategy_used="refused_oversize", was_truncated=True,
+                )
+        except zipfile.BadZipFile:
+            pass  # openpyxl below reports the parse error
         try:
             import openpyxl  # type: ignore
             wb = openpyxl.load_workbook(io.BytesIO(content_bytes), read_only=True, data_only=True)
@@ -845,7 +914,15 @@ class ExcelExtractor:
         all_results = []
         for sheet_name in sheet_names[:8]:  # max 8 sheets
             ws = wb[sheet_name]
-            rows_data = list(ws.iter_rows(values_only=True))
+            # Keep the header and the rows the CSV strategy will see; count
+            # the rest so the summary can still give the sheet's true size.
+            # list() held every row of a 400,000-row sheet in memory.
+            rows_data, extra_rows = [], 0
+            for row in ws.iter_rows(values_only=True):
+                if len(rows_data) <= self.MAX_ROWS_PER_SHEET:
+                    rows_data.append(row)
+                else:
+                    extra_rows += 1
             if not rows_data or len(rows_data) < 2:
                 parts.append(f"\n[Sheet: {sheet_name}] — empty")
                 continue
@@ -864,7 +941,7 @@ class ExcelExtractor:
                 token_budget=budget_per_sheet,
                 sample_rows=3,
                 query=query,
-                rows_in_source=len(rows_data) - 1,
+                rows_in_source=len(rows_data) - 1 + extra_rows,
             )
             parts.append(f"\n[Sheet: {sheet_name}]\n{result.content}")
             all_results.append(result)
@@ -1105,6 +1182,7 @@ class FileIntelligence:
         messages: list[dict],
         token_budget_per_file: int = 800,
         query: str = "",
+        digest_current_turn: bool = False,
     ) -> tuple[list[dict], int]:
         """
         Scan messages for large file content blocks and extract intelligently.
@@ -1116,9 +1194,21 @@ class FileIntelligence:
         """
         total_saved = 0
         processed = []
+        # The new input — every message after the last assistant turn — is
+        # what the question is ABOUT. Digesting it replaced code the user
+        # asked about with a sample of it, and the model answered without
+        # the line in question. Only older turns are digested.
+        protect_from = len(messages)
+        for idx in range(len(messages) - 1, -1, -1) if not digest_current_turn else ():
+            if messages[idx].get("role") == "assistant":
+                break
+            protect_from = idx
 
-        for msg in messages:
+        for idx, msg in enumerate(messages):
             content = msg.get("content", "")
+            if idx >= protect_from:
+                processed.append(msg)
+                continue
             if not isinstance(content, str) or len(content) < 500:
                 processed.append(msg)
                 continue
@@ -1154,9 +1244,13 @@ class FileIntelligence:
             content,
         )
         if code_fence:
-            lang = code_fence.group(1) or "text"
+            lang = (code_fence.group(1) or "text").lower()
             block = code_fence.group(2)
-            filename = f"attachment.{lang}" if lang != "text" else "attachment.txt"
+            # The fence names a LANGUAGE, not an extension. "python" became
+            # "attachment.python", matched no type, and the block was
+            # content-sniffed — as CSV, because code has commas.
+            ext = _FENCE_LANG_EXT.get(lang, lang)
+            filename = f"attachment.{ext}" if ext != "text" else "attachment.txt"
             pre = content[:code_fence.start()].strip()
             post = content[code_fence.end():].strip()
             return block, filename, pre, post

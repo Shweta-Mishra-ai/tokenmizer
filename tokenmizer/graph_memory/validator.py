@@ -292,7 +292,10 @@ class GraphValidator:
             base -= 0.10
         # Decision language is a strong signal
         decision_words = ["use", "using", "chose", "decided", "switch", "instead", "because", "over"]
-        if any(w in label.lower() for w in decision_words):
+        # Whole words: as substrings "use" matched "because" and "user", and
+        # "over" matched "coverage", crediting labels with decision language
+        # they do not contain.
+        if re.search(r"\b(?:" + "|".join(decision_words) + r")\b", label.lower()):
             base += 0.15
         # Technology names are strong decision signals
         tech_names = ["postgresql", "redis", "sqlite", "mongodb", "jwt", "oauth",

@@ -145,7 +145,8 @@ def test_readme_documents_every_endpoint_and_no_others():
     declared = set()
     for py in (root / "tokenmizer" / "api").rglob("*.py"):
         declared |= set(re.findall(
-            r'@(?:app|router)\.(?:get|post)\("([^"]+)"', py.read_text(encoding="utf-8")
+            r'@(?:app|router)\.(?:get|post|put|patch|delete)\(\s*"([^"]+)"',
+            py.read_text(encoding="utf-8")
         ))
 
     documented = set(re.findall(r"`(/(?:api|v1)/[^`]*?)`", readme))

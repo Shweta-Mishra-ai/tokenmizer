@@ -22,7 +22,8 @@ class _Bucket:
 class RateLimiter:
     """
     Per-client token-bucket rate limiter.
-    Default: 60 requests/minute per API key (or IP if no key).
+    Default: 60 requests/minute per client address (see app._rate_limit_key);
+    configured by `rate_limit:` in settings.
 
     Usage:
         limiter = RateLimiter(rate=60, per_seconds=60, burst=10)

@@ -283,7 +283,7 @@ def tool_signals(message: dict) -> tuple[list[str], list[str]]:
             # OpenAI tool results carry no error flag; only a result whose
             # first line is itself an error line counts.
             text = _block_text(content)
-            first = next((ln for ln in text[:2000].splitlines() if ln.strip()), "")
+            first = next((ln.strip() for ln in text[:2000].splitlines() if ln.strip()), "")
             if _TOOL_ERROR_LINE.match(first):
                 label = _tool_error_label(text)
                 if label:
