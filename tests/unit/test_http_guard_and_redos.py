@@ -366,3 +366,20 @@ def test_clip_words_never_cuts_mid_word():
     assert out == "We switched from moment.js to date-fns because…"
     assert clip_words("short", 50) == "short"
     assert len(clip_words("x" * 80, 20)) == 20
+
+
+def test_the_anonymous_scope_prefix_is_reserved():
+    """A request with no session is cached and counted under
+    "__anon__:<principal>"; a client that chose that string as its session
+    id would share the scope of the principal it names."""
+    from fastapi.testclient import TestClient
+
+    from tokenmizer.api import app as app_module
+    with TestClient(app_module.app) as c:
+        body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        r = c.post("/v1/chat/completions", json={**body, "session_id": "__anon__:k_0123"})
+        assert r.status_code == 422
+        r = c.post("/v1/chat/completions", json=body, headers={"X-Session-ID": "__anon__:k_0123"})
+        assert r.status_code == 422
+        assert c.get("/api/stats", params={"session_id": "__anon__:k_0123"}).status_code == 422
+        assert c.get("/api/stats", params={"session_id": "my-anon-notes"}).status_code != 422

@@ -8,7 +8,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/v1/chat/completions` | POST | OpenAI-compatible proxy, including `tools` / `tool_choice` and `role: "tool"` messages (see below). Memory needs a session: `session_id` in the body or an `X-Session-ID` header; without one the request is stateless. Image blocks are forwarded to providers that accept them (Anthropic, OpenAI and OpenAI-compatible except DeepSeek) and otherwise counted in `tokenmizer.dropped_non_text_blocks`. The semantic cache is skipped for `temperature` > 0 and for `Cache-Control: no-cache` |
+| `/v1/chat/completions` | POST | OpenAI-compatible proxy, including `tools` / `tool_choice` and `role: "tool"` messages (see below). Memory needs a session: `session_id` in the body or an `X-Session-ID` header; without one the request is stateless. Image blocks are forwarded to providers that accept them (Anthropic, OpenAI and OpenAI-compatible except DeepSeek, and Gemini for base64 `data:` images; an image by URL is not sent to Gemini) and otherwise counted in `tokenmizer.dropped_non_text_blocks`. The semantic cache is skipped for `temperature` > 0 and for `Cache-Control: no-cache` |
 | `/api/resume/{id}` | GET | Resume context. Built live from the graph whenever it is newer than the latest checkpoint (or there is none) — `source: "live_graph"` — else from the checkpoint. 404 only when both are empty |
 | `/api/checkpoint` | POST | Manual checkpoint. Optional JSON body `{"messages": [{role, content}, ...]}` is extracted into the graph first, so a checkpoint made outside the proxy (MCP tool, CLI) populates the session |
 | `/api/analyze` | POST | File → token-budgeted digest (CSV/JSON/PDF/Excel/logs/code) |

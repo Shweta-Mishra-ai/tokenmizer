@@ -776,7 +776,11 @@ async def _validation_error(request: Request, exc: RequestValidationError) -> Re
 
 # Outermost: runs before routing and before any body is read. See
 # security/http_guard.py for the four attacks it closes.
-from tokenmizer.security.http_guard import MAX_SESSION_ID_LENGTH, HTTPGuard  # noqa: E402
+from tokenmizer.security.http_guard import (  # noqa: E402
+    MAX_SESSION_ID_LENGTH,
+    RESERVED_SESSION_PREFIX,
+    HTTPGuard,
+)
 
 app.add_middleware(
     HTTPGuard,
@@ -933,6 +937,8 @@ class ChatRequest(BaseModel):
                 raise ValueError("session_id must be valid Unicode text") from None
             if len(v) > MAX_SESSION_ID_LENGTH:
                 raise ValueError(f"session_id is longer than {MAX_SESSION_ID_LENGTH} characters")
+            if v.startswith(RESERVED_SESSION_PREFIX):
+                raise ValueError(f"session_id may not start with {RESERVED_SESSION_PREFIX!r}")
         return v
 
 

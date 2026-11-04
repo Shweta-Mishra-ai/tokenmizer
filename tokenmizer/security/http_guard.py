@@ -30,6 +30,10 @@ from urllib.parse import parse_qs
 logger = logging.getLogger(__name__)
 
 MAX_SESSION_ID_LENGTH = 256
+# The cache and analytics scope of a request with no session is
+# "__anon__:<principal>". A client choosing that as its session id would
+# share the scope of the principal it names, so the prefix is reserved.
+RESERVED_SESSION_PREFIX = "__anon__:"
 
 # "testserver" is the Host Starlette's TestClient sends. It is not a
 # registrable domain, so no attacker can point a page at it.
@@ -124,6 +128,9 @@ class HTTPGuard:
         if sid is not None and len(sid) > MAX_SESSION_ID_LENGTH:
             return await _reject(
                 send, 422, f"session_id is longer than {MAX_SESSION_ID_LENGTH} characters.")
+        if sid is not None and sid.startswith(RESERVED_SESSION_PREFIX):
+            return await _reject(
+                send, 422, f"session_id may not start with {RESERVED_SESSION_PREFIX!r}.")
 
         declared = headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > self.max_body_bytes:
