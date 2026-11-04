@@ -90,3 +90,44 @@ def test_an_ollama_error_line_mid_stream_raises(monkeypatch):
         return [x async for x in p.chat_stream([{"role": "user", "content": "go"}], model="m")]
     with pytest.raises(ProviderError, match="model runner crashed"):
         asyncio.run(drain())
+
+
+@pytest.mark.parametrize("native, expected", [
+    ("MAX_TOKENS", "length"),            # Cohere
+    ("length", "length"), ("max_tokens", "length"),
+    ("STOP", "stop"), ("COMPLETE", "stop"), (None, "stop"),
+])
+def test_a_cut_off_answer_is_reported_as_length_whatever_the_case(native, expected):
+    """Matched as given, Cohere's MAX_TOKENS and Gemini's enum both came
+    back as "stop": a client took half an answer for a whole one."""
+    from tokenmizer.providers.tools import finish_reason
+    assert finish_reason(native, []) == expected
+
+
+def test_gemini_enum_finish_reason_maps_to_length():
+    types = pytest.importorskip("google.genai.types")
+    from tokenmizer.providers.tools import finish_reason
+    assert finish_reason(types.FinishReason.MAX_TOKENS, []) == "length"
+
+
+def test_cohere_reply_joins_every_text_item_and_counts_ints(monkeypatch):
+    import sys
+    import types as pytypes
+
+    from tokenmizer.providers.providers import CohereProvider
+    item = lambda t: pytypes.SimpleNamespace(type="text", text=t)  # noqa: E731
+
+    class Client:
+        def __init__(self, **kw):
+            pass
+
+        async def chat(self, **kw):
+            return pytypes.SimpleNamespace(
+                finish_reason="MAX_TOKENS",
+                message=pytypes.SimpleNamespace(content=[item("one. "), item("two.")], tool_calls=None),
+                usage=pytypes.SimpleNamespace(tokens=pytypes.SimpleNamespace(input_tokens=6.0, output_tokens=4.0)))
+
+    monkeypatch.setitem(sys.modules, "cohere", pytypes.SimpleNamespace(AsyncClientV2=Client))
+    r = asyncio.run(CohereProvider(api_key="k").chat([{"role": "user", "content": "hi"}], model="c"))
+    assert r.text == "one. two." and r.finish_reason == "length"
+    assert (r.input_tokens, r.output_tokens) == (6, 4) and isinstance(r.input_tokens, int)

@@ -836,7 +836,8 @@ class CohereProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install cohere")
 
-        client = cohere.AsyncClientV2(api_key=self.api_key)
+        client = self._client(cohere.AsyncClientV2, api_key=self.api_key,
+                              **self._timeout_kwargs)
 
         all_messages = messages[:]
         if system:
@@ -847,13 +848,19 @@ class CohereProvider(BaseProvider):
                                      messages=cohere_messages(all_messages),
                                      max_tokens=max_tokens,
                                      **self._chat_kwargs(kwargs))
-            text = resp.message.content[0].text if resp.message.content else ""
+            # Every text item, not only the first: a reply can carry
+            # several, and a non-text item first made [0].text raise.
+            text = "".join(getattr(c, "text", "") or "" for c in (resp.message.content or [])
+                           if getattr(c, "type", "text") == "text")
             calls = normalize_tool_calls(getattr(resp.message, "tool_calls", None))
             usage = resp.usage
             return LLMResponse(
                 text=text,
-                input_tokens=usage.tokens.input_tokens if usage else count_messages_tokens(all_messages),
-                output_tokens=usage.tokens.output_tokens if usage else count_tokens(text),
+                # Cohere reports counts as floats (6.0); clients read ints.
+                input_tokens=int(usage.tokens.input_tokens) if usage and usage.tokens
+                else count_messages_tokens(all_messages),
+                output_tokens=int(usage.tokens.output_tokens) if usage and usage.tokens
+                else count_tokens(text),
                 model=model,
                 provider="cohere",
                 finish_reason=finish_reason(getattr(resp, "finish_reason", None), calls),
@@ -885,7 +892,8 @@ class CohereProvider(BaseProvider):
             raise ImportError("pip install cohere")
 
         model = model or self.default_model
-        client = cohere.AsyncClientV2(api_key=self.api_key)
+        client = self._client(cohere.AsyncClientV2, api_key=self.api_key,
+                              **self._timeout_kwargs)
         all_messages = messages[:]
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
