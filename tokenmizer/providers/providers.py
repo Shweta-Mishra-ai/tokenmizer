@@ -960,9 +960,22 @@ class GeminiProvider(BaseProvider):
     # The SDK carries function_call parts on the streamed chunks, so a
     # streamed tool request does not have to fall back to a buffered call.
     supports_tool_stream = True
+    # Base64 images go as inline_data (see tools.gemini_parts); they were
+    # dropped before, with a warning, though Gemini reads images.
+    supports_images = True
 
     def __init__(self, api_key: str, model: str = "gemini-1.5-pro"):
         super().__init__(api_key, model)
+
+    def _genai_client(self, genai):
+        """The SDK client, reused per event loop like the other adapters'
+        (see BaseProvider._client). One was built per request: a new
+        connection pool and TLS handshake on every call."""
+        return self._client(
+            genai.Client, api_key=self.api_key,
+            **({"http_options": {"timeout": int(self.request_timeout * 1000)}}
+               if self.request_timeout and self.request_timeout > 0 else {}),
+        )
 
     def _config_kwargs(self, kwargs: dict, max_tokens: int,
                        system_instruction: Optional[str]) -> dict:
@@ -995,11 +1008,7 @@ class GeminiProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install google-genai")
 
-        client = genai.Client(
-            api_key=self.api_key,
-            **({"http_options": {"timeout": int(self.request_timeout * 1000)}}
-               if self.request_timeout and self.request_timeout > 0 else {}),
-        )
+        client = self._genai_client(genai)
 
         # Extract system prompt
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
@@ -1040,7 +1049,11 @@ class GeminiProvider(BaseProvider):
             usage = resp.usage_metadata
             if usage is not None and usage.prompt_token_count:
                 input_tokens = usage.prompt_token_count
-                output_tokens = usage.candidates_token_count
+                # None when the reply was blocked or carried no candidate
+                # text; a None here reached the analytics sums.
+                output_tokens = (usage.candidates_token_count
+                                 if usage.candidates_token_count is not None
+                                 else count_tokens(text, model))
             else:
                 input_tokens = count_messages_tokens(conversation, model)
                 output_tokens = count_tokens(text, model)
@@ -1073,11 +1086,7 @@ class GeminiProvider(BaseProvider):
             raise ImportError("pip install google-genai")
 
         model = model or self.default_model
-        client = genai.Client(
-            api_key=self.api_key,
-            **({"http_options": {"timeout": int(self.request_timeout * 1000)}}
-               if self.request_timeout and self.request_timeout > 0 else {}),
-        )
+        client = self._genai_client(genai)
 
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
@@ -1161,26 +1170,30 @@ class OllamaProvider(BaseProvider):
             # tool_choice, so "none"/"required" cannot be enforced here.
             payload["tools"] = tk["tools"]
 
-        async with httpx.AsyncClient(timeout=self.request_timeout or None) as client:
-            try:
-                r = await client.post(f"{self._base_url}/api/chat", json=payload)
-                r.raise_for_status()
-                data = r.json()
-                message = data.get("message", {})
-                text = message.get("content", "") or ""
-                calls = ollama_tool_calls(message.get("tool_calls"))
-                return LLMResponse(
-                    text=text,
-                    input_tokens=data.get("prompt_eval_count", count_messages_tokens(all_messages)),
-                    output_tokens=data.get("eval_count", count_tokens(text)),
-                    model=model,
-                    provider="ollama",
-                    finish_reason=finish_reason(data.get("done_reason"), calls),
-                    tool_calls=calls,
-                )
-            except Exception as e:
-                raise ProviderError("ollama", "api_error", str(e),
-                                    retryable=_ollama_error_is_retryable(e))
+        # Reused per event loop (see BaseProvider._client), not one per call.
+        client = self._client(httpx.AsyncClient, timeout=self.request_timeout or None)
+        try:
+            r = await client.post(f"{self._base_url}/api/chat", json=payload)
+            r.raise_for_status()
+            data = r.json()
+            if data.get("error"):
+                raise ProviderError("ollama", "api_error", str(data["error"]),
+                                    retryable=False)
+            message = data.get("message", {})
+            text = message.get("content", "") or ""
+            calls = ollama_tool_calls(message.get("tool_calls"))
+            return LLMResponse(
+                text=text,
+                input_tokens=data.get("prompt_eval_count", count_messages_tokens(all_messages)),
+                output_tokens=data.get("eval_count", count_tokens(text)),
+                model=model,
+                provider="ollama",
+                finish_reason=finish_reason(data.get("done_reason"), calls),
+                tool_calls=calls,
+            )
+        except Exception as e:
+            raise ProviderError("ollama", "api_error", str(e),
+                                retryable=_ollama_error_is_retryable(e))
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -1211,34 +1224,41 @@ class OllamaProvider(BaseProvider):
             # that asked for tools AND a stream got a model that could not
             # see them — the same silent drop the non-streaming path had.
             payload["tools"] = tk["tools"]
+        client = self._client(httpx.AsyncClient, timeout=self.request_timeout or None)
         try:
-            async with httpx.AsyncClient(timeout=self.request_timeout or None) as client:
-                async with client.stream("POST", f"{self._base_url}/api/chat",
-                                         json=payload) as r:
-                    r.raise_for_status()
-                    async for line in r.aiter_lines():
-                        if not line.strip():
-                            continue
-                        data = _json.loads(line)
-                        message = data.get("message", {}) or {}
-                        chunk = message.get("content", "")
-                        if chunk:
-                            yield chunk
-                        # Ollama sends finished calls on one message rather
-                        # than fragments, so each becomes a single delta
-                        # carrying the whole arguments string. The proxy
-                        # assembles by index either way.
-                        calls = ollama_tool_calls(message.get("tool_calls"))
-                        if calls:
-                            yield {"tool_calls": [
-                                {"index": i, "id": c["id"], "type": "function",
-                                 "function": dict(c["function"])}
-                                for i, c in enumerate(calls)
-                            ]}
-                        if data.get("done"):
-                            if finish_reason(data.get("done_reason"), []) == "length":
-                                yield {"finish_reason": "length"}
-                            break
+            async with client.stream("POST", f"{self._base_url}/api/chat",
+                                     json=payload) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line.strip():
+                        continue
+                    data = _json.loads(line)
+                    # A failure after the stream started (the model
+                    # runner crashing, out of memory) arrives as an
+                    # {"error": ...} line. It was skipped, so the
+                    # client got the text so far as a finished answer.
+                    if data.get("error"):
+                        raise ProviderError("ollama", "api_error", str(data["error"]),
+                                            retryable=False)
+                    message = data.get("message", {}) or {}
+                    chunk = message.get("content", "")
+                    if chunk:
+                        yield chunk
+                    # Ollama sends finished calls on one message rather
+                    # than fragments, so each becomes a single delta
+                    # carrying the whole arguments string. The proxy
+                    # assembles by index either way.
+                    calls = ollama_tool_calls(message.get("tool_calls"))
+                    if calls:
+                        yield {"tool_calls": [
+                            {"index": i, "id": c["id"], "type": "function",
+                             "function": dict(c["function"])}
+                            for i, c in enumerate(calls)
+                        ]}
+                    if data.get("done"):
+                        if finish_reason(data.get("done_reason"), []) == "length":
+                            yield {"finish_reason": "length"}
+                        break
         except ProviderError:
             raise
         except Exception as e:

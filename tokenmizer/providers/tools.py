@@ -19,6 +19,8 @@ Everything in this module is pure: no I/O, no SDK imports.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import uuid
@@ -455,14 +457,21 @@ def gemini_contents(conv: list[dict]) -> list[dict]:
             # the OpenAI shape only carries the id — so the name is looked
             # up from the assistant turn that requested it, above.
             name = m.get("name") or _tool_name_for(conv, m.get("tool_call_id"))
-            out.append({"role": "user", "parts": [{"function_response": {
+            part = {"function_response": {
                 "name": name or "tool",
                 "response": {"result": m.get("content") or ""},
-            }}]})
+            }}
+            # The results of parallel calls go in ONE user turn: Gemini
+            # rejects a turn whose function_response count differs from
+            # the function_call count of the model turn before it, so one
+            # turn per result failed every parallel tool call.
+            if out and out[-1]["role"] == "user" and all(
+                    "function_response" in p for p in out[-1]["parts"]):
+                out[-1]["parts"].append(part)
+            else:
+                out.append({"role": "user", "parts": [part]})
             continue
-        parts: list[dict] = []
-        if m.get("content"):
-            parts.append({"text": m["content"]})
+        parts = gemini_parts(m.get("content"))
         for tc in normalize_tool_calls(m.get("tool_calls")):
             parts.append({"function_call": {
                 "name": tc["function"]["name"],
@@ -472,6 +481,44 @@ def gemini_contents(conv: list[dict]) -> list[dict]:
             continue
         out.append({"role": "user" if role == "user" else "model", "parts": parts})
     return out
+
+
+def gemini_parts(content) -> list[dict]:
+    """A message's content as google-genai parts. Text blocks become text
+    parts and a base64 `data:` image becomes inline_data. An image given
+    by http(s) URL is left out, with a warning: inline_data needs the
+    bytes, and fetching a client-supplied URL from the proxy would let any
+    caller make it request internal addresses."""
+    if not isinstance(content, list):
+        return [{"text": content}] if content else []
+    parts: list[dict] = []
+    skipped = 0
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            if block.get("text"):
+                parts.append({"text": block["text"]})
+        elif block.get("type") == "image_url":
+            raw = block.get("image_url")
+            url = (raw or {}).get("url", "") if isinstance(raw, dict) else str(raw or "")
+            if url.startswith("data:") and ";base64," in url:
+                mime, data = url[5:].split(";base64,", 1)
+                try:
+                    parts.append({"inline_data": {"mime_type": mime or "image/png",
+                                                  "data": base64.b64decode(data, validate=False)}})
+                except (binascii.Error, ValueError):
+                    skipped += 1
+            else:
+                skipped += 1
+        else:
+            skipped += 1
+    if skipped:
+        logger.warning(
+            "%d content block(s) not sent to Gemini: only text and base64 "
+            "data: images are forwarded (an image by URL must be sent inline).",
+            skipped)
+    return parts
 
 
 def _tool_name_for(conv: list[dict], call_id: Optional[str]) -> Optional[str]:
