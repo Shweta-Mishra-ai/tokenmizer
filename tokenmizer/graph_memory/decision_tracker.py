@@ -27,6 +27,7 @@ _is_same_decision/_semantic_same_slot rather than in a second file.
 """
 from __future__ import annotations
 
+import functools
 import re
 
 # ── Topic taxonomy ────────────────────────────────────────────────────────────
@@ -578,6 +579,10 @@ def _names_competing_alternatives(label_a: str, label_b: str) -> bool:
     return bool(_topics(exclusive_a) & _topics(exclusive_b))
 
 
+# Pure functions of two labels, called for every new node against every
+# existing one of its type: memoised, because the same pairs come back on
+# every turn of a session (measured: 1,720 calls on one cold 100-turn chat).
+@functools.lru_cache(maxsize=65536)
 def _is_same_decision(label_a: str, label_b: str) -> bool:
     """True if two labels are essentially the same decision (dedup check)."""
 
@@ -707,6 +712,7 @@ def _named_error_classes_conflict(label_a: str, label_b: str) -> bool:
     return not (classes_a & classes_b)
 
 
+@functools.lru_cache(maxsize=65536)
 def _is_same_error(label_a: str, label_b: str) -> bool:
     """True if two error labels describe the same underlying failure,
     phrased identically or near-identically. Mirrors _is_same_decision's

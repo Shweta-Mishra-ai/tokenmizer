@@ -402,7 +402,8 @@ async def create_manual_checkpoint(session_id: str, body: CheckpointBody | None 
         raw_messages = [m.to_dict() for m in (body.messages if body else [])]
         raw_messages = redact_messages(raw_messages)
         async with app_module._get_session_lock(session_id):
-            ckpt = app_module._checkpoint_mgr.create(
+            ckpt = await asyncio.to_thread(
+                app_module._checkpoint_mgr.create,
                 session_id=session_id,
                 messages=raw_messages,
                 graph=graph,

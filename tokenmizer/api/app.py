@@ -672,7 +672,15 @@ async def _flush_all_graphs(reason: str, skip_busy: bool = False) -> tuple[int, 
             if _session_inflight.get(sid) or (lock is not None and lock.locked()):
                 continue
         try:
-            if graph._persist(force=True):
+            # Off the event loop — a flush writes every dirty session to
+            # SQLite, and done on the loop it stalled every request in flight
+            # for as long as the writes took. Under the session's own lock,
+            # so a request for this session cannot mutate the graph while it
+            # is being serialised in another thread. At shutdown (skip_busy
+            # False) the drain has already stopped the background writers.
+            async with _get_session_lock(sid):
+                ok = await asyncio.to_thread(graph._persist, force=True)
+            if ok:
                 flushed += 1
             else:
                 failed += 1
@@ -696,7 +704,7 @@ async def _periodic_flush() -> None:
             await _flush_all_graphs("periodic", skip_busy=True)
             # Same timer, same worst-case exposure: a hard kill loses at
             # most one interval of analytics, not the whole history.
-            if not _analytics.flush():
+            if not await asyncio.to_thread(_analytics.flush):
                 _analytics.record_silent_failure("analytics_flush")
             cycles += 1
             # Roughly hourly at the default 30s interval. Lock files are
@@ -783,7 +791,7 @@ async def lifespan(app: FastAPI):
             pass
         await _drain_background_tasks()
         await _flush_all_graphs("shutdown")
-        _analytics.flush()
+        await asyncio.to_thread(_analytics.flush)
         privacy.release()
         logger.info("TokenMizer stopped")
 
@@ -1395,7 +1403,10 @@ async def _update_graph(
         last_error: Exception | None = None
         for attempt in range(2):  # one retry for transient SQLite lock contention
             try:
-                ckpt = _checkpoint_mgr.create(
+                # Off the loop: it re-extracts, builds three resume blocks and
+                # writes SQLite. The caller holds this session's lock.
+                ckpt = await asyncio.to_thread(
+                    _checkpoint_mgr.create,
                     session_id=session_id,
                     messages=raw_messages,
                     graph=graph,

@@ -30,6 +30,7 @@ continues to work unchanged.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -206,12 +207,24 @@ def _names_file(name: str, text: str) -> bool:
     `postgres.py` to "PostgreSQL". Underscores and hyphens count as spaces
     on both sides, so `rate_limiter` matches "rate limiter".
     """
+    pattern = _file_name_pattern(name)
+    return pattern is not None and pattern.search(_spaced_lower(text)) is not None
+
+
+# Both memoised: _names_file runs for every new node against every file in
+# the graph, and built a fresh regex for each call — compiled anew whenever
+# Python's own pattern cache had cycled, which on a long session was always.
+@functools.lru_cache(maxsize=4096)
+def _file_name_pattern(name: str) -> re.Pattern | None:
     name = re.sub(r"[_\-]+", " ", name.lower()).strip()
     if len(name) <= 2:
-        return False
-    text = re.sub(r"[_\-]+", " ", text.lower())
-    return re.search(r"(?<![a-z0-9])" + re.escape(name) + _INFLECTION + r"(?![a-z0-9])",
-                     text) is not None
+        return None
+    return re.compile(r"(?<![a-z0-9])" + re.escape(name) + _INFLECTION + r"(?![a-z0-9])")
+
+
+@functools.lru_cache(maxsize=4096)
+def _spaced_lower(text: str) -> str:
+    return re.sub(r"[_\-]+", " ", text.lower())
 
 
 _INFLECTION = r"(?:s|es|d|ed|r|er|ers|ing|ment|ql)?"

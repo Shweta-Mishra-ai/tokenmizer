@@ -1502,7 +1502,7 @@ class HybridExtractor:
         # graph_memory/hinglish.py. Any other language keeps only what the
         # structural passes above can read.
         from tokenmizer.graph_memory.hinglish import extract_hinglish, looks_hinglish
-        if looks_hinglish(content):
+        if role != "tool" and looks_hinglish(content):
             found = extract_hinglish(content)
             for task in found["tasks_done"]:
                 norm = self._normalize(task)
@@ -1867,7 +1867,16 @@ class HybridExtractor:
                 result, seen_decisions, seen_tasks, seen_files,
                 seen_endpoints, seen_schemas,
                 proposals=open_proposals if role == "user" else None,
-                original=original, english=looks_english(original),
+                # A tool result is machine output — a file's contents, a
+                # listing, a test run — and nothing in it decides or
+                # finishes anything. Read as English prose, the comments in
+                # a file an agent merely opened ("# retry on timeout")
+                # became open ERROR nodes: 60 of them for a 60-step session
+                # that never failed. It gets the structure-only reading:
+                # files, routes, exception names, status codes and log
+                # error lines, which is what is real in tool output.
+                original=original,
+                english=role != "tool" and looks_english(original),
             )
 
         # Cross-granularity dedup. Without this the heuristic path

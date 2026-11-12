@@ -6,6 +6,7 @@ in; the docstring says what used to happen.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -596,3 +597,63 @@ def test_extraction_is_not_quadratic(text):
     t0 = time.perf_counter()
     _extract(text)
     assert time.perf_counter() - t0 < 5.0
+
+
+# ── round 4: performance and tool output ─────────────────────────────────────
+
+def _tool_session(comment: str, result: str | None = None) -> list[dict]:
+    body = result if result is not None else "\n".join(
+        f"def f_{j}(x):\n    return x + {j}  # {comment}" for j in range(30))
+    return [
+        {"role": "user", "content": "Refactor the orders module."},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path": "src/orders.py"}'}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": body},
+    ]
+
+
+def test_comments_in_a_file_an_agent_read_are_not_errors(tmp_path):
+    """60 open ERROR nodes came out of a 60-step session that never failed:
+    the prose patterns read code comments in tool output as reports."""
+    from tokenmizer.graph_memory.graph import GraphMemory
+    g = GraphMemory("tool", storage_dir=str(tmp_path))
+    g.extract_from_messages(_tool_session("retry the request on timeout; the worker failed before"),
+                            incremental=False)
+    assert [n for n in g._nodes.values() if n.type.value == "error"] == []
+
+
+def test_a_real_failure_in_tool_output_is_still_an_error(tmp_path):
+    from tokenmizer.graph_memory.graph import GraphMemory
+    g = GraphMemory("tool2", storage_dir=str(tmp_path))
+    g.extract_from_messages(_tool_session("", result=(
+        "FAILED tests/test_orders.py::test_refund - AssertionError: expected 200, got 500\n"
+        "1 failed, 12 passed in 0.8s")), incremental=False)
+    assert any(n.type.value == "error" for n in g._nodes.values())
+
+
+def test_checkpoints_and_flushes_run_off_the_event_loop(client, monkeypatch):
+    import threading
+    c, _ = client
+    loop_threads: list[int] = []
+    seen: list[int] = []
+    real_create = app_module._checkpoint_mgr.create
+
+    def spy_create(*a, **k):
+        seen.append(threading.get_ident())
+        return real_create(*a, **k)
+    monkeypatch.setattr(app_module._checkpoint_mgr, "create", spy_create)
+    monkeypatch.setattr(app_module, "_context_window", lambda model: 50)
+    _chat(c, "Decided: use PostgreSQL for the orders table and Redis for sessions. " * 5,
+          session_id="ckpt-thread")
+    assert seen, "auto-checkpoint did not run"
+
+    async def flush_and_note():
+        loop_threads.append(threading.get_ident())
+        return await app_module._flush_all_graphs("test", skip_busy=True)
+    persisted: list[int] = []
+    g = app_module._graph_cache["ckpt-thread"]
+    real_persist = g._persist
+    monkeypatch.setattr(g, "_persist", lambda force=False: persisted.append(
+        threading.get_ident()) or real_persist(force=force))
+    asyncio.run(flush_and_note())
+    assert persisted and loop_threads[0] not in persisted + seen

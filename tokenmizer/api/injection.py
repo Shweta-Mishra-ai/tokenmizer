@@ -7,6 +7,7 @@ Split out of api/app.py, which re-exports every name.
 """
 from __future__ import annotations
 
+import functools
 import re
 
 from tokenmizer.security.fencing import fence
@@ -41,13 +42,17 @@ _FILLER = frozenset({
 _EXTENSION = re.compile(r"^(.+)\.[a-z][a-z0-9]{0,4}$")
 
 
+@functools.lru_cache(maxsize=4096)
 def _content_words(text: str) -> frozenset:
     """The words of `text` that carry content, and for a file name both
     spellings: with its extension and without. A node label is clipped to a
     clause and often ends at `hybrid_extractor` where the turn said
     `hybrid_extractor.py`; they are the same file. Both sides go through
     here, so a label naming `config.py` still needs `config.py`, not
-    `config.yaml`, in the turn."""
+    `config.yaml`, in the turn.
+
+    Memoised: every request recomputed this for every message it carries,
+    and all but the newest are the same text as on the previous request."""
     words = set()
     for w in _WORD.findall(text.lower()):
         if len(w) <= 2 or w in _FILLER:

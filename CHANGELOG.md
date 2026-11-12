@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added — local extraction on Ollama, chosen by measurement
+
+- `graph_checkpoint.extraction_provider` runs LLM extraction on a different
+  provider from chat. `ollama` keeps every turn on the machine; it is refused
+  under `privacy.local_only` if it names a remote provider.
+- `extraction_model: auto` takes the best installed Ollama model from a
+  documented preference list; `python -m benchmarks.extraction_models` ranks
+  every installed model on the labelled corpus (F1 alone and merged with the
+  heuristic pass, JSON failures, seconds per call) against the heuristic-only
+  baseline, and recommends one only if it beats it. The preference list is a
+  starting point, not a measurement: no model was run in the environment this
+  was written in.
+- Ollama calls use schema-constrained JSON, temperature 0, thinking off for
+  reasoning models, and an explicit `ollama_num_ctx` (8192): Ollama's own
+  default silently drops the start of a longer prompt — the instructions.
+
+### Fixed — performance and agent sessions
+
+- Code an agent merely read was extracted as English prose: comments such as
+  "retry on timeout" in a `read_file` result became open ERROR nodes (60 of
+  them in a 60-step session that never failed). Tool output now gets the
+  structure-only reading — files, routes, exception names, status codes and
+  log error lines. Measured on a 60-step agent session: median proxy overhead
+  per request 47 ms → 20 ms, worst request 962 ms → 264 ms.
+- The periodic flush, the analytics flush and checkpoint creation ran
+  synchronously on the event loop, stalling every request in flight while
+  they wrote SQLite. All three run in worker threads now, the flush under the
+  session's lock.
+- Memoised the pure comparisons that run against every node of a session
+  (decision/error dedup, file-name matching, payload word sets).
+
 ### Added — Hinglish
 
 - Hindi in Latin script mixed with English ("login bug fix kar diya",
