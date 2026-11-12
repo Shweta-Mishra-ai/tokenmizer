@@ -30,6 +30,8 @@ from __future__ import annotations
 import functools
 import re
 
+from tokenmizer.graph_memory.patterns import is_library_name
+
 # ── Topic taxonomy ────────────────────────────────────────────────────────────
 # Maps keywords → topic bucket name
 # When two decisions share a bucket → one supersedes the other
@@ -582,6 +584,51 @@ def _names_competing_alternatives(label_a: str, label_b: str) -> bool:
 # Pure functions of two labels, called for every new node against every
 # existing one of its type: memoised, because the same pairs come back on
 # every turn of a session (measured: 1,720 calls on one cold 100-turn chat).
+# ── Identifiers keep different things apart ───────────────────────────────
+#
+# Word overlap cannot tell "RuntimeError: amber_billing overflowed the batch
+# buffer" from the same sentence about marble_ledger: five words of six
+# match, so the second error was merged into the first and lost. The words
+# that differ are the ones that say WHICH thing — a path, a snake_case or
+# camelCase name, a file name. Two labels that each name such identifiers,
+# where neither label's set contains the other's, describe different things.
+# Line numbers, memory addresses and temp paths are not identifiers: they
+# change between two reports of the same failure.
+
+_IDENT_STRIP = "`'\"()[]{}<>,;:!?"
+_HEXISH = re.compile(r"^(?:0x)?[0-9a-f]{6,}$")
+# camelCase as code writes it (getUserName, userId): two or more lowercase
+# letters, then a capital starting a lowercase word. Not a product name —
+# TypeScript, PostgreSQL, NextJS, macOS, iPhone — which is a spelling of a
+# technology, not an identifier, and comes in several spellings.
+_CAMEL = re.compile(r"^[a-z]{2,}[A-Z][a-z]")
+_FILE_NAME = re.compile(r"^[\w-]+\.[A-Za-z][A-Za-z0-9]{0,4}$")
+
+
+def _identifiers(label: str) -> frozenset[str]:
+    out = set()
+    for raw in label.split():
+        tok = raw.strip(_IDENT_STRIP).rstrip(".")
+        if len(tok) < 4 or not re.search(r"[A-Za-z]", tok):
+            continue
+        low = tok.lower()
+        if _HEXISH.match(low) or low.startswith(("/tmp/", "/var/folders/", "http")):
+            continue
+        if _ERROR_CLASS_NAME.fullmatch(tok):
+            continue          # the class check handles those
+        if is_library_name(tok):
+            continue          # Next.js, Vue.js: a technology, not a file
+        if ("/" in tok or "_" in tok.strip("_") or _CAMEL.search(tok)
+                or (_FILE_NAME.match(tok) and len(tok) >= 5)):
+            out.add(low)
+    return frozenset(out)
+
+
+def _different_identifiers(label_a: str, label_b: str) -> bool:
+    a, b = _identifiers(label_a), _identifiers(label_b)
+    return bool(a) and bool(b) and not (a <= b or b <= a)
+
+
 @functools.lru_cache(maxsize=65536)
 def _is_same_decision(label_a: str, label_b: str) -> bool:
     """True if two labels are essentially the same decision (dedup check)."""
@@ -592,6 +639,8 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
     # heuristics get this case backwards — see
     # _names_competing_alternatives.
     if _names_competing_alternatives(label_a, label_b):
+        return False
+    if _different_identifiers(label_a, label_b):
         return False
 
     def _norm(s: str) -> str:
@@ -720,7 +769,7 @@ def _is_same_error(label_a: str, label_b: str) -> bool:
     handling — an error either is or isn't the same failure; there's no
     "opposite" of an error the way there's an opposite of a decision.
     """
-    if _named_error_classes_conflict(label_a, label_b):
+    if _named_error_classes_conflict(label_a, label_b) or _different_identifiers(label_a, label_b):
         return False
 
     def _norm(s: str) -> str:
@@ -762,7 +811,7 @@ def _semantic_same_error(label_a: str, label_b: str) -> bool:
     installed, reusing the same EmbeddingEngine reasoning.py's semantic
     recall and _semantic_same_slot already use.
     """
-    if _named_error_classes_conflict(label_a, label_b):
+    if _named_error_classes_conflict(label_a, label_b) or _different_identifiers(label_a, label_b):
         return False
     if not label_a.strip() or not label_b.strip():
         return False

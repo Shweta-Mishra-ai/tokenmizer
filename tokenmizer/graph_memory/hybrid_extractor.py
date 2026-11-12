@@ -22,6 +22,7 @@ be defined here directly is still an attribute of this module.
 """
 from __future__ import annotations
 
+import difflib
 import functools
 import json
 import logging
@@ -605,6 +606,10 @@ _LISTING_LINE = re.compile(
 )
 
 
+# More distinct paths than this in one message makes it a listing.
+_BULK_PATHS = 12
+
+
 def _listing_spans(text: str, min_lines: int = 5) -> list[tuple[int, int]]:
     """Character spans of directory listings: runs of `min_lines` or more
     listing lines. A listing says what exists in the repository, not what
@@ -781,6 +786,9 @@ class ExtractedData:
     # `files`: the strongest evidence that a file was worked on, not just
     # named. The graph ranks them above mentions.
     edited_files: list[str] = field(default_factory=list)
+    # Files named only inside a bulk listing (a subset of `files`): real,
+    # but no evidence they were worked on. Ranked below other files.
+    listed_files: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     # Errors the transcript says were fixed, by label (a subset of
     # `errors`). Kept as a parallel list rather than a flag on each entry
@@ -1536,28 +1544,48 @@ class HybridExtractor:
         for m in _FILE_COMMON.finditer(original):
             if is_library_name(m.group(1).strip()):
                 seen_files.add(m.group(1).strip())   # never a file; see _LIBRARY_NOT_FILE
+        # Every file this message names, before deduplication against
+        # earlier messages: whether the message is a bulk listing depends on
+        # all of them, and a file already seen is upgraded below when this
+        # message names it on its own.
+        found: dict[str, None] = {}
+        libraries = {f for f in seen_files if f not in result.files}
         for m in _FILE_PATH.finditer(original):
             f = _strip_diff_side(m.group(1).strip(), original, m.start(1))
-            if f not in seen_files and len(f) > 4 and not _is_example_mention(original, m.start(1)) \
+            if f not in libraries and len(f) > 4 and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
-                result.files.append(f)
-                seen_files.add(f)
+                found[f] = None
         for m in _FILE_COMMON.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files and not _is_example_mention(original, m.start(1)) \
+            if f not in libraries and f not in found \
+                    and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not _is_code_attribute(f, original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
-                result.files.append(f)
-                seen_files.add(f)
+                found[f] = None
         for m in _FILE_EXTENSIONLESS.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files and not _is_example_mention(original, m.start(1)) \
+            if f not in libraries and f not in found \
+                    and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
+                found[f] = None
+        # A message naming many paths is output — `wc -l`, `git diff --stat`,
+        # `du`, a checksum list — not a statement about what was worked on.
+        # Its files are still recorded, marked as listed, so the graph ranks
+        # them below files named on their own and prunes them first. One 16 KB
+        # listing used to add 200 files at full weight, and in a long session
+        # they pushed open TODOs out of the graph.
+        bulk = len(found) > _BULK_PATHS
+        for f in found:
+            if f not in seen_files:
                 result.files.append(f)
                 seen_files.add(f)
+                if bulk:
+                    result.listed_files.append(f)
+            elif not bulk and f in result.listed_files:
+                result.listed_files.remove(f)
 
         # Endpoints — "POST /api/auth/login"
         for m in _ENDPOINT.finditer(original):
@@ -1971,10 +1999,9 @@ class HybridExtractor:
             # insertion-ordered llm_by_norm/heu_by_norm dicts, never from
             # set operations (llm_keys & heu_keys, ...). Python's
             # string-hash randomization makes set iteration order unstable
-            # across processes, so with more than 15 items, WHICH 15
-            # survive combined[:15] would vary between runs on identical
-            # input — the same conversation could yield different graphs
-            # on two workers. Every LLM item in the LLM's order, then
+            # across processes, so the ORDER of the merged list would vary
+            # between runs on identical input — and with it which node wins
+            # a dedup or a cap downstream, on two workers. Every LLM item in the LLM's order, then
             # heuristic-only items in the heuristic's order: a pure,
             # deterministic function of input order.
             combined: list[str] = []
@@ -1984,7 +2011,7 @@ class HybridExtractor:
                 if k not in llm_keys:
                     combined.append(v)
 
-            setattr(merged, attr, combined[:15])
+            setattr(merged, attr, combined)
             merged.confidence[attr] = (
                 0.95 if corroborated else
                 0.80 if llm_only else
@@ -2024,7 +2051,7 @@ class HybridExtractor:
             else:
                 seen[key] = {**d, "confidence": 0.65, "_source": "heuristic"}
 
-        merged.decisions = list(seen.values())[:15]
+        merged.decisions = list(seen.values())
         merged.confidence["decisions"] = (
             0.95 if any(d.get("_source") == "both" for d in merged.decisions) else
             0.80 if any(d.get("_source") == "llm"  for d in merged.decisions) else
@@ -2053,7 +2080,12 @@ class HybridExtractor:
         working now" arrive as two labels for one event. Compared on
         content words, one clearly subsumes the other.
         """
-        return _subsumes_words(_label_words(a), _label_words(b))
+        from tokenmizer.graph_memory.decision_tracker import _different_identifiers
+        if not _subsumes_words(_label_words(a), _label_words(b)):
+            return False
+        if _different_identifiers(a, b) or _substituted(a, b):
+            return False   # the same sentence about a different thing
+        return True
 
     # Fields on ExtractedData that are lists of DICTS, not lists of plain
     # strings — these can't go through the string-normalize-and-dedup
@@ -2097,7 +2129,7 @@ class HybridExtractor:
                 if norm not in seen and len(norm) > 3:
                     deduped.append(item)
                     seen.add(norm)
-            setattr(result, attr, deduped[:15])
+            setattr(result, attr, deduped)
         result.files = self._drop_shadowed_paths(result.files)
         result.decisions = self._drop_vaguer_decisions(data.decisions)
         result.errors = self._drop_restated_errors(result.errors)
@@ -2142,6 +2174,8 @@ class HybridExtractor:
         trajectories, "ValueError: Imaginary coordinates are not permitted"
         was deleted by a later, unrelated "ValueError: Error from parse_expr".
         """
+        from tokenmizer.graph_memory.decision_tracker import _different_identifiers
+
         def key(label: str) -> str | None:
             m = re.search(r'\b[A-Z]\w*(?:Error|Exception)\b', label)
             if m:
@@ -2160,6 +2194,8 @@ class HybridExtractor:
 
         def restates(a: str, b: str, k: str) -> bool:
             """Is `a` a less specific statement of the failure `b` names?"""
+            if _different_identifiers(a, b):
+                return False
             wa, wb = words(a) - {k}, words(b) - {k}
             if len(wa) <= 3:
                 return True
@@ -2302,6 +2338,37 @@ def _label_words(text: str) -> frozenset:
     ten-second extraction. A label's words never change.
     """
     return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2)
+
+
+@functools.lru_cache(maxsize=65536)
+def _substituted(a: str, b: str) -> bool:
+    """Does one label swap a word of the other for a different one?
+
+    What _subsumes exists to collapse is several patterns matching
+    overlapping spans of one sentence: those differ at the edges, where one
+    label runs on further than the other. Two labels that differ in the
+    MIDDLE — "write the svc00x exporter docs" / "write the svc01x exporter
+    docs", "update the billing docs" / "update the ledger docs" — are the
+    same sentence about different things. Overlap alone (3 words of 4)
+    merged them, and a long call kept one TODO of thirty. A word and its
+    inflection (add / added, test / tests) is not a substitution.
+    """
+    ta = [w for w in re.findall(r"[a-z0-9_]+", a.lower()) if len(w) > 2]
+    tb = [w for w in re.findall(r"[a-z0-9_]+", b.lower()) if len(w) > 2]
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
+        if tag == "replace" and 0 < i1 and i2 < len(ta) and 0 < j1 and j2 < len(tb):
+            if any(not _inflected(x, y) for x in ta[i1:i2] for y in tb[j1:j2]):
+                return True
+    return False
+
+
+_INFLECTION_ENDINGS = ("", "s", "es", "d", "ed", "ing", "er", "ers")
+
+
+def _inflected(x: str, y: str) -> bool:
+    """One word, inflected: add/added/adds, fix/fixes, test/tests."""
+    short, long_ = sorted((x, y), key=len)
+    return long_.startswith(short) and long_[len(short):] in _INFLECTION_ENDINGS
 
 
 def _subsumes_words(wa: frozenset, wb: frozenset) -> bool:

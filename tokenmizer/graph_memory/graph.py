@@ -441,6 +441,9 @@ class GraphMemory:
             # Dedup: update existing node instead of creating duplicate
             existing = self._nodes[node_id]
             existing.touch()
+            if node_type == NodeType.FILE and importance > existing.importance:
+                # A file first seen in a listing, now named on its own.
+                existing.importance = importance
             self._dirty = True  # touch() always changes updated_at, must persist
             # Only upgrade status (completed > in_progress > pending) —
             # except ERROR, see _next_status().
@@ -536,6 +539,7 @@ class GraphMemory:
                 if short.count("/") >= 1 and (short == long_ or long_.endswith("/" + short)):
                     ex.touch()
                     self._dirty = True
+                    ex.importance = max(ex.importance, importance)
                     if len(stored_label) < len(ex.label):
                         ex.label = stored_label
                     return ex_id
@@ -957,6 +961,7 @@ class GraphMemory:
             "decisions":    extracted.decisions,
             "files":        extracted.files,
             "edited_files": getattr(extracted, "edited_files", []),
+            "listed_files": getattr(extracted, "listed_files", []),
             "errors":       [
                 {"label": e, "resolved": e.lower().strip() in resolved}
                 for e in extracted.errors
@@ -1036,9 +1041,14 @@ class GraphMemory:
         # the whole history on every request cost more than extracting it.
         new_messages = scrub_surrogates(new_messages)
 
-        # Auto-select sliding window for long sessions
-        # For sessions > 30 messages: only extract WIP/errors from last 20
-        window_size = 20 if len(messages) > 30 else 0
+        # No window: every message is read the way the per-request path reads
+        # it. A window of the last 20 messages for tasks and errors used to
+        # apply whenever one call carried more than 30 messages, which in the
+        # proxy is exactly the cold start of a long existing conversation:
+        # 30 TODOs in 60 messages came out as 1, while the same messages fed
+        # one request at a time kept all 30. Stale work is resolved by the
+        # later messages that resolve it, in order, either way.
+        window_size = 0
 
         if extracted_data is None:
             from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
@@ -1259,10 +1269,12 @@ class GraphMemory:
 
         # Files — linked to tasks and decisions that name them
         edited = set(data.get("edited_files") or [])
+        listed = set(data.get("listed_files") or []) - edited
         for f in data.get("files", []):
             if not f or len(f) < 3:
                 continue
-            nid = self.add_node(NodeType.FILE, f, NodeStatus.IN_PROGRESS, importance=0.7)
+            nid = self.add_node(NodeType.FILE, f, NodeStatus.IN_PROGRESS,
+                                importance=0.35 if f in listed else 0.7)
             if nid and f in edited and nid in self._nodes:
                 # Changed by a tool call: ranked above files only named.
                 node = self._nodes[nid]
