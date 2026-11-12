@@ -1707,13 +1707,11 @@ class GraphMemory:
                 scored.append((node.importance, node))
                 continue
 
-            node_words = self._expand_with_aliases(
-                frozenset(
-                    w.strip(".,!?:;()[]").lower()
-                    for w in node.label.split()
-                    if len(w) > 2
-                )
-            )
+            # Label AND summary, the same words query() matches on: the
+            # summary carries a decision's reason and a long label's tail,
+            # and "what did we decide about refunds last week" should find
+            # a decision whose reason is the only place refunds appear.
+            node_words = self._expand_with_aliases(self._search_words(node))
             if not node_words:
                 continue
 

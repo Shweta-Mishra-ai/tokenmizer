@@ -105,6 +105,25 @@ jobs:
           name: benchmark-results
           path: benchmark_results.json
 
+  audit:
+    # Known-vulnerable dependencies. The proxy holds every provider key it
+    # is configured with, so a CVE in an HTTP or SDK dependency is a CVE in
+    # TokenMizer. Audits what `pip install tokenmizer` actually resolves to.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install . pip-audit
+
+      - name: Audit installed dependencies
+        run: pip-audit --skip-editable
+
   docker:
     # Runs on PRs too, not just main. The image is the documented
     # deployment path, and a Dockerfile that stops building is a broken

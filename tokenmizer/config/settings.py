@@ -246,6 +246,13 @@ class TerseOutputSettings(BaseModel):
     # save output; a reply capped at a few hundred tokens has little to
     # save, so on short exchanges it was a net cost.
     min_max_tokens: int = Field(default=512, ge=0)
+    # ...and out of conversations shorter than this many tokens. Measured on
+    # a six-turn chat, the instruction was the proxy's ENTIRE overhead: +22%
+    # input with it, +0% without. Its saving is in output, which no local
+    # measurement can see, so on a conversation this small it is left out
+    # and the request goes upstream exactly as the client sent it. Past
+    # this size it is a few percent of the request. 0 = always add it.
+    min_conversation_tokens: int = Field(default=1500, ge=0)
 
 
 class PrivacySettings(BaseModel):

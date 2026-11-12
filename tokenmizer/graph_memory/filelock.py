@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import errno
 import logging
+import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -138,6 +139,14 @@ def session_lock(storage_dir, session_id: str, timeout: float = 10.0):
                     yield False
                     return
                 acquired = True
+                # Record use. The sweep removes files untouched for a
+                # month, and nothing ever wrote to one after creating it,
+                # so a session created long ago but used today looked
+                # stale and could lose its lock file mid-use.
+                try:
+                    os.utime(lock_path, None)
+                except OSError:
+                    pass
                 break
             except OSError as e:
                 if e.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):

@@ -64,9 +64,39 @@ _COST_PER_1K = {
 }
 
 
-def _cost(input_tokens: int, output_tokens: int, provider: str) -> float:
+# Local inference has no per-token bill. Ollama fell through to "default"
+# and was reported as costing Claude Sonnet's price.
+_ZERO_COST_PROVIDERS = frozenset({"ollama"})
+
+
+def _configured_pricing() -> dict:
+    try:
+        from tokenmizer.config.settings import get_settings
+        return get_settings().pricing or {}
+    except Exception:
+        return {}
+
+
+def _rates(provider: str, model: str = "") -> tuple[float, float]:
+    """(input, output) USD per 1K tokens: configured pricing by the longest
+    substring of the model name, then by provider, then the built-in
+    per-provider estimate."""
+    provider = (provider or "").lower()
+    if provider in _ZERO_COST_PROVIDERS:
+        return (0.0, 0.0)
+    pricing = {k.lower(): v for k, v in _configured_pricing().items()}
+    name = (model or "").lower()
+    for key in sorted(pricing, key=len, reverse=True):
+        if key and key in name and len(pricing[key]) == 2:
+            return float(pricing[key][0]), float(pricing[key][1])
+    if provider in pricing and len(pricing[provider]) == 2:
+        return float(pricing[provider][0]), float(pricing[provider][1])
+    return _COST_PER_1K.get(provider, _COST_PER_1K["default"])
+
+
+def _cost(input_tokens: int, output_tokens: int, provider: str, model: str = "") -> float:
     """Estimated USD cost, charging input and output at their own rates."""
-    in_rate, out_rate = _COST_PER_1K.get(provider.lower(), _COST_PER_1K["default"])
+    in_rate, out_rate = _rates(provider, model)
     return (input_tokens / 1000) * in_rate + (output_tokens / 1000) * out_rate
 
 
@@ -362,8 +392,10 @@ class AnalyticsEngine:
             # intelligence and cache all reduce the prompt), so they are
             # priced at the input rate rather than a blend that silently
             # inflated them with output pricing.
-            stats.cost_saved += _cost(r.tokens_saved, 0, r.provider)
-            stats.cost_actual += _cost(r.input_tokens_sent, r.output_tokens, r.provider)
+            # Negative when the proxy added more than it removed: the
+            # estimate says so rather than reporting a saving.
+            stats.cost_saved += _cost(r.tokens_saved, 0, r.provider, r.model)
+            stats.cost_actual += _cost(r.input_tokens_sent, r.output_tokens, r.provider, r.model)
         return stats
 
     @property
@@ -391,7 +423,13 @@ class AnalyticsEngine:
         if d.requests == 0:
             suggestions.append("No requests yet — start sending requests to see analytics.")
             return suggestions
-        if d.tokens_saved == 0:
+        if d.tokens_saved < 0:
+            suggestions.append(
+                "Requests sent today were larger than the client's own requests "
+                f"({-d.tokens_saved} tokens net). On short sessions the proxy's additions "
+                "outweigh what it removes; check terse_output.min_max_tokens and the "
+                "'added_by_proxy' line in layer_breakdown.")
+        elif d.tokens_saved == 0:
             suggestions.append("Enable compression in tokenmizer.yaml to start saving tokens.")
         breakdown = self.layer_breakdown()
         if breakdown.get("cache", 0) == 0:
@@ -424,6 +462,9 @@ class AnalyticsEngine:
                 "cost_saved_usd": round(m.cost_saved, 4),
             },
             "layer_breakdown": self.layer_breakdown(),
+            # Prices are per-provider defaults unless `pricing` is set; the
+            # USD figures are estimates, not an invoice.
+            "cost_is_estimate": True,
             "by_provider": dict(self._provider_totals),
             "suggestions": self.generate_suggestions(),
             # persistence failures (checkpoint/graph/redis writes that

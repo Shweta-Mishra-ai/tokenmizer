@@ -22,6 +22,10 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 | `/api/preferences` | DELETE | Forget one (`?key=...`) or all of this principal's preferences |
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
 | `/api/sessions` | GET | The caller's sessions with node counts, last activity and a link to each graph page. Scoped by ownership: one API key never sees another's sessions |
+| `/api/session/{session_id}` | DELETE | Delete everything stored for the session: graph, cold storage, transitions, checkpoints, archived turns, cached answers and the ownership record |
+| `/api/session/{session_id}/archive` | GET | Turns windowing stopped sending, kept verbatim. `?q=` returns the best matches; without it, only the count |
+| `/api/graph/{session_id}/pruned` | GET | Nodes moved to cold storage when the session passed `graph_checkpoint.max_nodes` |
+| `/api/graph/{session_id}/restore` | POST | `?node_id=` puts one pruned node back into the live graph |
 | `/api/graph/{id}` | GET | Session graph stats |
 | `/api/graph/{id}/html` | GET | **Interactive graph page** — nodes grouped and colored by detected community with a toggleable community panel, click-to-inspect node detail, decision-history timeline, supersession arcs, search, fit/zoom/pan, PNG export; an empty graph explains why. Zero external dependencies (works offline) |
 | `/api/graph/{id}/why?q=` | GET | **Reasoning:** causal chain behind a decision (old → new with trigger/reason/evidence) |

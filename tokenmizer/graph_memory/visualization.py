@@ -664,7 +664,7 @@ applySide();
 let W=Math.max(360,(innerWidth||1280)-SIDE), H=Math.max(300,innerHeight||800);
 const NS="http://www.w3.org/2000/svg";
 function el(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e}
-function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function $(id){return document.getElementById(id)}
 function when(ts){return ts?new Date(ts*1000).toLocaleString():""}
 function colorOf(t){return COLOR[t]||"#8a8f9e"}

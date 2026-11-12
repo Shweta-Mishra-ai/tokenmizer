@@ -144,6 +144,15 @@ _checkpoint_mgr = CheckpointManager(
     max_resume_tokens=settings.graph_checkpoint.max_resume_tokens,
 )
 _ownership = OwnershipStore(storage_dir=settings.graph_checkpoint.storage_dir)
+# A key given a name keeps its sessions under the name from now on; move
+# the ones it already owns by its hash, so naming a key is not a reset.
+if settings.api_key_names:
+    from tokenmizer.security.ownership import principal_for_key as _pfk
+    for _key, _name in settings.api_key_names.items():
+        try:
+            _ownership.rename_owner(_pfk(_key), _pfk(_key, settings.api_key_names))
+        except OwnershipUnavailable as _e:
+            logger.error("Could not move sessions to key name %r: %s", _name, _e)
 # storage_dir gives analytics the same durability the graph has. Without
 # it every savings figure resets to zero on restart — see engine.py.
 _analytics = AnalyticsEngine(storage_dir=settings.graph_checkpoint.storage_dir)
@@ -524,6 +533,7 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
                 session_id,
                 storage_dir=settings.graph_checkpoint.storage_dir,
                 semantic_retrieval=_SEMANTIC_RETRIEVAL,
+                max_nodes=settings.graph_checkpoint.max_nodes,
             )
         _graph_cache_touch(session_id)
         return _graph_cache[session_id]
@@ -759,7 +769,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,  # defaults: localhost:3000, localhost:8000
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Session-ID", "X-API-Key"],
 )
 
@@ -1078,7 +1088,10 @@ def _apply_compression_layers(
     # cannot get much shorter, and the instruction then costs more than it
     # can save — the main reason a short chat cost more through the proxy
     # than without it. Below terse_output.min_max_tokens it is left out.
-    if settings.terse_output.enabled and max_tokens >= settings.terse_output.min_max_tokens:
+    if (settings.terse_output.enabled
+            and max_tokens >= settings.terse_output.min_max_tokens
+            and (settings.terse_output.min_conversation_tokens <= 0
+                 or count_messages_tokens(messages) >= settings.terse_output.min_conversation_tokens)):
         terse = _compression.terse_system_prompt(
             settings.terse_output.level, style=settings.terse_output.style)
         has_system = any(m.get("role") == "system" for m in messages)
