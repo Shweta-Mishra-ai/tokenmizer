@@ -369,7 +369,7 @@ def test_docs_pages_have_sane_heading_structure():
         assert levels.count(1) == 1, (
             f"{path.name}: {levels.count(1)} H1 headings — a page has one title"
         )
-        skips = [(a, b) for a, b in zip(levels, levels[1:]) if b - a > 1]
+        skips = [(a, b) for a, b in zip(levels, levels[1:], strict=False) if b - a > 1]
         assert not skips, f"{path.name}: heading level jumps {skips}"
 
         footer_count = path.read_text(encoding="utf-8").count(

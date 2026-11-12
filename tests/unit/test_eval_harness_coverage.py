@@ -45,9 +45,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.eval import __main__ as ev  # noqa: E402
-from benchmarks.eval import corpus as corpus_mod  # noqa: E402
-from benchmarks.eval.__main__ import extract  # noqa: E402
+from benchmarks.eval import __main__ as ev
+from benchmarks.eval import corpus as corpus_mod
+from benchmarks.eval.__main__ import extract
 
 
 def _session(id_="s1", pack=None, messages=None):

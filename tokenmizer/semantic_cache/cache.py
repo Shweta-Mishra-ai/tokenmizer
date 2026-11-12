@@ -21,7 +21,6 @@ import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional
 
 from tokenmizer.core.tokenizer import count_tokens
 
@@ -191,7 +190,7 @@ class CacheEntry:
 class EmbeddingEngine:
     """Sentence-transformers based embeddings. Falls back to None if not installed."""
 
-    _instance: Optional["EmbeddingEngine"] = None
+    _instance: EmbeddingEngine | None = None
 
     def __init__(self):
         self._model = None
@@ -273,7 +272,7 @@ class EmbeddingEngine:
         return float(np.dot(a, b))
 
     @classmethod
-    def get(cls) -> "EmbeddingEngine":
+    def get(cls) -> EmbeddingEngine:
         if cls._instance is None:
             cls._instance = EmbeddingEngine()
         return cls._instance
@@ -440,7 +439,7 @@ class SemanticCache:
     _SWEEP_EVERY = 256
 
     def get(self, prompt: str, session_id: str = "",
-            context: str = "") -> Optional[CacheEntry]:
+            context: str = "") -> CacheEntry | None:
         """
         Look up cache.
         Checks session-scoped key first (using session_id, or "__private__"

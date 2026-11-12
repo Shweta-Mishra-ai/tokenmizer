@@ -144,7 +144,7 @@ def configure(*, secrets: bool = True, emails: bool = True, pii: bool = False) -
     _memo_clear()
 
 
-def _email_sub(m: "re.Match") -> str:
+def _email_sub(m: re.Match) -> str:
     """Redact an address, but not the things that merely look like one.
 
     `git clone git@github.com:acme/widgets.git` became `git clone
@@ -173,12 +173,12 @@ def _luhn(digits: str) -> bool:
     return total % 10 == 0
 
 
-def _card_sub(m: "re.Match") -> str:
+def _card_sub(m: re.Match) -> str:
     digits = re.sub(r"\D", "", m.group(0))
     return "[REDACTED]" if 13 <= len(digits) <= 19 and _luhn(digits) else m.group(0)
 
 
-def _value_sub(m: "re.Match") -> str:
+def _value_sub(m: re.Match) -> str:
     """Keep the name, redact the value, and keep the value's quotes so a
     JSON document or a dict literal is still one afterwards."""
     quote = m.group(2) if m.re.groups >= 2 else ""

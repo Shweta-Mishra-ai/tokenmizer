@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Generate docs/assets/demo.gif — terminal-style demo.
 
 All numbers/outputs shown are REAL, captured from an actual run of

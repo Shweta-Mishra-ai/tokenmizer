@@ -53,7 +53,6 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +69,7 @@ class OwnershipUnavailable(Exception):
     """Raised when ownership state can't be determined — deny, never allow."""
 
 
-def principal_for_key(api_key: str, names: Optional[dict] = None) -> str:
+def principal_for_key(api_key: str, names: dict | None = None) -> str:
     """Stable, non-reversible principal id for a credential.
 
     Hashed so the ownership table never stores raw API keys: leaking that
@@ -149,7 +148,7 @@ class OwnershipStore:
             raise OwnershipUnavailable("owner row vanished immediately after claim")
         return row[0]
 
-    def owner_of(self, session_id: str) -> Optional[str]:
+    def owner_of(self, session_id: str) -> str | None:
         """Current owner, or None if the session has never been claimed."""
         try:
             conn = self._connect()
@@ -238,6 +237,7 @@ class OwnershipStore:
         than silently creating an ownership record as a side effect of a
         GET.
         """
+        owner: str | None
         if claim:
             owner = self.claim(session_id, principal)
         else:

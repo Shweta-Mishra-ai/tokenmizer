@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def apply_importance_decay(graph: "GraphMemory") -> dict[str, float]:
+def apply_importance_decay(graph: GraphMemory) -> dict[str, float]:
     """
     Time-based importance decay — runs automatically during extract_from_messages.
 
@@ -161,7 +161,7 @@ _RESOLVED = (NodeStatus.COMPLETED, NodeStatus.FAILED, NodeStatus.ARCHIVED,
 
 
 def prune(
-    graph: "GraphMemory",
+    graph: GraphMemory,
     max_nodes: int = 500,
     max_age_days: float = 60.0,
 ) -> int:
@@ -190,8 +190,9 @@ def prune(
     now = time.time()
     cutoff = now - max_age_days * 86400
 
-    tier1: list[tuple[float, str]] = []
-    tier2: list[tuple[float, str]] = []
+    # (importance, 0 = history / 1 = recent, updated_at, node id)
+    tier1: list[tuple[float, int, float, str]] = []
+    tier2: list[tuple[float, int, float, str]] = []
     for nid, node in graph._nodes.items():
         if _protected(node):
             continue

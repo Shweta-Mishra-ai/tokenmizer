@@ -37,7 +37,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any
 
 from tokenmizer.core.tokenizer import count_tokens
 
@@ -65,11 +65,11 @@ class CodeBlockGuard:
     """
 
     @staticmethod
-    def segment(text: str) -> List[Tuple[bool, str]]:
+    def segment(text: str) -> list[tuple[bool, str]]:
         """Returns ordered (is_code, segment_text) pairs covering the
         entire input losslessly — concatenating all segment_text values
         back together reproduces the original text exactly."""
-        segments: List[Tuple[bool, str]] = []
+        segments: list[tuple[bool, str]] = []
         pos = 0
         # Fenced blocks first (they take priority over inline spans found inside them)
         for m in _FENCED_CODE_RE.finditer(text):
@@ -82,9 +82,9 @@ class CodeBlockGuard:
         return segments
 
     @staticmethod
-    def _segment_inline(text: str) -> List[Tuple[bool, str]]:
+    def _segment_inline(text: str) -> list[tuple[bool, str]]:
         """Within non-fenced text, also protect inline `code spans`."""
-        segments: List[Tuple[bool, str]] = []
+        segments: list[tuple[bool, str]] = []
         pos = 0
         for m in _INLINE_CODE_RE.finditer(text):
             if m.start() > pos:
@@ -96,7 +96,7 @@ class CodeBlockGuard:
         return segments
 
     @staticmethod
-    def reassemble(segments: List[Tuple[bool, str]]) -> str:
+    def reassemble(segments: list[tuple[bool, str]]) -> str:
         return "".join(seg for _, seg in segments)
 
 # ─── Filler patterns ────────────────────────────────────────────────────────
@@ -137,7 +137,7 @@ class CompressionResult:
     compressed_tokens: int
     original_text: str
     compressed_text: str
-    strategies_applied: List[str] = field(default_factory=list)
+    strategies_applied: list[str] = field(default_factory=list)
     quality_score: float = 1.0  # 0-1, estimated
 
     @property
@@ -171,7 +171,7 @@ class FillerRemover:
     every unfenced code block that passed through.
     """
 
-    def apply(self, text: str) -> Tuple[str, str]:
+    def apply(self, text: str) -> tuple[str, str]:
         for pat in _FILLER_RE:
             text = pat.sub("", text)
         text = re.sub(r'\n{3,}', '\n\n', text)
@@ -194,9 +194,9 @@ class DuplicateLineRemover:
     reader could have learned from the original is gone.
     """
 
-    def apply(self, text: str) -> Tuple[str, str]:
+    def apply(self, text: str) -> tuple[str, str]:
         lines = text.split("\n")
-        out: List[str] = []
+        out: list[str] = []
         i = 0
         while i < len(lines):
             line = lines[i]
@@ -225,7 +225,7 @@ class WhitespaceNormalizer:
     meant something else.
     """
 
-    def apply(self, text: str) -> Tuple[str, str]:
+    def apply(self, text: str) -> tuple[str, str]:
         text = re.sub(r'[ \t]+(?=\n)', '', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text, "whitespace_normalization"
@@ -255,7 +255,7 @@ class CommentStripper:
     _DOCSTRING = re.compile(r'""".*?"""', re.DOTALL)
 
     @staticmethod
-    def _strip_line_comments(text: str, markers: Tuple[str, ...]) -> str:
+    def _strip_line_comments(text: str, markers: tuple[str, ...]) -> str:
         """
         String-aware line-comment stripper, shared by both Python (#) and
         JS-style (//) comments.
@@ -297,7 +297,7 @@ class CommentStripper:
             out_lines.append(line[:best_pos].rstrip() if best_pos is not None else line)
         return '\n'.join(out_lines)
 
-    def apply(self, text: str, strip_docstrings: bool = False) -> Tuple[str, str]:
+    def apply(self, text: str, strip_docstrings: bool = False) -> tuple[str, str]:
         result = self._strip_line_comments(text, ('#', '//'))
         result = self._BLOCK_COMMENT.sub('', result)
         if strip_docstrings:
@@ -324,12 +324,12 @@ class RepetitiveHistoryPruner:
     is what the model needs to know and nothing it does not.
     """
 
-    def apply(self, messages: List[Dict]) -> Tuple[List[Dict], str]:
+    def apply(self, messages: list[dict]) -> tuple[list[dict], str]:
         if len(messages) < 6:
             return messages, "history_pruning_skipped"
 
         result = []
-        first_seen: Dict[str, int] = {}
+        first_seen: dict[str, int] = {}
         pruned = False
 
         for i, msg in enumerate(messages):
@@ -439,7 +439,7 @@ class FileContentFilter:
             + "\n".join(tail)
         )
 
-    def filter_by_extension(self, content: str, filename: str) -> Tuple[str, str]:
+    def filter_by_extension(self, content: str, filename: str) -> tuple[str, str]:
         """Auto-detect file type and apply appropriate filter."""
         ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
         if ext == "csv":
@@ -495,7 +495,7 @@ class LLMLinguaEngine:
     def available(self) -> bool:
         return self._available
 
-    def compress(self, text: str, ratio: Optional[float] = None) -> CompressionResult:
+    def compress(self, text: str, ratio: float | None = None) -> CompressionResult:
         """
         Compress text via LLMLingua-2, EXCLUDING code segments.
 
@@ -532,7 +532,7 @@ class LLMLinguaEngine:
         code_segment_count = sum(1 for is_code, _ in segments if is_code)
 
         try:
-            out_parts: List[str] = []
+            out_parts: list[str] = []
             any_compressed = False
             for is_code, seg in segments:
                 if is_code or count_tokens(seg) < 20:
@@ -540,6 +540,9 @@ class LLMLinguaEngine:
                     out_parts.append(seg)
                     continue
                 engine = self._long if count_tokens(seg) > self.LONG_THRESHOLD else self._short
+                if engine is None:      # not loaded; _available is False then
+                    out_parts.append(seg)
+                    continue
                 result = engine.compress_prompt(
                     seg,
                     rate=target,
@@ -611,7 +614,7 @@ class CompressionPipeline:
         self.lingua = LLMLinguaEngine(ratio=ratio) if enable_ml else None
 
     def _apply_heuristics_to_prose(self, text: str,
-                                   strip_filler: bool = True) -> Tuple[str, List[str]]:
+                                   strip_filler: bool = True) -> tuple[str, list[str]]:
         """Run the heuristic stages over the prose segments of `text` only.
 
         Code segments (fenced blocks and inline spans, per CodeBlockGuard)
@@ -619,14 +622,14 @@ class CompressionPipeline:
         rather than on the joined prose, so a duplicate-line check cannot
         see across a code block and the segment boundaries stay exact.
         """
-        stages = [self.whitespace, self.dedup]
+        stages: list[Any] = [self.whitespace, self.dedup]
         if strip_filler:
             stages.insert(1, self.filler)
         if self.strip_comments:
             stages.append(self.comments)
 
-        applied: List[str] = []
-        pieces: List[str] = []
+        applied: list[str] = []
+        pieces: list[str] = []
         for is_code, segment in CodeBlockGuard.segment(text):
             if not is_code:
                 for stage in stages:
@@ -641,7 +644,7 @@ class CompressionPipeline:
     def compress_text(
         self,
         text: str,
-        filename: Optional[str] = None,
+        filename: str | None = None,
         min_tokens: int = 100,
         strip_filler: bool = True,
     ) -> CompressionResult:
@@ -649,7 +652,7 @@ class CompressionPipeline:
 
         original = text
         orig_tokens = count_tokens(text)
-        strategies: List[str] = []
+        strategies: list[str] = []
 
         if orig_tokens < min_tokens:
             return CompressionResult(
@@ -734,9 +737,9 @@ class CompressionPipeline:
 
     def compress_messages(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         protect_recent: int = 3,
-    ) -> Tuple[List[Dict], int]:
+    ) -> tuple[list[dict], int]:
         """
         Compress all messages except the most recent N.
         Returns (compressed_messages, total_tokens_saved).

@@ -384,7 +384,7 @@ def _local_checkpoint(session_id: str, messages: list) -> tuple[str, bool]:
         for m in messages:
             if not isinstance(m, dict):
                 continue
-            item = {"role": str(m.get("role", "user")),
+            item: dict[str, Any] = {"role": str(m.get("role", "user")),
                     "content": _content_to_text(m.get("content", ""))}
             if m.get("tool_calls"):
                 item["tool_calls"] = normalize_tool_calls(m["tool_calls"])
@@ -656,7 +656,8 @@ def _handle_request(req: dict, send) -> None:
     """Handle one parsed JSON-RPC request object."""
     req_id = req.get("id")
     method = req.get("method", "")
-    params = req.get("params") if isinstance(req.get("params"), dict) else {}
+    raw_params = req.get("params")
+    params: dict = raw_params if isinstance(raw_params, dict) else {}
     is_notification = "id" not in req
 
     if method == "initialize":
@@ -675,7 +676,8 @@ def _handle_request(req: dict, send) -> None:
 
     elif method == "tools/call":
         tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
+        # "arguments": null is the same as no arguments, not a crash.
+        arguments = params.get("arguments") or {}
         result_text, is_error = handle_tool_call(tool_name, arguments)
         send({
             "jsonrpc": "2.0", "id": req_id,

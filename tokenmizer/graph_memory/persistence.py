@@ -90,7 +90,7 @@ def quarantine_db(db_path, reason: str) -> bool:
         return False
 
 
-def safe_init_db(graph: "GraphMemory") -> None:
+def safe_init_db(graph: GraphMemory) -> None:
     """Initialize DB, quarantining a corrupt file if necessary."""
     try:
         graph._init_db()
@@ -113,7 +113,7 @@ def safe_init_db(graph: "GraphMemory") -> None:
             graph._persistence_broken = True
 
 
-def db_connect(graph: "GraphMemory") -> "sqlite3.Connection":
+def db_connect(graph: GraphMemory) -> sqlite3.Connection:
     """
     Open a SQLite connection with safe concurrent settings:
     - WAL journal mode: readers don't block writers, writers don't block readers
@@ -145,7 +145,7 @@ def edge_key(edge: MemoryEdge) -> str:
     return f"{edge.source_id}|{edge.target_id}|{etype}"
 
 
-def init_db(graph: "GraphMemory") -> None:
+def init_db(graph: GraphMemory) -> None:
     conn = graph._db_connect()
     try:
         # ── Per-row storage (schema v2) ──────────────────────────────────
@@ -248,7 +248,7 @@ def init_db(graph: "GraphMemory") -> None:
         conn.close()
 
 
-def persist_transition(graph: "GraphMemory", t: DecisionTransition) -> None:
+def persist_transition(graph: GraphMemory, t: DecisionTransition) -> None:
     """Persist a single DecisionTransition to its own SQLite table."""
     try:
         conn = graph._db_connect()
@@ -270,7 +270,7 @@ def persist_transition(graph: "GraphMemory", t: DecisionTransition) -> None:
         logger.error(f"Transition persist failed: {e}")
 
 
-def store_pruned(graph: "GraphMemory", nodes: list) -> bool:
+def store_pruned(graph: GraphMemory, nodes: list) -> bool:
     """Write nodes about to be pruned into cold storage. Returns success;
     a caller must not delete what this could not keep."""
     if not nodes:
@@ -293,7 +293,7 @@ def store_pruned(graph: "GraphMemory", nodes: list) -> bool:
         return False
 
 
-def list_pruned(graph: "GraphMemory") -> list[dict]:
+def list_pruned(graph: GraphMemory) -> list[dict]:
     try:
         conn = graph._db_connect()
         try:
@@ -316,7 +316,7 @@ def list_pruned(graph: "GraphMemory") -> list[dict]:
     return out
 
 
-def restore_pruned(graph: "GraphMemory", node_id: str) -> bool:
+def restore_pruned(graph: GraphMemory, node_id: str) -> bool:
     """Bring one node back from cold storage into the live graph."""
     conn = graph._db_connect()
     try:
@@ -421,12 +421,12 @@ def session_summaries(storage_dir, session_ids: list[str]) -> dict[str, dict]:
     return out
 
 
-def get_transitions(graph: "GraphMemory") -> list[DecisionTransition]:
+def get_transitions(graph: GraphMemory) -> list[DecisionTransition]:
     """Return all decision transitions for this session, newest first."""
     return sorted(graph._transitions, key=lambda t: t.timestamp, reverse=True)
 
 
-def load_transitions(graph: "GraphMemory") -> None:
+def load_transitions(graph: GraphMemory) -> None:
     """Load transitions from SQLite into memory."""
     try:
         conn = graph._db_connect()
@@ -465,7 +465,7 @@ def load_transitions(graph: "GraphMemory") -> None:
         graph._transitions = []
 
 
-def _serialize_state(graph: "GraphMemory") -> tuple[dict, dict]:
+def _serialize_state(graph: GraphMemory) -> tuple[dict, dict]:
     """Current nodes and edges as {key: canonical_json}.
 
     sort_keys makes the JSON canonical, so string equality against the
@@ -482,7 +482,7 @@ def _serialize_state(graph: "GraphMemory") -> tuple[dict, dict]:
     return nodes, edges
 
 
-def persist(graph: "GraphMemory", force: bool = False) -> bool:
+def persist(graph: GraphMemory, force: bool = False) -> bool:
     """
     Persist the graph to SQLite, writing only what actually changed.
 
@@ -555,7 +555,7 @@ def persist(graph: "GraphMemory", force: bool = False) -> bool:
         return False
 
 
-def _reconcile_with_disk(graph: "GraphMemory") -> tuple[int, int]:
+def _reconcile_with_disk(graph: GraphMemory) -> tuple[int, int]:
     """Merge another process's committed changes into this instance
     before writing. Caller holds the lock. Returns (nodes, edges) dropped.
 
@@ -617,7 +617,7 @@ def _reconcile_with_disk(graph: "GraphMemory") -> tuple[int, int]:
     return (len(dropped_nodes), len(dropped_edges))
 
 
-def _write_diff(graph: "GraphMemory", nodes: dict, edges: dict, *, force: bool) -> bool:
+def _write_diff(graph: GraphMemory, nodes: dict, edges: dict, *, force: bool) -> bool:
     """Compute and apply the row-level diff. Caller holds the lock."""
     prev_nodes = {} if force else graph._persisted_nodes
     prev_edges = {} if force else graph._persisted_edges
@@ -694,7 +694,7 @@ def _write_diff(graph: "GraphMemory", nodes: dict, edges: dict, *, force: bool) 
     return True
 
 
-def _hydrate_nodes(graph: "GraphMemory", nodes_data: list) -> None:
+def _hydrate_nodes(graph: GraphMemory, nodes_data: list) -> None:
     """Rebuild MemoryNode objects from stored dicts.
 
     Enum restoration matters: asdict() writes NodeType/NodeStatus (both
@@ -726,7 +726,7 @@ def _hydrate_nodes(graph: "GraphMemory", nodes_data: list) -> None:
         graph._nodes[n.id] = n
 
 
-def _hydrate_edges(graph: "GraphMemory", edges_data: list) -> None:
+def _hydrate_edges(graph: GraphMemory, edges_data: list) -> None:
     for ed in edges_data:
         try:
             ed["type"] = EdgeType(ed["type"])
@@ -744,7 +744,7 @@ def _hydrate_edges(graph: "GraphMemory", edges_data: list) -> None:
             )
 
 
-def _migrate_blob_session(graph: "GraphMemory", conn) -> bool:
+def _migrate_blob_session(graph: GraphMemory, conn) -> bool:
     """One-time migration of one session from the v1 blob to per-row.
 
     Returns True if a v1 row existed and was loaded into memory. The
@@ -791,7 +791,7 @@ def _migrate_blob_session(graph: "GraphMemory", conn) -> bool:
     return True
 
 
-def load(graph: "GraphMemory") -> None:
+def load(graph: GraphMemory) -> None:
     try:
         conn = graph._db_connect()
         try:

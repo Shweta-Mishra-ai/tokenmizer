@@ -86,7 +86,7 @@ async def verify_api_key(request: Request) -> None:
             status_code=503,
             detail="Auth configuration unavailable — request rejected for safety. "
                    "This is a server-side configuration problem, not a client error.",
-        )
+        ) from None
 
     if not configured:
         request.state.principal = DEV_PRINCIPAL

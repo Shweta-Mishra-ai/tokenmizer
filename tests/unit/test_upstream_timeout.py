@@ -95,7 +95,7 @@ class TestTheTimeoutActuallyReachesTheClient:
                 self.messages = _Messages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _Client)
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError, match="construction is the assertion"):
             await AnthropicProvider("k")._call(
                 [{"role": "user", "content": "hi"}], "claude-sonnet-4-6",
                 64, False, "")

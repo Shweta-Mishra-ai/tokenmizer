@@ -170,14 +170,16 @@ class _Guard:
 
         self.saved = (orig_gai, orig_connect, orig_connect_ex)
         socket.getaddrinfo = getaddrinfo
-        socket.socket.connect = connect
-        socket.socket.connect_ex = connect_ex
+        socket.socket.connect = connect  # type: ignore[method-assign]
+        socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
 
     def uninstall(self) -> None:
         self.restore_environment()
         if self.saved is None:
             return
-        socket.getaddrinfo, socket.socket.connect, socket.socket.connect_ex = self.saved
+        socket.getaddrinfo = self.saved[0]
+        socket.socket.connect = self.saved[1]  # type: ignore[method-assign]
+        socket.socket.connect_ex = self.saved[2]  # type: ignore[method-assign]
         self.saved = None
 
 

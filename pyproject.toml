@@ -79,6 +79,7 @@ dev = [
     "pytest-cov>=5.0.0",
     "httpx>=0.27.0",
     "ruff>=0.5.0",
+    "mypy>=1.10.0",
     "anthropic>=0.30.0",
     "openai>=1.35.0",
     "google-genai>=1.0.0",
@@ -134,7 +135,10 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+# E/F/W/I: style, errors, imports. B: bugbear (exception chaining, loop
+# variables, zip length). UP: modern syntax for the 3.10 floor. PLE: errors
+# such as invisible characters in source. RUF100: no stale noqa comments.
+select = ["E", "F", "W", "I", "B", "UP", "PLE", "RUF100"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
@@ -142,6 +146,19 @@ ignore = ["E501"]
 # imports with progress output so each section runs and reports even if
 # a later import is unavailable. Restructuring it would defeat the point.
 "scripts/run_stdlib_tests.py" = ["E402"]
+
+[tool.mypy]
+# Checked in CI over the package. Third-party SDKs (anthropic, openai,
+# google-genai, cohere, sentence-transformers, llmlingua) are optional and
+# imported lazily, so their absence must not fail the check.
+python_version = "3.10"
+# The same answer on every CI runner: on Windows, fcntl has no attributes
+# and msvcrt has them, so per-platform checking disagrees with itself.
+platform = "linux"
+ignore_missing_imports = true
+# Not warn_unused_ignores: whether an ignore on an optional SDK import is
+# "unused" depends on which SDKs the checking machine has installed.
+files = ["tokenmizer"]
 
 [tool.coverage.run]
 source = ["tokenmizer"]

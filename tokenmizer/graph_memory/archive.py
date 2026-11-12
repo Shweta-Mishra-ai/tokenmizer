@@ -95,7 +95,7 @@ class TurnArchive:
         self._lock = threading.Lock()
         # session -> hashes already stored, so a request whose windowed-out
         # prefix is unchanged writes nothing.
-        self._known: "OrderedDict[str, set[str]]" = OrderedDict()
+        self._known: OrderedDict[str, set[str]] = OrderedDict()
         self._fts = False
         self._init()
 

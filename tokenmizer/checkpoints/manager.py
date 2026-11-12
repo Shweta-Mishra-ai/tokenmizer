@@ -17,7 +17,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import sqlite3
@@ -88,7 +88,7 @@ class CheckpointManager:
         # snapshot per distinct session for the life of the process.
         # Losing an entry only costs diff fidelity for one checkpoint
         # (it reports every node as "added"), never any stored data.
-        self._prev_snapshots: "OrderedDict[str, dict]" = OrderedDict()
+        self._prev_snapshots: OrderedDict[str, dict] = OrderedDict()
 
     _MAX_PREV_SNAPSHOTS = 500
 
@@ -462,7 +462,7 @@ class CheckpointManager:
             conn.close()
         return n
 
-    def get_latest(self, session_id: str) -> Optional[Checkpoint]:
+    def get_latest(self, session_id: str) -> Checkpoint | None:
         try:
             conn = self._db_connect()
             try:

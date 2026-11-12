@@ -108,7 +108,7 @@ def fake_engine(monkeypatch):
         # `available`, so it has to bypass numpy too.
         if a is None or b is None:
             return 0.0
-        return float(sum(x * y for x, y in zip(a, b)))
+        return float(sum(x * y for x, y in zip(a, b, strict=True)))
 
     def install(vectors, default=(0.0, 1.0)):
         engine = _FakeEngine(vectors, default)

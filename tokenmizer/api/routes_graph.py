@@ -29,7 +29,6 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
@@ -90,14 +89,14 @@ async def verify_session_access(request: Request) -> None:
         raise HTTPException(
             status_code=404,
             detail=f"No session '{session_id}' found.",
-        )
+        ) from None
     except OwnershipUnavailable as e:
         logger.error(f"Ownership store unavailable, denying request: {e}")
         raise HTTPException(
             status_code=503,
             detail="Session ownership state unavailable — request rejected "
                    "for safety. This is a server-side problem.",
-        )
+        ) from e
 
 
 def _internal_error(context: str, e: Exception) -> HTTPException:
@@ -125,7 +124,7 @@ def _internal_error(context: str, e: Exception) -> HTTPException:
 
 
 @router.get("/api/stats", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
-async def stats(session_id: Optional[str] = None):
+async def stats(session_id: str | None = None):
     return app_module._analytics.summary()
 
 
@@ -163,7 +162,7 @@ async def analyze_file(req: AnalyzeRequest):
             token_budget=req.token_budget, query=req.query,
         )
     except Exception as e:
-        raise _internal_error("File analysis failed", e)
+        raise _internal_error("File analysis failed", e) from e
 
     return {
         "filename": req.filename,
@@ -419,7 +418,7 @@ async def create_manual_checkpoint(session_id: str, body: CheckpointBody | None 
             "trigger": ckpt.trigger,
         }
     except Exception as e:
-        raise _internal_error(f"Manual checkpoint failed for session {session_id}", e)
+        raise _internal_error(f"Manual checkpoint failed for session {session_id}", e) from e
 
 
 @router.get("/api/sessions", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
@@ -442,7 +441,7 @@ async def list_sessions(request: Request, limit: int = 100):
     except OwnershipUnavailable as e:
         logger.error(f"Ownership store unavailable listing sessions: {e}")
         raise HTTPException(status_code=503,
-                            detail="Session ownership state unavailable.")
+                            detail="Session ownership state unavailable.") from e
 
     # Counted in SQLite, not by building a GraphMemory per session: the
     # dashboard polls this every 15 seconds, and loading every graph a
@@ -485,8 +484,8 @@ _INVALIDATE_MIN_LABEL_LEN = 3  # matches validator.py's own noise-pattern floor 
 @router.post("/api/decision/invalidate", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def invalidate_decision(
     session_id: str,
-    decision_label: Optional[str] = None,
-    node_id: Optional[str] = None,
+    decision_label: str | None = None,
+    node_id: str | None = None,
     reason: str = "",
 ):
     """
@@ -541,6 +540,7 @@ async def invalidate_decision(
                 )
                 invalidated.append({"node_id": node_id, "label": node.label})
         else:
+            assert decision_label is not None  # checked at the top of the route
             label_lower = decision_label.lower().strip()
             pattern = re.compile(r'\b' + re.escape(label_lower) + r'\b')
             # Only ACTIVE (COMPLETED) decisions are eligible: matching
@@ -592,7 +592,7 @@ async def invalidate_decision(
     except HTTPException:
         raise
     except Exception as e:
-        raise _internal_error("Invalidate decision failed", e)
+        raise _internal_error("Invalidate decision failed", e) from e
 
 
 @router.delete("/api/session/{session_id}", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
@@ -604,7 +604,7 @@ async def delete_session(session_id: str):
     try:
         removed = await app_module.delete_session_data(session_id)
     except Exception as e:
-        raise _internal_error(f"Deleting session {session_id} failed", e)
+        raise _internal_error(f"Deleting session {session_id} failed", e) from e
     return {"session_id": session_id, "deleted": removed}
 
 
@@ -699,6 +699,7 @@ async def get_resume(session_id: str, level: str = "standard"):
             text = _live_resume(graph, level, ckpt.next_action if ckpt else "")
             source = "live_graph"
         else:
+            assert ckpt is not None  # use_live is False only when a checkpoint exists
             resume_map = {
                 "critical": ckpt.resume_critical,
                 "standard": ckpt.resume_standard,
@@ -717,4 +718,4 @@ async def get_resume(session_id: str, level: str = "standard"):
     except HTTPException:
         raise
     except Exception as e:
-        raise _internal_error(f"Resume failed for {session_id}", e)
+        raise _internal_error(f"Resume failed for {session_id}", e) from e

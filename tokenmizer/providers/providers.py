@@ -16,7 +16,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any
 
 from tokenmizer.core.errors import ProviderError
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
@@ -416,7 +416,7 @@ class AnthropicProvider(BaseProvider):
         try:
             import anthropic
         except ImportError:
-            raise ImportError("pip install anthropic")
+            raise ImportError("pip install anthropic") from None
 
         client = self._client(anthropic)
 
@@ -487,15 +487,15 @@ class AnthropicProvider(BaseProvider):
                 tool_calls=calls,
             )
         except anthropic.RateLimitError as e:
-            raise ProviderError("anthropic", "rate_limit", str(e), retryable=True, retry_after=60.0)
+            raise ProviderError("anthropic", "rate_limit", str(e), retryable=True, retry_after=60.0) from e
         except anthropic.APIStatusError as e:
             retryable = e.status_code in (408, 409, 500, 502, 503, 504, 529)
-            raise ProviderError("anthropic", f"http_{e.status_code}", str(e), retryable=retryable)
+            raise ProviderError("anthropic", f"http_{e.status_code}", str(e), retryable=retryable) from e
         except anthropic.APIConnectionError as e:
             # Includes APITimeoutError. A dropped connection or a timeout
             # fell through to the base class's catch-all and was marked
             # permanent, so the one failure most worth retrying never was.
-            raise ProviderError("anthropic", "connection", str(e), retryable=True)
+            raise ProviderError("anthropic", "connection", str(e), retryable=True) from e
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -503,7 +503,7 @@ class AnthropicProvider(BaseProvider):
         try:
             import anthropic
         except ImportError:
-            raise ImportError("pip install anthropic")
+            raise ImportError("pip install anthropic") from None
         model = model or self.default_model
         client = self._client(anthropic)
 
@@ -546,10 +546,10 @@ class AnthropicProvider(BaseProvider):
                     if kind == "content_block_start":
                         block = getattr(event, "content_block", None)
                         if getattr(block, "type", "") == "tool_use":
-                            idx = len(ordinal)
-                            ordinal[getattr(event, "index", 0)] = idx
+                            slot = len(ordinal)
+                            ordinal[getattr(event, "index", 0)] = slot
                             yield {"tool_calls": [{
-                                "index": idx,
+                                "index": slot,
                                 "id": getattr(block, "id", "") or "",
                                 "type": "function",
                                 "function": {"name": getattr(block, "name", "") or "",
@@ -579,9 +579,9 @@ class AnthropicProvider(BaseProvider):
                         if finish_reason(reason, []) == "length":
                             yield {"finish_reason": "length"}
         except anthropic.RateLimitError as e:
-            raise ProviderError("anthropic", "rate_limit", str(e), retryable=True)
+            raise ProviderError("anthropic", "rate_limit", str(e), retryable=True) from e
         except anthropic.APIStatusError as e:
-            raise ProviderError("anthropic", f"http_{e.status_code}", str(e), retryable=False)
+            raise ProviderError("anthropic", f"http_{e.status_code}", str(e), retryable=False) from e
 
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
@@ -616,7 +616,7 @@ class OpenAIProvider(BaseProvider):
     supports_tool_stream = True
 
     def __init__(self, api_key: str, model: str = "gpt-4o",
-                 base_url: Optional[str] = None):
+                 base_url: str | None = None):
         super().__init__(api_key, model)
         self._base_url = base_url
 
@@ -650,7 +650,7 @@ class OpenAIProvider(BaseProvider):
         try:
             from openai import AsyncOpenAI
         except ImportError:
-            raise ImportError("pip install openai")
+            raise ImportError("pip install openai") from None
 
         client = self._client(AsyncOpenAI)
 
@@ -706,7 +706,7 @@ class OpenAIProvider(BaseProvider):
             )
         except Exception as e:
             raise ProviderError("openai", "api_error", str(e),
-                                retryable=_openai_error_is_retryable(e))
+                                retryable=_openai_error_is_retryable(e)) from e
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -715,7 +715,7 @@ class OpenAIProvider(BaseProvider):
         try:
             from openai import AsyncOpenAI
         except ImportError:
-            raise ImportError("pip install openai")
+            raise ImportError("pip install openai") from None
         model = model or self.default_model
         client = self._client(AsyncOpenAI)
         all_messages = messages[:]
@@ -748,7 +748,7 @@ class OpenAIProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(self.__class__.__name__.lower().replace("provider", ""),
                                 "api_error", str(e),
-                                retryable=_openai_error_is_retryable(e))
+                                retryable=_openai_error_is_retryable(e)) from e
 
 
 # ── DeepSeek ──────────────────────────────────────────────────────────────────
@@ -815,7 +815,7 @@ class CohereProvider(BaseProvider):
         try:
             import cohere
         except ImportError:
-            raise ImportError("pip install cohere")
+            raise ImportError("pip install cohere") from None
 
         client = cohere.AsyncClientV2(api_key=self.api_key, **self._timeout_kwargs)
 
@@ -851,7 +851,7 @@ class CohereProvider(BaseProvider):
             # ("too many requests") was marked NOT retryable when it should
             # have been.
             raise ProviderError("cohere", "api_error", str(e),
-                                retryable=bool(_RETRYABLE_TEXT.search(str(e))))
+                                retryable=bool(_RETRYABLE_TEXT.search(str(e)))) from e
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -863,7 +863,7 @@ class CohereProvider(BaseProvider):
         try:
             import cohere
         except ImportError:
-            raise ImportError("pip install cohere")
+            raise ImportError("pip install cohere") from None
 
         model = model or self.default_model
         client = cohere.AsyncClientV2(api_key=self.api_key, **self._timeout_kwargs)
@@ -886,7 +886,7 @@ class CohereProvider(BaseProvider):
                     yield mapped
         except Exception as e:
             raise ProviderError("cohere", "api_error", str(e),
-                                retryable=bool(_RETRYABLE_TEXT.search(str(e))))
+                                retryable=bool(_RETRYABLE_TEXT.search(str(e)))) from e
 
 
 # ── Gemini ───────────────────────────────────────────────────────────────────
@@ -942,7 +942,7 @@ class GeminiProvider(BaseProvider):
         super().__init__(api_key, model)
 
     def _config_kwargs(self, kwargs: dict, max_tokens: int,
-                       system_instruction: Optional[str]) -> dict:
+                       system_instruction: str | None) -> dict:
         """Everything that goes into GenerateContentConfig. Shared so the
         streaming path cannot drift from the non-streaming one, which is
         how it lost temperature/top_p/stop the last time."""
@@ -970,7 +970,7 @@ class GeminiProvider(BaseProvider):
             from google import genai
             from google.genai import types
         except ImportError:
-            raise ImportError("pip install google-genai")
+            raise ImportError("pip install google-genai") from None
 
         client = genai.Client(
             api_key=self.api_key,
@@ -1034,7 +1034,7 @@ class GeminiProvider(BaseProvider):
             )
         except Exception as e:
             raise ProviderError("gemini", "api_error", str(e),
-                                retryable=_gemini_error_is_retryable(e))
+                                retryable=_gemini_error_is_retryable(e)) from e
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -1047,7 +1047,7 @@ class GeminiProvider(BaseProvider):
             from google import genai
             from google.genai import types
         except ImportError:
-            raise ImportError("pip install google-genai")
+            raise ImportError("pip install google-genai") from None
 
         model = model or self.default_model
         client = genai.Client(
@@ -1094,7 +1094,7 @@ class GeminiProvider(BaseProvider):
                     yield {"finish_reason": "length"}
         except Exception as e:
             raise ProviderError("gemini", "api_error", str(e),
-                                retryable=_gemini_error_is_retryable(e))
+                                retryable=_gemini_error_is_retryable(e)) from e
 
 
 # ── Ollama (local) ────────────────────────────────────────────────────────────
@@ -1116,14 +1116,14 @@ class OllamaProvider(BaseProvider):
         try:
             import httpx
         except ImportError:
-            raise ImportError("pip install httpx")
+            raise ImportError("pip install httpx") from None
 
         all_messages = messages[:]
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
 
         s = _sampling(kwargs)
-        options = {"num_predict": max_tokens}
+        options: dict[str, Any] = {"num_predict": max_tokens}
         if "temperature" in s:
             options["temperature"] = s["temperature"]
         if "top_p" in s:
@@ -1157,7 +1157,7 @@ class OllamaProvider(BaseProvider):
                 )
             except Exception as e:
                 raise ProviderError("ollama", "api_error", str(e),
-                                    retryable=_ollama_error_is_retryable(e))
+                                    retryable=_ollama_error_is_retryable(e)) from e
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -1173,7 +1173,7 @@ class OllamaProvider(BaseProvider):
         # temperature/top_p/stop on the floor, so a client got different
         # sampling depending on whether it asked for a stream.
         s = _sampling(kwargs)
-        options = {"num_predict": max_tokens}
+        options: dict[str, Any] = {"num_predict": max_tokens}
         if "temperature" in s:
             options["temperature"] = s["temperature"]
         if "top_p" in s:
@@ -1220,7 +1220,7 @@ class OllamaProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError("ollama", "api_error", str(e),
-                                retryable=_ollama_error_is_retryable(e))
+                                retryable=_ollama_error_is_retryable(e)) from e
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -1279,7 +1279,7 @@ _PROVIDER_SDK = {
 }
 
 
-def missing_provider_sdk(provider: str) -> Optional[str]:
+def missing_provider_sdk(provider: str) -> str | None:
     """The install command if `provider`'s SDK is not importable, else None.
 
     A plain `pip install tokenmizer` has no provider SDK, and the adapters
@@ -1298,7 +1298,7 @@ def missing_provider_sdk(provider: str) -> Optional[str]:
     return None if found else f'pip install "tokenmizer[{extra}]"'
 
 
-def build_provider(settings, model: Optional[str] = None) -> BaseProvider:
+def build_provider(settings, model: str | None = None) -> BaseProvider:
     """Build the correct provider from settings. `model` overrides
     settings.default_model on the same provider (used by the extraction
     pass when graph_checkpoint.extraction_model pins one)."""

@@ -27,7 +27,6 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
 from tokenmizer.graph_memory.domains import get_pack, normalize_domain
 from tokenmizer.graph_memory.helpers import tool_signals
@@ -186,7 +185,7 @@ _FIXED_AFTER = re.compile(
 )
 
 
-def _parse_json_object(raw: str) -> Optional[dict]:
+def _parse_json_object(raw: str) -> dict | None:
     """The first JSON object in a model reply, or None.
 
     The prompt says "JSON only", and most replies comply, but a smaller or
@@ -217,7 +216,7 @@ def _parse_json_object(raw: str) -> Optional[dict]:
     return _recover_truncated_object(text[start:])
 
 
-def _recover_truncated_object(text: str) -> Optional[dict]:
+def _recover_truncated_object(text: str) -> dict | None:
     """The complete leading part of a JSON object cut off mid-reply, or None.
 
     A reply that hits the output-token cap ends mid-structure, and
@@ -835,7 +834,7 @@ class HybridExtractor:
 
     async def llm_extract(
         self, messages: list[dict], provider_fn
-    ) -> Optional[ExtractedData]:
+    ) -> ExtractedData | None:
         """Call provider to extract structured data. Returns None on failure."""
         # Format messages as readable text for the LLM.
         #
@@ -922,7 +921,7 @@ class HybridExtractor:
         role: str,
         turn_idx: int,
         is_recent: bool,
-        result: "ExtractedData",
+        result: ExtractedData,
         seen_decisions: set,
         seen_tasks: set,
         seen_files: set,
@@ -1472,7 +1471,7 @@ class HybridExtractor:
                 result.evidence.append({"text": text, "type": "standard", "turn": turn_idx})
 
 
-    def _extract_language_neutral(self, content: str, original: str, result: "ExtractedData",
+    def _extract_language_neutral(self, content: str, original: str, result: ExtractedData,
                                   seen_tasks: set, seen_decisions: set, seen_files: set,
                                   seen_endpoints: set, seen_schemas: set, role: str) -> None:
         """What a message in another language still says in a form these
@@ -1499,7 +1498,7 @@ class HybridExtractor:
         self._extract_structure(original, result, seen_files, seen_endpoints, seen_schemas)
         self._extract_errors(content, result, _STRUCTURAL_ERROR_PATTERNS)
 
-    def _extract_structure(self, original: str, result: "ExtractedData",
+    def _extract_structure(self, original: str, result: ExtractedData,
                            seen_files: set, seen_endpoints: set, seen_schemas: set) -> None:
         """Files, endpoints and schemas. These are names, not prose, so they
         are read from the original text — quotes and code blocks included —
@@ -1571,7 +1570,7 @@ class HybridExtractor:
                 result.schemas.append(schema)
                 seen_schemas.add(norm)
 
-    def _extract_errors(self, content: str, result: "ExtractedData", patterns,
+    def _extract_errors(self, content: str, result: ExtractedData, patterns,
                         original: str | None = None) -> None:
         """Run the error patterns over `content` in `patterns` order, which
         is precedence (see _ALL_ERROR_PATTERNS)."""
@@ -1764,7 +1763,7 @@ class HybridExtractor:
         messages: list[dict],
         window_size: int = 0,
         prior_message: dict | None = None,
-    ) -> "ExtractedData":
+    ) -> ExtractedData:
         """
         Fast regex-based extraction. No API calls.
 
@@ -1878,7 +1877,7 @@ class HybridExtractor:
 
     def merge(
         self,
-        llm: Optional[ExtractedData],
+        llm: ExtractedData | None,
         heuristic: ExtractedData,
     ) -> ExtractedData:
         """
@@ -1946,7 +1945,7 @@ class HybridExtractor:
             # heuristic-only items in the heuristic's order: a pure,
             # deterministic function of input order.
             combined: list[str] = []
-            for k, v in llm_by_norm.items():
+            for v in llm_by_norm.values():
                 combined.append(v)  # prefer LLM casing when corroborated
             for k, v in heu_by_norm.items():
                 if k not in llm_keys:
@@ -2013,10 +2012,6 @@ class HybridExtractor:
 
     @staticmethod
     def _subsumes(a: str, b: str) -> bool:
-        return _subsumes_words(_label_words(a), _label_words(b))
-
-    @staticmethod
-    def _subsumes_uncached(a: str, b: str) -> bool:
         """True if `a` and `b` state substantially the same fact.
 
         Exact-string dedup is not enough. Several patterns fire on
@@ -2025,12 +2020,7 @@ class HybridExtractor:
         working now" arrive as two labels for one event. Compared on
         content words, one clearly subsumes the other.
         """
-        wa = {w for w in re.findall(r"[a-z0-9]+", a.lower()) if len(w) > 2}
-        wb = {w for w in re.findall(r"[a-z0-9]+", b.lower()) if len(w) > 2}
-        if not wa or not wb:
-            return False
-        smaller = wa if len(wa) <= len(wb) else wb
-        return len(wa & wb) / len(smaller) >= 0.75
+        return _subsumes_words(_label_words(a), _label_words(b))
 
     # Fields on ExtractedData that are lists of DICTS, not lists of plain
     # strings — these can't go through the string-normalize-and-dedup

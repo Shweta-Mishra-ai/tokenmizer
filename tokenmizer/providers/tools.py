@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def _get(obj: Any, key: str, default=None):
     return getattr(obj, key, default)
 
 
-def normalize_tool_call(tc: Any) -> Optional[dict]:
+def normalize_tool_call(tc: Any) -> dict | None:
     """One tool call in the OpenAI wire shape, from an SDK object or dict.
 
         {"id": ..., "type": "function",
@@ -119,15 +119,15 @@ def anthropic_tools(tools: list[dict]) -> list[dict]:
     return out
 
 
-def anthropic_tool_choice(tool_choice: Any, parallel_tool_calls: Optional[bool] = None
-                          ) -> Optional[dict]:
+def anthropic_tool_choice(tool_choice: Any, parallel_tool_calls: bool | None = None
+                          ) -> dict | None:
     """OpenAI `tool_choice` -> Anthropic `tool_choice`, or None to omit.
 
     "none" maps to Anthropic's {"type": "none"} rather than dropping the
     tool definitions: a conversation that already contains tool_use
     blocks is rejected without the definitions that explain them.
     """
-    choice: Optional[dict] = None
+    choice: dict | None = None
     if tool_choice is None or tool_choice == "auto":
         choice = {"type": "auto"} if parallel_tool_calls is False else None
     elif tool_choice == "required":
@@ -269,7 +269,7 @@ def cohere_messages(messages: list[dict]) -> list[dict]:
     return out
 
 
-def cohere_stream_event(event: Any) -> Optional[dict]:
+def cohere_stream_event(event: Any) -> dict | None:
     """One Cohere v2 stream event -> a text chunk, a tool-call delta, or
     None for the events that carry no payload (block start/end, message
     lifecycle).
@@ -334,7 +334,7 @@ def gemini_tools(tools: list[dict]) -> list[dict]:
     return [{"function_declarations": declarations}] if declarations else []
 
 
-def gemini_tool_config(tool_choice: Any) -> Optional[dict]:
+def gemini_tool_config(tool_choice: Any) -> dict | None:
     """OpenAI `tool_choice` -> Gemini's function_calling_config.
 
     "auto" is Gemini's own default, so it is expressed as None rather than
@@ -424,7 +424,7 @@ def gemini_contents(conv: list[dict]) -> list[dict]:
     return out
 
 
-def _tool_name_for(conv: list[dict], call_id: Optional[str]) -> Optional[str]:
+def _tool_name_for(conv: list[dict], call_id: str | None) -> str | None:
     if not call_id:
         return None
     for m in conv:
@@ -436,7 +436,7 @@ def _tool_name_for(conv: list[dict], call_id: Optional[str]) -> Optional[str]:
 
 # ── Shared response helpers ───────────────────────────────────────────────────
 
-def finish_reason(native: Optional[str], tool_calls: list[dict]) -> str:
+def finish_reason(native: str | None, tool_calls: list[dict]) -> str:
     """The OpenAI finish_reason for a response: "tool_calls" whenever the
     model asked for a tool, whatever the provider called it."""
     if tool_calls:

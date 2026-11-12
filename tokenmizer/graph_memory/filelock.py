@@ -130,7 +130,7 @@ def session_lock(storage_dir, session_id: str, timeout: float = 10.0):
                 if _HAVE_FCNTL:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 elif _HAVE_MSVCRT:  # pragma: no cover — Windows
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
                 else:  # pragma: no cover — neither primitive
                     logger.warning(
                         "No file-locking primitive on this platform; "
@@ -167,7 +167,7 @@ def session_lock(storage_dir, session_id: str, timeout: float = 10.0):
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
                 elif _HAVE_MSVCRT:  # pragma: no cover — Windows
                     fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
             except OSError as e:
                 logger.error("Failed to release lock for %s: %s", session_id, e)
         try:
@@ -244,7 +244,7 @@ def sweep_stale_locks(storage_dir, max_age: float = STALE_LOCK_AGE_SECONDS) -> i
                 if _HAVE_FCNTL:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 elif _HAVE_MSVCRT:  # pragma: no cover — Windows
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
                 else:  # pragma: no cover
                     return removed
             except OSError:
@@ -257,7 +257,7 @@ def sweep_stale_locks(storage_dir, max_age: float = STALE_LOCK_AGE_SECONDS) -> i
 
             # Windows: release, then delete after the handle is closed.
             try:  # pragma: no cover — Windows
-                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
             except OSError:
                 pass
         finally:

@@ -156,7 +156,7 @@ class CSVExtractor:
         try:
             reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
             rows = list(reader)
-            columns = reader.fieldnames or []
+            columns = list(reader.fieldnames or [])
         except Exception as e:
             logger.warning(f"CSV parse failed for {filename}: {e}")
             truncated, was_cut = _truncate_to_budget(content, token_budget)
@@ -310,8 +310,9 @@ class CSVExtractor:
         """
         if re.search(r"(^|[_\s-])id$", col.strip().lower()):
             return True
-        nums = [self._number(r.get(col)) for r in rows if r.get(col)]
-        if len(nums) < 2 or any(n is None or not n.is_integer() for n in nums):
+        raw = [self._number(r.get(col)) for r in rows if r.get(col)]
+        nums = [n for n in raw if n is not None]
+        if len(nums) < 2 or len(nums) != len(raw) or any(not n.is_integer() for n in nums):
             return False
         distinct = set(nums)
         return len(distinct) == len(nums) and max(nums) - min(nums) + 1 == len(nums)
@@ -492,11 +493,11 @@ class CSVExtractor:
             col = text_cols[0]
             value_counts: dict[str, list[int]] = {}
             for i, r in enumerate(rows):
-                v = str(r.get(col, ""))
-                if v:
-                    value_counts.setdefault(v, []).append(i)
+                category = str(r.get(col, ""))
+                if category:
+                    value_counts.setdefault(category, []).append(i)
             # Rare = appears <=3 times in the dataset
-            for val, idxs in value_counts.items():
+            for idxs in value_counts.values():
                 if len(idxs) <= 3 and len(selected_indices) < n:
                     selected_indices.add(idxs[0])
 
@@ -1234,7 +1235,7 @@ class FileIntelligence:
     def _table_start(content: str, delim: str) -> int:
         """Offset of the first line of the table, skipping a short intro."""
         offset = 0
-        for i, line in enumerate(content.split("\n")[:3]):
+        for line in content.split("\n")[:3]:
             if line.count(delim) >= (1 if delim == "\t" else 2):
                 return offset
             offset += len(line) + 1

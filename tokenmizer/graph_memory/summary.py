@@ -162,7 +162,7 @@ def select_sentences(messages: list[dict], known: list[str],
     return out
 
 
-def summarise_span(graph: "GraphMemory", dropped: list[dict],
+def summarise_span(graph: GraphMemory, dropped: list[dict],
                    limit: int = 4) -> str:
     """The note for the turns `dropped`, or "" when there is nothing worth
     keeping — which is the common case and must stay cheap."""

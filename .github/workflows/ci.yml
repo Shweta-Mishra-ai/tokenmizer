@@ -44,6 +44,11 @@ jobs:
       - name: Lint (blocking)
         run: ruff check tokenmizer/ tests/ benchmarks/ scripts/
 
+      # Types, over the package only (configured in pyproject.toml). Optional
+      # SDKs are imported lazily and may be absent; mypy is told so.
+      - name: Type check (blocking)
+        run: mypy
+
       # The eval harness gates extraction quality: tests/unit/
       # test_extraction_quality.py asserts F1 floors per category, and
       # this makes the numbers themselves visible in the build log.

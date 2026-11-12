@@ -45,7 +45,7 @@ class RateLimiter:
         # OrderedDict, not defaultdict: iteration order tracks LRU
         # (touched-most-recently moves to the end), which is what makes
         # the hard-cap eviction below O(1) rather than a sort.
-        self._buckets: "OrderedDict[str, _Bucket]" = OrderedDict()
+        self._buckets: OrderedDict[str, _Bucket] = OrderedDict()
         self._lock = asyncio.Lock()
         # Cleanup: evict stale buckets every 5 minutes
         self._last_cleanup = time.monotonic()

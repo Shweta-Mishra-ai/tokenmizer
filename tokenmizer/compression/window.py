@@ -67,7 +67,7 @@ class SmartMessageWindow:
         # conversation-level lead-in). Bounded: a proxy serves many sessions
         # and this is only a cost optimisation — a forgotten entry re-cuts,
         # it never loses a turn.
-        self._frozen: "OrderedDict[str, tuple[int, str, dict, list]]" = OrderedDict()
+        self._frozen: OrderedDict[str, tuple[int, str, dict, list]] = OrderedDict()
         self._frozen_max = 10_000
         # apply() runs off the event loop, on whichever worker thread the
         # request landed on, and two sessions' requests can be in it at once.
@@ -78,7 +78,7 @@ class SmartMessageWindow:
     def apply(
         self,
         messages: list[dict],
-        graph: "GraphMemory",
+        graph: GraphMemory,
         model: str = "gpt-4o",
         stable: bool = False,
     ) -> tuple[list[dict], int]:
@@ -192,7 +192,7 @@ class SmartMessageWindow:
         system_msgs: list[dict],
         conv_msgs: list[dict],
         model: str,
-    ) -> "list[dict] | None":
+    ) -> list[dict] | None:
         """The previous request's cut and bridge, if they still apply.
 
         Sliding the window forward one turn per request replaces the bridge
@@ -225,7 +225,7 @@ class SmartMessageWindow:
                 self._frozen.move_to_end(session_id)
         return candidate
 
-    def _choose_split(self, conv: list[dict], model: str) -> "int | None":
+    def _choose_split(self, conv: list[dict], model: str) -> int | None:
         """Where the verbatim tail begins, or None if there is no safe place.
 
         A tail may only open at the start of a step: a user turn, or an

@@ -22,7 +22,6 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +111,7 @@ class AnalyticsRecord:
     tokens_saved: int
     latency_ms: float
     cache_hit: bool
-    layer_savings: Dict[str, int] = field(default_factory=dict)
+    layer_savings: dict[str, int] = field(default_factory=dict)
 
 
 class AnalyticsEngine:
@@ -145,13 +144,13 @@ class AnalyticsEngine:
         # Rows written but not yet flushed. Bounded by flush frequency, not
         # by request volume — flush() is called on the proxy's existing
         # periodic timer and at shutdown.
-        self._pending: List[AnalyticsRecord] = []
-        self._records: List[AnalyticsRecord] = []
-        self._by_provider: Dict[str, List[AnalyticsRecord]] = defaultdict(list)
+        self._pending: list[AnalyticsRecord] = []
+        self._records: list[AnalyticsRecord] = []
+        self._by_provider: dict[str, list[AnalyticsRecord]] = defaultdict(list)
         # Provider counts must survive record trimming — a total that
         # silently decreases as old records age out is worse than no
         # total at all.
-        self._provider_totals: Dict[str, int] = defaultdict(int)
+        self._provider_totals: dict[str, int] = defaultdict(int)
         self._total_requests = 0
         # Silent failures (checkpoint save, graph
         # eviction persist, Redis write, AND background LLM extraction
@@ -163,9 +162,9 @@ class AnalyticsEngine:
         # buried in a log line. Dict key is `persist_failures` for API
         # stability even though it now covers a slightly broader category
         # than literal persistence (see record_silent_failure docstring).
-        self._persist_failures: Dict[str, int] = defaultdict(int)
+        self._persist_failures: dict[str, int] = defaultdict(int)
         # Work dropped on purpose to stay inside a limit — see record_shed.
-        self._shed: Dict[str, int] = defaultdict(int)
+        self._shed: dict[str, int] = defaultdict(int)
 
         if self._db_path is not None:
             self._init_db()
@@ -190,6 +189,8 @@ class AnalyticsEngine:
         must degrade to the previous in-memory behaviour rather than fail a
         request, so every path here is best-effort and says so in the log.
         """
+        if self._db_path is None:
+            return
         try:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as conn:
@@ -302,7 +303,7 @@ class AnalyticsEngine:
         self._persist_failures[source] += 1
 
     @property
-    def persist_failures(self) -> Dict[str, int]:
+    def persist_failures(self) -> dict[str, int]:
         return dict(self._persist_failures)
 
     def record_shed(self, source: str) -> None:
@@ -317,7 +318,7 @@ class AnalyticsEngine:
         self._shed[source] += 1
 
     @property
-    def shed(self) -> Dict[str, int]:
+    def shed(self) -> dict[str, int]:
         return dict(self._shed)
 
     def record(
@@ -331,7 +332,7 @@ class AnalyticsEngine:
         tokens_saved: int,
         latency_ms: float,
         cache_hit: bool,
-        layer_savings: Dict[str, int] | None = None,
+        layer_savings: dict[str, int] | None = None,
     ) -> None:
         r = AnalyticsRecord(
             timestamp=time.time(),
@@ -410,8 +411,8 @@ class AnalyticsEngine:
     def monthly(self) -> PeriodStats:
         return self._period_stats(time.time() - 30 * 86_400)
 
-    def layer_breakdown(self) -> Dict[str, int]:
-        totals: Dict[str, int] = defaultdict(int)
+    def layer_breakdown(self) -> dict[str, int]:
+        totals: dict[str, int] = defaultdict(int)
         for r in self._records:
             for layer, saved in r.layer_savings.items():
                 totals[layer] += saved

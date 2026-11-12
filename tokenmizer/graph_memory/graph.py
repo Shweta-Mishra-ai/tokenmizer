@@ -312,7 +312,7 @@ class GraphMemory:
     # ── DB ──────────────────────────────────────────────────────────────────
     # Full implementations in persistence.py.
 
-    def _db_connect(self) -> "sqlite3.Connection":
+    def _db_connect(self) -> sqlite3.Connection:
         from tokenmizer.graph_memory.persistence import db_connect
         return db_connect(self)
 
@@ -1488,7 +1488,7 @@ class GraphMemory:
 
         similarities = [
             (EmbeddingEngine.cosine(q_emb, vector), node)
-            for node, vector in zip(nodes, vectors) if vector is not None
+            for node, vector in zip(nodes, vectors, strict=True) if vector is not None
         ]
         if not similarities:
             return scored
@@ -1527,15 +1527,18 @@ class GraphMemory:
             for node in nodes
         ]
         missing = [
-            text for node, text in zip(nodes, texts)
+            text for node, text in zip(nodes, texts, strict=True)
             if cache.get(node.id, (None, None))[0] != text
         ]
         if missing:
             fresh = engine.embed_batch(missing)
-            if fresh is None:
+            # A model that returned a different number of vectors than it
+            # was given texts would pair every later node with the wrong
+            # embedding; degrade to keyword ranking instead.
+            if fresh is None or len(fresh) != len(missing):
                 return None
-            for text, vector in zip(missing, fresh):
-                for node, node_text in zip(nodes, texts):
+            for text, vector in zip(missing, fresh, strict=True):
+                for node, node_text in zip(nodes, texts, strict=True):
                     if node_text == text:
                         cache[node.id] = (text, vector)
         # Drop entries for nodes that no longer exist, so a long session's

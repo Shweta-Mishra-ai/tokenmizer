@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Generate docs/assets/graph-demo.gif — the graph explorer, in motion.
 
 The three still screenshots in the README show what the graph looks like.

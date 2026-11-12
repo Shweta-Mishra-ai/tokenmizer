@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from tokenmizer.api import app as app_module
 from tokenmizer.api.app import app
-from tokenmizer.preferences import (  # noqa: E402
+from tokenmizer.preferences import (
     PreferenceStore,
     looks_like_a_preference,
     preference_key,

@@ -28,7 +28,6 @@ _is_same_decision/_semantic_same_slot rather than in a second file.
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 # ── Topic taxonomy ────────────────────────────────────────────────────────────
 # Maps keywords → topic bucket name
@@ -171,7 +170,7 @@ def classify_topics(label: str, summary: str = "") -> set[str]:
     return set(_classify_ordered(label, summary))
 
 
-def classify_topic(label: str, summary: str = "") -> Optional[str]:
+def classify_topic(label: str, summary: str = "") -> str | None:
     """
     Backward-compatible singular form: the primary (first-matched) topic,
     or None if nothing matched. Prefer classify_topics() in new code —

@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Fixed — pasted code, data and logs reached the model altered
+
+- **Pasted code was replaced by a fake table.** A fenced block became
+  `attachment.<language>`; `.python` is not a known extension, so the content
+  was sniffed, found to contain commas, and summarised as CSV. Code is now
+  never summarised inside a message, every fenced block is considered (not
+  only the first), and a block is replaced only when it exceeds the budget and
+  the digest is at most 70% of it.
+- Inline CSV detection required only "two commas per line on average", which
+  pages of function calls and numbered instructions passed. It now needs a
+  consistent column count and value-like fields.
+- JSON that fits the budget is passed through instead of replaced by a schema;
+  JSONL reports its real line count beyond the first 1,000; a long log keeps
+  its error and warning lines from the middle.
+
+### Fixed — the extractor recorded the opposite of what was said
+
+- "The migration is not done yet" was stored as finished work.
+- "We decided against Redis" was stored as the decision "against Redis".
+- A decision someone quoted ("the docs say: 'Decided: use SQLite'") was
+  stored as this session's.
+- "Let's go with PostgreSQL" was stored as "with PostgreSQL" (now
+  "Use PostgreSQL").
+- An error reported as fixed in the same sentence stayed open, and its label
+  could start mid-word ("oneType").
+
+### Faster
+
+- Extraction was quadratic on text without sentence punctuation and on long
+  logs: 80 KB took 35 s and 10.7 s, on a thread holding the GIL. Clause scans
+  are bounded, sentence lookup is a binary search, dedup word sets are cached
+  and errors are capped at 60 per message. Both now take under 0.6 s. The
+  extraction benchmark is unchanged (all 224 metrics identical).
+
+### Code quality
+
+- mypy runs in CI over the package and is clean; 49 type errors fixed. The
+  only runtime defect among them: an MCP `tools/call` with `"arguments": null`.
+- ruff now also enforces bugbear, pyupgrade, invisible characters and stale
+  `noqa` comments. 40 `raise` statements inside `except` blocks now chain the
+  original exception; `zip` calls state whether lengths must match, and the
+  embedding batch degrades instead of mispairing vectors if they do not; the
+  invisible-character pattern in `security/fencing.py` is written with
+  escapes instead of literal zero-width characters.
+
 ### Behaviour changes to read before upgrading
 
 - Savings are now **net**: `usage.tokens_saved`, `tokenmizer.total_saved` and

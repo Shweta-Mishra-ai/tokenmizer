@@ -1,7 +1,7 @@
 """TokenMizer configuration — Pydantic Settings with env var support."""
 from __future__ import annotations
 
-from typing import List, Literal, Union
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -134,7 +134,7 @@ class GraphCheckpointSettings(BaseModel):
     # the weights are present. sentence-transformers ships no weights, so
     # "installed" and "loadable" are different questions on an air-gapped
     # host or behind an egress proxy.
-    semantic_retrieval: Union[bool, Literal["auto"]] = "auto"
+    semantic_retrieval: bool | Literal["auto"] = "auto"
     # Rank a principal's OTHER sessions' nodes alongside the current
     # session's when building retrieval results (Memory.search() and the
     # proxy's context-injection step) — see graph_memory/cross_session.py.
@@ -263,7 +263,7 @@ class PrivacySettings(BaseModel):
     # Hosts a local_only process may still reach: your own gateway or
     # inference server. Loopback is always allowed. An HTTP proxy must be
     # listed to be reachable, and then so is everything behind it.
-    allowed_hosts: List[str] = Field(default_factory=list)
+    allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class SecuritySettings(BaseModel):
@@ -412,7 +412,7 @@ class Settings(BaseSettings):
     # deployment is single-tenant: every caller shares one principal and
     # therefore one session namespace — which is the honest description
     # of what a single shared api_key has always meant.
-    api_keys: List[str] = []
+    api_keys: list[str] = []
     # Optional stable names for keys: {"<key>": "team-a"}. A session belongs
     # to the principal that created it, and the principal was a hash of the
     # key, so rotating a key orphaned every session made with it. A named
@@ -424,10 +424,10 @@ class Settings(BaseSettings):
     # /api/stats. Matched as a substring of the MODEL name, longest first,
     # then of the provider name. Built-in figures are rough defaults per
     # provider and are labelled as estimates; put your contract prices here.
-    pricing: dict[str, List[float]] = Field(default_factory=dict)
+    pricing: dict[str, list[float]] = Field(default_factory=dict)
 
     # CORS
-    cors_origins: List[str] = ["http://localhost:3000", "http://localhost:8000"]
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8000"]
 
     # Rate limiting: trust X-Forwarded-For?
     #
@@ -496,7 +496,7 @@ class Settings(BaseSettings):
         return mapping.get(provider, "")
 
     @classmethod
-    def from_yaml(cls, path: str) -> "Settings":
+    def from_yaml(cls, path: str) -> Settings:
         """Load settings from YAML, with environment variables taking
         precedence over the file — the behaviour tokenmizer.yaml's own
         header has always promised ("Environment variables always

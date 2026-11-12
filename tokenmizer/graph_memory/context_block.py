@@ -29,7 +29,7 @@ _DEFAULT_WORDS = {
 }
 
 
-def _vocabulary(graph: "GraphMemory") -> dict:
+def _vocabulary(graph: GraphMemory) -> dict:
     """The section headers for this graph's domain pack."""
     from tokenmizer.graph_memory.domains import get_pack
 
@@ -46,7 +46,7 @@ def _vocabulary(graph: "GraphMemory") -> dict:
     return {**_DEFAULT_WORDS, **get_pack(domain).vocabulary}
 
 
-def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
+def to_context_block(graph: GraphMemory, token_budget: int = 400) -> str:
     """
     Build tiered resume context block for LLM injection.
 
@@ -121,7 +121,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
     )
     # Interleaved, so a tight budget keeps both the current step and the
     # next one rather than four in-progress items and no plan.
-    current_work = [t for pair in zip(open_tasks[:4], pending_tasks[:4]) for t in pair]
+    current_work = [t for pair in zip(open_tasks[:4], pending_tasks[:4], strict=False) for t in pair]
     n = len(current_work) // 2
     current_work += open_tasks[n:4] + pending_tasks[n:4]
     if current_work:

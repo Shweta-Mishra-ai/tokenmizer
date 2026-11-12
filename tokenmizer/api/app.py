@@ -26,7 +26,7 @@ import time
 import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager, contextmanager
-from typing import Optional
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -203,7 +203,7 @@ _rate_limiter = _build_rate_limiter()
 # Bounded LRU for session locks — prevents memory leak on long-running servers.
 # Max 1000 concurrent sessions; LRU eviction removes oldest UNHELD lock.
 _SESSION_LOCK_MAX = 1000
-_session_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
+_session_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
 
 # Strong references to in-flight background tasks (e.g. the LLM
 # extraction pass scheduled by _update_graph). asyncio.create_task()'s own
@@ -325,7 +325,7 @@ _extraction_provider = None   # lazy — only built if use_llm_extraction=True
 # every request (a key can be configured later without a restart), but the
 # warning must not: with use_llm_extraction on and no key it was emitted
 # for every chat turn of every session, which buried every other log line.
-_extraction_unavailable_reason: Optional[str] = None
+_extraction_unavailable_reason: str | None = None
 
 
 def _get_extraction_provider():
@@ -424,7 +424,7 @@ def _provider_failure_detail(correlation_id: str) -> str:
 # the graph reloads from disk on next access. Cap chosen for typical
 # self-hosted deployments (one process, many sessions over time).
 _GRAPH_CACHE_MAX = 200
-_graph_cache: "OrderedDict[str, GraphMemory]" = OrderedDict()
+_graph_cache: OrderedDict[str, GraphMemory] = OrderedDict()
 _graph_cache_lock = asyncio.Lock()  # guards dict creation — prevents TOCTOU race
 
 
@@ -456,7 +456,7 @@ def _session_in_use(session_id: str):
             _session_inflight[session_id] = remaining
 
 
-def _find_evictable_graph_id() -> Optional[str]:
+def _find_evictable_graph_id() -> str | None:
     """First (most-LRU) session_id in _graph_cache that no request and no
     background task is currently using, or None if every remaining entry
     is in-flight. See the concurrency note above for why this exists."""
@@ -791,9 +791,9 @@ class ChatMessage(BaseModel):
 
     role: str
     content: str | list | None = ""
-    tool_calls: Optional[list] = None
-    tool_call_id: Optional[str] = None
-    name: Optional[str] = None
+    tool_calls: list | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
 
     def text(self) -> str:
         from tokenmizer.graph_memory.helpers import _content_to_text
@@ -821,7 +821,7 @@ class ChatRequest(BaseModel):
     the fields below influence the call."""
     model_config = {"extra": "allow"}
 
-    model: Optional[str] = None
+    model: str | None = None
     # At least one message, as every provider requires. Without the bound an
     # empty list reached the provider twice (transformed, then untransformed
     # retry) and came back as a misleading 502 instead of a 422 naming the field.
@@ -830,29 +830,29 @@ class ChatRequest(BaseModel):
     # a 422 naming the field, not an opaque upstream 400 after the request
     # has been compressed, extracted and forwarded — `max_tokens: -5` went
     # all the way to the provider.
-    max_tokens: Optional[int] = Field(default=4096, ge=1)
+    max_tokens: int | None = Field(default=4096, ge=1)
     # OpenAI's current name for the same limit; newer SDK defaults and the
     # o-series reject `max_tokens` and send this instead. Without it the
     # client's limit was silently replaced by the 4096 default above.
-    max_completion_tokens: Optional[int] = Field(default=None, ge=1)
-    stream: Optional[bool] = False
-    session_id: Optional[str] = None
-    temperature: Optional[float] = Field(default=None, ge=0, le=2)
-    top_p: Optional[float] = Field(default=None, ge=0, le=1)
-    stop: Optional[str | list[str]] = None
+    max_completion_tokens: int | None = Field(default=None, ge=1)
+    stream: bool | None = False
+    session_id: str | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    stop: str | list[str] | None = None
     # Tool/function calling, OpenAI shape. Forwarded to providers that
     # support it (see BaseProvider.supports_tools); a 501 otherwise.
-    tools: Optional[list[dict]] = None
-    tool_choice: Optional[str | dict] = None
-    parallel_tool_calls: Optional[bool] = None
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
+    parallel_tool_calls: bool | None = None
     # One choice is all this proxy ever returns. n > 1 was accepted and
     # silently answered with one, so a client indexing choices[1] crashed
     # far from the cause.
-    n: Optional[int] = Field(default=None, ge=1, le=1)
+    n: int | None = Field(default=None, ge=1, le=1)
 
     @field_validator("session_id")
     @classmethod
-    def _session_id_is_text(cls, v: Optional[str]) -> Optional[str]:
+    def _session_id_is_text(cls, v: str | None) -> str | None:
         # JSON accepts a lone surrogate ("\ud800"), and the id is used as a
         # key in SQLite and hashed for lock names. Unchecked it failed deep
         # in the ownership store and came back as a 503 "state unavailable"
@@ -865,14 +865,14 @@ class ChatRequest(BaseModel):
         return v
 
 
-def _max_tokens(req: "ChatRequest") -> int:
+def _max_tokens(req: ChatRequest) -> int:
     """The completion limit the client asked for, under either name."""
     if req.max_completion_tokens is not None:
         return req.max_completion_tokens
     return req.max_tokens or 4096
 
 
-def _sampling_kwargs(req: "ChatRequest") -> dict:
+def _sampling_kwargs(req: ChatRequest) -> dict:
     """Sampling params to forward to the provider (only ones explicitly set),
     plus the OpenAI passthrough fields for providers that take them."""
     kw: dict = {}
@@ -886,7 +886,7 @@ def _sampling_kwargs(req: "ChatRequest") -> dict:
     return kw
 
 
-def _cache_context(req: "ChatRequest", model: str, raw_messages: list[dict]) -> str:
+def _cache_context(req: ChatRequest, model: str, raw_messages: list[dict]) -> str:
     """The cache key's context: the conversation AND everything that changes
     what a correct answer is.
 
@@ -920,14 +920,15 @@ def _worth_untransformed_retry(exc: Exception) -> bool:
     was told anything.
     """
     seen = set()
-    e = exc
+    e: BaseException | None = exc
     while e is not None and id(e) not in seen:
         seen.add(id(e))
         status = getattr(e, "status_code", None)
         if status is None:
             status = getattr(getattr(e, "response", None), "status_code", None)
-        if status is None and isinstance(getattr(e, "code", None), int):
-            status = e.code
+        code = getattr(e, "code", None)
+        if status is None and isinstance(code, int):
+            status = code
         if isinstance(status, int):
             return status in (400, 413, 422)
         e = e.__cause__ or e.__context__
@@ -969,7 +970,7 @@ _PASSTHROUGH_PROVIDERS = frozenset({"openai", "gpt", "deepseek", "mistral",
                                     "grok", "openrouter"})
 
 
-def _passthrough_kwargs(req: "ChatRequest") -> dict:
+def _passthrough_kwargs(req: ChatRequest) -> dict:
     """The answer-shaping OpenAI fields the client set, if the provider can
     take them; {} otherwise, with a warning naming what was not applied."""
     extra = req.model_extra or {}
@@ -984,7 +985,7 @@ def _passthrough_kwargs(req: "ChatRequest") -> dict:
     return {}
 
 
-def _tool_kwargs(req: "ChatRequest") -> dict:
+def _tool_kwargs(req: ChatRequest) -> dict:
     """Tool-calling params to forward (only when the request declares tools)."""
     if not req.tools:
         return {}
@@ -1568,11 +1569,11 @@ async def _update_graph(
     # real occupancy. Storage growth is bounded instead by
     # CheckpointManager._prune_auto_checkpoints, which caps retained
     # auto-checkpoints per session and never touches manual ones.
-    checkpoint_status = {"attempted": False, "succeeded": False, "checkpoint_id": None}
+    checkpoint_status: dict[str, Any] = {"attempted": False, "succeeded": False, "checkpoint_id": None}
     if (context_pct >= settings.graph_checkpoint.trigger_at_percent
             and settings.graph_checkpoint.enabled):
         checkpoint_status["attempted"] = True
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
         for attempt in range(2):  # one retry for transient SQLite lock contention
             try:
                 ckpt = _checkpoint_mgr.create(
@@ -1613,8 +1614,8 @@ async def _call_provider(
     user_content: str,
     session_id: str,
     savings: dict,
-    raw_messages: Optional[list[dict]] = None,
-    outcome: Optional[dict] = None,
+    raw_messages: list[dict] | None = None,
+    outcome: dict | None = None,
 ) -> tuple[str, int, int, float, bool]:
     """
     Layer 3 + 5: Cache lookup → LLM call → output trim → cache write.
@@ -1668,7 +1669,7 @@ async def _call_provider(
             except Exception as e2:
                 logger.error(f"Provider error [{correlation_id}] (both attempts): "
                              f"transformed={e!r}; untransformed={e2!r}")
-                raise _upstream_http_error(e2, correlation_id)
+                raise _upstream_http_error(e2, correlation_id) from e2
             else:
                 # The transforms were the problem. That is a TokenMizer bug
                 # and it must be visible, not absorbed: counted as a silent
@@ -1690,7 +1691,7 @@ async def _call_provider(
             # the client. Full detail goes to the log under a correlation
             # id the client is given to quote.
             logger.error(f"Provider error [{correlation_id}]: {e}")
-            raise _upstream_http_error(e, correlation_id)
+            raise _upstream_http_error(e, correlation_id) from e
 
     response_text  = resp.text
     output_tokens  = resp.output_tokens
@@ -1964,7 +1965,7 @@ def _net_layers(savings: dict, original: int, sent: int) -> dict:
     return layers
 
 
-def _session_id_for(req: "ChatRequest", request: Request) -> str:
+def _session_id_for(req: ChatRequest, request: Request) -> str:
     """Body `session_id`, else the X-Session-ID header, else a new id.
 
     The header was in the CORS allow-list and documented as a way to name
@@ -1983,7 +1984,7 @@ def _session_id_for(req: "ChatRequest", request: Request) -> str:
     return str(uuid.uuid4())
 
 
-def _reject_unrepresentable_content(req: "ChatRequest") -> None:
+def _reject_unrepresentable_content(req: ChatRequest) -> None:
     """422 for content this text proxy would otherwise drop silently.
 
     Image, audio and file blocks were stripped to their text parts and the
@@ -2047,7 +2048,7 @@ async def chat_completions(req: ChatRequest, request: Request):
         try:
             provider_for_tools = _get_provider()
         except ValueError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=str(e)) from e
         if not getattr(provider_for_tools, "supports_tools", False):
             raise HTTPException(
                 status_code=501,
@@ -2073,13 +2074,13 @@ async def chat_completions(req: ChatRequest, request: Request):
             status_code=403,
             detail=f"Session '{session_id}' belongs to a different API key. "
                    f"Use a different session_id, or omit it for a new session.",
-        )
+        ) from None
     except OwnershipUnavailable as e:
         logger.error(f"Ownership store unavailable, denying chat request: {e}")
         raise HTTPException(
             status_code=503,
             detail="Session ownership state unavailable — request rejected for safety.",
-        )
+        ) from e
 
     # SECURITY: redact secrets/PII at the earliest possible point, before
     # ANY downstream consumer sees the content. This includes:
@@ -2292,9 +2293,9 @@ async def health(request: Request):
     # /health is deliberately unauthenticated (container health checks
     # carry no key), and it listed client-chosen session names to anyone.
     if not await _health_caller_authorised(request):
-        sessions_load_failed = len(sessions_load_failed)
-        sessions_no_durability = len(sessions_no_durability)
-        sessions_data_loss = len(sessions_data_loss)
+        sessions_load_failed = len(sessions_load_failed)  # type: ignore[assignment]
+        sessions_no_durability = len(sessions_no_durability)  # type: ignore[assignment]
+        sessions_data_loss = len(sessions_data_loss)  # type: ignore[assignment]
     return {
         "status": "degraded" if degraded else "ok",
         "timestamp": time.time(),
