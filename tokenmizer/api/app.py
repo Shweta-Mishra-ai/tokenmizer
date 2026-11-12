@@ -21,7 +21,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import re
 import time
 import uuid
 from collections import OrderedDict
@@ -32,8 +31,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import HTMLResponse, Response
 
 from tokenmizer import __version__
 from tokenmizer.analytics.engine import AnalyticsEngine
@@ -62,6 +60,30 @@ from tokenmizer.security.redaction import redact_messages
 from tokenmizer.semantic_cache.cache import SemanticCache
 
 logger = logging.getLogger(__name__)
+
+# Split out of this file; imported back so every name is still reachable as
+# app.<name>. See each module's docstring.
+from tokenmizer.api.injection import (  # noqa: E402,F401
+    _EXTENSION,
+    _FILLER,
+    _WORD,
+    _already_in_payload,
+    _append_volatile,
+    _content_words,
+    _inject_context,
+    _last_substantive_query,
+)
+from tokenmizer.api.request_helpers import (  # noqa: E402,F401
+    _CONTEXT_WINDOWS,
+    _PASSTHROUGH_FIELDS,
+    _PASSTHROUGH_PROVIDERS,
+    _context_window,
+    _net_layers,
+    _reject_unrepresentable_content,
+    _session_id_for,
+    _worth_untransformed_retry,
+)
+from tokenmizer.api.schemas import ChatMessage, ChatRequest, _max_tokens  # noqa: E402,F401
 
 settings = get_settings()
 
@@ -541,44 +563,8 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
 
 # ── Context window sizes ──────────────────────────────────────────────────────
 
-# Context window per model family, in tokens. Only feeds the auto-checkpoint
-# trigger (context_pct = tokens sent / window), so an entry that is too
-# SMALL checkpoints early (harmless) and one that is too LARGE never
-# checkpoints (the failure this table exists to prevent) — when unsure,
-# prefer the smaller published figure. Longest matching key wins, so a
-# specific entry beats its family's catch-all. Newest Claude models
-# (fable-5, opus-4-8, sonnet-5, haiku-4-5) all match the "claude" entry;
-# add a specific entry ONLY if a model's window differs.
-_CONTEXT_WINDOWS = {
-    "claude-fable-5": 200_000, "claude-opus-4-8": 200_000,
-    "claude-sonnet": 200_000, "claude-opus": 200_000, "claude-haiku": 200_000,
-    "claude": 200_000,
-    # OpenAI: the 4.1 family and the 5 series are far larger than 4o; the
-    # reasoning models sit at 200k. Longest-key matching keeps "gpt-4o"
-    # from being shadowed by "gpt-4", and "gpt-4.1" from matching "gpt-4".
-    "gpt-4.1": 1_000_000, "gpt-4o": 128_000, "gpt-4": 128_000, "gpt-3.5": 16_000,
-    "gpt-5": 400_000,
-    "o1": 200_000, "o3": 200_000, "o4": 200_000,
-    "gemini": 1_000_000,
-    "deepseek": 128_000,
-    "mistral": 128_000, "codestral": 256_000,
-    "grok": 128_000,
-    "command-r": 128_000,
-    # Local models vary by build; 32k is the common default `num_ctx`
-    # ceiling, and a too-small figure only checkpoints early.
-    "llama": 32_000, "qwen": 32_000, "mixtral": 32_000, "phi": 16_000,
-}
 
 
-def _context_window(model: str) -> int:
-    # Longest key first — so "claude-fable-5" wins over the "claude" catch-all
-    # if their values ever diverge. (Previously dict order decided; the broad
-    # "claude" key shadowed every specific entry.)
-    m = model.lower()
-    for k in sorted(_CONTEXT_WINDOWS, key=len, reverse=True):
-        if k in m:
-            return _CONTEXT_WINDOWS[k]
-    return 128_000
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
@@ -776,100 +762,10 @@ app.add_middleware(
 
 # ── Request / Response models ─────────────────────────────────────────────────
 
-class ChatMessage(BaseModel):
-    """OpenAI-style message. `content` accepts a plain string OR a list of
-    content blocks (multimodal format). Blocks are normalized to text —
-    TokenMizer is a text proxy; non-text blocks (images) are dropped with
-    their text parts preserved.
-
-    Tool calling carries three more fields, all optional: an assistant
-    turn's `tool_calls`, and a `role: "tool"` turn's `tool_call_id` (and
-    OpenAI's optional `name`). They ride through the pipeline untouched
-    and reach the provider adapter, which speaks them natively or
-    translates them (see providers/tools.py)."""
-    model_config = {"extra": "allow"}
-
-    role: str
-    content: str | list | None = ""
-    tool_calls: list | None = None
-    tool_call_id: str | None = None
-    name: str | None = None
-
-    def text(self) -> str:
-        from tokenmizer.graph_memory.helpers import _content_to_text
-        return _content_to_text(self.content)
-
-    def to_dict(self) -> dict:
-        """The pipeline's message shape: role + text content, plus the
-        tool fields only when set, so an ordinary message is exactly the
-        two-key dict every layer has always seen."""
-        d: dict = {"role": self.role, "content": self.text()}
-        if self.tool_calls:
-            from tokenmizer.providers.tools import normalize_tool_calls
-            d["tool_calls"] = normalize_tool_calls(self.tool_calls)
-        if self.tool_call_id:
-            d["tool_call_id"] = self.tool_call_id
-        if self.name:
-            d["name"] = self.name
-        return d
 
 
-class ChatRequest(BaseModel):
-    """OpenAI-compatible request. Sampling params (temperature, top_p, stop)
-    are forwarded to the provider. Unknown fields are accepted and ignored
-    (extra='allow') so standard OpenAI clients never get a 422 — but only
-    the fields below influence the call."""
-    model_config = {"extra": "allow"}
-
-    model: str | None = None
-    # At least one message, as every provider requires. Without the bound an
-    # empty list reached the provider twice (transformed, then untransformed
-    # retry) and came back as a misleading 502 instead of a 422 naming the field.
-    messages: list[ChatMessage] = Field(min_length=1)
-    # Ranges every provider enforces anyway. Checked here so a bad value is
-    # a 422 naming the field, not an opaque upstream 400 after the request
-    # has been compressed, extracted and forwarded — `max_tokens: -5` went
-    # all the way to the provider.
-    max_tokens: int | None = Field(default=4096, ge=1)
-    # OpenAI's current name for the same limit; newer SDK defaults and the
-    # o-series reject `max_tokens` and send this instead. Without it the
-    # client's limit was silently replaced by the 4096 default above.
-    max_completion_tokens: int | None = Field(default=None, ge=1)
-    stream: bool | None = False
-    session_id: str | None = None
-    temperature: float | None = Field(default=None, ge=0, le=2)
-    top_p: float | None = Field(default=None, ge=0, le=1)
-    stop: str | list[str] | None = None
-    # Tool/function calling, OpenAI shape. Forwarded to providers that
-    # support it (see BaseProvider.supports_tools); a 501 otherwise.
-    tools: list[dict] | None = None
-    tool_choice: str | dict | None = None
-    parallel_tool_calls: bool | None = None
-    # One choice is all this proxy ever returns. n > 1 was accepted and
-    # silently answered with one, so a client indexing choices[1] crashed
-    # far from the cause.
-    n: int | None = Field(default=None, ge=1, le=1)
-
-    @field_validator("session_id")
-    @classmethod
-    def _session_id_is_text(cls, v: str | None) -> str | None:
-        # JSON accepts a lone surrogate ("\ud800"), and the id is used as a
-        # key in SQLite and hashed for lock names. Unchecked it failed deep
-        # in the ownership store and came back as a 503 "state unavailable"
-        # — a client's bad input reported as the server's outage.
-        if v is not None:
-            try:
-                v.encode("utf-8")
-            except UnicodeEncodeError:
-                raise ValueError("session_id must be valid Unicode text") from None
-        return v
 
 
-def _max_tokens(req: ChatRequest) -> int:
-    """The completion limit the client asked for, under either name."""
-    if req.max_completion_tokens is not None:
-        return req.max_completion_tokens
-    return req.max_tokens or 4096
 
 
 def _sampling_kwargs(req: ChatRequest) -> dict:
@@ -909,39 +805,6 @@ def _cache_context(req: ChatRequest, model: str, raw_messages: list[dict]) -> st
     return hashlib.sha256(f"{conv}|{params}".encode("utf-8", "surrogatepass")).hexdigest()[:24]
 
 
-def _worth_untransformed_retry(exc: Exception) -> bool:
-    """Should a failure on the transformed request be retried untransformed?
-
-    Only when the provider REJECTED the request as malformed (400, 413,
-    422), which is the case the retry exists for: a pipeline layer built
-    something the provider will not accept. Every failure used to be
-    retried, so an upstream rate limit, outage or bad key cost a second,
-    larger request (each with the adapter's own backoff) before the client
-    was told anything.
-    """
-    seen = set()
-    e: BaseException | None = exc
-    while e is not None and id(e) not in seen:
-        seen.add(id(e))
-        status = getattr(e, "status_code", None)
-        if status is None:
-            status = getattr(getattr(e, "response", None), "status_code", None)
-        code = getattr(e, "code", None)
-        if status is None and isinstance(code, int):
-            status = code
-        if isinstance(status, int):
-            return status in (400, 413, 422)
-        e = e.__cause__ or e.__context__
-    from tokenmizer.core.errors import ProviderError
-    if isinstance(exc, ProviderError):
-        # No status to go on. A retryable error is transient by the
-        # adapter's own judgement; a rate limit, a dropped connection or a
-        # credential problem would fail the same way untransformed.
-        if exc.retryable or exc.error_type in ("rate_limit", "connection"):
-            return False
-        return not exc.error_type.startswith(("http_401", "http_403", "http_404",
-                                              "http_429", "http_5"))
-    return True
 
 
 def _upstream_http_error(exc: Exception, correlation_id: str) -> HTTPException:
@@ -959,15 +822,6 @@ def _upstream_http_error(exc: Exception, correlation_id: str) -> HTTPException:
     return HTTPException(status_code=502, detail=_provider_failure_detail(correlation_id))
 
 
-# OpenAI request fields that change the answer and that OpenAI-compatible
-# servers accept natively. They were accepted (extra="allow") and dropped,
-# so `response_format: json_object` produced prose and nothing said why.
-_PASSTHROUGH_FIELDS = ("response_format", "seed", "frequency_penalty",
-                       "presence_penalty", "logit_bias", "user",
-                       "reasoning_effort")
-# Providers whose adapter forwards _PASSTHROUGH_FIELDS untouched.
-_PASSTHROUGH_PROVIDERS = frozenset({"openai", "gpt", "deepseek", "mistral",
-                                    "grok", "openrouter"})
 
 
 def _passthrough_kwargs(req: ChatRequest) -> dict:
@@ -1123,119 +977,18 @@ def _stable_window() -> bool:
     return mode == "on"
 
 
-def _last_substantive_query(raw_messages: list[dict], min_words: int = 4) -> str:
-    """The most recent user turn long enough to retrieve against.
-
-    A follow-up like "why?" carries its subject in the turn before it. Walks
-    backwards past the short turns rather than giving up on retrieval, so the
-    graph is still searched with the topic actually under discussion.
-    """
-    for message in reversed(raw_messages):
-        if message.get("role") != "user":
-            continue
-        content = message.get("content") or ""
-        if len(content.split()) >= min_words:
-            return content
-    return ""
 
 
-_WORD = re.compile(r"[a-z0-9][a-z0-9_./-]*[a-z0-9]|[a-z0-9]")
-_FILLER = frozenset({
-    "the", "and", "for", "with", "that", "this", "from", "into", "are",
-    "was", "were", "has", "have", "had", "not", "but", "its", "our",
-    "use", "using", "will", "would", "should", "can", "could",
-})
 
 
-_EXTENSION = re.compile(r"^(.+)\.[a-z][a-z0-9]{0,4}$")
 
 
-def _content_words(text: str) -> frozenset:
-    """The words of `text` that carry content, and for a file name both
-    spellings: with its extension and without. A node label is clipped to a
-    clause and often ends at `hybrid_extractor` where the turn said
-    `hybrid_extractor.py`; they are the same file. Both sides go through
-    here, so a label naming `config.py` still needs `config.py`, not
-    `config.yaml`, in the turn."""
-    words = set()
-    for w in _WORD.findall(text.lower()):
-        if len(w) <= 2 or w in _FILLER:
-            continue
-        words.add(w)
-        stem = _EXTENSION.match(w)
-        if stem and len(stem.group(1)) > 2:
-            words.add(stem.group(1))
-    return frozenset(words)
 
 
-def _already_in_payload(node, message_words: list[frozenset]) -> bool:
-    """True when one message being sent already states this node.
-
-    Context injection exists to put back what the payload no longer
-    carries: turns windowing replaced, turns the client truncated on its
-    own, facts from another session. A node whose label and summary are
-    both fully present in a single message of this payload tells the
-    model nothing it is not already reading, and on a short session that
-    is every node. Injecting them anyway made a ten-turn session cost 81%
-    more input than it would have without the proxy.
-
-    Conservative by construction: a paraphrased label, a detail that only
-    exists in the summary, or words split across two messages all read as
-    absent, and the node is injected. The failure mode is a duplicate
-    line, never a lost fact.
-    """
-    words = _content_words(f"{node.label} {node.summary[:50] if node.summary else ''}")
-    if not words:
-        return False
-    return any(words <= mw for mw in message_words)
 
 
-def _append_volatile(messages: list[dict], fenced: str) -> None:
-    """Put per-turn context after everything a provider can cache.
-
-    Providers cache the longest byte-identical prefix of a request, and
-    render the system prompt before the conversation. Appending a block
-    that changes every turn to the system prompt therefore changed the
-    first bytes of the conversation too, and every request re-paid for
-    the whole history. Appended to the turn being asked instead, the
-    system prompt and every earlier turn go out exactly as they did last
-    time; the client never sees this text, so on the next request the
-    same user turn goes out without it and the prefix still matches.
-
-    Only a trailing user turn is a safe place. Anything else (a tool
-    result closing an agent step) keeps the old placement rather than
-    inventing a message some provider would reject.
-    """
-    last = messages[-1] if messages else None
-    if last is not None and last.get("role") == "user":
-        content = last.get("content")
-        if isinstance(content, list):
-            last["content"] = [*content, {"type": "text", "text": fenced}]
-            return
-        if isinstance(content, str) or content is None:
-            last["content"] = f"{content or ''}\n\n{fenced}"
-            return
-    sys_idx = next(
-        (i for i, m in enumerate(messages) if m.get("role") == "system"), None
-    )
-    if sys_idx is not None:
-        messages[sys_idx]["content"] = f"{messages[sys_idx]['content']}\n\n{fenced}"
-    else:
-        messages.insert(0, {"role": "system", "content": fenced})
 
 
-def _inject_context(messages: list[dict], session_id: str,
-                    relevant_pairs: list[tuple]) -> None:
-    """Append the ranked nodes to this turn, fenced."""
-    ctx_parts = [
-        f"  {n.type.value}: {n.label}"
-        + (f" ({n.summary[:50]})" if n.summary else "")
-        # Tag only nodes recalled from a DIFFERENT session.
-        + (f" [from session {sid}]" if sid != session_id else "")
-        for n, sid in relevant_pairs[:6]
-    ]
-    ctx_block = "\n".join(ctx_parts)
-    _append_volatile(messages, fence(ctx_block, "relevant session context"))
 
 
 async def _cross_session_query(
@@ -1731,280 +1484,12 @@ async def _call_provider(
     return response_text, input_tokens, output_tokens, latency_ms, False
 
 
-def _stream_response(req, messages, model, user_content, session_id,
-                     savings, orig_input_tokens, raw_messages=None) -> StreamingResponse:
-    """True SSE passthrough (OpenAI chat.completion.chunk format).
-
-    Cache hits stream as a single chunk. After the stream closes, analytics
-    and the semantic-cache write run on the accumulated text — same
-    bookkeeping as the non-stream path, minus output trimming.
-
-    Transform-rejected fallback, matching _call_provider(): if the
-    transformed `messages` fail before any content has reached the
-    client, retry once with `raw_messages`. Once content has streamed,
-    a failure can never retry — the client already has an unrecoverable
-    partial answer, and resending would duplicate or interleave output —
-    so it is always the existing mid-stream error event.
-    """
-    import json as _json
-
-    from tokenmizer.providers.providers import BaseProvider, ProviderError
-
-    provider = _get_provider()
-    if getattr(type(provider), "chat_stream", None) is BaseProvider.chat_stream:
-        raise HTTPException(
-            status_code=501,
-            detail=(f"Streaming passthrough is not implemented for provider "
-                    f"'{settings.provider}' yet (supported: anthropic, openai, "
-                    f"deepseek, mistral, openrouter, grok, ollama). "
-                    f"Set stream=false for this provider."),
-        )
-
-    resp_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    created = int(time.time())
-
-    def _chunk(delta: dict, finish: str | None = None, extra: dict | None = None) -> str:
-        payload = {
-            "id": resp_id, "object": "chat.completion.chunk",
-            "created": created, "model": model, "session_id": session_id,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-        }
-        if extra:
-            payload.update(extra)
-        return "data: " + _json.dumps(payload) + "\n\n"
-
-    cache_ctx = _cache_context(req, model, raw_messages or [])
-
-    tool_kw = _tool_kwargs(req)
-    # An adapter that supports tools but cannot stream tool-call deltas
-    # answers the request from chat() and the answer is emitted as chunks:
-    # the client still gets a valid SSE stream, just not an incremental one.
-    buffered_tools = bool(tool_kw) and not getattr(provider, "supports_tool_stream", False)
-
-    async def _buffered_tool_stream(candidate):
-        resp = await provider.chat(
-            messages=candidate, model=model, max_tokens=_max_tokens(req),
-            **_sampling_kwargs(req), **tool_kw,
-        )
-        if resp.text:
-            yield resp.text
-        if resp.tool_calls:
-            yield {"tool_calls": [{**tc, "index": i} for i, tc in enumerate(resp.tool_calls)]}
-        if resp.finish_reason in ("length", "max_tokens"):
-            yield {"finish_reason": "length"}
-
-    async def _gen():
-        full_text = ""
-        saw_tool_calls = False
-        truncated = False
-        t0 = time.monotonic()
-        cache_hit = False
-        stream_failed = False
-        transform_rejected = False
-        yield _chunk({"role": "assistant"})
-        try:
-            cached = (
-                _cache.get(user_content, session_id=session_id, context=cache_ctx)
-                if settings.cache.enabled and user_content and not tool_kw
-                else None
-            )
-
-            cache_hit = cached is not None
-
-            if cached:
-                full_text = cached.response
-                yield _chunk({"content": full_text})
-            else:
-                candidates = [messages]
-                if raw_messages is not None and raw_messages != messages:
-                    candidates.append(raw_messages)
-
-                last_error: Exception | None = None
-                succeeded = False
-                for attempt, candidate in enumerate(candidates):
-                    last_error = None
-                    try:
-                        pieces = (
-                            _buffered_tool_stream(candidate) if buffered_tools
-                            else provider.chat_stream(
-                                messages=candidate,
-                                model=model,
-                                max_tokens=_max_tokens(req),
-                                **_sampling_kwargs(req), **tool_kw,
-                            )
-                        )
-                        async for piece in pieces:
-                            if isinstance(piece, dict) and "finish_reason" in piece:
-                                truncated = piece["finish_reason"] == "length"
-                                continue
-                            if isinstance(piece, dict):
-                                # A tool-call delta (see OpenAIProvider.
-                                # chat_stream): re-emitted in the same
-                                # OpenAI chunk shape.
-                                saw_tool_calls = True
-                                yield _chunk({"tool_calls": piece["tool_calls"]})
-                                continue
-                            full_text += piece
-                            yield _chunk({"content": piece})
-                        succeeded = True
-                        transform_rejected = attempt > 0
-                        break
-                    except Exception as e:
-                        last_error = e
-                        # Content already reached the client — an
-                        # unrecoverable partial answer is out the door, so
-                        # retrying now would duplicate or interleave
-                        # output. This failure is final regardless of
-                        # attempts left.
-                        if full_text or saw_tool_calls:
-                            break
-                        if attempt == 0 and len(candidates) > 1 and _worth_untransformed_retry(e):
-                            correlation_id = uuid.uuid4().hex[:12]
-                            logger.warning(
-                                f"Provider rejected the transformed stream "
-                                f"request [{correlation_id}] for session "
-                                f"{session_id!r}; retrying with the "
-                                f"untransformed messages: {type(e).__name__}"
-                            )
-                            continue
-                        break
-
-                if not succeeded:
-                    raise last_error
-                if transform_rejected:
-                    logger.error(
-                        f"TokenMizer's transformed stream request was "
-                        f"rejected but the untransformed one succeeded for "
-                        f"session {session_id!r} — a pipeline layer "
-                        f"produced a request the provider will not accept. "
-                        f"Original error: {last_error}"
-                    )
-                    _analytics.record_silent_failure("transform_rejected")
-                    savings.clear()
-
-        except ProviderError as e:
-            # Mid-stream failure: SSE can't change the status code anymore —
-            # emit an explicit error event instead of silently truncating.
-            # Opaque, like the non-stream path: str(e) is the SDK's own
-            # message, with request ids and upstream URLs in it.
-            stream_failed = True
-            correlation_id = uuid.uuid4().hex[:12]
-            logger.error(f"Provider stream error [{correlation_id}]: {e}")
-            kind = "rate_limit_error" if e.error_type == "rate_limit" else "provider_error"
-            yield "data: " + _json.dumps(
-                {"error": {"message": _provider_failure_detail(correlation_id),
-                           "type": kind}}
-            ) + "\n\n"
-        except Exception as e:
-            # Anything the provider layer didn't wrap in ProviderError
-            # (transport errors, decode errors, bugs) would otherwise
-            # escape the generator: the SSE stream dies with no
-            # terminator and the bookkeeping below never runs.
-            stream_failed = True
-            correlation_id = uuid.uuid4().hex[:12]
-            logger.error(f"Stream error [{correlation_id}]: {e}")
-            yield "data: " + _json.dumps(
-                {"error": {"message": f"Stream failed (ref: {correlation_id})",
-                           "type": "internal_error"}}
-            ) + "\n\n"
-        yield _chunk(
-            {}, finish=("tool_calls" if saw_tool_calls
-                        else "length" if truncated else "stop"),
-            extra={"tokenmizer": {"fallback": {"transform_rejected": True}}}
-            if transform_rejected else None,
-        )
-        yield "data: [DONE]\n\n"
-
-        # Post-stream bookkeeping. When the transformed request was
-        # rejected, what was actually SENT is raw_messages — mirrors
-        # _call_provider()'s `sent_input_tokens = orig_input_tokens`.
-        latency_ms = (time.monotonic() - t0) * 1000
-        output_tokens = 0 if cache_hit else count_tokens(full_text, model)
-        input_tokens = (
-            0 if cache_hit
-            else orig_input_tokens if transform_rejected
-            else count_messages_tokens(messages, model)
-        )
-        # Never cache a response that didn't finish. `full_text` after a
-        # mid-stream failure holds however many tokens arrived before the
-        # error — writing that to the cache would serve a silently
-        # truncated answer to every future matching prompt, long after the
-        # provider recovered. Re-writing a cache HIT is equally pointless.
-        if (settings.cache.enabled and user_content and full_text and not truncated
-                and not stream_failed and not cache_hit and not saw_tool_calls):
-            _cache.set(user_content, full_text, input_tokens=input_tokens,
-                       output_tokens=output_tokens, session_id=session_id,
-                       context=cache_ctx)
-        _analytics.record(
-            session_id=session_id, provider=settings.provider, model=model,
-            input_tokens_original=orig_input_tokens,
-            input_tokens_sent=input_tokens, output_tokens=output_tokens,
-            tokens_saved=orig_input_tokens - input_tokens, latency_ms=latency_ms,
-            cache_hit=cache_hit, layer_savings=_net_layers(savings, orig_input_tokens, input_tokens),
-        )
-
-    return StreamingResponse(_gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
 
 
-def _net_layers(savings: dict, original: int, sent: int) -> dict:
-    """Per-layer savings plus the proxy's own additions as a negative line,
-    so the layers add up to what was really saved: original - sent.
-
-    The old total summed only what each layer removed and never subtracted
-    what the proxy added — the terse instruction, injected memory,
-    preferences, the windowing bridge. A request that went out four times
-    the size it came in was reported as a saving.
-    """
-    layers = {k: v for k, v in savings.items() if v}
-    removed = sum(layers.values())
-    overhead = (original - sent) - removed
-    if overhead:
-        layers["added_by_proxy"] = overhead
-    return layers
 
 
-def _session_id_for(req: ChatRequest, request: Request) -> str:
-    """Body `session_id`, else the X-Session-ID header, else a new id.
-
-    The header was in the CORS allow-list and documented as a way to name
-    a session, and nothing read it. A standard OpenAI SDK cannot add a body
-    field without `extra_body`, but every one of them can set a header —
-    so for most clients every request started a brand-new session, memory
-    never accumulated, and sessions.db gained a row per request.
-    """
-    if req.session_id:
-        return req.session_id
-    header = (request.headers.get("X-Session-ID") or "").strip()
-    if header:
-        if len(header) > 256:
-            raise HTTPException(status_code=422, detail="X-Session-ID is longer than 256 characters.")
-        return header
-    return str(uuid.uuid4())
 
 
-def _reject_unrepresentable_content(req: ChatRequest) -> None:
-    """422 for content this text proxy would otherwise drop silently.
-
-    Image, audio and file blocks were stripped to their text parts and the
-    request answered with a 200: the model replied about a picture it was
-    never shown. Refusing names the problem; sending the request straight
-    to the provider is the way to use those modalities today.
-    """
-    for i, m in enumerate(req.messages):
-        if not isinstance(m.content, list):
-            continue
-        for block in m.content:
-            kind = block.get("type") if isinstance(block, dict) else None
-            if kind not in (None, "text"):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(f"messages[{i}] carries a {kind!r} content block. "
-                            f"TokenMizer proxies text only and would drop it, so the "
-                            f"model would answer without it. Send this request to the "
-                            f"provider directly, or remove the block."),
-                )
 
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key), Depends(injection_guard)])
@@ -2421,5 +1906,6 @@ async def _apply_retention() -> int:
 # (_analytics, _cache, _checkpoint_mgr, _get_graph_async, _check_rate_limit)
 # is already defined above.
 from tokenmizer.api.routes_graph import router as _graph_router  # noqa: E402
+from tokenmizer.api.streaming import _stream_response  # noqa: E402
 
 app.include_router(_graph_router)
