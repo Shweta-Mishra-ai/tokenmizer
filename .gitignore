@@ -35,3 +35,6 @@ benchmark_persistence_results.json
 .DS_Store
 .idea/
 .vscode/
+
+# A SQLite file once committed by accident at the repo root.
+/None

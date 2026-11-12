@@ -53,6 +53,8 @@ try:
 except ImportError:  # pragma: no cover — non-FastAPI usage of _scan_messages
     Request = None  # type: ignore[assignment,misc]
 
+from tokenmizer.security.fencing import normalize_for_matching
+
 logger = logging.getLogger(__name__)
 
 _INJECTION_PATTERNS = [
@@ -60,10 +62,15 @@ _INJECTION_PATTERNS = [
     re.compile(r'disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?', re.IGNORECASE),
     re.compile(r'forget\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?', re.IGNORECASE),
     re.compile(r'you\s+are\s+now\s+(?:DAN|jailbreak(?:ed)?|unrestricted|in\s+developer\s+mode)', re.IGNORECASE),
-    re.compile(r'print\s+(?:your\s+)?(?:system\s+prompt|instructions)', re.IGNORECASE),
-    re.compile(r'reveal\s+(?:your\s+)?(?:system\s+prompt|instructions|api\s+key)', re.IGNORECASE),
-    re.compile(r'repeat\s+(?:the\s+|your\s+)?(?:words?\s+)?above', re.IGNORECASE),
-    re.compile(r'bypass\s+(?:your\s+)?(?:safety|filter|restriction|guardrails?)', re.IGNORECASE),
+    # These four name the MODEL's own prompt, rules or safeguards. Without
+    # the possessive they matched ordinary engineering questions and
+    # returned a 400: "how do I print instructions when argparse fails",
+    # "repeat the above refactor for the orders module", "attackers bypass
+    # filter rules with double encoding".
+    re.compile(r'(?:print|reveal|show|output)\s+(?:your\s+|the\s+)?system\s+prompt', re.IGNORECASE),
+    re.compile(r'(?:print|reveal)\s+your\s+(?:instructions|api\s+key)', re.IGNORECASE),
+    re.compile(r'repeat\s+(?:the\s+|your\s+)?words?\s+above', re.IGNORECASE),
+    re.compile(r'bypass\s+your\s+(?:safety|filters?|restrictions?|guardrails?)', re.IGNORECASE),
     re.compile(r'pretend\s+(?:you\s+have\s+no|there\s+(?:are|is)\s+no)\s+(?:restrictions?|rules?|filters?)', re.IGNORECASE),
     re.compile(r'this\s+is\s+a\s+(?:test|simulation)[,.]?\s+(?:ignore|disregard|skip)', re.IGNORECASE),
 ]
@@ -117,10 +124,24 @@ def _scan_messages(messages: list[dict]) -> bool:
         text = _content_to_plain_text(msg.get("content"))
         if not text:
             continue
+        # Same normalisation the memory-side check uses: a zero-width
+        # character inside "ignore previous instructions" walked straight
+        # past this filter while reading identically to the model.
+        text = normalize_for_matching(text)
         for pat in _INJECTION_PATTERNS:
             if pat.search(text):
                 return True
     return False
+
+
+def _filter_mode() -> str:
+    """security.injection_filter, or "block" if settings cannot be read —
+    a config problem must not silently switch a filter off."""
+    try:
+        from tokenmizer.config.settings import get_settings
+        return get_settings().security.injection_filter
+    except Exception:
+        return "block"
 
 
 async def injection_guard(request: Request) -> None:
@@ -134,18 +155,29 @@ async def injection_guard(request: Request) -> None:
     except ImportError:
         return  # not running under FastAPI — skip
 
+    mode = _filter_mode()
+    if mode == "off":
+        return
+
     if request.method == "POST" and "chat" in request.url.path:
         try:
             body = await request.json()
             messages = body.get("messages", [])
             if _scan_messages(messages):
                 client_host = request.client.host if request.client else "unknown"
+                if mode == "log":
+                    logger.warning(
+                        "Injection-pattern match from %s (security.injection_filter"
+                        "=log: request allowed through)", client_host)
+                    return
                 logger.warning(f"Injection-pattern match blocked from {client_host}")
                 raise HTTPException(
                     status_code=400,
                     detail=(
                         "Request blocked: matched a known prompt-injection phrasing. "
-                        "This is a basic keyword filter, not comprehensive protection."
+                        "This is a basic keyword filter, not comprehensive protection. "
+                        "If the phrase was quoted or discussed rather than meant, the "
+                        "operator can set security.injection_filter to 'log' or 'off'."
                     ),
                 )
         except HTTPException:

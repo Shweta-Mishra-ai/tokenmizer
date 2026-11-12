@@ -132,99 +132,100 @@ def apply_importance_decay(graph: "GraphMemory") -> dict[str, float]:
     return changed
 
 
+def _protected(node) -> bool:
+    """A node pruning never moves, however full the graph is.
+
+    The previous fallback pass made every node outside a short list
+    eligible once the cap was exceeded, which included the open bug the
+    session was in the middle of fixing and the task being worked on.
+    Those are exactly what a resume must say. An over-full graph is a
+    bounded cost; losing them is not.
+    """
+    if node.type in (NodeType.GOAL, NodeType.SCHEMA):
+        return True
+    if node.type == NodeType.DECISION and node.status in (
+            NodeStatus.COMPLETED, NodeStatus.CONTESTED, NodeStatus.INVALIDATED,
+            NodeStatus.PENDING, NodeStatus.IN_PROGRESS):
+        return True
+    if node.type == NodeType.ERROR and node.status == NodeStatus.FAILED:
+        return True
+    if node.type == NodeType.TASK and node.status == NodeStatus.IN_PROGRESS:
+        return True
+    if node.type == NodeType.SUMMARY:
+        return True
+    return False
+
+
+_RESOLVED = (NodeStatus.COMPLETED, NodeStatus.FAILED, NodeStatus.ARCHIVED,
+             NodeStatus.SUPERSEDED, NodeStatus.MODIFIED)
+
+
 def prune(
     graph: "GraphMemory",
-    max_nodes: int = 200,
+    max_nodes: int = 500,
     max_age_days: float = 60.0,
 ) -> int:
-    """Remove low-importance, old, completed nodes. Preserve decisions, envs, goals."""
-    preserve_types = {NodeType.GOAL, NodeType.SCHEMA}
-    # Decisions are kept even when old — history matters
-    # But ARCHIVED/SUPERSEDED decisions can be pruned after max_age_days
-    cutoff = time.time() - max_age_days * 86400
-    # Superseded decisions expire faster (30 days default)
-    superseded_cutoff = time.time() - min(max_age_days, 30) * 86400
-    candidates: list[tuple[float, str]] = []
+    """Bring the graph back under `max_nodes` by moving its least useful
+    nodes to cold storage. Returns how many were moved.
 
-    for nid, node in graph._nodes.items():
-        if node.type in preserve_types:
-            continue
-        # ACTIVE decisions and environments: keep unless very old
-        if node.type in (NodeType.DECISION, NodeType.ENVIRONMENT):
-            if node.status == NodeStatus.COMPLETED and node.updated_at < cutoff:
-                score = node.importance * 0.1  # low score = prune first
-                candidates.append((score, nid))
-            elif node.status in (NodeStatus.SUPERSEDED, NodeStatus.MODIFIED,
-                                 NodeStatus.ARCHIVED) and node.updated_at < superseded_cutoff:
-                candidates.append((0.0, nid))  # prune superseded decisions after 30d
-            continue
-        # All other nodes: prune if old and completed
-        if node.status in (NodeStatus.COMPLETED, NodeStatus.FAILED,
-                           NodeStatus.ARCHIVED) and node.updated_at < cutoff:
-            score = node.importance * (node.updated_at / (time.time() + 1))
-            candidates.append((score, nid))
+    Candidates are every unprotected node, least important first; among
+    equals, history (superseded decisions, resolved nodes not touched in
+    `max_age_days`) goes before anything recent, then the oldest.
+    Importance decides first because it already encodes what decay and
+    resolution have learned: a 0.1 TODO nobody returned to is worth less
+    than a 0.9 completed task.
+    Protected nodes (see _protected) are never moved; if they alone exceed
+    the cap the graph stays over it and says so.
 
+    Nothing is deleted outright. Each node goes to the session's
+    graph_pruned table first, from which /api/graph/{id}/pruned lists it
+    and a restore puts it back; if that write fails, nothing is pruned.
+    The old version deleted, and also treated an ACTIVE decision older
+    than 60 days as prunable while its own warning said active decisions
+    never are.
+    """
     if len(graph._nodes) <= max_nodes:
         return 0
-
     to_prune = len(graph._nodes) - max_nodes
+    now = time.time()
+    cutoff = now - max_age_days * 86400
 
-    # If age-based pruning didn't find enough candidates (graph is fresh —
-    # all nodes created recently), fall back to importance-only pruning.
-    # This ensures the hard cap is always enforced even in long single-day sessions.
-    #
-    # This must not blanket-exclude EVERY node of type
-    # DECISION, including SUPERSEDED/ARCHIVED/INVALIDATED ones. Only
-    # ACTIVE (COMPLETED) decisions are meant to be permanently
-    # protected — a graph dominated by dead/historical decisions
-    # (all created within max_age_days, so the age-based scan above
-    # found nothing) could never be pruned down to max_nodes at all,
-    # making the "hard cap" not actually hard. Only ACTIVE decisions
-    # (and GOAL/SCHEMA, via preserve_types) are excluded here now.
-    if len(candidates) < to_prune:
-        candidate_ids = {nid for _, nid in candidates}  # computed ONCE, not per iteration
-        importance_candidates = [
-            (node.importance, nid)
-            for nid, node in graph._nodes.items()
-            if node.type not in preserve_types
-            and not (node.type == NodeType.DECISION and node.status == NodeStatus.COMPLETED)
-            and nid not in candidate_ids
-        ]
-        candidates.extend(importance_candidates)
+    tier1: list[tuple[float, str]] = []
+    tier2: list[tuple[float, str]] = []
+    for nid, node in graph._nodes.items():
+        if _protected(node):
+            continue
+        if node.status in _RESOLVED and (
+                node.updated_at < cutoff
+                or (node.type == NodeType.DECISION
+                    and node.status in (NodeStatus.SUPERSEDED, NodeStatus.MODIFIED,
+                                        NodeStatus.ARCHIVED))):
+            tier1.append((node.importance, 0, node.updated_at, nid))
+        else:
+            tier2.append((node.importance, 1, node.updated_at, nid))
+    chosen = [nid for *_, nid in sorted(tier1 + tier2)[:to_prune]]
 
-    # Sort ONCE, after every tier has been combined.
-    #
-    # This must not sort BEFORE the fallback tier's
-    # extend() above, so the two tiers' entries were never merged
-    # into one true ascending-score order — candidates[:to_prune]
-    # could prune "all age-based candidates first regardless of
-    # score, then fallback candidates appended in their own separate
-    # order," rather than truly lowest-scoring-first across both.
-    candidates.sort()
-
-    if len(candidates) < to_prune:
+    if len(chosen) < to_prune:
         logger.warning(
-            f"prune() for session {graph.session_id}: only found "
-            f"{len(candidates)} evictable node(s) but need to remove "
-            f"{to_prune} to reach max_nodes={max_nodes} — the graph is "
-            f"dominated by protected node types (active decisions, "
-            f"goals, schemas). Pruning what's available; the cap will "
-            f"remain exceeded until more nodes become eligible. Active "
-            f"decisions are intentionally never auto-pruned regardless "
-            f"of cap pressure — deleting a current choice is a bigger "
-            f"risk than a temporarily oversized graph."
-        )
+            "prune() for session %s: %d node(s) over the cap of %d, but only %d "
+            "can be moved — the rest are active decisions, open errors, work in "
+            "progress, goals or schemas, which are never pruned. The graph stays "
+            "over the cap until some of them resolve.",
+            graph.session_id, to_prune, max_nodes, len(chosen))
+    if not chosen:
+        return 0
 
-    pruned = 0
+    from tokenmizer.graph_memory.persistence import store_pruned
+    if not store_pruned(graph, [graph._nodes[nid] for nid in chosen]):
+        # Could not keep them, so do not remove them: an oversized graph is
+        # recoverable, a deleted node is not.
+        return 0
 
-    for _, nid in candidates[:to_prune]:
+    gone = set(chosen)
+    for nid in chosen:
         del graph._nodes[nid]
-        graph._edges = [e for e in graph._edges
-                       if e.source_id != nid and e.target_id != nid]
-        pruned += 1
-
-    if pruned:
-        graph._persist(force=True)
-        logger.info(f"Graph pruned {pruned} nodes for session {graph.session_id}")
-
-    return pruned
+    graph._edges = [e for e in graph._edges
+                    if e.source_id not in gone and e.target_id not in gone]
+    graph._persist(force=True)
+    logger.info("Moved %d node(s) of session %s to cold storage", len(chosen), graph.session_id)
+    return len(chosen)

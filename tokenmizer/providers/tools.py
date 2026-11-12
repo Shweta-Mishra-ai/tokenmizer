@@ -441,7 +441,11 @@ def finish_reason(native: Optional[str], tool_calls: list[dict]) -> str:
     model asked for a tool, whatever the provider called it."""
     if tool_calls:
         return "tool_calls"
-    if native in ("length", "max_tokens"):
+    # Compared as lowered text: Gemini reports an enum whose str() is
+    # "FinishReason.MAX_TOKENS", which the exact-match test this replaces
+    # read as "stop".
+    name = str(native or "").lower()
+    if name in ("length", "max_tokens") or name.endswith("max_tokens"):
         return "length"
     return "stop"
 

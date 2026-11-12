@@ -693,6 +693,13 @@ class SemanticCache:
                 removed += 1
         return removed
 
+    def invalidate_session(self, session_id: str) -> int:
+        """Drop every entry scoped to `session_id`. Returns how many."""
+        keys = [k for k, e in self._exact.items() if e.scope == session_id]
+        for k in keys:
+            self._drop(k)
+        return len(keys)
+
     def clear(self) -> None:
         self._exact.clear()
         self._embeddings.clear()

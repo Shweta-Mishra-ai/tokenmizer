@@ -230,8 +230,12 @@ class GraphMemory:
     ARCHIVE_SUPERSEDED_AFTER_DAYS: float = 7.0
 
     def __init__(self, session_id: str, storage_dir: str = "./checkpoints",
-                 semantic_retrieval: bool = False, domain: str | None = None):
+                 semantic_retrieval: bool = False, domain: str | None = None,
+                 max_nodes: int = 500):
         self.session_id = session_id
+        # Above this, extraction prunes resolved nodes into cold storage.
+        # See graph_checkpoint.max_nodes.
+        self.max_nodes = max_nodes
         # Blend embedding similarity into query(). Off by default and passed
         # in rather than read from Settings, so this module stays independent
         # of config the way the rest of it is; api/app.py supplies the value.
@@ -378,6 +382,12 @@ class GraphMemory:
         label, summary = redact_node(label, summary)
 
         stored_label = label[:120]
+        # A label is clipped to 120 characters for display and identity.
+        # What was cut — often the half of the sentence that said WHY, or
+        # the path, or the version — used to be discarded. When the node
+        # has no summary of its own, the whole statement becomes it.
+        if len(label) > 120 and not summary:
+            summary = label
         stored_summary = summary[:300]
         norm = self._normalize_label(stored_label)
         node_id = self._node_id(node_type.value, norm)
@@ -551,6 +561,7 @@ class GraphMemory:
         # (prose, several sentences, no decision verb). It still goes
         # through redaction above, which is the check that matters for
         # text copied out of a transcript.
+        result = None
         if node_type is not NodeType.SUMMARY:
             validator = _get_validator()
             result = validator.validate(
@@ -579,7 +590,12 @@ class GraphMemory:
             status=status,
             summary=stored_summary,
             importance=importance,
-            confidence=confidence if confidence != 0.7 else result.confidence,
+            # A SUMMARY skips validation, so there is no validator score to
+            # fall back on; it keeps the confidence it was given. This read
+            # `result.confidence` unconditionally and raised
+            # UnboundLocalError for a SUMMARY added at the default.
+            confidence=(confidence if confidence != 0.7 or result is None
+                        else result.confidence),
         )
         self._nodes[node_id] = node
         self._dirty = True
@@ -748,8 +764,14 @@ class GraphMemory:
         trigger = trigger or _infer_trigger(old_node.label, new_node.label, summary)
         confidence = new_node.confidence if new_confidence is None else new_confidence
 
+        # The id is a primary key in a table every session shares. Built
+        # from the two node ids alone — which are hashes of the LABELS — two
+        # sessions making the same switch ("React" to "Next.js") produced
+        # the same id, and INSERT OR REPLACE handed the second session the
+        # first one's history row. The session is part of the identity.
+        sid_tag = hashlib.sha1(self.session_id.encode("utf-8", "surrogatepass")).hexdigest()[:8]
         transition = DecisionTransition(
-            id=f"tr_{old_id[:8]}_{new_id[:8]}",
+            id=f"tr_{sid_tag}_{old_id[:8]}_{new_id[:8]}",
             session_id=self.session_id,
             from_decision_id=old_id,
             to_decision_id=new_id,
@@ -1006,12 +1028,12 @@ class GraphMemory:
         if decayed:
             logger.debug(f"Importance decay applied to {len(decayed)} nodes")
 
-        # Auto-prune: if graph has grown large, remove low-importance old nodes.
-        # Runs only when over threshold — cheap no-op for typical sessions.
-        if len(self._nodes) > 200:
-            pruned = self.prune(max_nodes=200)
+        # Auto-prune: over the cap, move the least important resolved
+        # nodes to cold storage. Cheap no-op for typical sessions.
+        if len(self._nodes) > self.max_nodes:
+            pruned = self.prune(max_nodes=self.max_nodes)
             if pruned:
-                logger.debug(f"Auto-pruned {pruned} nodes (graph exceeded 200 nodes)")
+                logger.debug(f"Auto-pruned {pruned} nodes (graph exceeded {self.max_nodes} nodes)")
 
         self._persist()
 
@@ -1716,14 +1738,25 @@ class GraphMemory:
 
     def prune(
         self,
-        max_nodes: int = 200,
+        max_nodes: int | None = None,
         max_age_days: float = 60.0,
     ) -> int:
         """Remove low-importance, old, completed nodes. Preserve decisions,
         envs, goals. See graph_memory/pruning.py for the full pruning logic —
         extracted there to keep this file focused on core memory logic."""
         from tokenmizer.graph_memory.pruning import prune as _prune
-        return _prune(self, max_nodes=max_nodes, max_age_days=max_age_days)
+        return _prune(self, max_nodes=self.max_nodes if max_nodes is None else max_nodes,
+                      max_age_days=max_age_days)
+
+    def pruned_nodes(self) -> list[dict]:
+        """Nodes pruning moved to cold storage, newest first."""
+        from tokenmizer.graph_memory.persistence import list_pruned
+        return list_pruned(self)
+
+    def restore_node(self, node_id: str) -> bool:
+        """Bring one pruned node back into the live graph."""
+        from tokenmizer.graph_memory.persistence import restore_pruned
+        return restore_pruned(self, node_id)
 
     # ── Context block ────────────────────────────────────────────────────────
 

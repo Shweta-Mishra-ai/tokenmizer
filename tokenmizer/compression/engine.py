@@ -101,28 +101,31 @@ class CodeBlockGuard:
 
 # ─── Filler patterns ────────────────────────────────────────────────────────
 
+# Every pattern is anchored to a SENTENCE START and ends on sentence
+# punctuation, so it can only ever remove a whole filler sentence or a
+# standalone interjection — never part of a word and never the opening of
+# a sentence that goes on to say something.
+#
+# The unanchored versions deleted from inside words and real sentences:
+# "has an aim" contains "as an ai" and became "hm"; "In this
+# case-sensitive comparison" lost its first three words; "As an AI
+# engineer, I need..." lost its subject; "Certainly not." became "not.".
+# Phrases that only ever shortened a sentence without removing it ("In
+# this case,", "Basically,", "Let me explain") are gone entirely: what they
+# saved was a token or two, and what they cost was a sentence the reader
+# could no longer parse.
+_S = r"(?:(?<=\A)|(?<=\n)|(?<=[.!?]\s))"   # sentence start
 _FILLER = [
-    r"As an AI(?:\s+language model)?,?\s*",
-    r"I(?:'d| would) be (?:happy|glad|pleased) to\s+(?:help\s+)?",
-    r"(?:That'?s?\s+a?\s*)?(?:great|excellent|good|wonderful|fantastic)\s+question[.!]\s*",
-    # A one-word interjection is filler only where a sentence begins. With
-    # neither an anchor nor a word boundary this alternation matched INSIDE
-    # words and on every older prose message: "pressure" -> "pres",
-    # "measure" -> "mea", "ensure" -> "en", "insurer" -> "inr". The model was
-    # reading corrupted English. Anchored to start of text or to the space
-    # after sentence punctuation, and bounded on the right so "Surely" and
-    # "Absolutely" as an adverb mid-sentence are left alone.
-    r"(?:^|(?<=[.!?]\s))(?:Certainly|Of course|Sure|Absolutely|Indeed)\b[!.,]?\s*",
-    r"It(?:'s| is) (?:worth noting|important to note|crucial to understand) that\s+",
-    r"In this (?:case|context|scenario),?\s*",
-    r"(?:Essentially|Basically|Simply put|In other words),?\s*",
-    r"As you can see(?:,| from)?\s*",
-    r"As (?:mentioned|noted|discussed) (?:earlier|above|previously|before),?\s*",
-    r"Let me (?:explain|clarify|elaborate|break this down)(?:\s+for you)?\s*",
-    r"I hope this (?:helps|answers your question|clarifies things)[.!]\s*",
-    r"Feel free to (?:ask|reach out)[^.]*[.!]\s*",
-    r"Please (?:let me know|don't hesitate)[^.]*[.!]\s*",
-    r"(?:Thank you for|Thanks for) (?:asking|your question|reaching out)[.!]\s*",
+    _S + r"As an AI(?:\s+language model|\s+assistant)?,\s+(?=I\b)",
+    _S + r"I(?:'d| would) be (?:happy|glad|pleased) to help(?: (?:you )?with that)?[.!]\s*",
+    _S + r"(?:That'?s?\s+an?\s+)?(?:great|excellent|good|wonderful|fantastic)\s+question[.!]\s*",
+    # "!" or "." only: "Sure, but only after the backup" and "Certainly
+    # not." are sentences, "Sure!" is an interjection.
+    _S + r"(?:Certainly|Of course|Sure|Absolutely)[!.]\s+",
+    _S + r"I hope (?:this|that) (?:helps|answers your question|clarifies things)[.!]\s*",
+    _S + r"Feel free to (?:ask|reach out)[^.!?\n]{0,60}[.!]\s*",
+    _S + r"Please (?:let me know|don't hesitate to ask) if you (?:have|need)[^.!?\n]{0,60}[.!]\s*",
+    _S + r"(?:Thank you for|Thanks for) (?:asking|your question|reaching out)[.!]\s*",
 ]
 _FILLER_RE = [re.compile(p, re.IGNORECASE) for p in _FILLER]
 
@@ -161,39 +164,71 @@ class CompressionResult:
 # ─── Heuristic strategies ────────────────────────────────────────────────────
 
 class FillerRemover:
-    """Remove AI filler phrases. Zero dependencies. ~10-20% reduction on verbose responses."""
+    """Remove whole filler sentences an assistant wrote. Zero dependencies.
+
+    Leaves whitespace alone apart from the blank lines a removal opens up:
+    collapsing runs of spaces here is what flattened the indentation of
+    every unfenced code block that passed through.
+    """
 
     def apply(self, text: str) -> Tuple[str, str]:
         for pat in _FILLER_RE:
             text = pat.sub("", text)
         text = re.sub(r'\n{3,}', '\n\n', text)
-        text = re.sub(r'  +', ' ', text)
-        return text.strip(), "filler_removal"
+        return text, "filler_removal"
+
+
+# How many times a line must repeat IN A ROW before the run is collapsed.
+_REPEAT_RUN_MIN = 3
 
 
 class DuplicateLineRemover:
-    """Remove exact duplicate lines (common in repeated context). ~5-15% on long chats."""
+    """Collapse a run of identical consecutive lines into one line and a count.
+
+    This used to drop every later occurrence of any line over 40
+    characters, anywhere in the message. In prose that is rare; in what
+    people actually paste — logs, CSV rows, tracebacks, code — a repeated
+    line is data, and deleting it silently changed counts, row totals and
+    programs. A run is now collapsed only when the same line repeats at
+    least three times back to back, and the count is kept, so nothing the
+    reader could have learned from the original is gone.
+    """
 
     def apply(self, text: str) -> Tuple[str, str]:
-        seen: set = set()
-        lines = []
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped and stripped in seen and len(stripped) > 40:
-                continue  # skip duplicate non-trivial lines
-            seen.add(stripped)
-            lines.append(line)
-        return "\n".join(lines), "duplicate_removal"
+        lines = text.split("\n")
+        out: List[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            j = i + 1
+            if len(line.strip()) > 40:
+                while j < len(lines) and lines[j] == line:
+                    j += 1
+            run = j - i
+            if run >= _REPEAT_RUN_MIN:
+                out.append(line)
+                out.append(f"[previous line repeated {run - 1} more times]")
+            else:
+                out.extend(lines[i:j])
+            i = j
+        return "\n".join(out), "duplicate_removal"
 
 
 class WhitespaceNormalizer:
-    """Collapse excessive whitespace. ~2-5% reduction."""
+    """Drop trailing whitespace and collapse runs of blank lines.
+
+    Nothing else. Leading whitespace is structure — Python blocks, YAML
+    nesting, Makefile tabs, a diff's context column — and a paste with no
+    code fence reaches this stage as "prose". The previous version turned
+    tabs into spaces and every run of four or more spaces into three, so
+    two indentation levels became one and the model was shown code that
+    meant something else.
+    """
 
     def apply(self, text: str) -> Tuple[str, str]:
-        text = re.sub(r'\t', '  ', text)
-        text = re.sub(r' {4,}', '   ', text)
+        text = re.sub(r'[ \t]+(?=\n)', '', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
-        return text.strip(), "whitespace_normalization"
+        return text, "whitespace_normalization"
 
 
 class CommentStripper:
@@ -575,7 +610,8 @@ class CompressionPipeline:
         self.file_filter = FileContentFilter()
         self.lingua = LLMLinguaEngine(ratio=ratio) if enable_ml else None
 
-    def _apply_heuristics_to_prose(self, text: str) -> Tuple[str, List[str]]:
+    def _apply_heuristics_to_prose(self, text: str,
+                                   strip_filler: bool = True) -> Tuple[str, List[str]]:
         """Run the heuristic stages over the prose segments of `text` only.
 
         Code segments (fenced blocks and inline spans, per CodeBlockGuard)
@@ -583,38 +619,31 @@ class CompressionPipeline:
         rather than on the joined prose, so a duplicate-line check cannot
         see across a code block and the segment boundaries stay exact.
         """
-        stages = [self.whitespace, self.filler, self.dedup]
+        stages = [self.whitespace, self.dedup]
+        if strip_filler:
+            stages.insert(1, self.filler)
         if self.strip_comments:
             stages.append(self.comments)
 
         applied: List[str] = []
-        out: List[Tuple[bool, str]] = []
-        for is_code, segment in CodeBlockGuard.segment(text):
-            if is_code:
-                out.append((True, segment))
-                continue
-            for stage in stages:
-                segment, name = stage.apply(segment)
-                if name not in applied:
-                    applied.append(name)
-            out.append((False, segment))
-
-        # Each stage strips its segment, which would glue a prose segment
-        # onto an adjacent code fence; keep a newline at the boundary.
         pieces: List[str] = []
-        for i, (is_code, segment) in enumerate(out):
-            if not is_code and segment and i + 1 < len(out) and out[i + 1][0]:
-                segment = segment + "\n\n"
-            if not is_code and segment and i > 0 and out[i - 1][0]:
-                segment = "\n\n" + segment
+        for is_code, segment in CodeBlockGuard.segment(text):
+            if not is_code:
+                for stage in stages:
+                    segment, name = stage.apply(segment)
+                    if name not in applied:
+                        applied.append(name)
+            # No stage strips its segment, so the whitespace between prose
+            # and an inline `code span` or a fence is exactly what it was.
             pieces.append(segment)
-        return "".join(pieces), applied
+        return "".join(pieces).strip("\n"), applied
 
     def compress_text(
         self,
         text: str,
         filename: Optional[str] = None,
         min_tokens: int = 100,
+        strip_filler: bool = True,
     ) -> CompressionResult:
         """Compress a single text block through the full pipeline."""
 
@@ -654,7 +683,7 @@ class CompressionPipeline:
         # Raw pastes with no fence markup are still reachable by these
         # stages; that is the same documented gap CodeBlockGuard has for
         # LLMLingua, not a new one.
-        text, applied = self._apply_heuristics_to_prose(text)
+        text, applied = self._apply_heuristics_to_prose(text, strip_filler=strip_filler)
         strategies.extend(applied)
 
         # Save the heuristic-only result BEFORE running ML compression so we can
@@ -747,7 +776,11 @@ class CompressionPipeline:
                 result.append(msg)
                 continue
 
-            cr = self.compress_text(content, min_tokens=self.min_tokens_to_compress)
+            # Filler is an assistant's habit. A user's "Please let me know
+            # if you need the schema." is a request, not boilerplate.
+            cr = self.compress_text(
+                content, min_tokens=self.min_tokens_to_compress,
+                strip_filler=msg.get("role") == "assistant")
             total_saved += cr.original_tokens - cr.compressed_tokens
             result.append({**msg, "content": cr.compressed_text})
 

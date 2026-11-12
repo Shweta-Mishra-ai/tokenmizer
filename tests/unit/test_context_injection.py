@@ -27,6 +27,11 @@ def graph_with_signal(tmp_path):
     g.add_node(NodeType.TASK, "Implement the user authentication flow",
               NodeStatus.IN_PROGRESS, importance=0.8)
     g.add_node(NodeType.FILE, "api/auth.py", NodeStatus.IN_PROGRESS, importance=0.7)
+    # These facts came from turns this request no longer carries — the
+    # case injection exists for. A graph whose every processed turn is
+    # still in the payload gets nothing injected; see
+    # test_a_short_session_resending_its_history_gets_no_injection.
+    g._processed_hashes.add("hash-of-an-earlier-turn-not-in-this-request")
     return g
 
 
@@ -241,3 +246,22 @@ class TestContextTheRequestAlreadyCarriesIsNotRepeated:
         words = [app_module._content_words("PostgreSQL it is"),
                  app_module._content_words("sessions next")]
         assert not app_module._already_in_payload(node, words)
+
+
+@pytest.mark.asyncio
+async def test_a_short_session_resending_its_history_gets_no_injection(tmp_path, monkeypatch):
+    """Every node was extracted from this very payload, so injecting them
+    restates what the model is reading. On short sessions that block was
+    the main reason a request cost more through the proxy than without."""
+    monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", False)
+    g = GraphMemory("short-session", storage_dir=str(tmp_path))
+    raw = [
+        {"role": "user", "content": "We decided to use PostgreSQL for the primary datastore."},
+        {"role": "assistant", "content": "Decided: use PostgreSQL for the primary datastore. "
+                                          "Created api/auth.py for the login flow."},
+        {"role": "user", "content": "How are we handling database access right now?"},
+    ]
+    updated, _ = await app_module._update_graph(
+        "short-session", g, raw, [dict(m) for m in raw], "gpt-4o", {}, raw[-1]["content"])
+    assert len(g._nodes) >= 1, "fixture should have produced graph nodes"
+    assert all("relevant session context" not in (m.get("content") or "") for m in updated)

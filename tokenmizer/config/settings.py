@@ -59,6 +59,19 @@ class MemorySettings(BaseModel):
     # again. The index goes in the frozen bridge, so it is billed once per
     # cut and read from the provider's cache after. 0 leaves it out.
     tool_index_tokens: int = Field(default=1500, ge=0)
+    # Keep the turns windowing drops, verbatim, in storage_dir.
+    #
+    # The graph remembers what the extractor has a node type for. A figure,
+    # a snippet, an exact error string or a constraint stated in passing has
+    # none, and before this it left the session permanently at the first
+    # cut. Archived turns are already redacted, are searched by keyword on
+    # each later turn, and the best match is quoted back when the question
+    # is clearly about it — so a windowed session can still answer "what
+    # was the exact timeout we set?". Deleted with the session.
+    archive_dropped_turns: bool = True
+    # Ceiling, in tokens, on the verbatim excerpt quoted back from the
+    # archive on a turn that asks about it. 0 archives without recalling.
+    recall_excerpt_tokens: int = Field(default=300, ge=0)
 
 
 class GraphCheckpointSettings(BaseModel):
@@ -73,7 +86,14 @@ class GraphCheckpointSettings(BaseModel):
     # for the JSON alone can be exhausted before the JSON is complete; raise
     # it if the log reports a truncated extraction reply.
     extraction_max_tokens: int = Field(default=2048, ge=256, le=16384)
-    min_confidence: float = 0.65      # minimum validation confidence threshold
+    # Node cap per session. Over it, pruning moves the least important
+    # resolved nodes to cold storage (graph_pruned) — kept, searchable and
+    # restorable, just no longer ranked. Active decisions, open errors,
+    # work in progress, goals and schemas are never moved, whatever the
+    # count. Was a hard-coded 200, sized for a storage layout that rewrote
+    # the whole graph on every turn; per-row storage made that cost
+    # irrelevant.
+    max_nodes: int = Field(default=500, ge=50)
     # Blend embedding similarity into GraphMemory.query(), the ranker that
     # decides which nodes get injected into the prompt each turn.
     #
@@ -221,6 +241,11 @@ class TerseOutputSettings(BaseModel):
     # other, which docs/comparisons.md already warns about for running any
     # other brevity prompt alongside this layer.
     style: Literal["terse", "minimal"] = "terse"
+    # Leave the instruction out of requests whose output limit is below
+    # this. It costs its own length in input on every request and can only
+    # save output; a reply capped at a few hundred tokens has little to
+    # save, so on short exchanges it was a net cost.
+    min_max_tokens: int = Field(default=512, ge=0)
 
 
 class PrivacySettings(BaseModel):
@@ -232,6 +257,49 @@ class PrivacySettings(BaseModel):
     # inference server. Loopback is always allowed. An HTTP proxy must be
     # listed to be reachable, and then so is everything behind it.
     allowed_hosts: List[str] = Field(default_factory=list)
+
+
+class SecuritySettings(BaseModel):
+    """What the proxy changes or refuses on the way in.
+
+    Each of these edits or blocks a request the caller believes went out
+    as written, so each has to be something an operator can see and turn
+    off. Until these existed, redaction and the injection filter were
+    unconditional.
+    """
+    # Replace recognisable credentials with [REDACTED] before a message
+    # reaches the provider, the graph or a checkpoint.
+    redact_secrets: bool = True
+    # Email addresses. On by default as it always was; turn it off when the
+    # addresses ARE the work (a mail merge, a contacts migration).
+    redact_emails: bool = True
+    # Card numbers (Luhn-checked) and US SSNs. Off by default: a digit run
+    # that passes a checksum is not always a card.
+    redact_pii: bool = False
+    # The keyword denylist in security/middleware.py.
+    #   block — refuse the request with a 400 (the previous behaviour)
+    #   log   — let it through and log the match
+    #   off   — do not scan
+    # It is a speed bump against copy-pasted jailbreaks, not a boundary;
+    # see that module's docstring before relying on it.
+    injection_filter: Literal["block", "log", "off"] = "block"
+
+
+class RateLimitSettings(BaseModel):
+    """Per-client request budget. These were constants in api/app.py."""
+    enabled: bool = True
+    requests_per_minute: int = Field(default=60, ge=1)
+    burst: int = Field(default=10, ge=0)
+
+
+class RetentionSettings(BaseModel):
+    """How long a session nobody has touched is kept.
+
+    0 keeps everything forever, which is what happened before there was a
+    setting: no session was ever deleted, by anything. `DELETE
+    /api/session/{id}` removes one on request whatever this is set to.
+    """
+    session_ttl_days: float = Field(default=0, ge=0)
 
 
 class Settings(BaseSettings):
@@ -261,6 +329,16 @@ class Settings(BaseSettings):
 
     default_model: str = "claude-sonnet-4-6"
 
+    # TOKENMIZER_ENV and TOKENMIZER_CONFIG, declared so that writing them
+    # in a .env file works. They were read straight from os.environ and
+    # were not fields, so with extra="forbid" a `.env` line saying
+    # TOKENMIZER_ENV=production — the natural place for it — was an
+    # "extra input" that crashed startup. `env` is honoured from either
+    # source (see get_settings); `config` only from the real environment,
+    # because the file it names has to be found before .env is read.
+    env: str = ""
+    config: str = ""
+
     # Client model alias -> the model actually sent to the provider. This
     # is what the never-implemented `routing` block was reached for: a
     # client hard-codes "gpt-4" or an agent framework pins a name you do
@@ -288,6 +366,17 @@ class Settings(BaseSettings):
     mistral_api_key: str = ""
     cohere_api_key: str = ""
     openrouter_api_key: str = ""
+
+    # Where the provider lives, when it is not the vendor's own endpoint.
+    #
+    # openai_base_url points the `openai` provider at anything that speaks
+    # its API: Azure OpenAI, LiteLLM, vLLM, LM Studio, a corporate gateway.
+    # ollama_base_url matters the moment the proxy runs in a container,
+    # where "localhost" is the container and not the machine Ollama is on
+    # (use http://host.docker.internal:11434 there). Empty keeps each
+    # adapter's default.
+    openai_base_url: str = ""
+    ollama_base_url: str = ""
 
     # Where the state that is NOT the graph lives — today, the rate
     # limiter's token buckets.
@@ -317,6 +406,18 @@ class Settings(BaseSettings):
     # therefore one session namespace — which is the honest description
     # of what a single shared api_key has always meant.
     api_keys: List[str] = []
+    # Optional stable names for keys: {"<key>": "team-a"}. A session belongs
+    # to the principal that created it, and the principal was a hash of the
+    # key, so rotating a key orphaned every session made with it. A named
+    # key's principal is its name: give the new key the old key's name and
+    # its sessions follow. At startup, sessions owned by a named key's hash
+    # are moved to the name, so naming an existing key keeps its sessions.
+    api_key_names: dict[str, str] = Field(default_factory=dict)
+    # Price per 1K tokens, (input, output) in USD, for the cost estimates in
+    # /api/stats. Matched as a substring of the MODEL name, longest first,
+    # then of the provider name. Built-in figures are rough defaults per
+    # provider and are labelled as estimates; put your contract prices here.
+    pricing: dict[str, List[float]] = Field(default_factory=dict)
 
     # CORS
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:8000"]
@@ -347,6 +448,9 @@ class Settings(BaseSettings):
     preferences: PreferenceSettings = Field(default_factory=PreferenceSettings)
     terse_output: TerseOutputSettings = Field(default_factory=TerseOutputSettings)
     privacy: PrivacySettings = Field(default_factory=PrivacySettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
+    rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
+    retention: RetentionSettings = Field(default_factory=RetentionSettings)
 
     # How long an upstream provider call may hang before it is
     # abandoned. Every vendor SDK used by providers/providers.py
@@ -562,6 +666,9 @@ def get_settings() -> Settings:
         # set api_key at all — no typo, no load error, just a genuine
         # config gap — would otherwise get a perfectly "successful" boot
         # into the same unauthenticated state.
+        # TOKENMIZER_ENV=production written in .env rather than exported.
+        production = production or loaded.env.strip().lower() == "production"
+
         if production and not loaded.api_key:
             logger.error(
                 "TOKENMIZER_ENV=production but no api_key is configured — "

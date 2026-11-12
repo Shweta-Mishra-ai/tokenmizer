@@ -46,13 +46,6 @@ _PATTERNS = [
     re.compile(r'eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+'),
     # Bearer tokens in Authorization headers
     re.compile(r'Bearer\s+[A-Za-z0-9\-_\.]{20,}', re.IGNORECASE),
-    # Generic: password=..., secret=..., token=..., key=...
-    re.compile(
-        r'(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key'
-        r'|private[_\-]?key|auth[_\-]?key|client[_\-]?secret)\s*[=:]\s*'
-        r'["\']?[\w\-\.\/+]{8,}',
-        re.IGNORECASE,
-    ),
     # URL-embedded credentials (postgres://user:pass@host/db): redact the
     # userinfo section only — scheme and host survive so the message stays
     # readable. Connection-string passwords match no keyword or provider
@@ -70,8 +63,6 @@ _PATTERNS = [
     # Together AI (64 hex chars after explicit assignment handled by generic
     # rule; standalone "together_" prefixed keys:)
     re.compile(r'together_[A-Za-z0-9]{20,}', re.IGNORECASE),
-    # Email addresses (PII)
-    re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Z|a-z]{2,}\b'),
 ]
 
 
@@ -93,9 +84,122 @@ def _memo_clear() -> None:
         _memo.clear()
 
 
+_SECRET_WORD = (r'(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key'
+                r'|private[_\-]?key|auth[_\-]?key|client[_\-]?secret)')
+
+# Rules that keep the NAME and redact only the VALUE. Group 1 is what
+# survives. The single rule these replace matched `<word> [=:] <8+ chars of
+# anything identifier-like>` and replaced all of it, which had two failures
+# at once:
+#
+#   - It rewrote ordinary code. `token = generate_token(user)` became
+#     `[REDACTED](user)`, `api_key = settings.openai_api_key` became
+#     `[REDACTED]`, `password: Optional[SecretStr]` became
+#     `[REDACTED][SecretStr]`. The model was then asked to fix code it had
+#     been shown a corrupted copy of, and an agent wrote the marker back
+#     into the file.
+#   - It missed the commonest way a secret is actually written down:
+#     `{"password": "..."}`. The quote after the key sits between the word
+#     and the colon, so the rule never matched JSON or a Python dict.
+_VALUE_RULES = [
+    # "password": "value"  /  'api_key': 'value'   (JSON, dict literals)
+    re.compile(r'''(["']''' + _SECRET_WORD + r'''["']\s*:\s*)(["'])[^"'\n]{6,}\2''',
+               re.IGNORECASE),
+    # password = "value"   — a quoted literal on the right-hand side
+    re.compile(r'(\b' + _SECRET_WORD + r'''\s*[=:]\s*)(["'])[^"'\n]{8,}\2''',
+               re.IGNORECASE),
+    # password=hunter2hunter2 — unquoted. It must contain a digit and must
+    # not continue into a call, an attribute or a subscript: that is what
+    # separates a literal from `get_token()`, `settings.key`, `os.environ[`.
+    re.compile(r'(\b' + _SECRET_WORD + r'\s*[=:]\s*)'
+               r'(?=[A-Za-z_\-/+]{0,64}\d)[\w\-/+]{8,}(?![\w.(\[])',
+               re.IGNORECASE),
+    # DB_PASS=..., AWS_SECRET_ACCESS_KEY=... — env-file style. An
+    # UPPER_SNAKE name that says it is a secret, assigned a literal.
+    re.compile(r'(\b[A-Z][A-Z0-9_]*(?:PASS(?:WORD|WD)?|SECRET|TOKEN|API_?KEY|'
+               r'ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*\s*=\s*)'
+               r'''["']?[^\s"']{6,}["']?'''),
+]
+
+# A PEM private key, whole. No keyword and no prefix rule sees these.
+_PEM = re.compile(
+    r'-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----.{0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY-----',
+    re.DOTALL)
+
+_EMAIL = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')
+# Local parts that name a transport account, not a person.
+_SERVICE_ACCOUNTS = frozenset({"git", "hg", "svn"})
+_CARD = re.compile(r'\b(?:\d[ -]?){13,19}\b')
+_SSN = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')
+
+# What redaction does, set once at startup from `security.*` in settings by
+# configure(). The defaults are what a bare import gets.
+_config = {"secrets": True, "emails": True, "pii": False}
+
+
+def configure(*, secrets: bool = True, emails: bool = True, pii: bool = False) -> None:
+    """Choose what is redacted. Clears the memo, which holds results
+    computed under the previous choice."""
+    _config.update(secrets=bool(secrets), emails=bool(emails), pii=bool(pii))
+    _memo_clear()
+
+
+def _email_sub(m: "re.Match") -> str:
+    """Redact an address, but not the things that merely look like one.
+
+    `git clone git@github.com:acme/widgets.git` became `git clone
+    [REDACTED]:acme/widgets.git`, an scp target lost its host, and numpy's
+    matrix operator (`weights@np.linalg.inv(cov)`) was read as a mailbox.
+    An address followed by `:` `/` or `(` is a remote or an expression.
+    """
+    tail = m.string[m.end():m.end() + 1]
+    if tail in (":", "/", "("):
+        return m.group(0)
+    if m.group(0).split("@", 1)[0].lower() in _SERVICE_ACCOUNTS:
+        return m.group(0)
+    return "[REDACTED]"
+
+
+def _luhn(digits: str) -> bool:
+    total, alt = 0, False
+    for ch in reversed(digits):
+        d = int(ch)
+        if alt:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+        alt = not alt
+    return total % 10 == 0
+
+
+def _card_sub(m: "re.Match") -> str:
+    digits = re.sub(r"\D", "", m.group(0))
+    return "[REDACTED]" if 13 <= len(digits) <= 19 and _luhn(digits) else m.group(0)
+
+
+def _value_sub(m: "re.Match") -> str:
+    """Keep the name, redact the value, and keep the value's quotes so a
+    JSON document or a dict literal is still one afterwards."""
+    quote = m.group(2) if m.re.groups >= 2 else ""
+    return f"{m.group(1)}{quote}[REDACTED]{quote}"
+
+
+_SECRET_KEY_NAME = re.compile(r"^" + _SECRET_WORD + r"$", re.IGNORECASE)
+
+
 def _scrub(text: str) -> str:
-    for pat in _PATTERNS:
-        text = pat.sub("[REDACTED]", text)
+    if _config["secrets"]:
+        text = _PEM.sub("[REDACTED PRIVATE KEY]", text)
+        for pat in _PATTERNS:
+            text = pat.sub("[REDACTED]", text)
+        for pat in _VALUE_RULES:
+            text = pat.sub(_value_sub, text)
+    if _config["emails"]:
+        text = _EMAIL.sub(_email_sub, text)
+    if _config["pii"]:
+        text = _CARD.sub(_card_sub, text)
+        text = _SSN.sub("[REDACTED]", text)
     return text
 
 
@@ -138,7 +242,16 @@ def _redact_values(value):
     if isinstance(value, list):
         return [_redact_values(item) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_values(item) for key, item in value.items()}
+        # In parsed data the key is not in the string being scanned, so a
+        # value filed under a secret's name is redacted on the key alone.
+        return {
+            key: ("[REDACTED]"
+                  if (_config["secrets"] and isinstance(key, str)
+                      and isinstance(item, str) and len(item) >= 6
+                      and _SECRET_KEY_NAME.match(key))
+                  else _redact_values(item))
+            for key, item in value.items()
+        }
     return value
 
 

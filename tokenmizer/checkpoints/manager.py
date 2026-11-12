@@ -450,6 +450,18 @@ class CheckpointManager:
                 f"session {ckpt.session_id}: {e}"
             ) from e
 
+    def delete_session(self, session_id: str) -> int:
+        """Delete every checkpoint of one session. Returns how many."""
+        self._prev_snapshots.pop(session_id, None)
+        conn = self._db_connect()
+        try:
+            n = conn.execute("DELETE FROM checkpoints WHERE session_id=?",
+                             (session_id,)).rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        return n
+
     def get_latest(self, session_id: str) -> Optional[Checkpoint]:
         try:
             conn = self._db_connect()

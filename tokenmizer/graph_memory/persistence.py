@@ -213,6 +213,19 @@ def init_db(graph: "GraphMemory") -> None:
                 updated_at REAL NOT NULL
             )
         """)
+        # Cold storage for pruned nodes. prune() used to DELETE a node once
+        # a session passed its cap, and with it whatever only that node
+        # said. It now moves the node here first: out of ranking and out of
+        # the resume block, but kept whole, listable and restorable.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS graph_pruned (
+                session_id TEXT NOT NULL,
+                node_id    TEXT NOT NULL,
+                data_json  TEXT NOT NULL,
+                pruned_at  REAL NOT NULL,
+                PRIMARY KEY (session_id, node_id)
+            )
+        """)
         # Separate table for decision transitions — full causal story
         # Kept separate so it survives graph pruning and is queryable independently
         conn.execute("""
@@ -255,6 +268,157 @@ def persist_transition(graph: "GraphMemory", t: DecisionTransition) -> None:
             conn.close()
     except Exception as e:
         logger.error(f"Transition persist failed: {e}")
+
+
+def store_pruned(graph: "GraphMemory", nodes: list) -> bool:
+    """Write nodes about to be pruned into cold storage. Returns success;
+    a caller must not delete what this could not keep."""
+    if not nodes:
+        return True
+    try:
+        conn = graph._db_connect()
+        try:
+            with conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO graph_pruned VALUES (?,?,?,?)",
+                    [(graph.session_id, n.id,
+                      json.dumps(asdict(n), sort_keys=True, default=str), time.time())
+                     for n in nodes])
+        finally:
+            conn.close()
+        return True
+    except Exception as e:
+        logger.error("Could not move %d pruned node(s) of %s to cold storage: %s",
+                     len(nodes), graph.session_id, e)
+        return False
+
+
+def list_pruned(graph: "GraphMemory") -> list[dict]:
+    try:
+        conn = graph._db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT data_json, pruned_at FROM graph_pruned WHERE session_id=? "
+                "ORDER BY pruned_at DESC", (graph.session_id,)).fetchall()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error("Could not read cold storage for %s: %s", graph.session_id, e)
+        return []
+    out = []
+    for data_json, pruned_at in rows:
+        try:
+            d = json.loads(data_json)
+        except (TypeError, ValueError):
+            continue
+        d["pruned_at"] = pruned_at
+        out.append(d)
+    return out
+
+
+def restore_pruned(graph: "GraphMemory", node_id: str) -> bool:
+    """Bring one node back from cold storage into the live graph."""
+    conn = graph._db_connect()
+    try:
+        row = conn.execute(
+            "SELECT data_json FROM graph_pruned WHERE session_id=? AND node_id=?",
+            (graph.session_id, node_id)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return False
+    before = len(graph._nodes)
+    _hydrate_nodes(graph, [json.loads(row[0])])
+    if len(graph._nodes) == before and node_id not in graph._nodes:
+        return False
+    graph._nodes[node_id].touch()
+    graph._dirty = True
+    if not graph._persist():
+        return False
+    conn = graph._db_connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM graph_pruned WHERE session_id=? AND node_id=?",
+                         (graph.session_id, node_id))
+    finally:
+        conn.close()
+    return True
+
+
+def delete_session_rows(storage_dir, session_id: str) -> int:
+    """Delete every graph row of one session. Returns nodes deleted."""
+    from pathlib import Path
+    db = Path(storage_dir) / "graph_memory.db"
+    if not db.exists():
+        return 0
+    conn = sqlite3.connect(str(db), timeout=5.0)
+    try:
+        with conn:
+            n = conn.execute("DELETE FROM graph_nodes WHERE session_id=?",
+                             (session_id,)).rowcount
+            for table in ("graph_edges", "graph_meta", "graphs",
+                          "decision_transitions", "graph_pruned"):
+                try:
+                    conn.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
+                except sqlite3.OperationalError:
+                    pass  # table predates this build
+    finally:
+        conn.close()
+    return n
+
+
+def stale_session_ids(storage_dir, cutoff: float, ownership) -> list[str]:
+    """Sessions whose last graph write, or failing that whose claim, is
+    older than `cutoff`."""
+    from pathlib import Path
+    last: dict[str, float] = {}
+    db = Path(storage_dir) / "graph_memory.db"
+    if db.exists():
+        conn = sqlite3.connect(str(db), timeout=5.0)
+        try:
+            for sid, ts in conn.execute("SELECT session_id, updated_at FROM graph_meta"):
+                last[sid] = max(last.get(sid, 0.0), ts or 0.0)
+        finally:
+            conn.close()
+    for sid, created in ownership.all_sessions():
+        last[sid] = max(last.get(sid, 0.0), created or 0.0)
+    return [sid for sid, ts in last.items() if ts < cutoff]
+
+
+def session_summaries(storage_dir, session_ids: list[str]) -> dict[str, dict]:
+    """Node/edge counts, node counts by type, and last update per session,
+    read straight from SQLite — no GraphMemory is built.
+
+    The session list used to construct a full GraphMemory for every
+    session a caller owned, on every dashboard refresh: each one a full
+    load, a cache insertion and potentially an eviction of a session
+    someone was actually using.
+    """
+    from pathlib import Path
+    out: dict[str, dict] = {sid: {"node_count": 0, "edge_count": 0, "by_type": {},
+                                  "updated_at": 0.0} for sid in session_ids}
+    db = Path(storage_dir) / "graph_memory.db"
+    if not session_ids or not db.exists():
+        return out
+    marks = ",".join("?" * len(session_ids))
+    conn = sqlite3.connect(str(db), timeout=5.0)
+    try:
+        for sid, ntype, count, updated in conn.execute(
+                f"SELECT session_id, json_extract(data_json, '$.type'), COUNT(*), "
+                f"MAX(updated_at) FROM graph_nodes WHERE session_id IN ({marks}) "
+                f"AND COALESCE(json_extract(data_json, '$._evicted'), 0) = 0 "
+                f"GROUP BY session_id, json_extract(data_json, '$.type')", session_ids):
+            row = out[sid]
+            row["by_type"][ntype] = count
+            row["node_count"] += count
+            row["updated_at"] = max(row["updated_at"], updated or 0.0)
+        for sid, count in conn.execute(
+                f"SELECT session_id, COUNT(*) FROM graph_edges WHERE session_id IN ({marks}) "
+                f"GROUP BY session_id", session_ids):
+            out[sid]["edge_count"] = count
+    finally:
+        conn.close()
+    return out
 
 
 def get_transitions(graph: "GraphMemory") -> list[DecisionTransition]:

@@ -95,7 +95,7 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_MEMORY__TOOL_INDEX_TOKENS` | `1500` | Budget for an index of the file paths that appeared in the tool output windowing drops, listed by directory in the resume block. The agent still knows which files exist and where, so it re-reads instead of guessing. Measured on a real agent session, it raised what the agent went on to use that was still in the request from 71% to 94%. `0` leaves it out |
 | `TOKENMIZER_PRIVACY__LOCAL_ONLY` | `false` | Nothing leaves this machine except to `privacy.allowed_hosts`. Refuses to start with a remote provider (use `ollama`), and blocks every other connection and DNS lookup in the process, including the first-use downloads of the tokenizer and embedding model — pre-fetch those (`TIKTOKEN_CACHE_DIR`, `HF_HOME`) or token counts fall back to an estimate and the semantic cache to exact match |
 | `TOKENMIZER_PRIVACY__ALLOWED_HOSTS` | *(empty)* | Extra hosts a `local_only` process may reach, e.g. your own inference gateway. Loopback is always allowed. HTTP proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) are removed from the process while the mode is on, because a proxy, even one on loopback, hides the real destination from the guard; list the proxy's own host here to keep it, and everything behind it is then reachable. `GET /health` reports `privacy.guard_active` and what was removed |
-| `TOKENMIZER_GRAPH_CHECKPOINT__MIN_CONFIDENCE` | `0.65` | Extraction confidence below which a fact is not written to the graph |
+| `TOKENMIZER_GRAPH_CHECKPOINT__MAX_NODES` | `500` | Node cap per session. Over it, the least important unprotected nodes move to cold storage — listed at `GET /api/graph/{id}/pruned`, restorable with `POST /api/graph/{id}/restore?node_id=…`. Active decisions, open errors, in-progress tasks, goals and schemas are never moved |
 | `TOKENMIZER_GRAPH_CHECKPOINT__SEMANTIC_RETRIEVAL` | `auto` | Rank injected context by embeddings. `auto` = on when the model actually loads, resolved once at startup; `true`/`false` pin it |
 | `TOKENMIZER_GRAPH_CHECKPOINT__CROSS_SESSION_RECALL` | `false` | Let a session retrieve facts from the same principal's other sessions |
 | `TOKENMIZER_CACHE__TTL_SECONDS` | `3600` | How long a cached answer stays valid |
@@ -110,6 +110,21 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_TERSE_OUTPUT__ENABLED` | `true` | Inject the output-style instruction at all |
 | `TOKENMIZER_TERSE_OUTPUT__LEVEL` | `full` | How hard `lite`/`full`/`ultra` push, both in the injected instruction and in how much boilerplate the response trimmer strips. Ignored for the injected prompt when `style: minimal`, which is a single fixed instruction |
 | `TOKENMIZER_TERSE_OUTPUT__STYLE` | `terse` | Output-style prompt injected each turn: `terse`, `minimal`, or `off` |
+| `TOKENMIZER_TERSE_OUTPUT__MIN_MAX_TOKENS` | `512` | Leave the output-style instruction out of requests whose output limit is below this. It is billed as input on every request and can only shorten output, so on short replies it costs more than it saves |
+| `TOKENMIZER_MEMORY__ARCHIVE_DROPPED_TURNS` | `true` | Keep every turn windowing stops sending, verbatim (already redacted), in `turn_archive.db`. Searchable at `GET /api/session/{id}/archive?q=…`; deleted with the session |
+| `TOKENMIZER_MEMORY__RECALL_EXCERPT_TOKENS` | `300` | When a question clearly matches an archived turn (a shared number, path or identifier, or two shared words), quote that passage back verbatim within this budget. `0` archives without recalling |
+| `TOKENMIZER_OPENAI_BASE_URL` | *(empty)* | Point the `openai` provider at any server with the same API: Azure OpenAI, LiteLLM, vLLM, LM Studio, a gateway |
+| `TOKENMIZER_OLLAMA_BASE_URL` | *(empty)* | Where Ollama listens. Default `http://localhost:11434`; inside a container use `http://host.docker.internal:11434` |
+| `TOKENMIZER_SECURITY__REDACT_SECRETS` | `true` | Replace recognisable credentials with `[REDACTED]` before a message reaches the provider, the graph or a checkpoint. Names are kept and only values are replaced (`password = "[REDACTED]"`), and code such as `token = get_token()` is left alone |
+| `TOKENMIZER_SECURITY__REDACT_EMAILS` | `true` | Redact email addresses. Git remotes (`git@host:repo`), scp targets and `a@b` expressions are not addresses and are left alone |
+| `TOKENMIZER_SECURITY__REDACT_PII` | `false` | Also redact Luhn-valid card numbers and US SSNs |
+| `TOKENMIZER_SECURITY__INJECTION_FILTER` | `block` | The keyword denylist for prompt-injection phrasings: `block` (400), `log` (allow and log) or `off` |
+| `TOKENMIZER_RATE_LIMIT__ENABLED` | `true` | Per-client rate limiting |
+| `TOKENMIZER_RATE_LIMIT__REQUESTS_PER_MINUTE` | `60` | Sustained requests per minute per client address |
+| `TOKENMIZER_RATE_LIMIT__BURST` | `10` | Extra requests allowed in a burst above that |
+| `TOKENMIZER_RETENTION__SESSION_TTL_DAYS` | `0` | Delete sessions nobody has touched for this many days (graph, checkpoints, archive, cache, ownership). `0` keeps everything. `DELETE /api/session/{id}` removes one on request |
+| `TOKENMIZER_API_KEY_NAMES` | `{}` | Stable names for keys, as JSON `{"<key>": "team-a"}`. A named key's sessions belong to the name, so rotating the key (give the new one the same name) keeps them. Naming an existing key moves its sessions to the name at startup |
+| `TOKENMIZER_PRICING` | `{}` | Price per 1K tokens, `[input, output]` in USD, keyed by a substring of the model name (longest match wins) or by provider, as JSON. Used for the cost estimates in `/api/stats`; the built-in figures are rough per-provider defaults |
 | `TIKTOKEN_CACHE_DIR` | *(unset)* | Where tiktoken looks for its BPE vocabulary. Set it, and pre-download, to run without egress — the Docker image does this at build time |
 
 Two variables are worth calling out because they fail loudly rather than

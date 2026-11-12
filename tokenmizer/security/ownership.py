@@ -70,14 +70,19 @@ class OwnershipUnavailable(Exception):
     """Raised when ownership state can't be determined — deny, never allow."""
 
 
-def principal_for_key(api_key: str) -> str:
+def principal_for_key(api_key: str, names: Optional[dict] = None) -> str:
     """Stable, non-reversible principal id for a credential.
 
     Hashed so the ownership table never stores raw API keys: leaking that
-    file must not leak credentials.
+    file must not leak credentials. A key given a name in
+    settings.api_key_names is that name instead, so rotating the key does
+    not orphan its sessions (see Settings.api_key_names).
     """
     if not api_key:
         return DEV_PRINCIPAL
+    name = (names or {}).get(api_key)
+    if name:
+        return "n_" + name
     return "k_" + hashlib.sha256(api_key.encode()).hexdigest()[:16]
 
 
@@ -178,6 +183,51 @@ class OwnershipStore:
         except Exception as e:
             raise OwnershipUnavailable(str(e)) from e
         return [r[0] for r in rows]
+
+    def all_sessions(self) -> list[tuple[str, float]]:
+        """(session_id, claimed_at) for every claimed session."""
+        try:
+            conn = self._connect()
+            try:
+                return conn.execute(
+                    "SELECT session_id, created_at FROM session_owners").fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            raise OwnershipUnavailable(str(e)) from e
+
+    def release(self, session_id: str) -> int:
+        """Forget who owns `session_id` (it is being deleted)."""
+        try:
+            conn = self._connect()
+            try:
+                n = conn.execute("DELETE FROM session_owners WHERE session_id=?",
+                                 (session_id,)).rowcount
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            raise OwnershipUnavailable(str(e)) from e
+        return n
+
+    def rename_owner(self, old: str, new: str) -> int:
+        """Move every session of principal `old` to `new`. Used when a key
+        is given a name, so its sessions follow the name from then on."""
+        if old == new:
+            return 0
+        try:
+            conn = self._connect()
+            try:
+                n = conn.execute("UPDATE session_owners SET owner=? WHERE owner=?",
+                                 (new, old)).rowcount
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            raise OwnershipUnavailable(str(e)) from e
+        if n:
+            logger.info("Moved %d session(s) from a key's hash to its configured name", n)
+        return n
 
     def check_access(self, session_id: str, principal: str, *, claim: bool = True) -> None:
         """Raise SessionAccessDenied if `principal` may not touch this
