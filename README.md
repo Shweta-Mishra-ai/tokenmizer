@@ -428,7 +428,7 @@ is a small sample and the same person wrote every label.
 **Retrieval is measured separately.** `python -m
 benchmarks.graph_retrieval.query_eval` scores what `query()` returns for
 questions phrased the way a person asks them, not in the node's own
-words: **recall@6 90% over 40 cases**, keyword ranking only. The eval was
+words: **recall@6 92% over 40 cases**, keyword ranking only. The eval was
 13 cases until this branch, where one case flipping moved the headline by
 8 points; every case is checked to be answerable from its own transcript,
 because an ungrounded question measures extraction and reads as a
@@ -454,12 +454,25 @@ still had 97% of what the agent went on to use in the request (94% over 58
 requests). That is one session and an input-only estimate, and information
 retained is not answer quality: see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
+**Long sessions are tested for loss, not only for cost.** `python -m
+benchmarks.soak` drives the real proxy through 1,000 turns and 19.7 MB of
+history, with a 4 MB tool output and 50 planted facts. At the end all 50 are
+in the graph, all 50 are recalled into the request that asks about them, and
+all 50 survive a restart; the client's newest message reached the provider
+unaltered on all 1,000 requests. Late requests take a median 652 ms there.
+Before this round, the same session lost more than half its facts by 120
+turns and did not finish in an hour. Facts are planted in explicit wording:
+see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
+
 **Independently verified against 7 other methods.** A separate
 100-session benchmark ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research),
 a different corpus and scorer than the numbers above) ties TokenMizer
 0.5.4 for first place at **60% macro F1** — level with Mem0-style (60%)
 and Graphiti-style (59%), ahead of GraphRAG-style (44%), MemGPT-style
-(35%), and every naive baseline (under 20%).
+(35%), and every naive baseline (under 20%). Re-measured on this branch
+(2026-11-12): 92% on that corpus, which later rounds were tuned against, and
+**64% and 58% on two held-out sets frozen before tuning**, where the best
+comparison method reaches 35% and 25%.
 
 **Measured on real agent traffic, not only on labelled corpora.** The
 same research repository runs the product on **1,467 public SWE-bench

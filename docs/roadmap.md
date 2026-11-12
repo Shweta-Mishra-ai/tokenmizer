@@ -17,12 +17,12 @@ benchmark, the suite is right and this file is a bug.
 |---|---|---|
 | Extraction, macro F1 on the labelled corpus | 97% overall; **91% on real transcripts**, 98% synthetic | `python -m benchmarks.eval` |
 | Label quality | 0% truncated mid-word; 0 near-duplicate pairs over 169 labels | same run |
-| Retrieval, recall@6 on paraphrased questions | **90% keyword, n=40** (88% before intent ranking; 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
+| Retrieval, recall@6 on paraphrased questions | **92% keyword, n=40** (90% before identifier sub-words; 88% before intent ranking; 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
 | Extraction outside coding | **93%** macro F1 with a domain pack, **11%** without | `benchmarks.eval --corpus benchmarks/eval/corpus_domains` |
 | Out-of-ontology facts surviving windowing | **0% to 100%**, at +25 tokens of resume per session | `benchmarks.resume_quality.runner` |
 | Checkpoint accuracy | 80% task / 100% decision / 100% file recall, 207-token resume | `benchmarks.checkpoint_accuracy.runner` |
 | Graph density, fastapi_auth session | 29 nodes, 27 edges, 4 communities + 6 unclustered | `/api/graph/{id}/viz` |
-| Independent 100-session benchmark | ties for first at 60% macro F1; decisions 59%, errors 44% (weakest) | tokenmizer-research |
+| Independent 100-session benchmark | **92%** macro F1 on the n=100 corpus (tuned against); **64% / 58%** on held-out v3 / v4, never tuned against, where the best reimplemented comparison method reaches 35% / 25%. 0.5.4 tied for first at 60% | tokenmizer-research, 2026-11-12 |
 | Suite | 2327 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
@@ -129,8 +129,8 @@ no longer gets quietly worse ranking than the same deployment's proxy.
 The eval is enlarged from 13 cases to **40**, across every corpus session
 including the six captured transcripts, with a grounding check that
 refuses a question its own transcript cannot answer. Keyword ranking
-scores **recall@6 90%** on it. Two of the four misses, named rather than
-characterised, are `real_audit_concurrency` / "what is still not safe
+scores **recall@6 92%** (37/40) on it. Two of the three misses, named
+rather than characterised, are `real_audit_concurrency` / "what is still not safe
 across workers" (expects a node about per-process state; returns the
 advisory-lock nodes) and `real_audit_extraction` / "what were we getting
 badly wrong" (expects the error-recall node). Both are abstract
@@ -150,6 +150,21 @@ no durable storage, sessions that lost stored memory, and broken
 checkpoint storage. A `/health` call that itself fails is reported as
 "could not read", never as healthy: unknown and fine are different
 answers, and savings were the only number the CLI used to show.
+
+**Open: a decision's scope is not part of its identity.**  *(found 2026-11-12)*
+The decision extractor drops "for the billing service" from a label, so a
+later decision in the same slot for a *different* component supersedes it:
+"the ledger service uses `ledger_events`" marks "the billing service uses
+`billing_events`" superseded. `main` behaves the same. In the soak, 16 of 18
+planted decision nodes end up superseded. They are still recalled, through
+the resume's supersession lines, but `query()` skips superseded nodes and
+finds 2 of 10. The fix is to carry the scope in the label, or as a field
+supersession compares — not another word list.
+
+**Open: a change of mind is often not extracted.**  *(found 2026-11-12)*
+"Change of plan: switch the partition key to `account_id`" and "Actually,
+let's store sessions in X instead" produce nothing, so the earlier choice
+stays current in every resume. `main` behaves the same.
 
 ### P1 — more sessions, more domains, more of the pipeline real
 

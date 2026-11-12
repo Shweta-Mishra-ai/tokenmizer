@@ -237,7 +237,12 @@ re-render"). If the question quoted the answer, the person would not have
 needed to ask — and those are exactly the cases token-overlap ranking
 cannot serve.
 
-**recall@6 90%** (36/40) with keyword ranking; it was 88% before the ranker learned to read a question's intent (failure, decision, progress or location words, and present tense). Every case is checked to be
+**recall@6 92%** (37/40) with keyword ranking. It was 88% before the ranker
+learned to read a question's intent (failure, decision, progress or location
+words, and present tense), and 90% before identifiers were also matched by
+their parts (`quartz_uploader` answers "the quartz uploader"), function words
+stopped counting as overlap, and a question naming what it wants started
+ranking the other kinds of node lower. Every case is checked to be
 answerable from its own transcript before scoring: an ungrounded question
 measures extraction, not retrieval, and reads as a retrieval failure
 forever.
@@ -247,6 +252,54 @@ headline by 8 points. The 92% figure once quoted for
 `semantic_retrieval` came from that smaller set and has **not** been
 re-measured against these 40 — `--semantic` needs the embedding weights,
 and they could not be fetched where this was run.
+
+## Long sessions — `benchmarks/soak`
+
+```bash
+python -m benchmarks.soak                              # 1,000 turns, 4 MB tool output
+python -m benchmarks.soak --concurrent 8 --turns 200   # isolation across sessions
+```
+
+The real proxy (windowing, compression, extraction, SQLite, recall) driven
+the way a client drives it — the whole history resent on every request —
+with only the provider replaced by a stand-in that records what it was
+sent. The session mixes filler from the captured transcripts, tool output
+of 1–200 KB, one 4 MB tool output, and **50 planted facts** (10 each of
+decisions, errors, pending tasks, edited files, finished tasks), each with
+an answer token that appears nowhere else. At the end each fact is asked
+about, long after its turn left the window, and the answer must be in what
+the proxy sends upstream.
+
+| 1,000 turns, 19.7 MB of history | Before this round | Now |
+|---|---:|---:|
+| Facts in the graph | 23 of 50 at 120 turns | **50 of 50** |
+| Facts recalled end to end | 35 of 50 at 120 turns | **50 of 50** |
+| Facts after a restart (reloaded from disk) | — | **50 of 50** |
+| Newest client message altered | — | 0 of 1,000 requests |
+| Latency, first / last 10% of requests (median) | did not finish in an hour | 70 / 652 ms |
+| Latency, last 10%, 95th percentile | — | 1.16 s |
+| Process memory, start → end | — | 109 → 410 MB |
+
+The process memory includes the client's own copy of the history, which
+lives in the same process here. "Before" is the branch at the start of this
+round; at 1,000 turns it did not finish, because each late request
+re-extracted most of the history (see the CHANGELOG).
+
+**Cold start** — the first request on an existing conversation extracts its
+whole history in one call:
+
+| History | main | now |
+|---|---:|---:|
+| 300 turns, 4 MB | 22.8 s | 4.6 s |
+| 1,000 turns, 15 MB | 72 s | 14.8 s |
+| Real agent session, 6.5 MB (one 6.3 MB observation) | 57 s | 1.5 s |
+| Real agent session, 643 KB | 3.1 s | 3.1 s |
+
+Still slow at the top end: a 15 MB history costs about 15 s of extraction on
+its first request. **Limits:** facts are planted in explicit wording, so this
+measures what happens to extracted facts over length, not extraction of
+implicit phrasing (see the research held-out corpora for that); one process,
+no real network; timings are from a shared 4-core VM.
 
 ## Domains other than coding
 
