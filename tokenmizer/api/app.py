@@ -987,11 +987,52 @@ async def _check_rate_limit(request: Request) -> None:
         )
 
 
+# Where each session's output-style instruction goes, decided once and then
+# held. See _terse_placement. Bounded like the other per-session tables.
+_TERSE_PLACEMENT: OrderedDict[str, str] = OrderedDict()
+_TERSE_PLACEMENT_MAX = 10_000
+
+
+def _terse_placement(session_id: str | None, qualifies: bool) -> str | None:
+    """"system", "tail" or None (leave it out) for this request.
+
+    The instruction used to be prepended to the system prompt whenever the
+    request qualified. With a size threshold that changes mid-session, the
+    first qualifying request rewrote the first bytes of the conversation,
+    the provider's prompt cache missed, and the whole history was billed as
+    a cache write: measured on a 40-turn replay, +10% cost for the session
+    from that one request. A cached prefix must not change once it exists:
+
+      - qualifies on the session's first request: system prompt, held for
+        the rest of the session (cached with everything else);
+      - starts to qualify later: appended after the history instead, where
+        it never disturbs the cached prefix (about 20 uncached tokens per
+        request rather than one rewrite of everything).
+    """
+    if session_id is None:
+        return "system" if qualifies else None
+    prev = _TERSE_PLACEMENT.get(session_id)
+    if prev == "system":
+        mode = "system"                     # never removed: that would break the prefix too
+    elif prev is None:
+        mode = "system" if qualifies else "off"
+    else:
+        mode = "tail" if qualifies else "off"
+        if prev == "tail":
+            mode = "tail" if qualifies else "off"
+    _TERSE_PLACEMENT[session_id] = "tail" if (prev == "tail" or mode == "tail") else mode
+    _TERSE_PLACEMENT.move_to_end(session_id)
+    while len(_TERSE_PLACEMENT) > _TERSE_PLACEMENT_MAX:
+        _TERSE_PLACEMENT.popitem(last=False)
+    return None if mode == "off" else mode
+
+
 def _apply_compression_layers(
     messages: list[dict],
     settings,
     savings: dict,
     max_tokens: int = 4096,
+    session_id: str | None = None,
 ) -> list[dict]:
     """
     Layer 0-2: file intelligence, compression, terse injection.
@@ -1008,7 +1049,17 @@ def _apply_compression_layers(
 
     # Layer 1: Prompt compression
     if settings.compression.enabled:
-        compressed, saved = _compression.compress_messages(messages, protect_recent=3)
+        # Where the provider caches the request prefix, a message must be
+        # sent with the same bytes every time: compressed only once it aged
+        # past the protected tail, each turn rewrote one message mid-history
+        # and the cache was re-written from there on. Measured on a 60-turn
+        # replay with long replies: +54% against a client caching on its own,
+        # -29% with compression off. So under caching every message is
+        # compressed the first time it is sent and never changes after.
+        # The heuristic stages only drop whole filler sentences, trailing
+        # whitespace and runs of 3+ identical lines (with a count).
+        compressed, saved = _compression.compress_messages(
+            messages, protect_recent=0 if _stable_window() else 3)
         messages = compressed
         savings["compression"] = saved
 
@@ -1019,10 +1070,23 @@ def _apply_compression_layers(
     # cannot get much shorter, and the instruction then costs more than it
     # can save — the main reason a short chat cost more through the proxy
     # than without it. Below terse_output.min_max_tokens it is left out.
-    if (settings.terse_output.enabled
-            and max_tokens >= settings.terse_output.min_max_tokens
-            and (settings.terse_output.min_conversation_tokens <= 0
-                 or count_messages_tokens(messages) >= settings.terse_output.min_conversation_tokens)):
+    qualifies = bool(
+        settings.terse_output.enabled
+        and max_tokens >= settings.terse_output.min_max_tokens
+        and (settings.terse_output.min_conversation_tokens <= 0
+             or count_messages_tokens(messages) >= settings.terse_output.min_conversation_tokens))
+    placement = _terse_placement(session_id, qualifies) if settings.terse_output.enabled else None
+    if placement == "tail":
+        # Only after a trailing user turn; anywhere else (a tool result
+        # closing an agent step) it would have to go in the system prompt,
+        # which is exactly the prefix change this placement avoids.
+        if messages and messages[-1].get("role") == "user" \
+                and isinstance(messages[-1].get("content"), str):
+            terse = _compression.terse_system_prompt(
+                settings.terse_output.level, style=settings.terse_output.style)
+            messages[-1] = {**messages[-1],
+                            "content": f"{messages[-1]['content']}\n\n[{terse}]"}
+    elif placement == "system":
         terse = _compression.terse_system_prompt(
             settings.terse_output.level, style=settings.terse_output.style)
         has_system = any(m.get("role") == "system" for m in messages)
@@ -1043,7 +1107,16 @@ def _window_messages(messages: list[dict], graph, model: str) -> tuple[list[dict
         messages, settings.memory.max_tokens_before_summary, model
     ):
         return messages, 0
-    return _smart_window.apply(messages, graph, model, stable=_stable_window())
+    stable = _stable_window()
+    floor = 0
+    if stable and settings.provider in ("anthropic", "claude"):
+        # Never cut below what the provider will cache; see
+        # SmartMessageWindow._respect_floor. 20% headroom so the request
+        # stays above the minimum as the token estimate wobbles.
+        from tokenmizer.providers.providers import _cache_minimum
+        floor = int(_cache_minimum(model) * 1.2)
+    return _smart_window.apply(messages, graph, model, stable=stable,
+                               min_request_tokens=floor)
 
 
 def _stable_window() -> bool:
@@ -1677,7 +1750,7 @@ async def chat_completions(req: ChatRequest, request: Request):
 
     # Layer 0-2: file intelligence, compression, terse injection
     messages = _apply_compression_layers(messages, settings, savings,
-                                         max_tokens=_max_tokens(req))
+                                         max_tokens=_max_tokens(req), session_id=session_id)
 
     orig_input_tokens = count_messages_tokens(raw_messages, model)
 

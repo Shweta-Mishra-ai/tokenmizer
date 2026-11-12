@@ -229,6 +229,38 @@ def _spaced_lower(text: str) -> str:
 
 _INFLECTION = r"(?:s|es|d|ed|r|er|ers|ing|ment|ql)?"
 
+# Question words that say which KIND of fact is wanted. Kept to plain,
+# domain-free vocabulary; see GraphMemory._score_nodes.
+_INTENT_WORDS: dict[NodeType, re.Pattern] = {
+    NodeType.ERROR: re.compile(
+        r"\b(?:broke|broken|break(?:s|ing)?|fail(?:s|ed|ing|ure)?|wrong|bugs?|crash\w*|"
+        r"errors?|issues?|problems?|slow\w*|unsafe|not safe|leak\w*|regress\w*|"
+        r"went wrong|goes wrong|go wrong)\b", re.IGNORECASE),
+    NodeType.DECISION: re.compile(
+        r"\b(?:decide\w*|decision\w*|chose|choose|chosen|pick(?:ed)?|which\s+\w+\s+(?:do|did|are|will)\s+we|"
+        r"went with|go(?:ing)? with|why (?:do|did|are) we (?:use|using))\b", re.IGNORECASE),
+    NodeType.TASK: re.compile(
+        r"\b(?:left|remaining|todo|to do|next|still need|pending|done|finished|"
+        r"checking|verify\w*|progress|status)\b", re.IGNORECASE),
+    NodeType.FILE: re.compile(r"\b(?:files?|where (?:is|are|does)|module|path)\b", re.IGNORECASE),
+}
+_INTENT_BOOST = 1.5
+
+# A question about the present ("how ARE we checking", "what is STILL
+# broken", "right now") asks for what is open, not what is finished; the
+# fixed importances rank a completed task (0.8) above work in progress (0.6).
+_PRESENT = re.compile(r"\b(?:are we|is (?:it|there|this)? ?still|still|currently|"
+                      r"right now|at the moment|so far)\b", re.IGNORECASE)
+_PRESENT_BOOST = 1.3
+
+
+_OPEN_STATUSES = frozenset({NodeStatus.IN_PROGRESS, NodeStatus.PENDING, NodeStatus.FAILED,
+                            NodeStatus.CONTESTED})
+
+
+def _query_intent(task: str) -> list[NodeType]:
+    return [t for t, pattern in _INTENT_WORDS.items() if pattern.search(task or "")]
+
 
 # ── Graph ────────────────────────────────────────────────────────────────────
 
@@ -1634,7 +1666,15 @@ class GraphMemory:
             NodeType.DEPENDENCY: 0.70,
             NodeType.ENVIRONMENT: 0.70,
         }
+        # What the question asks FOR. "What broke when signing people up"
+        # shares no word with "422 on POST /signup", but it is plainly
+        # asking for a failure; keyword overlap cannot see that, and the
+        # fixed type order ranked every decision above every error.
+        _TYPE_BOOST = {**_TYPE_BOOST}
+        for node_type in _query_intent(task):
+            _TYPE_BOOST[node_type] = _TYPE_BOOST.get(node_type, 1.0) * _INTENT_BOOST
 
+        present = bool(_PRESENT.search(task or ""))
         scored: list[tuple[float, MemoryNode]] = []
 
         for node in self._nodes.values():
@@ -1651,6 +1691,8 @@ class GraphMemory:
             overlap = len(query_words & node_words) / max(1, len(query_words))
             recency = 1.0 / (1.0 + node.age_days() * 0.1)
             type_boost = _TYPE_BOOST.get(node.type, 1.0)
+            if present and node.status in _OPEN_STATUSES:
+                type_boost *= _PRESENT_BOOST
 
             # Score: overlap is primary signal; importance and recency are tiebreakers
             score = (overlap * 0.6 + node.importance * 0.3 + recency * 0.1) * type_boost

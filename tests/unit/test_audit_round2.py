@@ -657,3 +657,92 @@ def test_checkpoints_and_flushes_run_off_the_event_loop(client, monkeypatch):
         threading.get_ident()) or real_persist(force=force))
     asyncio.run(flush_and_note())
     assert persisted and loop_threads[0] not in persisted + seen
+
+
+def test_min_confidence_reaches_the_validator(monkeypatch):
+    """It was removed from Settings as unused while the validator still read
+    it; every start then logged a warning and the value could not be set."""
+    from tokenmizer.graph_memory import validator as v
+    monkeypatch.setattr(app_module.settings.graph_checkpoint, "min_confidence", 0.8)
+    monkeypatch.setattr(v, "_validator", None)
+    assert v.get_validator().min_confidence == 0.8
+
+
+# ── round 5: prompt-cache cost ───────────────────────────────────────────────
+
+def test_a_cut_never_goes_below_the_cache_minimum(tmp_path):
+    """Cut to ~870 tokens under a 1,024 minimum, every later request was
+    billed at full price: windowing made a 150-turn session 9% dearer."""
+    from tokenmizer.compression.window import SmartMessageWindow
+    from tokenmizer.core.tokenizer import count_messages_tokens
+    from tokenmizer.graph_memory.graph import GraphMemory
+    conv = []
+    for i in range(80):
+        conv += [{"role": "user", "content": f"question {i} " + "word " * 30},
+                 {"role": "assistant", "content": f"answer {i} " + "word " * 30}]
+    w = SmartMessageWindow(token_budget=2000, protect_recent=4)
+    g = GraphMemory("floor", storage_dir=str(tmp_path))
+    out, _ = w.apply(conv, g, "claude-sonnet-5", stable=True, min_request_tokens=1500)
+    assert count_messages_tokens(out, "claude-sonnet-5") >= 1500
+    small = conv[:6]
+    same, saved = w.apply(small, g, "claude-sonnet-5", min_request_tokens=10_000)
+    assert same == small and saved == 0
+
+
+def test_the_output_instruction_never_rewrites_a_cached_prefix(client, monkeypatch):
+    """Switched on mid-session it went into the system prompt and the
+    provider's cache missed on the whole history: +10% on a 40-turn replay."""
+    c, fake = client
+    monkeypatch.setattr(app_module.settings.terse_output, "min_conversation_tokens", 200)
+    history, systems = [], []
+    for i in range(12):
+        history.append({"role": "user", "content": f"question {i} " + "word " * 20})
+        _chat_body = {"session_id": "terse-stable", "max_tokens": 1024, "messages": history}
+        c.post("/v1/chat/completions", json=_chat_body)
+        sent = fake.chat.call_args.kwargs["messages"]
+        systems.append(next((m["content"] for m in sent if m["role"] == "system"), None))
+        history.append({"role": "assistant", "content": "ok"})
+    assert len(set(systems)) == 1, "the system prompt changed mid-session"
+    last = fake.chat.call_args.kwargs["messages"][-1]["content"]
+    assert "preamble" in last          # it went after the history instead
+
+
+def test_history_compression_is_stable_under_prompt_caching(monkeypatch):
+    """Compressed only once past the protected tail, one message changed bytes
+    every turn and the cache was rewritten from there: +54% on a replay."""
+    from tokenmizer.api.app import _apply_compression_layers
+    monkeypatch.setattr(app_module.settings.memory, "stable_window", "on")
+    long = "I'd be happy to help. " + "the order service retries on timeout. " * 60
+    hist = [{"role": "user", "content": "q0"}, {"role": "assistant", "content": long},
+            {"role": "user", "content": "q1"}]
+    first = _apply_compression_layers([dict(m) for m in hist], app_module.settings, {})
+    hist += [{"role": "assistant", "content": "short"}, {"role": "user", "content": "q2"},
+             {"role": "assistant", "content": "short"}, {"role": "user", "content": "q3"}]
+    later = _apply_compression_layers([dict(m) for m in hist], app_module.settings, {})
+    a = next(m["content"] for m in first if m["role"] == "assistant")
+    b = next(m["content"] for m in later if m["role"] == "assistant")
+    assert a == b
+
+
+def test_a_question_about_failures_ranks_the_failure_first(tmp_path):
+    """"What broke when signing people up" shares no word with the error it
+    asks about; the fixed type order put every decision above it."""
+    from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
+    g = GraphMemory("intent", storage_dir=str(tmp_path))
+    for d in ("Use PostgreSQL for accounts", "Use Redis for refresh tokens",
+              "Use bcrypt for password hashing", "Use FastAPI for the service"):
+        g.add_node(NodeType.DECISION, d, NodeStatus.COMPLETED, confidence=0.9, importance=0.9)
+    err = g.add_node(NodeType.ERROR, "422 on POST /signup when email is missing",
+                     NodeStatus.FAILED, importance=0.6)
+    assert g.query("what broke when signing people up", top_k=2)[0].id == err
+
+
+def test_a_present_tense_question_prefers_open_work(tmp_path):
+    from tokenmizer.graph_memory.graph import GraphMemory, NodeStatus, NodeType
+    g = GraphMemory("present", storage_dir=str(tmp_path))
+    for t in ("Completed the orders table backfill", "Completed the index rebuild",
+              "Completed the schema migration dry run"):
+        g.add_node(NodeType.TASK, t, NodeStatus.COMPLETED, importance=0.8)
+    wip = g.add_node(NodeType.TASK, "a row count reconciliation script",
+                     NodeStatus.IN_PROGRESS, importance=0.6)
+    assert wip in [n.id for n in g.query("how are we checking nothing was lost", top_k=2)]

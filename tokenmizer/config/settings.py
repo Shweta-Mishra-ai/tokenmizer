@@ -102,6 +102,9 @@ class GraphCheckpointSettings(BaseModel):
     # for the JSON alone can be exhausted before the JSON is complete; raise
     # it if the log reports a truncated extraction reply.
     extraction_max_tokens: int = Field(default=2048, ge=256, le=16384)
+    # Validation score a candidate node needs to be written to the graph
+    # (graph_memory/validator.py). Higher keeps fewer, surer nodes.
+    min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
     # Node cap per session. Over it, pruning moves the least important
     # resolved nodes to cold storage (graph_pruned) — kept, searchable and
     # restorable, just no longer ranked. Active decisions, open errors,

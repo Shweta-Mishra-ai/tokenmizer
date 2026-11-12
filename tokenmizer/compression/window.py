@@ -81,6 +81,7 @@ class SmartMessageWindow:
         graph: GraphMemory,
         model: str = "gpt-4o",
         stable: bool = False,
+        min_request_tokens: int = 0,
     ) -> tuple[list[dict], int]:
         """
         Apply smart windowing to messages.
@@ -111,6 +112,12 @@ class SmartMessageWindow:
             return messages, 0  # not enough history to window
 
         split = self._choose_split(conv_msgs, model)
+        if split is not None and min_request_tokens > 0:
+            split = self._respect_floor(conv_msgs, system_msgs, split, model, min_request_tokens)
+            if split == 0:
+                # Keeping enough to stay cacheable means keeping everything:
+                # there is nothing to cut, and a bridge on top would only add.
+                return messages, 0
 
         if split is None:
             # No step to open the window on — nothing safe to window down
@@ -224,6 +231,30 @@ class SmartMessageWindow:
             if session_id in self._frozen:
                 self._frozen.move_to_end(session_id)
         return candidate
+
+    def _respect_floor(self, conv: list[dict], system_msgs: list[dict], split: int,
+                       model: str, floor: int) -> int:
+        """Move the cut earlier, a whole step at a time, until what is kept
+        is at least `floor` tokens.
+
+        A provider caches a prompt prefix only above a minimum length. Cut
+        below it, every following request is billed at full price until it
+        grows back: measured on a 150-turn replay against Anthropic's rules,
+        a cut to ~870 tokens (minimum 1,024) cost 866 units a request where
+        the uncut, cached history cost 428 — windowing made the session 9%
+        dearer than not windowing. Keeping a slightly longer tail keeps the
+        request cacheable. The bridge is not counted, so this errs long.
+        """
+        starts = [i for i, m in enumerate(conv)
+                  if m.get("role") == "user"
+                  or (m.get("role") == "assistant" and m.get("tool_calls"))]
+        base = count_messages_tokens(system_msgs, model)
+        while split > 0 and base + count_messages_tokens(conv[split:], model) < floor:
+            earlier = [i for i in starts if i < split]
+            if not earlier:
+                break
+            split = earlier[-1]
+        return split
 
     def _choose_split(self, conv: list[dict], model: str) -> int | None:
         """Where the verbatim tail begins, or None if there is no safe place.

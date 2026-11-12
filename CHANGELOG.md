@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+### Fixed — the proxy cost more than a self-caching client
+
+Measured with `benchmarks.savings.runner` against Anthropic's prompt-caching
+rules, against a client that caches its own history:
+
+- The brevity instruction switching on mid-session was prepended to the
+  system prompt, which changed the cached prefix and re-wrote the whole
+  history: +10% at 40 turns. It is now decided once per session and, when it
+  switches on later, appended after the history.
+- A windowing cut could leave the request under the provider's cache
+  minimum (1,024 tokens), so every following request was billed at full
+  price. Cuts now keep at least the minimum plus 20%, and a cut that would
+  keep everything is not made. 150 turns: 9% more → 11% less.
+- History compression changed a message the turn it aged past the protected
+  tail, re-writing the cache from there on every turn. Under caching each
+  message is now compressed the first time it is sent. Long-reply replay:
+  54% more → 29% less.
+- The whitespace stage was quadratic on a long line without a newline (a
+  50 KB line of spaces took 16 s).
+
+Overall: 40 turns −10% → −2.5%, 150 turns −8% → +11%, 300 turns +34% → +44%
+saved.
+
+### Improved — retrieval
+
+- The ranker reads what a question asks for: failure words favour errors,
+  choice words decisions, progress words tasks, location words files, and a
+  present-tense question favours open items. recall@6 on the paraphrase eval
+  88% → 90% (36/40; one question moved its exact-substring answer out of the
+  top 6 while its new first result says the same in other words). The two
+  remaining extraction gaps behind misses are documented, not patched.
+
+### Fixed — a setting removed by mistake
+
+- `graph_checkpoint.min_confidence` was removed in this release as unused,
+  and the CHANGELOG said nothing read it. The node validator does; it is
+  restored. Nothing behaved differently (the fallback is the same 0.65), but
+  the value could not be set and every start logged a warning.
+
 ### Added — local extraction on Ollama, chosen by measurement
 
 - `graph_checkpoint.extraction_provider` runs LLM extraction on a different
@@ -113,7 +152,6 @@
 - An upstream rate limit is a 429 with `Retry-After`, not a 502.
 - `/health` lists affected session ids only to a caller with a valid key;
   others get counts.
-- `graph_checkpoint.min_confidence` is removed; nothing ever read it.
 - The default node cap is 500 (was a hard-coded 200), and pruning moves nodes
   to cold storage instead of deleting them.
 

@@ -91,10 +91,10 @@ cache marker, per-model minimum, reads at 0.1x the input price, writes at
 
 | Turns | History | Client alone, no caching | Client caching its own history | Through TokenMizer |
 |---:|---:|---:|---:|---:|
-| 10 | 462 | 2,333 | 2,333 | 2,833 (**21% more**) |
-| 40 | 2,057 | 41,556 | 14,745 | 16,158 (**61% less** / 10% more) |
-| 150 | 7,967 | 596,900 | 77,998 | 77,472 (**87% less** / level) |
-| 300 | 16,040 | 2,399,067 | 268,767 | 157,818 (**93% less** / **41% less**) |
+| 10 | 462 | 2,333 | 2,333 | 2,333 (level / level) |
+| 40 | 2,057 | 41,556 | 14,745 | 15,108 (**64% less** / 2.5% more) |
+| 150 | 7,967 | 596,900 | 77,998 | 69,350 (**88% less** / **11% less**) |
+| 300 | 16,040 | 2,399,067 | 268,767 | 150,122 (**94% less** / **44% less**) |
 
 The two percentages are against the two client columns. Where the saving
 comes from: below about 4,000 tokens of history, prompt caching — the
@@ -102,13 +102,28 @@ proxy marks the history cacheable and keeps every earlier byte of the
 request identical; above it, windowing, with the cut held still between
 cuts so the windowed history is cached too.
 
-**Short sessions still cost more on input**, and this is why: a ten-turn
-session of 462 tokens is under the model's cache minimum, so nothing can
-be cached, and the proxy adds its ~50-token brevity instruction to every
-request. That instruction exists to shorten what the model writes back,
-which costs several times more per token than input; this benchmark
-returns a fixed one-word answer and so charges the instruction while
-crediting it nothing. `terse_output.enabled: false` removes it.
+**Short sessions now go upstream exactly as sent.** The brevity
+instruction is left out until a conversation reaches
+`terse_output.min_conversation_tokens` (1,500). The 2.5% at 40 turns is
+that instruction once it switches on: it is then appended after the
+history, not to the system prompt, because changing the cached prefix
+mid-session made the provider re-write the whole history (that alone was
++10% at 40 turns). It exists to shorten what the model writes back, which
+this benchmark cannot see; `terse_output.enabled: false` removes it.
+
+Three things were fixed to get here, each measured with this runner:
+
+* the brevity instruction switching on mid-session rewrote the cached
+  prefix (+10% at 40 turns);
+* a windowing cut could leave a request under the provider's cache
+  minimum, so every request after it was billed at full price — the cut
+  now keeps at least the minimum plus 20% (150 turns went from 9% more
+  to 11% less);
+* history compression changed a message's bytes the turn it aged past the
+  protected tail, re-writing the cache from there every turn. Under
+  caching every message is now compressed the first time it is sent. On
+  a 60-turn replay with long replies: 54% more than a self-caching client
+  before, 29% less after.
 
 Read before quoting:
 
@@ -222,7 +237,7 @@ re-render"). If the question quoted the answer, the person would not have
 needed to ask — and those are exactly the cases token-overlap ranking
 cannot serve.
 
-**recall@6 88%** with keyword ranking. Every case is checked to be
+**recall@6 90%** (36/40) with keyword ranking; it was 88% before the ranker learned to read a question's intent (failure, decision, progress or location words, and present tense). Every case is checked to be
 answerable from its own transcript before scoring: an ungrounded question
 measures extraction, not retrieval, and reads as a retrieval failure
 forever.

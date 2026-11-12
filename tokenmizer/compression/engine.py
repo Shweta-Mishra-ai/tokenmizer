@@ -226,7 +226,13 @@ class WhitespaceNormalizer:
     """
 
     def apply(self, text: str) -> tuple[str, str]:
-        text = re.sub(r'[ \t]+(?=\n)', '', text)
+        # Per line, not `[ \t]+(?=\n)`: that pattern rescans a run of spaces
+        # from every position when no newline follows, and one 50 KB line of
+        # padding took 16 seconds.
+        # The last line is left alone: it is followed by no newline, and in a
+        # prose segment it is the space before an inline `code span`.
+        lines = text.split("\n")
+        text = "\n".join([line.rstrip(" \t") for line in lines[:-1]] + lines[-1:])
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text, "whitespace_normalization"
 
