@@ -175,3 +175,16 @@ def test_the_exception_survives_a_long_list_of_failing_tests(tmp_path):
     g.extract_from_messages([{"role": "assistant", "content": "Running the formset tests."},
                              {"role": "user", "content": names + "\n\n" + trace}])
     assert any("make_choiceformset" in label for label in _labels(g, NodeType.ERROR))
+
+
+def test_being_listed_again_does_not_make_a_file_important(tmp_path):
+    """A re-mention raises a node's importance; a path re-listed by `ls`
+    a dozen times climbed from 0.35 to 1.0 that way and, in a 1,000-turn
+    soak, pushed every file the agent named out of the graph."""
+    g = _graph(tmp_path)
+    history = [{"role": "user", "content": "go"}]
+    for i in range(15):
+        history += [{"role": "user", "content": f"list {i}"}, *_tool(i, _listing(60))]
+        g.extract_from_messages(history)
+    listed = [n for n in g._nodes.values() if n.type == NodeType.FILE]
+    assert listed and max(n.importance for n in listed) < 0.5

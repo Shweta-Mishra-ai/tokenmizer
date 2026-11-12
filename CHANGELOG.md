@@ -2,6 +2,66 @@
 
 ## [Unreleased]
 
+### Fixed — long sessions lost facts and slowed down with length
+
+Found by the new `benchmarks/soak` (the real proxy driven through a long
+session with 50 planted facts and large tool output) and by profiling one
+late request. Every item has a regression test.
+
+Data loss:
+
+- **Merges were blind to identifiers.** Two errors or decisions that differ
+  only in which service, file or key they name ("RuntimeError:
+  amber_billing ..." and the same about marble_ledger) cleared the
+  word-overlap bar and became one node. Labels that each name identifiers
+  (paths, snake_case, camelCase, file names) and disagree on them are now
+  kept apart — in the graph merge and in the extractor's own dedup, which
+  also no longer collapses labels that swap a word in the middle ("write
+  the A docs" / "write the B docs"). Line numbers, addresses, temp paths
+  and technology spellings (Next.js / NextJS) are not identifiers.
+- **One call over a long history kept almost nothing.** The proxy's first
+  request on an existing conversation read tasks and errors from its last
+  20 messages only and kept at most 15 items per category: 30 TODOs came
+  out as 1. Both limits are removed.
+- **Listings pushed real work out.** A message naming more than 12 paths
+  (`wc -l`, `git diff --stat`, `du`) added every path at full weight; in a
+  long session they filled the node cap and open TODOs were pruned first.
+  Those files are now recorded as listed, ranked 0.35, and regain full
+  weight when named on their own or edited.
+- **Re-listed paths outranked real work.** Every repeated mention raises a
+  node's importance; a path re-listed a dozen times climbed from 0.35 to
+  1.0, and in a 1,000-turn session every file the agent named was pruned
+  in favour of them. A mention inside a listing now refreshes a file
+  without raising it.
+- **A test run's list of failures hid the failure.** The per-message error
+  limit kept the first labels it saw — failing test names — and dropped
+  the traceback after them. A named exception now takes the place of a
+  label that names none, and the limit counts per message as documented.
+
+Soak at 120 turns: 23 of 50 facts kept → 50 of 50.
+
+Speed:
+
+- **Old history was re-extracted on every request** once a session passed
+  500 messages, whenever an old message was identical to a recent one (a
+  repeated "ok", the same tool output) — and the stale statuses in it were
+  re-asserted each time. One request at 300 turns: 12.2 s → 0.25 s.
+- `path_index` caches each tool output's paths instead of re-reading all
+  dropped output whenever the cut is remade.
+- Finding another spelling of a file path is no longer quadratic in the
+  number of FILE nodes.
+- Pattern extraction reads the first and last 100 KB of a message. A real
+  agent observation of 6.3 MB of HTML took 50 s; every labelled error in
+  the 716 held-out real sessions is inside those bounds. The whole message
+  still goes to the model and the turn archive.
+- Four regexes with no literal prefix are skipped when their keywords are
+  absent (`test_regex_gates` checks every gate never skips a match).
+
+Cold start, one call over the whole history (main → now): 300-turn soak
+22.8 s → 4.6 s, 1,000 turns 72 s → 14.8 s, real 6.5 MB session 57 s →
+1.5 s. Labelled corpora unchanged (extraction 97% / 93%, retrieval 90%,
+resume sections lost 0, savings identical).
+
 ### Fixed — the proxy cost more than a self-caching client
 
 Measured with `benchmarks.savings.runner` against Anthropic's prompt-caching

@@ -424,7 +424,17 @@ class GraphMemory:
         importance: float = 0.5,
         confidence: float = 0.7,
         source_role: str | None = "assistant",
+        reinforce: bool = True,
     ) -> str:
+        """Add a node, or update the one it duplicates.
+
+        A repeated mention normally raises the existing node's importance
+        (MemoryNode.touch). `reinforce=False` refreshes it without that:
+        for a path that reappears in a listing, being listed again is not
+        evidence it matters. A 1,000-turn session's re-listed paths climbed
+        to 1.0 that way and pushed every file the agent named out of the
+        graph.
+        """
         from tokenmizer.security.fencing import is_injection_text
         from tokenmizer.security.redaction import redact_node
 
@@ -460,7 +470,10 @@ class GraphMemory:
         if node_id in self._nodes:
             # Dedup: update existing node instead of creating duplicate
             existing = self._nodes[node_id]
-            existing.touch()
+            if reinforce:
+                existing.touch()
+            else:
+                existing.updated_at = time.time()
             if node_type == NodeType.FILE and importance > existing.importance:
                 # A file first seen in a listing, now named on its own.
                 existing.importance = importance
@@ -563,7 +576,10 @@ class GraphMemory:
                     continue
                 short, long_ = sorted((stored_label, ex.label), key=len)
                 if short.count("/") >= 1 and (short == long_ or long_.endswith("/" + short)):
-                    ex.touch()
+                    if reinforce:
+                        ex.touch()
+                    else:
+                        ex.updated_at = time.time()
                     self._dirty = True
                     ex.importance = max(ex.importance, importance)
                     if len(stored_label) < len(ex.label):
@@ -1336,7 +1352,8 @@ class GraphMemory:
             if not f or len(f) < 3:
                 continue
             nid = self.add_node(NodeType.FILE, f, NodeStatus.IN_PROGRESS,
-                                importance=0.35 if f in listed else 0.7)
+                                importance=0.35 if f in listed else 0.7,
+                                reinforce=f not in listed)
             if nid and f in edited and nid in self._nodes:
                 # Changed by a tool call: ranked above files only named.
                 node = self._nodes[nid]

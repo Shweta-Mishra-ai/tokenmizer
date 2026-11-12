@@ -179,10 +179,13 @@ def _build_session(turns: int, giant_mb: float, rng: random.Random, tag: str):
 
 
 class _Upstream:
-    """Stand-in for anthropic.AsyncAnthropic: records what was sent."""
+    """Stand-in for anthropic.AsyncAnthropic: keeps the LAST request it was
+    sent and a count. Keeping every request would make the process's memory
+    growth measure this harness instead of the proxy."""
 
     def __init__(self):
-        self.sent: list[dict] = []
+        self.count = 0
+        self.last: dict = {"text": "", "messages": []}
         self.lock = threading.Lock()
 
     def client_class(self):
@@ -200,7 +203,8 @@ class _Upstream:
                             b.get("content", b.get("input", "")), default=str))
                 text = "\n".join(parts)
                 with upstream.lock:
-                    upstream.sent.append({"text": text, "messages": messages})
+                    upstream.count += 1
+                    upstream.last = {"text": text, "messages": messages}
                 return SimpleNamespace(
                     content=[SimpleNamespace(type="text", text="ok")], stop_reason="end_turn",
                     usage=SimpleNamespace(input_tokens=len(text) // 4, output_tokens=1,
@@ -250,7 +254,7 @@ def _run_session(c, A, up, sid, steps, model, latencies, rss, tail_ok, lock=None
     history: list[dict] = []
     for i, step in enumerate(steps):
         history.extend(step)
-        before = len(up.sent)
+        before = up.count
         t = time.perf_counter()
         r = c.post("/v1/chat/completions",
                    json={"model": model, "messages": history, "session_id": sid})
@@ -261,7 +265,7 @@ def _run_session(c, A, up, sid, steps, model, latencies, rss, tail_ok, lock=None
         if lock is None:
             # The newest client message must reach upstream untouched.
             newest = history[-1]["content"]
-            if len(up.sent) > before and newest not in up.sent[-1]["text"]:
+            if up.count > before and newest not in up.last["text"]:
                 tail_ok.append(i)
             if i % 50 == 0:
                 rss.append((i, _rss_mb()))
@@ -273,12 +277,13 @@ def _run_session(c, A, up, sid, steps, model, latencies, rss, tail_ok, lock=None
 
 def _probe(c, up, sid, history, model, question) -> str:
     probe = history + [{"role": "user", "content": question}]
-    before = len(up.sent)
+    with up.lock:
+        before = up.count
     r = c.post("/v1/chat/completions",
                json={"model": model, "messages": probe, "session_id": sid})
-    if r.status_code != 200 or len(up.sent) == before:
+    if r.status_code != 200 or up.count == before:
         return ""
-    return up.sent[-1]["text"]
+    return up.last["text"]
 
 
 def _pct(xs, p):
@@ -304,7 +309,7 @@ def single(args) -> dict:
         history = _run_session(c, A, up, sid, steps, args.model, latencies, rss, tail_bad)
         run_s = time.perf_counter() - t0
         history_mb = len(json.dumps(history)) / 1e6
-        last_sent_mb = len(up.sent[-1]["text"]) / 1e6
+        last_sent_mb = len(up.last["text"]) / 1e6
         g = A._graph_cache.get(sid)
         gtext = _graph_text(g) if g else ""
         nodes = sum(1 for n in g._nodes.values() if not n._evicted) if g else 0
