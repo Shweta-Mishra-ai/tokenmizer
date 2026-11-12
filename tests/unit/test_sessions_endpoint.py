@@ -24,7 +24,13 @@ from tokenmizer.providers.providers import LLMResponse
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
+    # Its own ownership store. The default one lives in ./checkpoints and is
+    # shared by every test run; the list returns the 100 most recently
+    # CREATED sessions, so once a hundred later runs had created sessions,
+    # the one these tests made on their first run fell off the list.
+    from tokenmizer.security.ownership import OwnershipStore
+    monkeypatch.setattr(app_module, "_ownership", OwnershipStore(storage_dir=str(tmp_path)))
     provider = AsyncMock()
     provider.chat = AsyncMock(return_value=LLMResponse(
         text="ok", input_tokens=10, output_tokens=5,

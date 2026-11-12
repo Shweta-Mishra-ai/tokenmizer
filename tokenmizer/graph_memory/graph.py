@@ -245,6 +245,7 @@ _INTENT_WORDS: dict[NodeType, re.Pattern] = {
     NodeType.FILE: re.compile(r"\b(?:files?|where (?:is|are|does)|module|path)\b", re.IGNORECASE),
 }
 _INTENT_BOOST = 1.5
+_INTENT_DEMOTE = 1.25
 
 # A question about the present ("how ARE we checking", "what is STILL
 # broken", "right now") asks for what is open, not what is finished; the
@@ -263,6 +264,28 @@ def _query_intent(task: str) -> list[NodeType]:
 
 
 # ── Graph ────────────────────────────────────────────────────────────────────
+
+
+# Where an identifier has more than one word in it: a separator, or a
+# lower-to-upper case change.
+_SUBWORD_SPLIT = re.compile(r"[_/.\-]|[a-z][A-Z]")
+_SUBWORD = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+")
+# Words that carry no subject. Counted as overlap they let "Redis for refresh
+# token storage" match "which file did we change for the quartz uploader"
+# as well as the file did, and a boosted type outranked the real answer.
+_FUNCTION_WORDS = frozenset((
+    "the and for are was were been being did does doing has have had having our "
+    "ours you your yours its this that these those what which who whom whose how "
+    "why when where with from into onto than then there their they them will would "
+    "should could can may might must also just any all some about over under after "
+    "before out off but per via its").split())
+# Path parts that say where a file sits, not what it is. As sub-words they
+# matched questions on "test" or "source" to every file under tests/ or src/
+# and pushed real answers down (retrieval eval: one case lost).
+_SCAFFOLD_PARTS = frozenset((
+    "src lib libs app apps pkg pkgs internal cmd test tests spec specs dist build "
+    "py js jsx ts tsx go rs java rb php cs cpp hpp md json yaml yml toml txt html "
+    "css sql sh cfg ini lock xml csv env").split())
 
 
 def _start_of_longest_run(flags: list[bool]) -> int | None:
@@ -1699,15 +1722,30 @@ class GraphMemory:
         the singular; before this, "which datastore for orders" shared no
         word with "PostgreSQL for order storage"."""
         out = set()
-        for w in text.split():
-            w = w.strip(".,!?:;()[]\"'").lower()
-            if len(w) <= 2:
-                continue
+
+        def add(w: str) -> None:
+            if len(w) <= 2 or w in _FUNCTION_WORDS:
+                return
             out.add(w)
             if len(w) > 4 and w.endswith("ies"):
                 out.add(w[:-3] + "y")
             elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
                 out.add(w[:-1])
+
+        for raw in text.split():
+            raw = raw.strip(".,!?:;()[]\"'`")
+            add(raw.lower())
+            # Code names its things in one token — quartz_uploader,
+            # src/billing/handler.py, getUserName — and people ask in
+            # words: "the quartz uploader". Matched on the whole token
+            # only, a file node shared nothing with the question about it,
+            # and in a 1,000-turn session no file was ever recalled. The
+            # whole token stays, so a question that quotes the identifier
+            # still matches it exactly.
+            if _SUBWORD_SPLIT.search(raw):
+                for part in _SUBWORD.findall(raw):
+                    if part.lower() not in _SCAFFOLD_PARTS:
+                        add(part.lower())
         return frozenset(out)
 
     def _search_words(self, node: MemoryNode) -> frozenset:
@@ -1762,7 +1800,17 @@ class GraphMemory:
         # asking for a failure; keyword overlap cannot see that, and the
         # fixed type order ranked every decision above every error.
         _TYPE_BOOST = {**_TYPE_BOOST}
-        for node_type in _query_intent(task):
+        # A question that names what it wants also makes every other kind of
+        # node a less likely answer. Raising the named kind alone was not
+        # enough once function words stopped counting as overlap: "what broke
+        # when signing people up" ranked four unrelated decisions (importance
+        # 0.9) above the signup error (0.6) — the error had only ever won on
+        # the shared word "when".
+        intent = _query_intent(task)
+        for node_type in list(_TYPE_BOOST):
+            if intent and node_type not in intent:
+                _TYPE_BOOST[node_type] = _TYPE_BOOST[node_type] / _INTENT_DEMOTE
+        for node_type in intent:
             _TYPE_BOOST[node_type] = _TYPE_BOOST.get(node_type, 1.0) * _INTENT_BOOST
 
         present = bool(_PRESENT.search(task or ""))

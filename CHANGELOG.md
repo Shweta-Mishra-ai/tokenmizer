@@ -38,7 +38,24 @@ Data loss:
   the traceback after them. A named exception now takes the place of a
   label that names none, and the limit counts per message as documented.
 
-Soak at 120 turns: 23 of 50 facts kept → 50 of 50.
+Recall:
+
+- **A question in words never found a file named in code.** Retrieval
+  matched whole tokens, so "the quartz uploader" shared nothing with
+  `src/quartz_uploader/quartz_uploader_s03.py`; in a 1,000-turn session no
+  planted file was ever recalled. Identifiers are now also matched by their
+  parts (snake_case, paths, camelCase), leaving out directory scaffolding
+  (`src`, `tests`, extensions).
+- **Function words counted as overlap** ("the", "for", "which"), so any
+  decision containing "for the" matched a question as well as its answer
+  did. They no longer count.
+- **A question that names what it wants** ("what broke …") now also ranks
+  other kinds of node lower. The error in last round's intent test had
+  only ever won on the shared word "when".
+
+Soak at 120 turns: 23 of 50 facts kept → 50 of 50. Retrieval eval recall@6
+90% → 92% (37/40); the newly answered case is "what went wrong on the big
+table", which the previous round had put down to the eval's wording.
 
 Speed:
 

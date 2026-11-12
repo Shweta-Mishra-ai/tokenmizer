@@ -188,3 +188,28 @@ def test_being_listed_again_does_not_make_a_file_important(tmp_path):
         g.extract_from_messages(history)
     listed = [n for n in g._nodes.values() if n.type == NodeType.FILE]
     assert listed and max(n.importance for n in listed) < 0.5
+
+
+# ── a question in words finds a file named in code ──────────────────────────
+
+def test_a_file_is_found_by_the_words_in_its_name(tmp_path):
+    """People ask "the quartz uploader"; code writes quartz_uploader. Matched
+    on whole tokens only, and with "for"/"the" counting as overlap, the
+    decisions below outranked the file in every one of ten probes of a
+    1,000-turn session."""
+    g = _graph(tmp_path)
+    for d in ("Redis for refresh token storage", "PostgreSQL for order storage",
+              "for the nimbus scheduler we'll use nimbus_key as the partition key",
+              "CSS variables for theming"):
+        g.add_node(NodeType.DECISION, d, NodeStatus.COMPLETED, importance=0.95, confidence=0.9)
+    f = g.add_node(NodeType.FILE, "src/quartz_uploader/quartz_uploader_s03.py",
+                   NodeStatus.IN_PROGRESS, importance=0.7)
+    top = [n.id for n in g.query("Which file did we change for the quartz uploader?", top_k=3)]
+    assert f in top
+
+
+def test_directory_scaffolding_is_not_a_match(tmp_path):
+    from tokenmizer.graph_memory.graph import GraphMemory as G
+    words = G._query_tokens("tests/conftest.py src/app/routes.py")
+    assert {"conftest", "routes"} <= words
+    assert not {"test", "tests", "src", "app", "py"} & words
