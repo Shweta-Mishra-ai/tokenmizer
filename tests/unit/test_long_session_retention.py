@@ -154,3 +154,24 @@ def test_open_todos_survive_a_flood_of_listed_files(tmp_path):
         g.extract_from_messages(history)
     todos = _labels(g, NodeType.TASK)
     assert any("retry_budget_x7" in t for t in todos), todos
+
+
+# ── a test run's traceback outranks its list of failing test names ──────────
+
+def test_the_exception_survives_a_long_list_of_failing_tests(tmp_path):
+    """A test run names every failing test before the traceback that says
+    what broke. The per-message limit kept the first labels it saw — the
+    test names — and dropped the exception (found on a real SWE-bench
+    session, django-14608)."""
+    names = "\n".join(f"ERROR: test_case_{i:03d} (tests.forms.test_formsets.Case{i:03d})"
+                      for i in range(80))
+    trace = ("Traceback (most recent call last):\n"
+             '  File "tests/forms/test_formsets.py", line 1408, in test_valid\n'
+             "    formset = self.make_choiceformset([])\n"
+             "AttributeError: 'AllValidTests' object has no attribute 'make_choiceformset'")
+    g = _graph(tmp_path)
+    # SWE-agent returns command output as a user turn, not a tool result, so
+    # only the text patterns read it.
+    g.extract_from_messages([{"role": "assistant", "content": "Running the formset tests."},
+                             {"role": "user", "content": names + "\n\n" + trace}])
+    assert any("make_choiceformset" in label for label in _labels(g, NodeType.ERROR))

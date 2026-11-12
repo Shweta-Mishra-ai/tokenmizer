@@ -605,6 +605,7 @@ _CAMEL = re.compile(r"^[a-z]{2,}[A-Z][a-z]")
 _FILE_NAME = re.compile(r"^[\w-]+\.[A-Za-z][A-Za-z0-9]{0,4}$")
 
 
+@functools.lru_cache(maxsize=65536)
 def _identifiers(label: str) -> frozenset[str]:
     out = set()
     for raw in label.split():

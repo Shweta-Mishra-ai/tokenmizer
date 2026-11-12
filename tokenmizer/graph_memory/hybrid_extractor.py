@@ -165,6 +165,13 @@ DEFAULT_EXTRACTION_MAX_TOKENS = 2048
 
 
 _MAX_ERRORS_PER_MESSAGE = 60
+# An exception with its message, as a traceback's last line prints it:
+# "AttributeError: 'X' object has no attribute 'y'",
+# "django.core.exceptions.ImproperlyConfigured: Requested setting ...",
+# "StopIteration: ...". What a failure was, as opposed to which test failed.
+_NAMED_EXCEPTION = re.compile(
+    r"(?:^|[\s(])(?:[a-z_]\w*\.)*"
+    r"(?:[A-Z]\w*(?:Error|Exception|Warning)|[A-Z][a-z]+(?:[A-Z][a-z]*)+)\b:\s*\S")
 
 # A decision verb followed by what was ruled out, not chosen.
 # Applied with .match() to a stripped label. No leading \s*: every
@@ -606,6 +613,24 @@ _LISTING_LINE = re.compile(
 )
 
 
+# Pattern extraction reads at most the first and last 100 KB of a message.
+# Typed messages never come near that; what does is machine output, and a
+# real agent once printed 6.3 MB of built HTML in one observation, which
+# took 50 s of regex passes on the request path. On the 716 held-out real
+# sessions, every labelled error in a message this long is in its first or
+# last 100 KB — where a test runner and a traceback put them — and one
+# labelled file (named by coincidence inside that HTML) is not. The whole
+# message still goes to the model, and to the turn archive.
+_EXTRACT_HEAD = 100_000
+_EXTRACT_TAIL = 100_000
+
+
+def _bounded(text: str) -> str:
+    if len(text) <= _EXTRACT_HEAD + _EXTRACT_TAIL:
+        return text
+    return text[:_EXTRACT_HEAD] + "\n\n" + text[-_EXTRACT_TAIL:]
+
+
 # More distinct paths than this in one message makes it a listing.
 _BULK_PATHS = 12
 
@@ -758,6 +783,27 @@ _PREFILTER: dict = {
                        "not applied", "not enforced"),
     id(_TASK_DONE_PASSIVE): ("working", "ready", "done", "complete", "live", "passing",
                              "implemented", "deployed", "fixed", "resolved", "running"),
+    # The four below have no literal prefix, so the engine tries them at every
+    # line start and after every full stop: _TASK_TODO_HEADER took 40 ms per
+    # 64 KB of tool output with nothing to find. Each key list is the
+    # pattern's own alternation, lowercased; test_regex_gates checks that no
+    # text the pattern matches is ever skipped.
+    id(_TASK_TODO_HEADER): (
+        "todo", "to do", "to-do", "next step", "next up", "up next", "remaining",
+        "open item", "follow", "backlog", "outstanding", "not started", "not yet started",
+        "action item", "still needed", "deferred", "next task", "queued", "planned",
+        "tomorrow", "later", "still open", "upcoming", "scheduled", "parked", "on hold",
+        "wishlist", "pendiente", "por hacer", "a faire", "\u00e0 faire", "offen",
+        "ausstehend", "baaki", "baki", "pending hai"),
+    id(_DECISION_HEADER): (
+        "decision", "choice", "approach", "stack", "agreed", "final call", "verdict",
+        "conclusion", "chosen", "our pick", "selection", "decisi\u00f3n", "d\u00e9cision",
+        "entscheidung", "faisla", "going with", "settled", "locked in", "going forward",
+        "consensus"),
+    id(_TASK_DONE_CHECK): ("[x]", "[done]", "[complete", "[fixed]", "[shipped]",
+                           "\u2612", "\u2705", "\u2714", "\u2713"),
+    id(_TASK_TODO_CHECK): ("[ ]", "[todo]", "[to do]", "[pending]", "[wip]", "[open]",
+                           "\u2610", "\u2b1c"),
 }
 
 
@@ -1109,9 +1155,12 @@ class HybridExtractor:
                 result.tasks_done.append(task)
                 seen_tasks.add(norm)
 
+        low = content.lower()
         for pattern in (_TASK_DONE_CHECK, _TASK_DONE_PHRASAL, _TASK_DONE_GOT,
                         _TASK_DONE_MANAGED, _TASK_DONE_POSTFIX, _TASK_DONE_NO_WORRY,
                         _TASK_DONE_CROSSED_OFF, _TASK_DONE_BEHIND_US):
+            if not _may_match(pattern, low):
+                continue
             for m in pattern.finditer(content):
                 if pattern is not _TASK_DONE_CHECK and (
                         _is_negated_context(content, m.start())
@@ -1211,10 +1260,13 @@ class HybridExtractor:
         # completion, and that is reconciled where it can be seen across
         # extraction calls — GraphMemory.add_node merges a completed task into
         # the pending node it finishes.
+        low = content.lower()
         for pattern in (_TASK_TODO, _TASK_TODO_HEADER, _TASK_TODO_CHECK,
                         _TASK_TODO_NOT_DONE, _TASK_TODO_DEFER, _TASK_TODO_FRONTED,
                         _TASK_TODO_REMIND, _TASK_TODO_PARKED,
                         _TASK_TODO_OWED):
+            if not _may_match(pattern, low):
+                continue
             for m in pattern.finditer(content):
                 todo = _clip(_todo_label(m.group(1)))
                 if _outstanding(todo, m.start(1), result.tasks_todo):
@@ -1257,7 +1309,8 @@ class HybridExtractor:
                 seen_decisions.add(norm)
 
         # Decision Pass 2: header format
-        for m in _DECISION_HEADER.finditer(content):
+        for m in (_DECISION_HEADER.finditer(content)
+                  if _may_match(_DECISION_HEADER, content.lower()) else ()):
             if (_is_negated_context(content, m.start()) or _quoted_or_question(content, m.start())):
                 continue
             label = _clip(m.group(1))
@@ -1486,18 +1539,23 @@ class HybridExtractor:
         patterns can read: checkboxes, "TODO:"/"Decision:" headers, file and
         route names, exception names and status codes. See
         patterns.looks_english for why nothing else is attempted."""
-        for m in _TASK_DONE_CHECK.finditer(content):
+        low = content.lower()
+        for m in (_TASK_DONE_CHECK.finditer(content)
+                  if _may_match(_TASK_DONE_CHECK, low) else ()):
             task = _clip(m.group(1))
             norm = self._normalize(task)
             if len(task) >= 5 and norm not in seen_tasks:
                 result.tasks_done.append(task)
                 seen_tasks.add(norm)
         for pattern in (_TASK_TODO_CHECK, _TASK_TODO_HEADER):
+            if not _may_match(pattern, low):
+                continue
             for m in pattern.finditer(content):
                 todo = _clip(m.group(1))
                 if len(todo) >= 5 and not any(self._subsumes(todo, t) for t in result.tasks_todo):
                     result.tasks_todo.append(todo)
-        for m in _DECISION_HEADER.finditer(content):
+        for m in (_DECISION_HEADER.finditer(content)
+                  if _may_match(_DECISION_HEADER, low) else ()):
             label = _clip(m.group(1))
             norm = self._normalize(label)
             if norm not in seen_decisions and len(norm) > 4:
@@ -1549,16 +1607,15 @@ class HybridExtractor:
         # all of them, and a file already seen is upgraded below when this
         # message names it on its own.
         found: dict[str, None] = {}
-        libraries = {f for f in seen_files if f not in result.files}
         for m in _FILE_PATH.finditer(original):
             f = _strip_diff_side(m.group(1).strip(), original, m.start(1))
-            if f not in libraries and len(f) > 4 and not _is_example_mention(original, m.start(1)) \
+            if not is_library_name(f) and len(f) > 4 and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
                 found[f] = None
         for m in _FILE_COMMON.finditer(original):
             f = m.group(1).strip()
-            if f not in libraries and f not in found \
+            if not is_library_name(f) and f not in found \
                     and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not _is_code_attribute(f, original, m.start(1), m.end(1)) \
@@ -1566,7 +1623,7 @@ class HybridExtractor:
                 found[f] = None
         for m in _FILE_EXTENSIONLESS.finditer(original):
             f = m.group(1).strip()
-            if f not in libraries and f not in found \
+            if not is_library_name(f) and f not in found \
                     and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
@@ -1635,6 +1692,7 @@ class HybridExtractor:
         # a session that diagnosed three failures early and spent the rest
         # of its turns fixing them carried none of them forward.
         sentence_claims: dict[tuple[int, int], tuple[str, int]] = {}
+        errors_at_start = len(result.errors)
         low = content.lower()
         for pattern in patterns:
             if not _may_match(pattern, low):
@@ -1743,8 +1801,23 @@ class HybridExtractor:
                 # Past this many, more ERROR nodes from one message do not
                 # make a resume more useful; the message itself still goes
                 # to the model and to the turn archive whole.
-                if len(result.errors) >= _MAX_ERRORS_PER_MESSAGE:
-                    continue
+                if len(result.errors) - errors_at_start >= _MAX_ERRORS_PER_MESSAGE:
+                    # ...but not at the price of the failure itself. A test
+                    # run names every failing test before the traceback that
+                    # says what broke, and keeping the first sixty kept the
+                    # names and dropped "AttributeError: 'AllValidTests'
+                    # object has no attribute 'make_choiceformset'" — the
+                    # one line that was the bug. A named exception takes the
+                    # place of the latest label from this message naming none.
+                    if not _NAMED_EXCEPTION.search(err):
+                        continue
+                    weak = next((i for i in range(len(result.errors) - 1, errors_at_start - 1, -1)
+                                 if not _NAMED_EXCEPTION.search(result.errors[i])), None)
+                    if weak is None or any(self._subsumes(err, e) for e in result.errors):
+                        continue
+                    gone = result.errors.pop(weak)
+                    if gone in result.resolved_errors:
+                        result.resolved_errors.remove(gone)
                 # One failure, two labels: keep the more specific. A pattern
                 # later in the order can recover the whole description of a
                 # failure an earlier one only clipped a piece of.
@@ -1874,7 +1947,7 @@ class HybridExtractor:
             for e in tool_errors:
                 if not any(self._subsumes(e, x) for x in result.errors):
                     result.errors.append(e)
-            original = _strip_emphasis(_content_to_text(msg.get("content", "")))
+            original = _bounded(_strip_emphasis(_content_to_text(msg.get("content", ""))))
             if not original.strip():
                 continue
             content = mask_mentions(original)
@@ -2184,13 +2257,13 @@ class HybridExtractor:
             return m.group(0) if m else None
 
         def weight(label: str) -> int:
-            return len({w for w in re.findall(r"[a-z0-9]+", label.lower()) if len(w) > 2})
+            return len(_label_words(label))
 
         # The LLM path can hand back non-strings; this runs on both paths.
         errors = [e for e in errors if isinstance(e, str) and e.strip()]
 
-        def words(label: str) -> set[str]:
-            return {w for w in re.findall(r"[a-z0-9]+", label.lower()) if len(w) > 2}
+        def words(label: str) -> frozenset[str]:
+            return _label_words(label)
 
         def restates(a: str, b: str, k: str) -> bool:
             """Is `a` a less specific statement of the failure `b` names?"""

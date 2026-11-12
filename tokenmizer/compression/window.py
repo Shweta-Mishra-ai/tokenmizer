@@ -344,6 +344,33 @@ def _as_path(word: str) -> str:
     return word if dot and stem and ext.lower() in _PATH_EXTENSIONS else ""
 
 
+# Paths per tool output, by a digest of its text. A cut is remade whenever
+# the verbatim tail outgrows its budget — in an agent loop with large tool
+# output, most requests — and each remade cut read every dropped output word
+# by word again: 151,134 words and half a second per request at 300 turns,
+# for the same answer as last time. Hashing the text costs a few ms per MB.
+_PATHS_CACHE: OrderedDict[bytes, tuple[str, ...]] = OrderedDict()
+_PATHS_CACHE_MAX = 20_000
+_PATHS_CACHE_LOCK = threading.Lock()
+
+
+def _paths_in(text: str) -> tuple[str, ...]:
+    """The paths in one tool output or tool call, in first-seen order."""
+    scanned = text[:_MAX_SCAN_CHARS]
+    key = hashlib.blake2b(scanned.encode("utf-8", "surrogatepass"), digest_size=16).digest()
+    with _PATHS_CACHE_LOCK:
+        hit = _PATHS_CACHE.get(key)
+        if hit is not None:
+            _PATHS_CACHE.move_to_end(key)
+            return hit
+    found = tuple(dict.fromkeys(p for p in map(_as_path, scanned.split()) if p))
+    with _PATHS_CACHE_LOCK:
+        _PATHS_CACHE[key] = found
+        while len(_PATHS_CACHE) > _PATHS_CACHE_MAX:
+            _PATHS_CACHE.popitem(last=False)
+    return found
+
+
 def path_index(dropped: list[dict], budget: int, model: str = "gpt-4o") -> str:
     """The paths mentioned in the tool calls and tool output that windowing
     is dropping, grouped by directory, newest directories first, within
@@ -384,10 +411,8 @@ def path_index(dropped: list[dict], budget: int, model: str = "gpt-4o") -> str:
         for call in m.get("tool_calls") or []:
             texts.append((call.get("function") or {}).get("arguments") or "")
         for text in texts:
-            for word in text[:_MAX_SCAN_CHARS].split():
-                path = _as_path(word)
-                if path:
-                    seen.setdefault(path)
+            for path in _paths_in(text):
+                seen.setdefault(path)
     if not seen:
         return ""
     groups: dict[str, list[str]] = {}

@@ -264,6 +264,23 @@ def _query_intent(task: str) -> list[NodeType]:
 
 # ── Graph ────────────────────────────────────────────────────────────────────
 
+
+def _start_of_longest_run(flags: list[bool]) -> int | None:
+    """Index where the longest run of True values starts (the earliest such
+    run on a tie), or None when there is no True."""
+    best_start, best_len = None, 0
+    run_start, run_len = 0, 0
+    for i, f in enumerate(flags):
+        if f:
+            if run_len == 0:
+                run_start = i
+            run_len += 1
+            if run_len > best_len:
+                best_start, best_len = run_start, run_len
+        else:
+            run_len = 0
+    return best_start
+
 class GraphMemory:
     """
     In-process graph with SQLite persistence.
@@ -293,6 +310,9 @@ class GraphMemory:
         self._embedding_cache: dict[str, tuple] = {}
         self._nodes: dict[str, MemoryNode] = {}
         self._edges: list[MemoryEdge] = []
+        # FILE nodes by the last component of their path, only while
+        # _apply_extracted runs; see _build_file_index.
+        self._file_index: dict[str, list[str]] | None = None
         self._transitions: list[DecisionTransition] = []   # full causal history
         self._processed_hashes: set[str] = set()
         # (fingerprint, hash) per position of the last history hashed; see
@@ -532,7 +552,13 @@ class GraphMemory:
         # any repository's. The shorter spelling is kept: it is the one the
         # resume should show.
         if node_type == NodeType.FILE and "/" in stored_label:
-            for ex_id, ex in self._nodes.items():
+            # Two spellings of one path end in the same last component, so
+            # while an index exists only those nodes can match.
+            candidates = (((i, self._nodes[i]) for i in
+                           self._file_index.get(stored_label.rsplit("/", 1)[-1], ())
+                           if i in self._nodes)
+                          if self._file_index is not None else self._nodes.items())
+            for ex_id, ex in candidates:
                 if ex.type != NodeType.FILE or ex._evicted or "/" not in ex.label:
                     continue
                 short, long_ = sorted((stored_label, ex.label), key=len)
@@ -648,6 +674,8 @@ class GraphMemory:
         )
         self._nodes[node_id] = node
         self._dirty = True
+        if node_type == NodeType.FILE and self._file_index is not None and "/" in stored_label:
+            self._file_index.setdefault(stored_label.rsplit("/", 1)[-1], []).append(node_id)
 
         # Decision contradiction detection — capture full transition story
         if node_type == NodeType.DECISION and status == NodeStatus.COMPLETED:
@@ -1020,7 +1048,18 @@ class GraphMemory:
                 # re-extracted every message older than the window: on a
                 # real 914-message agent session, 414 messages per request
                 # and ~115 ms instead of ~15.
-                first_known = known.index(True) if True in known else None
+                #
+                # The processed window is the LONGEST run of recognised
+                # messages, not the first recognised one. A message older
+                # than the window that is identical to one inside it — a
+                # repeated "ok", the same tool output, an assistant reply
+                # said twice — is recognised too, and taking the first
+                # recognised message as the boundary made every trimmed
+                # message after that duplicate count as new on every
+                # request: a 300-turn session re-extracted ~60 old messages
+                # per request (12 s), growing with the session, and
+                # re-asserted their old statuses each time.
+                first_known = _start_of_longest_run(known)
                 if first_known is not None:
                     new_idx = [i for i in new_idx if i > first_known]
             if not new_idx:
@@ -1092,7 +1131,30 @@ class GraphMemory:
 
         self._persist()
 
+    def _build_file_index(self) -> dict[str, list[str]]:
+        index: dict[str, list[str]] = {}
+        for nid, n in self._nodes.items():
+            if n.type == NodeType.FILE and "/" in n.label:
+                index.setdefault(n.label.rsplit("/", 1)[-1], []).append(nid)
+        return index
+
     def _apply_extracted(self, data: dict, messages: list[dict]) -> None:
+        """Apply one extraction's results, with FILE nodes indexed by name.
+
+        add_node compares a new path with every FILE node to find another
+        spelling of it; one call over a long history adds thousands of
+        paths, and that comparison was quadratic: 7 million comparisons and
+        4.6 s for a 300-turn cold start. The index lives only for this call:
+        nothing here removes a node (pruning runs after), and any other
+        caller of add_node scans as before.
+        """
+        self._file_index = self._build_file_index()
+        try:
+            self._apply_extracted_indexed(data, messages)
+        finally:
+            self._file_index = None
+
+    def _apply_extracted_indexed(self, data: dict, messages: list[dict]) -> None:
         """
         Apply extracted structured data to the graph.
 

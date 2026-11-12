@@ -265,6 +265,9 @@ def _run_session(c, A, up, sid, steps, model, latencies, rss, tail_ok, lock=None
                 tail_ok.append(i)
             if i % 50 == 0:
                 rss.append((i, _rss_mb()))
+            if i % 100 == 0:
+                print(f"  {sid}: request {i}/{len(steps)}, {dt * 1000:.0f} ms, "
+                      f"RSS {_rss_mb():.0f} MB", file=sys.stderr, flush=True)
     return history
 
 
