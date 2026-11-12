@@ -1498,6 +1498,30 @@ class HybridExtractor:
         self._extract_structure(original, result, seen_files, seen_endpoints, seen_schemas)
         self._extract_errors(content, result, _STRUCTURAL_ERROR_PATTERNS)
 
+        # Hindi in Latin script gets its own verb-final patterns: see
+        # graph_memory/hinglish.py. Any other language keeps only what the
+        # structural passes above can read.
+        from tokenmizer.graph_memory.hinglish import extract_hinglish, looks_hinglish
+        if looks_hinglish(content):
+            found = extract_hinglish(content)
+            for task in found["tasks_done"]:
+                norm = self._normalize(task)
+                if norm not in seen_tasks:
+                    result.tasks_done.append(task)
+                    seen_tasks.add(norm)
+            for todo in found["tasks_todo"]:
+                if not any(self._subsumes(todo, t) for t in result.tasks_todo + result.tasks_done):
+                    result.tasks_todo.append(todo)
+            for decision in found["decisions"]:
+                norm = self._normalize(decision["label"])
+                if norm not in seen_decisions:
+                    result.decisions.append({**decision, "source_role": role})
+                    seen_decisions.add(norm)
+            for err in found["errors"]:
+                if not any(self._subsumes(err, e) for e in result.errors):
+                    result.errors.append(err)
+            result.resolved_errors.extend(found["resolved_errors"])
+
     def _extract_structure(self, original: str, result: ExtractedData,
                            seen_files: set, seen_endpoints: set, seen_schemas: set) -> None:
         """Files, endpoints and schemas. These are names, not prose, so they

@@ -247,6 +247,33 @@ Measured in [benchmarks](benchmarks.md): out-of-ontology retention 0% to
 resume block per session, with no section lost on the captured
 transcripts in the eval corpus.
 
+Everything else in those turns is kept too, verbatim: windowed-out turns go
+to `turn_archive.db` (already redacted), and when a later question shares a
+number, a path or an identifier with one of them, that passage is quoted
+back within `memory.recall_excerpt_tokens`. `GET /api/session/{id}/archive`
+searches it. Nodes pruned over `graph_checkpoint.max_nodes` go to cold
+storage rather than being deleted, and never include active decisions, open
+errors or work in progress.
+
+### Languages
+
+The prose patterns are English. A message that reads as another language
+(`patterns.looks_english`) gets only what carries across languages — file
+paths, exception names, status codes, checkboxes, `TODO:` headers — because
+English patterns misfire on other languages rather than missing quietly.
+
+Hindi written in Latin script — Hinglish, which a lot of developers
+actually type — has its own pass (`graph_memory/hinglish.py`). Hindi is
+verb-final, so it reads a closing verb phrase and takes the object from the
+words in front of it: "login bug fix kar diya" → `Fixed login bug`,
+"tests add karna baaki hai" → to-do `Add tests`, "PostgreSQL use karenge
+orders ke liye" → decision `Use PostgreSQL for orders`, "checkout page nahi
+chal raha" → error. Negations, prohibitions and questions produce nothing.
+Measured only on hand-written sentences (`tests/unit/test_hinglish_extraction.py`
+and a held-out set of 18 that found 10 of 12 facts with no false positives
+on 6 negatives); its accuracy on real sessions is unknown until a labelled
+Hinglish corpus exists. Devanagari and other languages are not covered.
+
 ---
 
 ## File Intelligence

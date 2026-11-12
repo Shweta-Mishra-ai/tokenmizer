@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added — Hinglish
+
+- Hindi in Latin script mixed with English ("login bug fix kar diya",
+  "tests add karna baaki hai", "PostgreSQL use karenge orders ke liye",
+  "checkout page nahi chal raha") produced no nodes: it is correctly not read
+  as English, and nothing else read it. A verb-final pass
+  (`graph_memory/hinglish.py`) now extracts finished work, to-dos, decisions
+  and errors from it, with English labels so the resume block reads the same
+  in either language. Negations, prohibitions and questions produce nothing.
+  Accuracy is measured only on hand-written sentences (10 of 12 found and 0 of
+  6 false positives on a held-out set, before its two misses were fixed);
+  English extraction is unchanged (benchmark identical).
+
+### Changed — `api/app.py` split
+
+- Request models, pure request helpers, context assembly and the streaming
+  path moved to `api/schemas.py`, `api/request_helpers.py`,
+  `api/injection.py` and `api/streaming.py`; `app.py` went from 2,423 to
+  1,888 lines. Every name is still importable from `tokenmizer.api.app`.
+
 ### Fixed — pasted code, data and logs reached the model altered
 
 - **Pasted code was replaced by a fake table.** A fenced block became
