@@ -16,6 +16,8 @@ these patterns still work, a line-count split cannot.
 """
 from __future__ import annotations
 
+import bisect
+import functools
 import re
 
 # ── Extraction prompt ─────────────────────────────────────────────────────────
@@ -356,11 +358,22 @@ _WORK_CLAUSE_START = re.compile(
 )
 
 
+# How far a clause boundary is looked for, either side of a match.
+#
+# The scans used to walk character by character to the nearest boundary,
+# once per match. Text without sentence punctuation — a pasted list, a log,
+# minified output — has no boundary, so every match walked back to the
+# start of the message: quadratic, and 80 KB of "use redis, " took 35
+# seconds of extraction (on a thread holding the GIL, so the whole proxy
+# stalled with it). A clause longer than this is a run-on, and context
+# further back than this does not govern a word here anyway.
+_CLAUSE_SCAN = 400
+
+
 def _clause_start(content: str, pos: int) -> int:
-    for i in range(pos - 1, -1, -1):
-        if content[i] in ".!?\n":
-            return i + 1
-    return 0
+    lo = max(0, pos - _CLAUSE_SCAN)
+    cut = max(content.rfind(c, lo, pos) for c in ".!?\n")
+    return cut + 1 if cut >= 0 else lo
 
 
 def _tech_mention_is_a_decision(content: str, start: int, end: int) -> bool:
@@ -413,12 +426,50 @@ _NEGATION_WORDS = re.compile(
 
 def _is_negated_context(content: str, match_start: int) -> bool:
     """True if `match_start` in `content` falls inside a negated clause."""
-    clause_start = 0
-    for i in range(match_start - 1, -1, -1):
-        if content[i] in ".!?\n":
-            clause_start = i + 1
-            break
-    return bool(_NEGATION_WORDS.search(content[clause_start:match_start]))
+    return bool(_NEGATION_WORDS.search(
+        content, _clause_start(content, match_start), match_start))
+
+
+# The verb itself is negated: "is NOT done", "haven't fixed", "never
+# shipped", "yet to be merged". Narrower than _is_negated_context, which
+# looks at the whole clause and would discard "Fixed the bug where users
+# could not log in" for the "not" after the verb — this only reads the two
+# words right before it.
+_NEGATED_VERB = re.compile(
+    # The apostrophe is required: without it "incide|nt| was resolved" read
+    # as "n't was resolved" and a finished task was thrown away.
+    r"(?:\bnot|\bnever|\bcannot|n['\u2019]t|\bno longer|\byet to(?:\s+be)?)\s+(?:\w+\s+)?$",
+    re.IGNORECASE,
+)
+
+
+def is_negated_verb(content: str, verb_start: int) -> bool:
+    return bool(_NEGATED_VERB.search(content[max(0, verb_start - 30):verb_start]))
+
+
+def inside_quotation(content: str, pos: int) -> bool:
+    """True if `pos` is inside a quotation opened earlier on its line.
+
+    A quotation reports what someone else said or wrote — the docs, a
+    ticket, an error message — and a decision quoted ("the docs say:
+    'Decided: use SQLite for everything.'") is not one this session made.
+    Apostrophes inside words (let's, don't) are not quotation marks: a
+    single quote counts only where it opens or closes a word.
+    """
+    line_start = content.rfind("\n", max(0, pos - _CLAUSE_SCAN), pos) + 1
+    open_double = open_single = False
+    for i in range(max(line_start, pos - _CLAUSE_SCAN), pos):
+        ch = content[i]
+        if ch in '"\u201c\u201d':
+            open_double = not open_double if ch == '"' else ch == "\u201c"
+        elif ch in "'\u2018\u2019":
+            prev_alnum = i > 0 and content[i - 1].isalnum()
+            next_alnum = i + 1 < len(content) and content[i + 1].isalnum()
+            if not prev_alnum and next_alnum:
+                open_single = True
+            elif prev_alnum and not next_alnum:
+                open_single = False
+    return open_double or open_single
 
 
 # "Should we go with Postgres or Redis for this?" matches Pass 1's "go
@@ -427,13 +478,11 @@ def _is_negated_context(content: str, match_start: int) -> bool:
 # the match sits mid-question, so the terminator that disambiguates it
 # is ahead, not behind.
 def _is_question_context(content: str, match_start: int) -> bool:
-    """True if the clause containing `match_start` ends in a question mark."""
-    clause_end = len(content)
-    for i in range(match_start, len(content)):
-        if content[i] in ".!?\n":
-            clause_end = i
-            break
-    return content[clause_end:clause_end + 1] == "?"
+    """True if the clause containing `match_start` ends in a question mark.
+    Looks at most _CLAUSE_SCAN characters ahead; see _clause_start."""
+    hi = min(len(content), match_start + _CLAUSE_SCAN)
+    ends = [i for i in (content.find(c, match_start, hi) for c in ".!?\n") if i >= 0]
+    return bool(ends) and content[min(ends)] == "?"
 
 
 # Pass 5: config decisions — "expires in 15 minutes", "cost factor 12"
@@ -768,9 +817,19 @@ def _drop_leading_sentence(text: str) -> str:
     return s[last.end():].strip() if last else s
 
 
+@functools.lru_cache(maxsize=16)
+def _sentence_ends(text: str) -> tuple[int, ...]:
+    return tuple(m.end() for m in _SENTENCE_BOUNDARY.finditer(text))
+
+
 def _sentence_index(text: str, position: int) -> int:
-    """Which sentence of `text` contains `position` (0-based)."""
-    return sum(1 for m in _SENTENCE_BOUNDARY.finditer(text) if m.end() <= position)
+    """Which sentence of `text` contains `position` (0-based).
+
+    Boundaries are found once per text and binary-searched. This re-scanned
+    the whole message for every error it was asked about, which made error
+    extraction quadratic in the length of a pasted log.
+    """
+    return bisect.bisect_right(_sentence_ends(text), position)
 
 
 def _content_words(text: str) -> int:
@@ -962,6 +1021,9 @@ _PAST_ASPECT_LEAD = re.compile(
 _INTRANSITIVE_TAIL = re.compile(
     r"^(?:in|on|at|into|with|from|off|over|during|after|before|last|yesterday|"
     r"earlier|today|this morning|this afternoon|already|successfully|fine|cleanly|"
+    # "The TypeError in billing.py is fixed now — I added a None check" was
+    # stored as the finished task "now — I added a None check".
+    r"now|just now|for now|too|as well|"
     # "The incident was resolved within an hour": a time or manner adverbial,
     # not the work. It was stored as the finished task "within an hour".
     r"within|without|overnight|quickly|immediately|eventually|again)\b",

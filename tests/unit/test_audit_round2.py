@@ -481,3 +481,118 @@ def test_invalidate_sets_valid_until(client):
     assert r.status_code == 200, r.text
     later = c.get(f"/api/graph/{sid}/history", params={"at_time": time.time() + 5}).json()
     assert nid not in {n["id"] for n in later["nodes"]}
+
+
+# ── round 3: file intelligence ───────────────────────────────────────────────
+
+_CODE = '''def apply_discount(order, pct):
+    if pct < 0 or pct > 100:
+        raise ValueError("bad pct")
+    total = sum(i.price * i.qty for i in order.items)
+    total = round(total)  # BUG: rounds before the discount
+    discounted = total - total * pct / 100
+    if order.customer.is_vip:
+        discounted *= 0.95
+    return discounted
+''' * 3
+
+
+class TestFileIntelligenceKeepsWhatTheUserSent:
+    def test_pasted_code_reaches_the_model_unchanged(self):
+        """```python became 'attachment.python', was sniffed as CSV for its
+        commas, and the code was replaced by a fake table."""
+        from tokenmizer.filters.file_intelligence import FileIntelligence
+        msg = {"role": "user", "content": "Fix the rounding bug:\n```python\n" + _CODE + "```"}
+        out, saved = FileIntelligence().process_message_files([msg], 100)
+        assert out[0] == msg and saved == 0
+
+    @pytest.mark.parametrize("text", [
+        "Refactor this:\n" + "\n".join(f"  doThing(a{i}, b{i}, c{i});" for i in range(60)),
+        "\n".join(f"Step {i}: open the file, edit the config, then restart, and check logs."
+                  for i in range(60)),
+    ])
+    def test_code_and_prose_with_commas_are_not_tables(self, text):
+        from tokenmizer.filters.file_intelligence import FileIntelligence
+        msg = {"role": "user", "content": text}
+        assert FileIntelligence().process_message_files([msg], 100)[0][0] == msg
+
+    def test_a_real_table_is_still_summarised(self):
+        from tokenmizer.filters.file_intelligence import FileIntelligence
+        table = "id,name,value\n" + "\n".join(f"{i},item_{i},{i * 10}" for i in range(400))
+        out, saved = FileIntelligence().process_message_files(
+            [{"role": "user", "content": "Analyze:\n" + table}], 300)
+        assert saved > 0 and out[0]["content"].startswith("Analyze:")
+
+    def test_every_fenced_block_is_considered(self):
+        from tokenmizer.filters.file_intelligence import FileIntelligence
+        table = "a,b,c\n" + "\n".join(f"{i},{i * 2},{i * 3}" for i in range(300))
+        msg = {"role": "user", "content":
+               f"code:\n```python\n{_CODE}```\ndata:\n```csv\n{table}\n```\nthanks"}
+        out, saved = FileIntelligence().process_message_files([msg], 200)
+        assert saved > 0
+        assert _CODE in out[0]["content"]          # the code block untouched
+        assert out[0]["content"].endswith("thanks")
+
+    def test_errors_in_the_middle_of_a_long_log_survive(self):
+        from tokenmizer.filters.file_intelligence import FileIntelligence
+        lines = [f"10:{i:02d} INFO request ok id={i}" for i in range(400)]
+        lines.insert(200, "10:20 ERROR payment webhook timed out order=8812")
+        r = FileIntelligence().process("\n".join(lines), "app.log", token_budget=300)
+        assert "order=8812" in r.content
+
+    def test_jsonl_count_is_not_understated(self):
+        from tokenmizer.filters.file_intelligence import FileIntelligence
+        rows = "\n".join(json.dumps({"i": i}) for i in range(2500))
+        assert "2,500 lines" in FileIntelligence().process(rows, "x.jsonl", 200).content
+
+
+# ── round 3: extraction ──────────────────────────────────────────────────────
+
+def _extract(*contents, role="assistant"):
+    from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
+    return get_hybrid_extractor(None).heuristic_extract(
+        [{"role": role, "content": c} for c in contents])
+
+
+class TestExtractionDoesNotInventFacts:
+    def test_work_said_to_be_not_done_is_not_done(self):
+        d = _extract("The migration is not done yet, and the refund endpoint still fails.",
+                     role="user")
+        assert d.tasks_done == []
+        assert any("migration" in t.lower() for t in d.tasks_todo)
+
+    @pytest.mark.parametrize("text", ["We haven't fixed the login bug.",
+                                      "The cache was never deployed to staging."])
+    def test_negated_completion_verbs(self, text):
+        assert _extract(text).tasks_done == []
+
+    def test_a_negation_inside_a_word_is_not_one(self):
+        d = _extract("The incident was resolved within an hour.")
+        assert any("incident" in t.lower() for t in d.tasks_done)
+
+    def test_a_rejected_option_is_not_a_decision(self):
+        labels = [x["label"] for x in _extract("We decided against Redis. Let's go with PostgreSQL.").decisions]
+        assert not any("redis" in label.lower() for label in labels)
+        assert "Use PostgreSQL" in labels
+
+    def test_a_quoted_decision_is_not_this_sessions(self):
+        d = _extract("Here's what the docs say: 'Decided: use SQLite for everything.' "
+                     "Is that right for us?", role="user")
+        assert d.decisions == []
+
+    def test_an_error_reported_as_fixed_is_resolved_and_not_cut_mid_word(self):
+        d = _extract("The TypeError: 'NoneType' object is not subscriptable in billing.py "
+                     "is fixed now — I added a None check.")
+        assert d.errors and set(d.errors) <= set(d.resolved_errors)
+        assert not any(t.startswith(("now", "oneType")) for t in d.tasks_done)
+
+
+@pytest.mark.parametrize("text", [
+    "use redis, " * 7000,
+    "\n".join(f"ERROR worker {i} failed: timeout in a/b/c_{i}.py line {i}" for i in range(1500)),
+])
+def test_extraction_is_not_quadratic(text):
+    """80 KB of either took 35 s and 10.7 s, on a thread holding the GIL."""
+    t0 = time.perf_counter()
+    _extract(text)
+    assert time.perf_counter() - t0 < 5.0

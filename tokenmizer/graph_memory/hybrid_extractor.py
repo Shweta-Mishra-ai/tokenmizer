@@ -22,6 +22,7 @@ be defined here directly is still an attribute of this module.
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -147,7 +148,9 @@ from tokenmizer.graph_memory.patterns import (
     _tech_mention_is_a_decision,
     clause_subject,
     find_supersessions,
+    inside_quotation,
     is_library_name,
+    is_negated_verb,
     looks_english,
     mask_mentions,
     restore_verb,
@@ -159,6 +162,28 @@ logger = logging.getLogger(__name__)
 # a model that reasons before answering spends part of it on reasoning, and
 # 800 was exhausted before the object was complete (issue #89).
 DEFAULT_EXTRACTION_MAX_TOKENS = 2048
+
+
+_MAX_ERRORS_PER_MESSAGE = 60
+
+# A decision verb followed by what was ruled out, not chosen.
+# Applied with .match() to a stripped label. No leading \s*: every
+# extraction regex is also run with .search() over long whitespace by the
+# linearity test, and a leading optional run is quadratic there.
+_REJECTION_LEAD = re.compile(r"(?:against|not\s+to|to\s+not|no\b|to\s+drop|to\s+remove)\b",
+                             re.IGNORECASE)
+
+# "go WITH x", "settled ON x", "switching TO x": the preposition is the
+# verb's, and the label is what follows it.
+_CHOICE_PREPOSITION = re.compile(r"^(?:with|on|to|for)\s+(?=\S)", re.IGNORECASE)
+
+# The error just quoted is reported as dealt with, after it: "The
+# TypeError … in billing.py is fixed now". It was kept as an open bug.
+_FIXED_AFTER = re.compile(
+    r"[^.!?\n]{0,40}?\b(?:is|was|are|were|has been|have been|got|now)\s+"
+    r"(?:now\s+|finally\s+|already\s+)?(?:fixed|resolved|solved|gone|patched)\b",
+    re.IGNORECASE,
+)
 
 
 def _parse_json_object(raw: str) -> Optional[dict]:
@@ -950,6 +975,12 @@ class HybridExtractor:
         # Tasks done: full history (completed = permanent fact)
         for m in _TASK_DONE.finditer(content):
             raw_task = m.group(1)
+            # "The migration is NOT done yet, and the refund endpoint still
+            # fails" was recorded as the FINISHED task "yet, and the refund
+            # endpoint still fails" — the resume then told the next session
+            # the work was complete. A negated verb is the opposite claim.
+            if is_negated_verb(content, m.start()):
+                continue
             # "Implemented: POST /a, POST /b, POST /c" is three pieces of
             # finished work, not one task whose label is a route list cut
             # off at 80 chars (which also left the last route truncated).
@@ -1041,8 +1072,13 @@ class HybridExtractor:
             # not a report that the backfill is done.
             if _CONDITIONAL_LEAD.match(m.group(1).strip()):
                 continue
+            # The subject window is bounded, so it can open inside a word:
+            # "'NoneType' object …" became "oneType' object …". Start on the
+            # word, or not at all if that leaves nothing.
+            start, _ = _word_bounded(content, m.start(1), m.end(1))
+            subject = content[start:m.end(1)] if start >= m.start(1) - 40 else m.group(1)
             task = _clip(re.sub(r'^(?:the|a|an|this|that)\s+', '',
-                                m.group(1), flags=re.IGNORECASE))
+                                subject, flags=re.IGNORECASE))
             if len(task) > 5 and _is_subject_label(task):
                 norm = self._normalize(task)
                 if any(self._subsumes(task, t) for t in result.tasks_done):
@@ -1072,7 +1108,7 @@ class HybridExtractor:
             for m in pattern.finditer(content):
                 if pattern is not _TASK_DONE_CHECK and (
                         _is_negated_context(content, m.start())
-                        or _is_question_context(content, m.start())):
+                        or _quoted_or_question(content, m.start())):
                     continue
                 task = _clip(m.group(1))
                 if pattern is _TASK_DONE_PHRASAL:
@@ -1088,13 +1124,13 @@ class HybridExtractor:
                 _add_done(task)
         # "With X sorted, …", "Once X was in, …": the premise is finished work.
         for m in _TASK_DONE_PREMISE.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             premise = m.group(1) or m.group(2)
             if premise and _is_subject_label(premise) and not _NEGATION_WORDS.search(premise):
                 _add_done(_clip(premise))
         for m in _TASK_DONE_WENT.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             subject = clause_subject(content, m.start())
             if _CONDITIONAL_LEAD.match(subject) or _NEGATION_WORDS.search(subject) \
@@ -1102,7 +1138,7 @@ class HybridExtractor:
                 continue
             _add_done(_clip(subject))
         for m in _TASK_DONE_STATE.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             subject = clause_subject(content, m.start())
             # "No tests are in place" says the opposite of what it matches.
@@ -1150,7 +1186,7 @@ class HybridExtractor:
                     result.tasks_wip.append(wip)
             # Narrated intent is WIP-like: see _TASK_TODO_INTENT.
             for m in _TASK_TODO_INTENT.finditer(content):
-                if _is_question_context(content, m.start()):
+                if _quoted_or_question(content, m.start()):
                     continue
                 todo = _clip(_todo_label(m.group(1)))
                 if _outstanding(todo, m.start(1), result.tasks_todo):
@@ -1177,7 +1213,7 @@ class HybridExtractor:
                 if _outstanding(todo, m.start(1), result.tasks_todo):
                     result.tasks_todo.append(todo)
         for m in _TASK_TODO_STATE.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             subject = clause_subject(content, m.start())
             if _CONDITIONAL_LEAD.match(subject) or _NEGATION_WORDS.search(subject) \
@@ -1189,7 +1225,13 @@ class HybridExtractor:
 
         # Decision Pass 1: explicit verb
         for m in _DECISION.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _quoted_or_question(content, m.start()):
+                continue
+            # "We decided AGAINST Redis" is a rejection; it was recorded as
+            # the decision "against Redis too". And a decision someone is
+            # QUOTING ("the docs say: 'Decided: use SQLite'") is not one
+            # this session made.
+            if _REJECTION_LEAD.match(m.group(1).lstrip()) or inside_quotation(content, m.start()):
                 continue
             # "Finished up dark mode using CSS custom properties": `using`
             # names how reported work was done — see _WORK_CLAUSE_START.
@@ -1197,6 +1239,11 @@ class HybridExtractor:
                     content[_clause_start(content, m.start()):m.start()]):
                 continue
             label = _clip(m.group(1))
+            # "Let's go with PostgreSQL" captured "with PostgreSQL": the
+            # preposition belongs to the verb. What was chosen is the rest.
+            bare = _CHOICE_PREPOSITION.sub("", label)
+            if bare != label:
+                label = "Use " + bare
             norm  = self._normalize(label)
             if norm not in seen_decisions and len(norm) > 4:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
@@ -1204,7 +1251,7 @@ class HybridExtractor:
 
         # Decision Pass 2: header format
         for m in _DECISION_HEADER.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+            if (_is_negated_context(content, m.start()) or _quoted_or_question(content, m.start())):
                 continue
             label = _clip(m.group(1))
             norm  = self._normalize(label)
@@ -1214,7 +1261,7 @@ class HybridExtractor:
 
         # Decision Pass 2b: "Kafka it is." — the choice precedes the verb.
         for m in _DECISION_IT_IS.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _quoted_or_question(content, m.start()):
                 continue
             label = "Use " + m.group(1).strip()
             norm  = self._normalize(label)
@@ -1242,7 +1289,7 @@ class HybridExtractor:
         # assistant, that is the decision; stated by the user it is a
         # proposal until the assistant agrees.
         for m in _DECISION_EVALUATIVE.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             subject = clause_subject(content, m.start())
             # Negation is scoped to this clause, not the sentence: in "It
@@ -1287,7 +1334,7 @@ class HybridExtractor:
 
         # Decision Pass 3: tech names
         for m in _DECISION_FOR.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _quoted_or_question(content, m.start()):
                 continue
             # A bare tech name is only a decision with choosing context —
             # see _tech_mention_is_a_decision.
@@ -1313,7 +1360,7 @@ class HybridExtractor:
         for pattern in self.pack.decisions:
             for m in pattern.finditer(content):
                 if _is_negated_context(content, m.start()) or \
-                        _is_question_context(content, m.start()):
+                        _quoted_or_question(content, m.start()):
                     continue
                 label = _clip(m.group(1))
                 norm = self._normalize(label)
@@ -1363,7 +1410,7 @@ class HybridExtractor:
         # "migrate 40M rows from MySQL to Postgres with no downtime" — a
         # statement of the problem — into the decision "Use Postgres".
         for m in _DECISION_PASSIVE.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _quoted_or_question(content, m.start()):
                 continue
             if not _tech_mention_is_a_decision(content, m.start(1), m.end(1)):
                 continue
@@ -1639,6 +1686,14 @@ class HybridExtractor:
                 floor = 3 if pattern is _ERROR_VULN else 5
                 if len(err) < floor or err.lower() in _ERROR_STOPWORDS:
                     continue
+                # A pasted log can hold thousands of failure lines, and each
+                # new one is compared with every one kept so far: quadratic,
+                # and an 85 KB log took seconds on a thread holding the GIL.
+                # Past this many, more ERROR nodes from one message do not
+                # make a resume more useful; the message itself still goes
+                # to the model and to the turn archive whole.
+                if len(result.errors) >= _MAX_ERRORS_PER_MESSAGE:
+                    continue
                 # One failure, two labels: keep the more specific. A pattern
                 # later in the order can recover the whole description of a
                 # failure an earlier one only clipped a piece of.
@@ -1670,7 +1725,8 @@ class HybridExtractor:
                 # open bug. The fix prefix stripped from the label above is
                 # the same signal when it sat inside the captured span.
                 if _FIX_LEAD.search(before) or _FIX_PREFIX.match(raw.strip()) \
-                        or _under_fixed_heading(content, span_start):
+                        or _under_fixed_heading(content, span_start) \
+                        or _FIXED_AFTER.match(content, span_end):
                     result.resolved_errors.append(err)
                 key = (id(pattern), _sentence_index(content, label_start))
                 prior = sentence_claims.get(key)
@@ -1957,6 +2013,10 @@ class HybridExtractor:
 
     @staticmethod
     def _subsumes(a: str, b: str) -> bool:
+        return _subsumes_words(_label_words(a), _label_words(b))
+
+    @staticmethod
+    def _subsumes_uncached(a: str, b: str) -> bool:
         """True if `a` and `b` state substantially the same fact.
 
         Exact-string dedup is not enough. Several patterns fire on
@@ -2207,6 +2267,31 @@ class HybridExtractor:
 # compiled once at import, so caching them costs nothing and keeps the
 # common case a dict lookup.
 _extractors: dict[str, HybridExtractor] = {}
+
+
+@functools.lru_cache(maxsize=8192)
+def _label_words(text: str) -> frozenset:
+    """Content words of a label, memoised.
+
+    Dedup compares every new label against every earlier one, and each
+    comparison re-ran the word regex on both sides: on an 80 KB log with
+    hundreds of error lines that was 660,000 regex calls and most of a
+    ten-second extraction. A label's words never change.
+    """
+    return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2)
+
+
+def _subsumes_words(wa: frozenset, wb: frozenset) -> bool:
+    if not wa or not wb:
+        return False
+    smaller = wa if len(wa) <= len(wb) else wb
+    return len(wa & wb) / len(smaller) >= 0.75
+
+
+def _quoted_or_question(content: str, pos: int) -> bool:
+    """A choice that is asked about, or quoted from someone else, is not a
+    choice this session made."""
+    return _is_question_context(content, pos) or inside_quotation(content, pos)
 
 
 def get_hybrid_extractor(domain: str | None = None) -> HybridExtractor:

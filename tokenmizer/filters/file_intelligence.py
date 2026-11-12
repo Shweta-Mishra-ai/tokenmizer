@@ -27,7 +27,6 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from tokenmizer.core.tokenizer import count_tokens
 
@@ -558,12 +557,25 @@ class JSONExtractor:
         token_budget: int = 500,
     ) -> FileExtractionResult:
         original_tokens = count_tokens(content)
+        if original_tokens <= token_budget:
+            # It fits. A schema in place of the document would drop every
+            # value to save nothing — the other extractors already pass
+            # through; this one did not.
+            return FileExtractionResult(
+                file_type="json", original_size_bytes=len(content.encode("utf-8", "surrogatepass")),
+                original_tokens=original_tokens, extracted_tokens=original_tokens,
+                tokens_saved=0, savings_pct=0.0, content=content,
+                summary=f"JSON: fits in budget ({original_tokens} tokens)",
+                strategy_used="passthrough", was_truncated=False,
+            )
 
+        jsonl_total = None
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
             # Try JSONL
             lines = [line.strip() for line in content.splitlines() if line.strip()]
+            jsonl_total = len(lines)
             try:
                 data = [json.loads(line) for line in lines[:1000]]
             except Exception as jsonl_err:
@@ -592,7 +604,12 @@ class JSONExtractor:
         parts.append("Schema:\n" + schema)
 
         if isinstance(data, list):
-            parts.append(f"Array length: {len(data):,} items")
+            if jsonl_total is not None and jsonl_total > len(data):
+                # Only the first 1,000 lines are parsed. Reporting their
+                # count as the file's length understated it silently.
+                parts.append(f"Records: {jsonl_total:,} lines (first {len(data):,} analysed)")
+            else:
+                parts.append(f"Array length: {len(data):,} items")
             sample = data[:3]
             parts.append("First 3 items:\n" + json.dumps(sample, indent=2)[:800])
         elif isinstance(data, dict):
@@ -890,6 +907,12 @@ class ExcelExtractor:
 
 # ── Text / Code extractor ─────────────────────────────────────────────────────
 
+# Lines worth keeping from the middle of a long log.
+_SIGNAL_LINE = re.compile(
+    r"\b(?:error|exception|traceback|fatal|panic|fail(?:ed|ure)?|critical|"
+    r"warn(?:ing)?|denied|refused|timed? ?out)\b", re.IGNORECASE)
+
+
 class TextExtractor:
     """
     Strategy for plain text, markdown, and code files.
@@ -972,13 +995,17 @@ class TextExtractor:
         # Always keep first 20 lines
         result.extend(lines[:20])
 
-        # Keep headings from the rest
-        for line in lines[20:]:
-            if heading_pattern.match(line.strip()):
+        # From the middle: headings, and the lines a reader of a log is
+        # looking for. Keeping only the first 20 and last 10 lines dropped
+        # every error in between — usually the one being asked about. The
+        # middle excludes the tail, which used to be scanned here AND
+        # appended below, and a file under 30 lines, whose head and tail
+        # overlapped and came out twice.
+        for line in lines[20:max(20, len(lines) - 10)]:
+            if heading_pattern.match(line.strip()) or _SIGNAL_LINE.search(line):
                 result.append(line)
 
-        # Keep last 10 lines
-        result.extend(lines[-10:])
+        result.extend(lines[max(20, len(lines) - 10):])
 
         skeleton = "\n".join(result)
         if count_tokens(skeleton) > budget:
@@ -1100,6 +1127,29 @@ class FileIntelligence:
         result.was_truncated = True
         return result
 
+    # A fence's language tag, as the file type it names. Anything not here is
+    # read as text: the tag was turned into a filename extension, and
+    # ```python became "attachment.python" — an unknown extension, so the
+    # content was SNIFFED, found to contain commas, and summarised as a CSV
+    # table. The code a user pasted to have fixed never reached the model.
+    _FENCE_TYPES = {
+        "csv": "csv", "tsv": "tsv", "json": "json", "jsonl": "jsonl",
+        "ndjson": "jsonl", "log": "text", "logs": "text", "text": "text",
+        "txt": "text", "plaintext": "text", "md": "text", "markdown": "text",
+        "xml": "text", "html": "text", "yaml": "text", "yml": "text", "toml": "text",
+    }
+
+    # Kinds of block that may be replaced by a summary. Code is not one of
+    # them: a model asked about code needs the code, and a list of
+    # signatures in its place is a different program. /api/analyze still
+    # summarises code on request.
+    _SUMMARISABLE = frozenset({"csv", "tsv", "json", "jsonl", "text"})
+
+    # Replace a block only when the summary is at most this share of it.
+    # Swapping 300 tokens of real rows for 250 tokens of statistics saves
+    # almost nothing and loses every value the user might ask about.
+    _MIN_SAVING_RATIO = 0.7
+
     def process_message_files(
         self,
         messages: list[dict],
@@ -1107,10 +1157,15 @@ class FileIntelligence:
         query: str = "",
     ) -> tuple[list[dict], int]:
         """
-        Scan messages for large file content blocks and extract intelligently.
-        Detects patterns like:
-          - "Here is my CSV file: <large content>"
-          - Multi-line data blocks embedded in user messages
+        Replace large data blocks embedded in messages — a pasted CSV, a JSON
+        dump, a long log — with a token-budgeted digest.
+
+        A block is replaced only when all of these hold:
+          - it is data or text, never code (see _SUMMARISABLE);
+          - it is larger than the budget;
+          - the digest is no more than _MIN_SAVING_RATIO of it.
+        Otherwise the message goes through byte-identical. Every fenced block
+        in a message is considered, not just the first.
 
         Returns (processed_messages, total_tokens_saved)
         """
@@ -1119,78 +1174,103 @@ class FileIntelligence:
 
         for msg in messages:
             content = msg.get("content", "")
-            if not isinstance(content, str) or len(content) < 500:
+            if (not isinstance(content, str) or len(content) < 500
+                    or msg.get("role") == "tool" or msg.get("tool_calls")):
                 processed.append(msg)
                 continue
 
-            # Detect if content contains a large file block
-            file_block, filename, pre, post = self._extract_file_block(content)
-            if file_block is None:
-                processed.append(msg)
-                continue
-
-            result = self.process(file_block, filename, token_budget_per_file, query)
-            total_saved += result.tokens_saved
-
-            new_content = (
-                (pre + "\n" if pre else "") +
-                f"[File: {filename} — {result.summary}]\n{result.content}" +
-                ("\n" + post if post else "")
-            )
-            processed.append({**msg, "content": new_content})
+            new_content, saved = self._replace_blocks(content, token_budget_per_file, query)
+            total_saved += saved
+            processed.append(msg if saved <= 0 else {**msg, "content": new_content})
 
         return processed, total_saved
 
-    def _extract_file_block(
-        self, content: str
-    ) -> tuple[Optional[str], str, str, str]:
+    def _replace_blocks(self, content: str, budget: int, query: str) -> tuple[str, int]:
+        saved = 0
+        pieces: list[str] = []
+        pos = 0
+        for m in re.finditer(r"```([\w+.-]*)[^\n]*\n([\s\S]*?)\n```", content):
+            lang = (m.group(1) or "").lower()
+            kind = self._FENCE_TYPES.get(lang, "code" if lang else "text")
+            replacement, gained = self._digest(m.group(2), kind, budget, query,
+                                               f"attachment.{lang or 'txt'}")
+            pieces.append(content[pos:m.start()])
+            pieces.append(replacement if gained > 0 else m.group(0))
+            saved += max(0, gained)
+            pos = m.end()
+        if pieces:
+            pieces.append(content[pos:])
+            return "".join(pieces), saved
+
+        # No fences: the whole message may be a pasted table.
+        if self._looks_tabular(content):
+            delim = "\t" if content.count("\t") > content.count(",") else ","
+            kind = "tsv" if delim == "\t" else "csv"
+            start = self._table_start(content, delim)
+            pre, table = content[:start].rstrip("\n"), content[start:]
+            replacement, gained = self._digest(table, kind, budget, query, f"inline_data.{kind}")
+            if gained > 0:
+                return (pre + "\n" if pre else "") + replacement, gained
+        return content, 0
+
+    def _digest(self, block: str, kind: str, budget: int, query: str,
+                filename: str) -> tuple[str, int]:
+        """(replacement text, tokens saved), or (block, 0) when the block
+        must stay as it is."""
+        if kind not in self._SUMMARISABLE:
+            return block, 0
+        original = count_tokens(block)
+        if original <= budget:
+            return block, 0
+        name = {"csv": "data.csv", "tsv": "data.tsv", "json": "data.json",
+                "jsonl": "data.jsonl"}.get(kind, filename if kind != "text" else "data.log")
+        result = self.process(block, name, budget, query)
+        if result.extracted_tokens > original * self._MIN_SAVING_RATIO:
+            return block, 0
+        text = f"[File: {filename} — {result.summary}]\n{result.content}"
+        return text, original - count_tokens(text)
+
+    @staticmethod
+    def _table_start(content: str, delim: str) -> int:
+        """Offset of the first line of the table, skipping a short intro."""
+        offset = 0
+        for i, line in enumerate(content.split("\n")[:3]):
+            if line.count(delim) >= (1 if delim == "\t" else 2):
+                return offset
+            offset += len(line) + 1
+        return 0
+
+    @staticmethod
+    def _looks_tabular(content: str) -> bool:
+        """A message that is a delimited table, not prose or code with
+        commas in it.
+
+        Requires 50+ lines and, over the first 20 table lines, one field
+        count shared by at least 80% of them, with three or more fields.
+        The old test was "two commas per line on average", which a page of
+        function calls or of instructions ("open the file, edit it, then
+        restart") passed, and both were summarised as CSV.
         """
-        Detect embedded file content in a message.
-        Returns (file_content, filename, text_before, text_after) or (None, ...)
-        """
-        # Pattern: "file.csv\n<content>" or "```csv\n<content>\n```"
-        code_fence = re.search(
-            r"```(\w+)?\n([\s\S]{500,}?)\n```",
-            content,
-        )
-        if code_fence:
-            lang = code_fence.group(1) or "text"
-            block = code_fence.group(2)
-            filename = f"attachment.{lang}" if lang != "text" else "attachment.txt"
-            pre = content[:code_fence.start()].strip()
-            post = content[code_fence.end():].strip()
-            return block, filename, pre, post
-
-        # Pattern: very long line-separated content (likely CSV/TSV)
-        lines = content.split("\n")
-        if len(lines) > 50:
-            # the old
-            # code sampled lines[:5] unconditionally and averaged comma counts
-            # across them. Any prose preamble before the actual data (e.g. a
-            # user typing "Analyze this data:" before pasting a CSV — an
-            # extremely common real case) diluted avg_commas below the >=2
-            # threshold, so detection silently failed and ZERO tokens were
-            # saved on exactly the input this feature exists for. Verified:
-            # "Analyze this data:\n<60-row CSV>" saved 0 tokens before this
-            # fix, 149 tokens after.
-            #
-            # Fix: skip a small number of leading non-tabular lines (prose
-            # preamble) before taking the 5-line sample used for detection.
-            non_tabular_skip_limit = 3  # generous enough for a short intro line
-            start = 0
-            while start < len(lines) and start < non_tabular_skip_limit:
-                probe = lines[start]
-                if probe.count(",") >= 2 or probe.count("\t") >= 1:
-                    break
-                start += 1
-
-            sample = lines[start:start + 5]
-            comma_counts = [line.count(",") for line in sample if line]
-            tab_counts = [line.count("\t") for line in sample if line]
-            avg_commas = sum(comma_counts) / max(1, len(comma_counts))
-            avg_tabs = sum(tab_counts) / max(1, len(tab_counts))
-
-            if avg_commas >= 2 or avg_tabs >= 1:
-                return content, "inline_data.csv", "", ""
-
-        return None, "", content, ""
+        lines = [line for line in content.split("\n") if line.strip()]
+        if len(lines) < 50:
+            return False
+        for delim in (",", "\t"):
+            body = [line for line in lines[:23] if line.count(delim) >= 1][:20]
+            if len(body) < 15:
+                continue
+            try:
+                widths = [len(row) for row in csv.reader(body, delimiter=delim)]
+            except csv.Error:
+                continue
+            common = max(set(widths), key=widths.count)
+            if common < 3 or widths.count(common) < 0.8 * len(widths):
+                continue
+            # Fields of a table are values, not clauses. A numbered list of
+            # instructions ("Step 4: open the file, edit the config, then
+            # restart.") has a perfectly regular comma count too.
+            fields = [f.strip() for row in csv.reader(body, delimiter=delim) for f in row]
+            wordy = sum(1 for f in fields if len(f.split()) > 3)
+            sentences = sum(1 for line in body if line.rstrip().endswith((".", "!", "?", ";")))
+            if wordy <= 0.25 * len(fields) and sentences <= 0.5 * len(body):
+                return True
+        return False

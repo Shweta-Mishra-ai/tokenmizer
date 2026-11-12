@@ -32,8 +32,8 @@
   stripped from assistant turns only.
 - **Output trimmer** removed the first word of answers such as "Certainly not.
   Dropping that table…".
-- **Redaction** rewrote ordinary code (`token = generate_token(user)` →
-  `[REDACTED](user)`, git remotes, `a@b` expressions) and missed JSON and dict
+- **Redaction** rewrote ordinary code (`token = generate_token(user)` lost
+  everything before `(user)`, git remotes, `a@b` expressions) and missed JSON and dict
   passwords, env-file secrets and PEM keys. It now keeps names and redacts
   values, keeps JSON valid, and is configurable (`security.*`), with an
   optional Luhn-checked card and SSN pass.
