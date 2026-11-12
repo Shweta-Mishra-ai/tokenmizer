@@ -80,7 +80,23 @@ class GraphCheckpointSettings(BaseModel):
     storage_dir: str = "./checkpoints"
     max_resume_tokens: int = 400
     use_llm_extraction: bool = False  # set True for 80%+ recall (needs API key, ~$0.001/turn)
-    extraction_model: str = ""        # leave empty = auto-pick cheapest model for your provider
+    # Where LLM extraction runs, separately from chat. Empty = the chat
+    # provider. "ollama" runs it on a local model: nothing the session says
+    # leaves the machine for extraction, and it costs nothing per call, while
+    # chat can stay on whichever provider answers best. Any other provider
+    # name uses that provider's key.
+    extraction_provider: Literal["", "anthropic", "claude", "openai", "gpt", "deepseek",
+                                 "mistral", "grok", "cohere", "gemini", "ollama",
+                                 "openrouter"] = ""
+    # The extraction model. Empty = the chat model on the same provider.
+    # With extraction_provider: ollama, "auto" (or empty) picks the best
+    # installed model — see providers/ollama_models.py, and rank what you
+    # have with `python -m benchmarks.extraction_models`.
+    extraction_model: str = ""
+    # Seconds one extraction call may take. Separate from request_timeout
+    # because a local model on a CPU is slow and extraction runs in the
+    # background, where waiting costs no one a response.
+    extraction_timeout: float = Field(default=300.0, gt=0)
     # Output-token budget for the LLM extraction call. A model that reasons
     # before it answers spends part of this on reasoning, so a budget sized
     # for the JSON alone can be exhausted before the JSON is complete; raise
@@ -384,6 +400,11 @@ class Settings(BaseSettings):
     # adapter's default.
     openai_base_url: str = ""
     ollama_base_url: str = ""
+    # Context window, in tokens, requested from Ollama for every call, chat
+    # and extraction. Ollama's default is small (2,048 or 4,096 depending on
+    # the version) and a longer prompt loses its START silently — the system
+    # prompt and the oldest turns. 0 keeps Ollama's default.
+    ollama_num_ctx: int = Field(default=8192, ge=0)
 
     # Where the state that is NOT the graph lives — today, the rate
     # limiter's token buckets.

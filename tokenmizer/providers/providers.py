@@ -1108,9 +1108,48 @@ class OllamaProvider(BaseProvider):
     # buffered non-streaming call to get them.
     supports_tool_stream = True
 
+    # Context window requested from Ollama, in tokens. Ollama's own default
+    # is small (2,048 or 4,096 tokens depending on the version) and a longer
+    # prompt is not refused — its START is dropped, which for a chat is the
+    # system prompt and the oldest turns, and for extraction is the
+    # instructions. 0 leaves Ollama's default. Set from settings.ollama_num_ctx.
+    num_ctx: int = 8192
+
     def __init__(self, model: str = "llama3", base_url: str = "http://localhost:11434"):
         super().__init__(api_key="", model=model)
         self._base_url = base_url.rstrip("/")
+
+    def _options(self, max_tokens: int, kwargs: dict) -> dict:
+        """Ollama `options`, shared by both paths so they cannot drift."""
+        s = _sampling(kwargs)
+        options: dict[str, Any] = {"num_predict": max_tokens}
+        if self.num_ctx and self.num_ctx > 0:
+            options["num_ctx"] = self.num_ctx
+        if "temperature" in s:
+            options["temperature"] = s["temperature"]
+        if "top_p" in s:
+            options["top_p"] = s["top_p"]
+        if "stop" in s:
+            options["stop"] = _as_stop_list(s["stop"])
+        return options
+
+    @staticmethod
+    def _structured(payload: dict, model: str, kwargs: dict) -> dict:
+        """Add constrained JSON output and the thinking switch when asked.
+
+        `json_schema` makes Ollama constrain decoding to that schema, so a
+        small model cannot answer with prose or a broken object. `think`
+        (False for extraction) turns off a reasoning model's visible
+        thinking, which otherwise spends the output budget and minutes of
+        CPU before the JSON starts. Sent only to models that think: older
+        Ollama versions and non-thinking models reject the field.
+        """
+        from tokenmizer.providers.ollama_models import is_thinking_model
+        if kwargs.get("json_schema"):
+            payload["format"] = kwargs["json_schema"]
+        if kwargs.get("think") is not None and is_thinking_model(model):
+            payload["think"] = bool(kwargs["think"])
+        return payload
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
@@ -1122,16 +1161,10 @@ class OllamaProvider(BaseProvider):
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
 
-        s = _sampling(kwargs)
-        options: dict[str, Any] = {"num_predict": max_tokens}
-        if "temperature" in s:
-            options["temperature"] = s["temperature"]
-        if "top_p" in s:
-            options["top_p"] = s["top_p"]
-        if "stop" in s:
-            options["stop"] = _as_stop_list(s["stop"])
-        payload = {"model": model, "messages": ollama_messages(all_messages),
-                   "stream": False, "options": options}
+        options = self._options(max_tokens, kwargs)
+        payload = self._structured(
+            {"model": model, "messages": ollama_messages(all_messages),
+             "stream": False, "options": options}, model, kwargs)
         tk = tool_kwargs(kwargs)
         if tk.get("tools"):
             # Ollama takes OpenAI-shaped declarations; it has no
@@ -1141,6 +1174,15 @@ class OllamaProvider(BaseProvider):
         async with httpx.AsyncClient(timeout=self.request_timeout or None) as client:
             try:
                 r = await client.post(f"{self._base_url}/api/chat", json=payload)
+                if ("format" in payload or "think" in payload) and r.status_code == 400:
+                    # An Ollama too old for structured output or the
+                    # thinking switch: ask again without them. The prompt
+                    # still asks for JSON, and the reply is parsed leniently.
+                    logger.info("Ollama rejected format/think (%s); retrying without them",
+                                r.text[:120])
+                    payload.pop("format", None)
+                    payload.pop("think", None)
+                    r = await client.post(f"{self._base_url}/api/chat", json=payload)
                 r.raise_for_status()
                 data = r.json()
                 message = data.get("message", {})
@@ -1169,17 +1211,9 @@ class OllamaProvider(BaseProvider):
         all_messages = messages[:]
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
-        # Same option mapping as _call(): the streaming path dropped
-        # temperature/top_p/stop on the floor, so a client got different
-        # sampling depending on whether it asked for a stream.
-        s = _sampling(kwargs)
-        options: dict[str, Any] = {"num_predict": max_tokens}
-        if "temperature" in s:
-            options["temperature"] = s["temperature"]
-        if "top_p" in s:
-            options["top_p"] = s["top_p"]
-        if "stop" in s:
-            options["stop"] = _as_stop_list(s["stop"])
+        # Same options as _call() — the streaming path once dropped
+        # temperature/top_p/stop on the floor. See _options.
+        options = self._options(max_tokens, kwargs)
         payload = {"model": model, "messages": ollama_messages(all_messages),
                    "stream": True, "options": options}
         tk = tool_kwargs(kwargs)
@@ -1298,11 +1332,12 @@ def missing_provider_sdk(provider: str) -> str | None:
     return None if found else f'pip install "tokenmizer[{extra}]"'
 
 
-def build_provider(settings, model: str | None = None) -> BaseProvider:
+def build_provider(settings, model: str | None = None,
+                   provider: str | None = None) -> BaseProvider:
     """Build the correct provider from settings. `model` overrides
-    settings.default_model on the same provider (used by the extraction
-    pass when graph_checkpoint.extraction_model pins one)."""
-    provider = settings.provider.lower()
+    settings.default_model, and `provider` settings.provider (both used by
+    the extraction pass when graph_checkpoint pins them)."""
+    provider = (provider or settings.provider).lower()
     key = settings.get_api_key_for_provider(provider)
     model = model or settings.default_model
     _warn_on_model_provider_mismatch(provider, model)
@@ -1328,6 +1363,8 @@ def build_provider(settings, model: str | None = None) -> BaseProvider:
         raise ValueError(f"Unknown provider: {provider!r}. Valid: {list(mapping)}")
 
     instance = mapping[provider]()
+    if isinstance(instance, OllamaProvider):
+        instance.num_ctx = getattr(settings, "ollama_num_ctx", instance.num_ctx)
     # request_timeout is a Settings field (config/settings.py), not read
     # from the environment here — getattr covers a caller that passes
     # something settings-shaped without it, falling back to the class

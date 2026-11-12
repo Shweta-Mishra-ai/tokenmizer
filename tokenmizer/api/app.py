@@ -373,9 +373,16 @@ def _get_extraction_provider():
     if _extraction_provider is not None:
         return _extraction_provider
 
-    provider = settings.provider.lower()
+    provider = (settings.graph_checkpoint.extraction_provider or settings.provider).lower()
     override = (settings.graph_checkpoint.extraction_model or "").strip()
-    if provider != "ollama" and not settings.get_api_key_for_provider(provider):
+    if provider == "ollama":
+        # Chat already on Ollama and nothing pinned for extraction: the chat
+        # model, as it always was. Only an explicit "auto" (or an empty model
+        # with extraction_provider: ollama) asks Ollama what is installed.
+        if not override and not settings.graph_checkpoint.extraction_provider:
+            override = settings.default_model
+        return _build_ollama_extractor(override)
+    if not settings.get_api_key_for_provider(provider):
         reason = (f"use_llm_extraction is on but provider={provider!r} has no API "
                   f"key configured; falling back to heuristic extraction.")
         if reason != _extraction_unavailable_reason:
@@ -383,7 +390,10 @@ def _get_extraction_provider():
             _extraction_unavailable_reason = reason
         return None
     try:
-        _extraction_provider = build_provider(settings, model=override or None)
+        _extraction_provider = build_provider(
+            settings, model=override or None,
+            provider=settings.graph_checkpoint.extraction_provider or None)
+        _extraction_provider.request_timeout = settings.graph_checkpoint.extraction_timeout
     except ValueError as e:
         reason = (f"use_llm_extraction is on but no provider could be built ({e}); "
                   f"falling back to heuristic extraction.")
@@ -393,6 +403,60 @@ def _get_extraction_provider():
         return None
     _extraction_unavailable_reason = None
     return _extraction_provider
+
+
+# When asking Ollama which models it has failed, when to ask again. The
+# question is a blocking HTTP call made from the request path, so a stopped
+# Ollama must cost one short timeout a minute, not one per request.
+_OLLAMA_RETRY_SECONDS = 60.0
+_ollama_retry_at = 0.0
+
+
+def _build_ollama_extractor(configured_model: str):
+    """An OllamaProvider on the best usable installed model, or None.
+
+    See providers/ollama_models.py for how "best" is chosen. The choice is
+    logged once with the reason, since it decides what memory is made of.
+    """
+    global _extraction_provider, _extraction_unavailable_reason, _ollama_retry_at
+    if time.monotonic() < _ollama_retry_at:
+        return None
+    from tokenmizer.providers.ollama_models import installed_models, pick_model
+    from tokenmizer.providers.providers import OllamaProvider
+
+    base = (settings.ollama_base_url or "http://localhost:11434").strip()
+    if configured_model and configured_model.lower() != "auto":
+        # A named model is used as named: no network call to check it, and
+        # a model that is not pulled fails on the first extraction call, in
+        # the background, with Ollama's own message.
+        prov = OllamaProvider(configured_model, base_url=base)
+        prov.num_ctx = settings.ollama_num_ctx
+        prov.request_timeout = settings.graph_checkpoint.extraction_timeout
+        _extraction_provider = prov
+        _extraction_unavailable_reason = None
+        return prov
+    installed = installed_models(base, timeout=1.5)
+    if installed is None:
+        reason = (f"use_llm_extraction is on with extraction on Ollama, but Ollama at "
+                  f"{base} did not answer; extraction is heuristic-only and is "
+                  f"retried every {int(_OLLAMA_RETRY_SECONDS)}s. Start it with: ollama serve")
+        _ollama_retry_at = time.monotonic() + _OLLAMA_RETRY_SECONDS
+    else:
+        model, why = pick_model(installed, configured_model)
+        if model is not None:
+            prov = OllamaProvider(model, base_url=base)
+            prov.num_ctx = settings.ollama_num_ctx
+            prov.request_timeout = settings.graph_checkpoint.extraction_timeout
+            logger.info("LLM extraction runs locally on Ollama model %r (%s)", model, why)
+            _extraction_provider = prov
+            _extraction_unavailable_reason = None
+            return prov
+        reason = f"use_llm_extraction is on but {why}; extraction is heuristic-only."
+        _ollama_retry_at = time.monotonic() + _OLLAMA_RETRY_SECONDS
+    if reason != _extraction_unavailable_reason:
+        logger.warning(reason)
+        _extraction_unavailable_reason = reason
+    return None
 
 
 def _get_provider():
@@ -701,6 +765,10 @@ async def lifespan(app: FastAPI):
             "requests will fail (checkpoints and the graph still work). "
             "Install it with: %s", settings.provider, sdk_hint)
     await asyncio.to_thread(_warm_up)
+    if settings.graph_checkpoint.use_llm_extraction:
+        # Picks (and logs) the extraction model now, so the first request
+        # does not pay for asking Ollama what is installed.
+        await asyncio.to_thread(_get_extraction_provider)
     flusher = asyncio.create_task(_periodic_flush())
     try:
         yield
@@ -1113,12 +1181,10 @@ async def _update_graph(
                     async with _lock:
                         try:
                             from tokenmizer.graph_memory.hybrid_extractor import HybridExtractor
-
-                            async def _pfn(messages, system="", max_tokens=600):
-                                r = await _cheap.chat(
-                                    messages=messages, system=system, max_tokens=max_tokens
-                                )
-                                return {"text": r.text}
+                            from tokenmizer.graph_memory.llm_extraction import (
+                                extraction_fn,
+                            )
+                            _pfn = extraction_fn(_cheap)
 
                             # provider_fn goes to extract(), not __init__ —
                             # omitting it silently skips the LLM pass

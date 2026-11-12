@@ -61,6 +61,33 @@ CRITICAL RULES:
 - NEVER fabricate — only extract what is explicitly stated"""
 
 
+def _string_list() -> dict:
+    return {"type": "array", "items": {"type": "string"}}
+
+
+# The reply shape EXTRACTION_SYSTEM describes, as a JSON schema. A provider
+# that can constrain decoding to it (Ollama's `format`) is given it, so a
+# small local model cannot answer with prose, a code fence or a truncated
+# object; the prompt still describes it for providers that cannot.
+EXTRACTION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        **{k: _string_list() for k in (
+            "goals", "tasks_done", "tasks_wip", "tasks_todo", "files", "errors",
+            "dependencies", "environments", "endpoints", "schemas")},
+        "decisions": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"label": {"type": "string"}, "reason": {"type": "string"}},
+            "required": ["label"]}},
+        "superseded": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+            "required": ["old", "new"]}},
+    },
+    "required": ["tasks_done", "tasks_todo", "decisions", "files", "errors"],
+}
+
+
 EXTRACTION_USER_TEMPLATE = """Extract from these conversation messages:
 
 {messages_text}

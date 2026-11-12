@@ -70,6 +70,15 @@ def validate(settings) -> None:
             f"provider: ollama, or list your own gateway's hostname in "
             f"privacy.allowed_hosts."
         )
+    gc = getattr(settings, "graph_checkpoint", None)
+    extraction = (getattr(gc, "extraction_provider", "") or "").lower()
+    if (gc is not None and gc.use_llm_extraction and extraction
+            and extraction not in LOCAL_PROVIDERS and not settings.privacy.allowed_hosts):
+        raise PrivacyConfigError(
+            f"privacy.local_only is on but graph_checkpoint.extraction_provider="
+            f"{extraction!r} is a remote service, so every turn would be sent to "
+            f"it for extraction. Use extraction_provider: ollama."
+        )
 
 
 class _Guard:

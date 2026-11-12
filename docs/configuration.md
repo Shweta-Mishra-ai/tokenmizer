@@ -102,7 +102,10 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_CACHE__SHARE_SCOPE` | `session` | `session` scopes every cached prompt to its session. `shared` lets non-sensitive prompts cross sessions for a higher hit rate — read the sensitivity heuristic in `semantic_cache/cache.py` before enabling it |
 | `TOKENMIZER_COMPRESSION__RATIO` | `0.5` | Target share of the prompt to keep. Only the `llmlingua2` engine honours it; the heuristic engine drops what it can prove is safe to drop and ignores a ratio |
 | `TOKENMIZER_MEMORY__ENABLED` | `true` | Conversation windowing and summarisation. Off means every turn is sent verbatim |
-| `TOKENMIZER_GRAPH_CHECKPOINT__EXTRACTION_MODEL` | *(empty)* | Pin a different model **of the configured provider** for extraction — usually a cheaper one. Empty uses `default_model` |
+| `TOKENMIZER_GRAPH_CHECKPOINT__EXTRACTION_PROVIDER` | *(empty)* | Where LLM extraction runs, separately from chat. Empty = the chat provider. `ollama` runs it on a local model, so nothing a session says leaves the machine for extraction and it costs nothing per call; chat can stay on any provider. Refused under `privacy.local_only` if it names a remote provider |
+| `TOKENMIZER_GRAPH_CHECKPOINT__EXTRACTION_MODEL` | *(empty)* | The extraction model. Empty = the chat model on the same provider. With `extraction_provider: ollama`, empty or `auto` picks the best installed model (see "Local extraction with Ollama" below) |
+| `TOKENMIZER_GRAPH_CHECKPOINT__EXTRACTION_TIMEOUT` | `300` | Seconds one extraction call may take. Separate from `request_timeout` because a local model on a CPU is slow, and extraction runs in the background where waiting delays no response |
+| `TOKENMIZER_OLLAMA_NUM_CTX` | `8192` | Context window requested from Ollama for every call. Ollama's default is small (2,048 or 4,096 tokens by version) and a longer prompt silently loses its start — the system prompt and the oldest turns. `0` keeps Ollama's default |
 | `TOKENMIZER_GRAPH_CHECKPOINT__EXTRACTION_MAX_TOKENS` | `2048` | Output-token budget of the extraction call (256–16384). A model that reasons before it answers spends part of it on reasoning, so a budget sized for the JSON alone can be exhausted before the JSON is complete. Raise it if the log reports a cut-off extraction reply |
 | `TOKENMIZER_PREFERENCES__ENABLED` | `false` | Cross-session preference memory. Off by default on purpose — see the section below before enabling it |
 | `TOKENMIZER_PREFERENCES__MAX_ITEMS` | `4` | Preference lines injected into the system prompt |
@@ -171,6 +174,38 @@ prompt.
 > `?key=...`) forgets it. Secrets, env vars and complaints ("I hate this
 > bug") are excluded by construction, but do not mistake that for a
 > guarantee.
+
+## Local extraction with Ollama
+
+LLM extraction reads every turn to decide what to remember. Running it on a
+local model keeps that text on the machine:
+
+```yaml
+graph_checkpoint:
+  use_llm_extraction: true
+  extraction_provider: ollama
+  extraction_model: auto        # or pin one, e.g. qwen2.5:7b
+# ollama_base_url: http://host.docker.internal:11434   # when TokenMizer runs in Docker
+```
+
+```bash
+ollama pull qwen2.5:7b                       # ~5 GB download, ~8 GB RAM
+python -m benchmarks.extraction_models       # rank every model you have installed
+```
+
+`auto` takes the first installed model from the preference list in
+`tokenmizer/providers/ollama_models.py` and logs which and why. That list is a
+starting point from what these model families are generally good at — it was
+**not** measured on this project's corpus. The benchmark is the measurement:
+it scores each installed model on the labelled extraction corpus (F1 per
+category, alone and merged with the heuristic pass), counts replies that were
+not valid JSON, and times each call on your hardware. Pin the winner with
+`extraction_model`.
+
+For Ollama, extraction asks for output constrained to a JSON schema, at
+temperature 0, with a reasoning model's thinking switched off, and sets
+`num_ctx` so the prompt is not truncated. An Ollama too old for schema output
+is asked again without it.
 
 ## Not implemented, despite being configurable
 
