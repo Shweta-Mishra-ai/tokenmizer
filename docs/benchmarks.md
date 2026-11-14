@@ -12,7 +12,7 @@ python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
 python -m benchmarks.savings.runner                 # input cost, with and without
-pytest tests/ -q                                     # 2327 tests
+pytest tests/ -q                                     # 2359 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -278,12 +278,17 @@ against its own code.
 | **120 turns:** facts in the graph / recalled / after a restart | 22 / 22 / 22 of 50 | **50 / 50 / 50** |
 | **1,000 turns, 19.7 MB, one 4 MB tool output:** facts in the graph / recalled / after a restart | does not finish in an hour | **50 / 50 / 50** |
 | Newest client message altered (1,000 turns) | — | 0 of 1,000 requests |
-| Latency, first / last 10% of requests, median (1,000 turns) | — | 63 / 585 ms |
-| Latency, last 10%, 95th percentile; slowest request | — | 972 ms; 1.84 s (the 4 MB turn) |
-| Process memory, start → end (1,000 turns) | — | 109 → 385 MB |
+| Latency, first / last 10% of requests, median (1,000 turns) | — | 58 / 576 ms |
+| Latency, last 10%, 95th percentile; slowest request | — | 979 ms; 1.46 s (the 4 MB turn) |
+| Process memory, start → end (1,000 turns) | — | 109 → 348 MB |
 | **8 sessions in parallel, 200 turns each:** own facts recalled / another session's facts leaked | — | **80 of 80 / 0 of 80** |
 
-<!-- MEMORY -->
+Process memory includes the client's own copy of the history (19.7 MB of
+JSON as Python objects, plus a serialised copy per request), which lives in
+the same process here. Attributed with `tracemalloc` between turns 200 and
+600 of a 600-turn run, the proxy itself grew about 8 MB, nearly all of it
+size-bounded memos (`core/bounded_cache.py`); before this round one memo
+alone grew 38 MB there and had no size bound.
 
 **Cold start** — the first request on an existing conversation extracts its
 whole history in one call:

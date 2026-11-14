@@ -23,7 +23,7 @@ benchmark, the suite is right and this file is a bug.
 | Checkpoint accuracy | 80% task / 100% decision / 100% file recall, 207-token resume | `benchmarks.checkpoint_accuracy.runner` |
 | Graph density, fastapi_auth session | 29 nodes, 27 edges, 4 communities + 6 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | **92%** macro F1 on the n=100 corpus (tuned against); **65% / 59%** on held-out v3 / v4, never tuned against, where the best reimplemented comparison method reaches 35% / 25%. 0.5.4 tied for first at 60% | tokenmizer-research, 2026-11-14 |
-| Suite | 2327 tests, ruff clean | `pytest tests/` |
+| Suite | 2359 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
 several items below exist.

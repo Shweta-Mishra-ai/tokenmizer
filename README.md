@@ -460,7 +460,7 @@ facts. At 120 turns `main` keeps 22 of them; this branch keeps all 50 —
 in the graph, recalled into the request that asks, and after a restart —
 and still all 50 at 1,000 turns with 19.7 MB of history and a 4 MB tool
 output, where `main` does not finish in an hour. Late requests there take a
-median 585 ms; eight sessions run in parallel leak none of their facts into
+median 576 ms; eight sessions run in parallel leak none of their facts into
 each other. Facts are planted in explicit wording: see
 [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
@@ -558,7 +558,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check . && mypy     # 2327 tests, must stay green
+pytest tests/ -q && ruff check . && mypy     # 2359 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

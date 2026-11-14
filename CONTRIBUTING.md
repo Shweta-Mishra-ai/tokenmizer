@@ -133,7 +133,7 @@ tokenmizer/
 │   ├── graph_retrieval/          # category recall
 │   ├── persistence/              # write amplification + concurrency
 │   └── latency/                  # end-to-end proxy latency (needs a running server)
-└── tests/                        # 123 files, 2327 tests — see TESTING.md for how to run them
+└── tests/                        # 125 files, 2359 tests — see TESTING.md for how to run them
 ```
 
 ---
