@@ -383,11 +383,15 @@ def concurrent(args) -> dict:
         run_s = time.perf_counter() - t0
         own = foreign = leaks = 0
         leak_examples = []
+        missed = []
         sids = list(sessions)
         for i, sid in enumerate(sids):
             other = sids[(i + 1) % len(sids)]
             for f in sessions[sid][1][:10]:
-                own += f["answer"] in _probe(c, up, sid, histories[sid], args.model, f["question"])
+                hit = f["answer"] in _probe(c, up, sid, histories[sid], args.model, f["question"])
+                own += hit
+                if not hit:
+                    missed.append((sid, f["kind"], f["answer"]))
             # The same question shape about the OTHER session's subjects.
             for f in sessions[other][1][:10]:
                 foreign += 1
@@ -400,7 +404,7 @@ def concurrent(args) -> dict:
             "requests": len(latencies), "run_seconds": round(run_s, 1),
             "latency_ms_p50": round(st.median(latencies) * 1000, 1),
             "latency_ms_p95": round(_pct(latencies, 0.95) * 1000, 1),
-            "own_recall": f"{own}/{10 * args.concurrent}",
+            "own_recall": f"{own}/{10 * args.concurrent}", "own_missed": missed,
             "cross_session_leaks": f"{leaks}/{foreign}", "leak_examples": leak_examples}
 
 

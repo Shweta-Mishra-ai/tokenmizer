@@ -17,11 +17,10 @@ consumer shares the same already-safe copy.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-import threading
-from collections import OrderedDict
+
+from tokenmizer.core.bounded_cache import MISSING, BoundedCache
 
 _PATTERNS = [
     # Anthropic
@@ -75,13 +74,15 @@ _PATTERNS = [
 # unless it is larger than _MEMO_MAX_CHARS, in which case it is recomputed.
 _MEMO_MAX_ENTRIES = 32_768
 _MEMO_MAX_CHARS = 64_000
-_memo: OrderedDict[bytes, str | None] = OrderedDict()
-_memo_lock = threading.Lock()
+# Redacted copies held in all: without this, 32,768 entries of up to 64,000
+# characters each could reach 2 GB on a long-running proxy.
+_MEMO_MAX_TOTAL_CHARS = 8_000_000
+_memo: BoundedCache[str | None] = BoundedCache(
+    _MEMO_MAX_ENTRIES, _MEMO_MAX_TOTAL_CHARS, lambda v: len(v or ""))
 
 
 def _memo_clear() -> None:
-    with _memo_lock:
-        _memo.clear()
+    _memo.clear()
 
 
 _SECRET_WORD = (r'(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key'
@@ -211,23 +212,15 @@ def redact(text: str) -> str:
         return ""
     if not text:
         return text
-    key = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=32).digest()
-    with _memo_lock:
-        if key in _memo:
-            _memo.move_to_end(key)
-            hit = _memo[key]
-            return text if hit is None else hit
+    key = BoundedCache.key(text)
+    hit = _memo.get(key)
+    if hit is not MISSING:
+        return text if hit is None else hit
     out = _scrub(text)
     if out == text:
-        value = None
+        _memo.put(key, None)
     elif len(out) <= _MEMO_MAX_CHARS:
-        value = out
-    else:
-        return out
-    with _memo_lock:
-        _memo[key] = value
-        while len(_memo) > _MEMO_MAX_ENTRIES:
-            _memo.popitem(last=False)
+        _memo.put(key, out)
     return out
 
 

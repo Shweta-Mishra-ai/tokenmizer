@@ -7,9 +7,9 @@ Split out of api/app.py, which re-exports every name.
 """
 from __future__ import annotations
 
-import functools
 import re
 
+from tokenmizer.core.bounded_cache import MISSING, BoundedCache
 from tokenmizer.security.fencing import fence
 
 
@@ -42,7 +42,12 @@ _FILLER = frozenset({
 _EXTENSION = re.compile(r"^(.+)\.[a-z][a-z0-9]{0,4}$")
 
 
-@functools.lru_cache(maxsize=4096)
+# Keyed by digest and bounded by words held: an lru_cache keyed on the text
+# kept up to 4,096 whole messages alive — 38 MB over 600 turns of one agent
+# session with large tool output, and unbounded in bytes.
+_WORDS_CACHE: BoundedCache[frozenset] = BoundedCache(4096, 2_000_000, len)
+
+
 def _content_words(text: str) -> frozenset:
     """The words of `text` that carry content, and for a file name both
     spellings: with its extension and without. A node label is clipped to a
@@ -53,6 +58,10 @@ def _content_words(text: str) -> frozenset:
 
     Memoised: every request recomputed this for every message it carries,
     and all but the newest are the same text as on the previous request."""
+    key = BoundedCache.key(text)
+    hit = _WORDS_CACHE.get(key)
+    if hit is not MISSING:
+        return hit
     words = set()
     for w in _WORD.findall(text.lower()):
         if len(w) <= 2 or w in _FILLER:
@@ -61,7 +70,9 @@ def _content_words(text: str) -> frozenset:
         stem = _EXTENSION.match(w)
         if stem and len(stem.group(1)) > 2:
             words.add(stem.group(1))
-    return frozenset(words)
+    result = frozenset(words)
+    _WORDS_CACHE.put(key, result)
+    return result
 
 
 def _already_in_payload(node, message_words: list[frozenset]) -> bool:

@@ -858,6 +858,12 @@ _PREFILTER: dict = {
         "consensus"),
     id(_TASK_DONE_CHECK): ("[x]", "[done]", "[complete", "[fixed]", "[shipped]",
                            "\u2612", "\u2705", "\u2714", "\u2713"),
+    # Same shape as the header patterns above: 45 ms per 64 KB of tool output
+    # with nothing to find, on every tool result an agent session produces.
+    id(_ERROR_HEADER): (
+        "bug", "issue", "error", "problem", "exception", "failure", "blocker",
+        "regression", "incident", "defect", "root cause", "symptom", "snag", "failing",
+        "root of the", "fehler", "erreur", "dikkat"),
     id(_TASK_TODO_CHECK): ("[ ]", "[todo]", "[to do]", "[pending]", "[wip]", "[open]",
                            "\u2610", "\u2b1c"),
 }

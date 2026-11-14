@@ -77,6 +77,12 @@ def test_the_imperative_replace_is_read():
      "Decision: for the marble ledger we'll use `marble_key` as the partition key.",
      "amber_key", "marble_key"),
     ("Use Redis for caching.", "Use Redis for rate limiting.", "caching", "rate limiting"),
+    # Sharing a word is not sharing a scope, and a technology named in the
+    # reason ("because Postgres row locks …") is not what was chosen.
+    ("Decision: for the quartz scheduler we'll use `qs_key` as the partition key, "
+     "because Postgres row locks were too slow.",
+     "Decision: for the quartz gateway we'll use `qg_key` as the partition key, "
+     "because Postgres row locks were too slow.", "qs_key", "qg_key"),
     ("For the billing service we'll use `gpt-4o-mini` as the default model.",
      "For the search service, change the default model to claude-sonnet-5.",
      "gpt-4o-mini", "claude-sonnet-5"),

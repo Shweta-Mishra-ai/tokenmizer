@@ -116,6 +116,9 @@ for _topic, _keywords in _TOPIC_KEYWORDS.items():
         _KEYWORD_TO_TOPIC[_kw.lower()] = _topic
 
 
+
+_REASON_TAIL = re.compile(r"[,;]?\s+\b(?:because|since|due to|given that)\b", re.IGNORECASE)
+
 def _classify_ordered(label: str, summary: str = "") -> list[str]:
     """
     All topic buckets matched by a decision, in match order (bigrams first,
@@ -130,6 +133,9 @@ def _classify_ordered(label: str, summary: str = "") -> list[str]:
     spurious single-word match ("session" → auth_mechanism).
     """
     label = label.rstrip(".,!?;:")
+    # What follows "because" is why, not what: "`x` as the partition key,
+    # because Postgres row locks were too slow" did not choose Postgres.
+    label = _REASON_TAIL.split(label, maxsplit=1)[0]
     text = (label + " " + summary).lower()
     # Remove punctuation for matching — but preserve version numbers
     text = re.sub(r"[^\w\s\.]", " ", text)
@@ -261,6 +267,9 @@ def _matched_topic_keywords(label: str, summary: str) -> frozenset:
     "pgvector") have no reason to resemble the original's ("storage").
     """
     label = label.rstrip(".,!?;:")
+    # What follows "because" is why, not what: "`x` as the partition key,
+    # because Postgres row locks were too slow" did not choose Postgres.
+    label = _REASON_TAIL.split(label, maxsplit=1)[0]
     text = (label + " " + summary).lower()
     text = re.sub(r"[^\w\s\.]", " ", text)
     text = text.replace("next.js", "nextjs").replace("node.js", "nodejs")
@@ -399,8 +408,11 @@ def decision_scope(label: str, summary: str = "") -> frozenset:
 
 
 def _different_scope(label_a: str, summary_a: str, label_b: str, summary_b: str) -> bool:
+    """Both state a scope, and neither contains the other. Sharing a word is
+    not the same scope: "the quartz scheduler" and "the quartz gateway" are
+    two components; "billing" and "the billing service" are one."""
     a, b = decision_scope(label_a, summary_a), decision_scope(label_b, summary_b)
-    return bool(a) and bool(b) and not (a & b)
+    return bool(a) and bool(b) and not (a <= b or b <= a)
 
 
 def find_contradicting_decisions(

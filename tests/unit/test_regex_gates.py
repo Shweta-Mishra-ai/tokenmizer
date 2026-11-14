@@ -48,6 +48,12 @@ HEADER_LINES = [
 # Sentences for gated patterns the corpora never trigger, so that every
 # gate is checked against at least one real match.
 PROSE = [
+    "Bug: the export drops the last row",
+    "- **Known issues:** the retry loop never backs off",
+    "Root cause: the pool was never closed",
+    "Regression — p99 doubled after the deploy",
+    "Fehler: Verbindung abgelehnt beim Start",
+    "Hit a snag: the migration locks the table",
     "the importer keeps failing on large files",
     "The checkout service broke after the deploy.",
     "The full import took 40 minutes instead of 5.",

@@ -70,7 +70,7 @@ def test_output_matches_the_unmemoised_scan_for_varied_inputs():
 
 
 def test_the_memo_is_bounded(monkeypatch):
-    monkeypatch.setattr(R, "_MEMO_MAX_ENTRIES", 50)
+    monkeypatch.setattr(R._memo, "max_entries", 50)
     for i in range(500):
         R.redact(f"message number {i}")
     assert len(R._memo) <= 50
@@ -101,7 +101,7 @@ def test_concurrent_callers_never_get_an_unredacted_secret(monkeypatch):
     redacting a mix of clean and secret-bearing texts, under constant
     eviction, must each get exactly the unmemoised result."""
     import threading
-    monkeypatch.setattr(R, "_MEMO_MAX_ENTRIES", 16)
+    monkeypatch.setattr(R._memo, "max_entries", 16)
     texts = [f"turn {i} " + (SECRET if i % 3 == 0 else "clean") for i in range(60)]
     expected = {t: R._scrub(t) for t in texts}
     wrong = []

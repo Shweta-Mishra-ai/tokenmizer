@@ -29,6 +29,7 @@ import threading
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
+from tokenmizer.core.bounded_cache import MISSING, BoundedCache
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.security.fencing import fence
 
@@ -348,26 +349,20 @@ def _as_path(word: str) -> str:
 # the verbatim tail outgrows its budget — in an agent loop with large tool
 # output, most requests — and each remade cut read every dropped output word
 # by word again: 151,134 words and half a second per request at 300 turns,
-# for the same answer as last time. Hashing the text costs a few ms per MB.
-_PATHS_CACHE: OrderedDict[bytes, tuple[str, ...]] = OrderedDict()
-_PATHS_CACHE_MAX = 20_000
-_PATHS_CACHE_LOCK = threading.Lock()
+# for the same answer as last time. Bounded by paths held (200,000, about
+# 17 MB): a cap on entries alone let large listings reach gigabytes.
+_PATHS_CACHE: BoundedCache[tuple[str, ...]] = BoundedCache(20_000, 200_000, len)
 
 
 def _paths_in(text: str) -> tuple[str, ...]:
     """The paths in one tool output or tool call, in first-seen order."""
     scanned = text[:_MAX_SCAN_CHARS]
-    key = hashlib.blake2b(scanned.encode("utf-8", "surrogatepass"), digest_size=16).digest()
-    with _PATHS_CACHE_LOCK:
-        hit = _PATHS_CACHE.get(key)
-        if hit is not None:
-            _PATHS_CACHE.move_to_end(key)
-            return hit
+    key = BoundedCache.key(scanned)
+    hit = _PATHS_CACHE.get(key)
+    if hit is not MISSING:
+        return hit
     found = tuple(dict.fromkeys(p for p in map(_as_path, scanned.split()) if p))
-    with _PATHS_CACHE_LOCK:
-        _PATHS_CACHE[key] = found
-        while len(_PATHS_CACHE) > _PATHS_CACHE_MAX:
-            _PATHS_CACHE.popitem(last=False)
+    _PATHS_CACHE.put(key, found)
     return found
 
 

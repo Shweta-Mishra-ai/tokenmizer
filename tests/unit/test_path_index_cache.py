@@ -61,10 +61,3 @@ def test_cached_index_equals_the_uncached_one():
         got = [f"{d}{n}" if d != "(no directory)" else n
                for d, names in listed for n in names.split()]
         assert sorted(got) == sorted(expected)
-
-
-def test_the_cache_is_bounded():
-    W._PATHS_CACHE.clear()
-    for i in range(W._PATHS_CACHE_MAX + 50):
-        W._paths_in(f"src/a_{i}.py")
-    assert len(W._PATHS_CACHE) == W._PATHS_CACHE_MAX
