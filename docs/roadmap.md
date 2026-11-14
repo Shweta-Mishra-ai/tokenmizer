@@ -22,7 +22,7 @@ benchmark, the suite is right and this file is a bug.
 | Out-of-ontology facts surviving windowing | **0% to 100%**, at +25 tokens of resume per session | `benchmarks.resume_quality.runner` |
 | Checkpoint accuracy | 80% task / 100% decision / 100% file recall, 207-token resume | `benchmarks.checkpoint_accuracy.runner` |
 | Graph density, fastapi_auth session | 29 nodes, 27 edges, 4 communities + 6 unclustered | `/api/graph/{id}/viz` |
-| Independent 100-session benchmark | **92%** macro F1 on the n=100 corpus (tuned against); **64% / 58%** on held-out v3 / v4, never tuned against, where the best reimplemented comparison method reaches 35% / 25%. 0.5.4 tied for first at 60% | tokenmizer-research, 2026-11-12 |
+| Independent 100-session benchmark | **92%** macro F1 on the n=100 corpus (tuned against); **65% / 59%** on held-out v3 / v4, never tuned against, where the best reimplemented comparison method reaches 35% / 25%. 0.5.4 tied for first at 60% | tokenmizer-research, 2026-11-14 |
 | Suite | 2327 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
@@ -151,20 +151,22 @@ checkpoint storage. A `/health` call that itself fails is reported as
 "could not read", never as healthy: unknown and fine are different
 answers, and savings were the only number the CLI used to show.
 
-**Open: a decision's scope is not part of its identity.**  *(found 2026-11-12)*
-The decision extractor drops "for the billing service" from a label, so a
-later decision in the same slot for a *different* component supersedes it:
-"the ledger service uses `ledger_events`" marks "the billing service uses
-`billing_events`" superseded. `main` behaves the same. In the soak, 16 of 18
-planted decision nodes end up superseded. They are still recalled, through
-the resume's supersession lines, but `query()` skips superseded nodes and
-finds 2 of 10. The fix is to carry the scope in the label, or as a field
-supersession compares — not another word list.
+**A decision's scope is part of its identity.**  *(done 2026-11-14; found 2026-11-12)*
+The extractor dropped "for the billing service" from a label, so a later
+decision in the same slot for a *different* component superseded it.
+Scope now comes from "for the X", "for <doing something>" and "the X uses";
+decisions with different scopes are independent, and scopes match only when
+one contains the other. A bare reason ("for performance") is not a scope,
+and a technology named in the reason is not the choice. In the soak, planted
+decisions wrongly superseded went from 16 of 18 nodes to 0, and `query()`
+finds 10 of 10 instead of 2. Held-out decision F1: v3 43% → 45%, v4 51% →
+55%.
 
-**Open: a change of mind is often not extracted.**  *(found 2026-11-12)*
-"Change of plan: switch the partition key to `account_id`" and "Actually,
-let's store sessions in X instead" produce nothing, so the earlier choice
-stays current in every resume. `main` behaves the same.
+**A change of mind is extracted.**  *(done 2026-11-14; found 2026-11-12)*
+"Switch/change the SLOT to X" and "let's … instead" record the new decision
+and supersede the latest one for that slot and scope; "replace X with Y"
+in the imperative is read. A change of mind that names neither the slot nor
+the old value ("let's go the other way") is still not extracted.
 
 ### P1 — more sessions, more domains, more of the pipeline real
 

@@ -455,14 +455,14 @@ requests). That is one session and an input-only estimate, and information
 retained is not answer quality: see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
 **Long sessions are tested for loss, not only for cost.** `python -m
-benchmarks.soak` drives the real proxy through 1,000 turns and 19.7 MB of
-history, with a 4 MB tool output and 50 planted facts. At the end all 50 are
-in the graph, all 50 are recalled into the request that asks about them, and
-all 50 survive a restart; the client's newest message reached the provider
-unaltered on all 1,000 requests. Late requests take a median 652 ms there.
-Before this round, the same session lost more than half its facts by 120
-turns and did not finish in an hour. Facts are planted in explicit wording:
-see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
+benchmarks.soak` drives the real proxy through a session with 50 planted
+facts. At 120 turns `main` keeps 22 of them; this branch keeps all 50 —
+in the graph, recalled into the request that asks, and after a restart —
+and still all 50 at 1,000 turns with 19.7 MB of history and a 4 MB tool
+output, where `main` does not finish in an hour. Late requests there take a
+median 585 ms; eight sessions run in parallel leak none of their facts into
+each other. Facts are planted in explicit wording: see
+[Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
 **Independently verified against 7 other methods.** A separate
 100-session benchmark ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research),
@@ -470,8 +470,8 @@ a different corpus and scorer than the numbers above) ties TokenMizer
 0.5.4 for first place at **60% macro F1** — level with Mem0-style (60%)
 and Graphiti-style (59%), ahead of GraphRAG-style (44%), MemGPT-style
 (35%), and every naive baseline (under 20%). Re-measured on this branch
-(2026-11-12): 92% on that corpus, which later rounds were tuned against, and
-**64% and 58% on two held-out sets frozen before tuning**, where the best
+(2026-11-14): 92% on that corpus, which later rounds were tuned against, and
+**65% and 59% on two held-out sets frozen before tuning**, where the best
 comparison method reaches 35% and 25%.
 
 **Measured on real agent traffic, not only on labelled corpora.** The

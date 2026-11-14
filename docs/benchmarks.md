@@ -93,8 +93,8 @@ cache marker, per-model minimum, reads at 0.1x the input price, writes at
 |---:|---:|---:|---:|---:|
 | 10 | 462 | 2,333 | 2,333 | 2,333 (level / level) |
 | 40 | 2,057 | 41,556 | 14,745 | 15,108 (**64% less** / 2.5% more) |
-| 150 | 7,967 | 596,900 | 77,998 | 69,350 (**88% less** / **11% less**) |
-| 300 | 16,040 | 2,399,067 | 268,767 | 150,122 (**94% less** / **44% less**) |
+| 150 | 7,967 | 596,900 | 77,998 | 69,193 (**88% less** / **11% less**) |
+| 300 | 16,040 | 2,399,067 | 268,767 | 149,757 (**94% less** / **44% less**) |
 
 The two percentages are against the two client columns. Where the saving
 comes from: below about 4,000 tokens of history, prompt caching — the
@@ -270,36 +270,35 @@ an answer token that appears nowhere else. At the end each fact is asked
 about, long after its turn left the window, and the answer must be in what
 the proxy sends upstream.
 
-| 1,000 turns, 19.7 MB of history | Before this round | Now |
-|---|---:|---:|
-| Facts in the graph | 23 of 50 at 120 turns | **50 of 50** |
-| Facts recalled end to end | 35 of 50 at 120 turns | **50 of 50** |
-| Facts after a restart (reloaded from disk) | — | **50 of 50** |
-| Newest client message altered | — | 0 of 1,000 requests |
-| Latency, first / last 10% of requests (median) | did not finish in an hour | 70 / 652 ms |
-| Latency, last 10%, 95th percentile | — | 1.16 s |
-| Process memory, start → end | — | 109 → 410 MB |
+Measured 2026-11-14 on one shared 4-core VM. `main` runs today's harness
+against its own code.
 
-The process memory includes the client's own copy of the history, which
-lives in the same process here. "Before" is the branch at the start of this
-round; at 1,000 turns it did not finish, because each late request
-re-extracted most of the history (see the CHANGELOG).
+| | `main` | Now |
+|---|---:|---:|
+| **120 turns:** facts in the graph / recalled / after a restart | 22 / 22 / 22 of 50 | **50 / 50 / 50** |
+| **1,000 turns, 19.7 MB, one 4 MB tool output:** facts in the graph / recalled / after a restart | does not finish in an hour | **50 / 50 / 50** |
+| Newest client message altered (1,000 turns) | — | 0 of 1,000 requests |
+| Latency, first / last 10% of requests, median (1,000 turns) | — | 63 / 585 ms |
+| Latency, last 10%, 95th percentile; slowest request | — | 972 ms; 1.84 s (the 4 MB turn) |
+| Process memory, start → end (1,000 turns) | — | 109 → 385 MB |
+| **8 sessions in parallel, 200 turns each:** own facts recalled / another session's facts leaked | — | **80 of 80 / 0 of 80** |
+
+<!-- MEMORY -->
 
 **Cold start** — the first request on an existing conversation extracts its
 whole history in one call:
 
-| History | main | now |
+| History | `main` | Now |
 |---|---:|---:|
-| 300 turns, 4 MB | 22.8 s | 4.6 s |
-| 1,000 turns, 15 MB | 72 s | 14.8 s |
-| Real agent session, 6.5 MB (one 6.3 MB observation) | 57 s | 1.5 s |
-| Real agent session, 643 KB | 3.1 s | 3.1 s |
+| 300 turns, 4 MB | 18.3 s | **2.4 s** |
+| 1,000 turns, 15 MB | 63.8 s | **6.3 s** |
+| Real agent session, 6.5 MB (one 6.3 MB observation) | 48.3 s | **1.3 s** |
+| Real agent session, 643 KB | 2.7 s | 2.6 s |
+| Real agent session, 582 KB | 2.8 s | 2.4 s |
 
-Still slow at the top end: a 15 MB history costs about 15 s of extraction on
-its first request. **Limits:** facts are planted in explicit wording, so this
-measures what happens to extracted facts over length, not extraction of
-implicit phrasing (see the research held-out corpora for that); one process,
-no real network; timings are from a shared 4-core VM.
+**Limits:** facts are planted in explicit wording, so this measures what
+happens to extracted facts over length, not extraction of implicit phrasing
+(the research held-out corpora measure that); one process, no real network.
 
 ## Domains other than coding
 

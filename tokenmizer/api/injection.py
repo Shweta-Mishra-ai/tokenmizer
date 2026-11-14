@@ -44,8 +44,14 @@ _EXTENSION = re.compile(r"^(.+)\.[a-z][a-z0-9]{0,4}$")
 
 # Keyed by digest and bounded by words held: an lru_cache keyed on the text
 # kept up to 4,096 whole messages alive — 38 MB over 600 turns of one agent
-# session with large tool output, and unbounded in bytes.
-_WORDS_CACHE: BoundedCache[frozenset] = BoundedCache(4096, 2_000_000, len)
+# session with large tool output, and unbounded in bytes. A cached word costs
+# about 86 bytes, so 200,000 words is about 17 MB.
+_WORDS_CACHE: BoundedCache[frozenset] = BoundedCache(4096, 200_000, len)
+# Only the first and last 100 KB of a message are read for its words, as
+# extraction reads them. This decides whether a node is already stated in a
+# message; a node missed in the middle of a 4 MB tool output is injected
+# once more, which _already_in_payload is built to tolerate.
+_WORDS_HEAD = _WORDS_TAIL = 100_000
 
 
 def _content_words(text: str) -> frozenset:
@@ -58,6 +64,8 @@ def _content_words(text: str) -> frozenset:
 
     Memoised: every request recomputed this for every message it carries,
     and all but the newest are the same text as on the previous request."""
+    if len(text) > _WORDS_HEAD + _WORDS_TAIL:
+        text = text[:_WORDS_HEAD] + "\n" + text[-_WORDS_TAIL:]
     key = BoundedCache.key(text)
     hit = _WORDS_CACHE.get(key)
     if hit is not MISSING:
