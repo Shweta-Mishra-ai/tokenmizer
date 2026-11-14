@@ -213,3 +213,26 @@ def test_directory_scaffolding_is_not_a_match(tmp_path):
     words = G._query_tokens("tests/conftest.py src/app/routes.py")
     assert {"conftest", "routes"} <= words
     assert not {"test", "tests", "src", "app", "py"} & words
+
+
+# ── the resume does not depend on the machine's clock ───────────────────────
+
+def test_the_resume_block_does_not_depend_on_clock_resolution(tmp_path):
+    """Recent completed tasks were ranked by the wall clock to the
+    microsecond. Nodes made in one extraction call tie on a coarse clock
+    (stable sort: oldest first) and are distinct on a fine one (newest
+    first), so identical input gave a different resume on a different
+    machine — 5 of 716 real sessions differed between two runs."""
+    msgs = []
+    for i in range(12):
+        msgs += [{"role": "user", "content": f"status {i}?"},
+                 {"role": "assistant", "content": f"Done: migrated the svc{i:02d}x exporter to the new API."}]
+
+    def block(name, spacing):
+        g = _graph(tmp_path, name)
+        g.extract_from_messages(msgs, incremental=False)
+        for k, n in enumerate(g._nodes.values()):      # creation order
+            n.updated_at = 1_800_000_000.0 + k * spacing
+        return g.to_context_block(token_budget=400)
+
+    assert block("coarse", 0.0) == block("fine", 1e-4)

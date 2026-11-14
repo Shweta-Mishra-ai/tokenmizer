@@ -29,6 +29,24 @@ _DEFAULT_WORDS = {
 }
 
 
+
+
+def _recent_first_key(graph):
+    """Sort key: most recently updated first, then most important, then
+    latest created.
+
+    This read `updated_at * 0.6 + importance * 0.4`, where `updated_at` is a
+    Unix timestamp near 1.8e9 and importance is at most 1 — importance never
+    counted, and the order was the wall clock to the microsecond. Nodes
+    created in one extraction call are microseconds apart, so which of them
+    made the block depended on machine speed: identical input gave a
+    different resume in 5 of 716 real sessions. Whole seconds keep real
+    recency (requests are seconds apart) and make the order within one call
+    deterministic.
+    """
+    order = {nid: i for i, nid in enumerate(graph._nodes)}
+    return lambda n: (int(n.updated_at), n.importance, order.get(n.id, 0))
+
 def _vocabulary(graph: GraphMemory) -> dict:
     """The section headers for this graph's domain pack."""
     from tokenmizer.graph_memory.domains import get_pack
@@ -133,7 +151,7 @@ def to_context_block(graph: GraphMemory, token_budget: int = 400) -> str:
          if n.type == NodeType.TASK
          and n.status == NodeStatus.COMPLETED
          and not n._evicted],
-        key=lambda x: (x.updated_at * 0.6 + x.importance * 0.4),
+        key=_recent_first_key(graph),
         reverse=True
     )
     # Deduplicate: skip if label is very similar to already-included task

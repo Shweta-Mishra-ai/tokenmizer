@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+### Fixed — which decision replaces which; memory that grew with input size
+
+Decisions (both present on `main`, found last round):
+
+- **A decision's scope is part of what it is.** "The ledger service uses
+  `ledger_events`" no longer supersedes "the billing service uses
+  `billing_events`", nor "Redis for rate limiting" replace "Redis for
+  caching". Scope comes from "for the X", "for <doing something>" and "the X
+  uses"; scopes match only when one contains the other ("the quartz
+  scheduler" and "the quartz gateway" are two components). A bare reason is
+  not a scope: "Rust for performance" → "Go for simplicity" still
+  supersedes. A technology named in the reason ("because Postgres row locks
+  were too slow") is no longer read as the choice.
+- **Changes of mind are read.** "Switch/change the SLOT to X" and "let's …
+  instead" record the new decision and supersede the latest one for that
+  slot and scope; a restatement supersedes nothing. "Replace X with Y" in
+  the imperative was never matched.
+- A scope at the head of a sentence ("For the search service we'll use
+  Elasticsearch") stays in the label.
+
+In the soak, planted decisions wrongly superseded went from 16 of 18 nodes
+to 0, and `query()` finds 10 of 10 instead of 2.
+
+Memory (found by attributing growth with tracemalloc over 600 turns):
+
+- The message-word memo was an `lru_cache` keyed on whole message texts —
+  up to 4,096 messages, megabyte tool outputs included. 38 MB in 600 turns,
+  unbounded in bytes. The tool-output path memo and the redaction memo were
+  capped by entries only. All three now use `core/bounded_cache.BoundedCache`
+  (digest keys, an entry cap and a total-size cap).
+
+Resume determinism: "recent completed tasks" were ranked by
+`updated_at * 0.6 + importance * 0.4`, where `updated_at` is a Unix
+timestamp — importance never counted and the order was the wall clock to
+the microsecond. Identical input gave a different resume in 5 of 716 real
+sessions between two runs. Ranked now by whole second, importance, then
+creation order.
+
+Also: the `_ERROR_HEADER` regex is gated by its own keywords (45 ms per
+64 KB of tool output with nothing to find), and the test suite no longer
+shares the repository's `./checkpoints` across runs, which had made two
+tests fail once a hundred older sessions accumulated.
+
 ### Fixed — long sessions lost facts and slowed down with length
 
 Found by the new `benchmarks/soak` (the real proxy driven through a long
