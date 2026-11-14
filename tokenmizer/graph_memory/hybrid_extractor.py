@@ -2249,11 +2249,9 @@ class HybridExtractor:
         content words, one clearly subsumes the other.
         """
         from tokenmizer.graph_memory.decision_tracker import _different_identifiers
-        if not _subsumes_words(_label_words(a), _label_words(b)):
-            return False
-        if _different_identifiers(a, b) or _substituted(a, b):
-            return False   # the same sentence about a different thing
-        return True
+        # Overlapping words, and not the same sentence about a different thing.
+        return (_subsumes_words(_label_words(a), _label_words(b))
+                and not _different_identifiers(a, b) and not _substituted(a, b))
 
     # Fields on ExtractedData that are lists of DICTS, not lists of plain
     # strings — these can't go through the string-normalize-and-dedup
@@ -2413,7 +2411,7 @@ class HybridExtractor:
             # own list, so a name outside it (sqlc, Pydantic, Helm) kept its
             # duplicate.
             if short.startswith("Use "):
-                name = {w for w in re.findall(r"[a-z0-9]+", short[4:].lower())}
+                name = set(re.findall(r"[a-z0-9]+", short[4:].lower()))
                 long_words = set(re.findall(r"[a-z0-9]+", long.lower()))
                 if name and name <= long_words and len(long) > len(short):
                     return True
@@ -2524,9 +2522,9 @@ def _substituted(a: str, b: str) -> bool:
     ta = [w for w in re.findall(r"[a-z0-9_]+", a.lower()) if len(w) > 2]
     tb = [w for w in re.findall(r"[a-z0-9_]+", b.lower()) if len(w) > 2]
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
-        if tag == "replace" and 0 < i1 and i2 < len(ta) and 0 < j1 and j2 < len(tb):
-            if any(not _inflected(x, y) for x in ta[i1:i2] for y in tb[j1:j2]):
-                return True
+        if (tag == "replace" and 0 < i1 and i2 < len(ta) and 0 < j1 and j2 < len(tb)
+                and any(not _inflected(x, y) for x in ta[i1:i2] for y in tb[j1:j2])):
+            return True
     return False
 
 

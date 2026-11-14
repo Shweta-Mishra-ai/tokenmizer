@@ -21,6 +21,7 @@ import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import ClassVar
 
 from tokenmizer.core.tokenizer import count_tokens
 
@@ -541,7 +542,7 @@ class SemanticCache:
         return None
 
     # Patterns that indicate session-specific content — never cross-session cache
-    _SENSITIVE_PATTERNS = [
+    _SENSITIVE_PATTERNS: ClassVar[list[re.Pattern]] = [
         re.compile(r'sk-ant-|sk-proj-|sk-[A-Za-z0-9]{20,}|ghp_|AIza|Bearer\s', re.I),
         re.compile(r'\b(my|our)\s+(name|email|password|key|secret|token|api[_\s]key)\b', re.I),
         re.compile(r'(?:DATABASE_URL|REDIS_URL|MONGO_URL|postgres://|mysql://|redis://)', re.I),
@@ -551,13 +552,10 @@ class SemanticCache:
 
     def _is_session_sensitive(self, prompt: str) -> bool:
         """True if prompt contains session-specific content — never share cross-session."""
-        for pat in self._SENSITIVE_PATTERNS:
-            if pat.search(prompt):
-                return True
-        # Long prompts with code/data are likely session-specific
-        if len(prompt) > 800 and ("\n" in prompt or "```" in prompt):
+        if any(pat.search(prompt) for pat in self._SENSITIVE_PATTERNS):
             return True
-        return False
+        # Long prompts with code/data are likely session-specific
+        return len(prompt) > 800 and ("\n" in prompt or "```" in prompt)
 
     def set(
         self,

@@ -732,7 +732,7 @@ async def _drain_background_tasks(timeout: float = 10.0) -> None:
     if not pending:
         return
     logger.info(f"Waiting up to {timeout}s for {len(pending)} background task(s)")
-    done, still_pending = await asyncio.wait(pending, timeout=timeout)
+    _, still_pending = await asyncio.wait(pending, timeout=timeout)
     for t in still_pending:
         logger.warning("Background task did not finish before shutdown — cancelling")
         t.cancel()

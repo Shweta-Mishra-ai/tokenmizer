@@ -358,9 +358,7 @@ class GraphValidator:
         if len(label) < 15:
             base -= 0.20  # "fix bug" is not a goal
         lowered = label.lower()
-        if any(v in lowered for v in self._GOAL_BUILD):
-            base += 0.15
-        elif any(v in lowered for v in self._GOAL_OUTCOME):
+        if any(v in lowered for v in self._GOAL_BUILD) or any(v in lowered for v in self._GOAL_OUTCOME):
             base += 0.15
         return base
 

@@ -151,9 +151,7 @@ def _protected(node) -> bool:
         return True
     if node.type == NodeType.TASK and node.status == NodeStatus.IN_PROGRESS:
         return True
-    if node.type == NodeType.SUMMARY:
-        return True
-    return False
+    return node.type == NodeType.SUMMARY
 
 
 _RESOLVED = (NodeStatus.COMPLETED, NodeStatus.FAILED, NodeStatus.ARCHIVED,

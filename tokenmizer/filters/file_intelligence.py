@@ -27,6 +27,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from tokenmizer.core.tokenizer import count_tokens
 
@@ -423,7 +424,7 @@ class CSVExtractor:
         for col in columns:
             if type_map.get(col) != "text" or (skip and col in skip):
                 continue
-            unique = set(r.get(col, "") for r in rows if r.get(col))
+            unique = {r.get(col, "") for r in rows if r.get(col)}
             if 2 <= len(unique) <= max_unique:
                 lines.append(f"  {col}: {', '.join(sorted(unique)[:max_unique])}")
         return "\n".join(lines)
@@ -1133,7 +1134,7 @@ class FileIntelligence:
     # ```python became "attachment.python" — an unknown extension, so the
     # content was SNIFFED, found to contain commas, and summarised as a CSV
     # table. The code a user pasted to have fixed never reached the model.
-    _FENCE_TYPES = {
+    _FENCE_TYPES: ClassVar[dict[str, str]] = {
         "csv": "csv", "tsv": "tsv", "json": "json", "jsonl": "jsonl",
         "ndjson": "jsonl", "log": "text", "logs": "text", "text": "text",
         "txt": "text", "plaintext": "text", "md": "text", "markdown": "text",

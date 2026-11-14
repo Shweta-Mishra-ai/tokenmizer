@@ -39,6 +39,7 @@ import sqlite3
 import time
 from collections import Counter
 from pathlib import Path
+from typing import ClassVar
 
 from tokenmizer.graph_memory.helpers import (
     _content_to_text,
@@ -1518,7 +1519,7 @@ class GraphMemory:
 
     # Tech aliases: maps common abbreviations/variants to canonical tokens
     # Allows "Use PG" to match task "Set up PostgreSQL database"
-    _TECH_ALIASES: dict[str, frozenset] = {
+    _TECH_ALIASES: ClassVar[dict[str, frozenset]] = {
         "postgres":     frozenset({"postgres", "postgresql", "pg", "psql"}),
         "postgresql":   frozenset({"postgres", "postgresql", "pg", "psql"}),
         "pg":           frozenset({"postgres", "postgresql", "pg", "psql"}),

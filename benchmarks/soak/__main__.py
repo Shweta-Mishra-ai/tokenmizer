@@ -362,7 +362,7 @@ def concurrent(args) -> dict:
 
     from fastapi.testclient import TestClient
 
-    A, up, storage = _setup(args.model)
+    A, up, _storage = _setup(args.model)
     sessions = {}
     for k in range(args.concurrent):
         rng = random.Random(args.seed + k)
