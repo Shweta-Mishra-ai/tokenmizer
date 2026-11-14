@@ -355,6 +355,54 @@ def _same_slot(new_label: str, new_summary: str, existing_label: str, existing_s
     return _semantic_same_slot(new_label, existing_label)
 
 
+# ── Scope: what a decision covers ─────────────────────────────────────────
+#
+# "The billing service uses `billing_events` as its Kafka topic" and "the
+# ledger service uses `ledger_events` as its Kafka topic" name the same
+# technology, so _same_slot read the second as a refinement of the first and
+# superseded it; "Redis for caching" and "Redis for rate limiting" likewise.
+# They cover different things and are two decisions. The scope is read from
+# what a decision says it covers — "for the X", "for <doing something>",
+# "the X uses" — and never from a bare reason: "Rust for performance" then
+# "Go for simplicity" is a real reversal and must still supersede.
+
+_SCOPE_FOR_THE = re.compile(
+    r"\bfor\s+(?:the|our|each|every|all)\s+([a-z0-9][\w-]*(?:\s+[a-z0-9][\w-]*){0,2})",
+    re.IGNORECASE)
+_SCOPE_FOR_USE = re.compile(
+    r"\bfor\s+((?:[a-z0-9][\w-]*\s+){0,2}[a-z][\w-]{2,}ing)\b", re.IGNORECASE)
+_SCOPE_SUBJECT = re.compile(
+    r"\bthe\s+([a-z0-9][\w-]*(?:\s+[a-z0-9][\w-]*){0,2}?)\s+"
+    r"(?:uses|will use|should use|is using|now uses|gets|runs on|stores|writes to|reads from)\b",
+    re.IGNORECASE)
+_SCOPE_CUT = frozenset((
+    "we we'll i i'll let's let use uses it they you because since so and but with to as "
+    "is are was will should instead rather which that this then now").split())
+_SCOPE_GENERIC = frozenset((
+    "service services module modules app apps component components layer system side "
+    "part one thing things project team example instance code stuff").split())
+
+
+def decision_scope(label: str, summary: str = "") -> frozenset:
+    """The content words of what a decision says it covers; empty when it
+    says nothing about that."""
+    text = f"{label} {summary}"
+    words: set[str] = set()
+    for pattern in (_SCOPE_FOR_THE, _SCOPE_FOR_USE, _SCOPE_SUBJECT):
+        for m in pattern.finditer(text):
+            for w in re.sub(r"[^\w\s-]", " ", m.group(1).lower()).split():
+                if w in _SCOPE_CUT:
+                    break
+                if len(w) > 2 and w not in _SCOPE_GENERIC:
+                    words.add(w)
+    return frozenset(words)
+
+
+def _different_scope(label_a: str, summary_a: str, label_b: str, summary_b: str) -> bool:
+    a, b = decision_scope(label_a, summary_a), decision_scope(label_b, summary_b)
+    return bool(a) and bool(b) and not (a & b)
+
+
 def find_contradicting_decisions(
     new_label: str,
     new_summary: str,
@@ -408,6 +456,8 @@ def find_contradicting_decisions(
         if existing_topics & new_topics:
             if _is_same_decision(new_label, node.label):
                 continue  # same decision — not a contradiction
+            if _different_scope(new_label, new_summary, node.label, node.summary):
+                continue  # covers something else — an independent decision
             if _same_slot(new_label, new_summary, node.label, node.summary):
                 to_supersede.append(node_id)
 
@@ -452,6 +502,8 @@ def find_contested_decisions(
             continue
         if _is_same_decision(new_label, node.label):
             continue
+        if _different_scope(new_label, new_summary, node.label, node.summary):
+            continue  # covers something else: independent, not contested
         # Reaching here means topics overlapped but _same_slot said no —
         # ambiguous, not confidently a replacement.
         if not _same_slot(new_label, new_summary, node.label, node.summary):
@@ -496,6 +548,8 @@ def _find_by_word_overlap(
         if node.status != NodeStatus.COMPLETED:
             continue
 
+        if _different_scope(new_label, "", node.label, node.summary):
+            continue
         existing_words = {w for w in re.sub(r"[^\w]", " ", node.label.lower()).split()
                           if w not in _STOP and len(w) > 2}
         if not existing_words:

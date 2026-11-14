@@ -212,6 +212,9 @@ class TestEnvOverridesYaml:
         monkeypatch.setenv("TOKENMIZER_PROVIDER", "openai")
         monkeypatch.setenv("TOKENMIZER_STATE_BACKEND", "redis")
         monkeypatch.setenv("TOKENMIZER_GRAPH_CHECKPOINT__TRIGGER_AT_PERCENT", "0.5")
+        # The sibling below must come from YAML, so the environment must not
+        # set it (conftest points the suite's storage at a temp directory).
+        monkeypatch.delenv("TOKENMIZER_GRAPH_CHECKPOINT__STORAGE_DIR", raising=False)
 
         s = Settings.from_yaml(str(cfg))
 

@@ -29,6 +29,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from tokenmizer.graph_memory.decision_tracker import _SCOPE_CUT
 from tokenmizer.graph_memory.domains import get_pack, normalize_domain
 from tokenmizer.graph_memory.helpers import tool_signals
 from tokenmizer.graph_memory.patterns import (
@@ -147,6 +148,7 @@ from tokenmizer.graph_memory.patterns import (
     _sentence_index,
     _tech_mention_is_a_decision,
     clause_subject,
+    find_slot_changes,
     find_supersessions,
     inside_quotation,
     is_library_name,
@@ -629,6 +631,60 @@ def _bounded(text: str) -> str:
     if len(text) <= _EXTRACT_HEAD + _EXTRACT_TAIL:
         return text
     return text[:_EXTRACT_HEAD] + "\n\n" + text[-_EXTRACT_TAIL:]
+
+
+# Only ever applied ANCHORED, with .match() right after a tech name. As a
+# search it is quadratic on long runs of whitespace (0.97 s on 20 KB).
+_TRAILING_SCOPE = re.compile(
+    r"\s+for\s+((?:the|our)\s+(?:[a-z0-9][\w-]*\s+){0,2}[a-z0-9][\w-]*"
+    r"|(?:[a-z0-9][\w-]*\s+){0,2}?[a-z][\w-]{2,}ing)\b(?!\s*[-'])",
+    re.IGNORECASE)
+
+
+# "For the search service we'll use Elasticsearch": the scope comes first and
+# the decision patterns start at the choice, so the label was "Use
+# Elasticsearch" and the next service's choice superseded it. A scope stated
+# at the head of the decision's own sentence is kept in its label.
+_FRONTED_SCOPE = re.compile(
+    # `[ \t]*`, not `\s*`, after the boundary: `\s*` also eats newlines, and
+    # from every newline in a run of blank lines it scanned to the run's end.
+    r"(?:^|[.:!?\n])[ \t]*(?:decision:[ \t]*|so,?[ \t]+|ok,?[ \t]+|and[ \t]+)?for[ \t]+(?:the|our)[ \t]+"
+    r"((?:[a-z0-9][\w-]*\s+){0,2}?[a-z0-9][\w-]*)"
+    # "For the X, <anything>" — the comma marks the fronted scope — or no
+    # comma and a subject or verb that starts the decision itself.
+    r"(?:\s*,\s*|\s+(?=(?:we|we'll|we're|we've|i|i'll|let's|let|use|go|going|switch|"
+    r"change|move|replace|keep|stick)\b))",
+    re.IGNORECASE)
+
+
+def _with_fronted_scope(label: str, content: str, at: int | None = None) -> str:
+    """`label` with the scope stated at the head of its sentence, if any.
+    `at` is where the decision starts in `content`; by default it is found
+    by searching for the label's own text."""
+    if at is None:
+        core = label[4:] if label.lower().startswith("use ") else label
+        probe = core[:24].strip()
+        if len(probe) < 3:
+            return label
+        at = content.lower().find(probe.lower())
+        if at < 0:
+            return label
+    head = content[:at]
+    sentence = max(head.rfind(c) for c in ".!?\n")
+    # Search from the boundary itself, so the pattern's own (?:^|[.:!?\n])
+    # anchor sees it.
+    matches = list(_FRONTED_SCOPE.finditer(content, max(0, sentence), at))
+    if not matches:
+        return label
+    m = matches[-1]
+    scope = " ".join(m.group(1).split())
+    # Whole words: "amber" inside `amber_billing_s00` is not the scope.
+    if all(re.search(r"\b" + re.escape(w) + r"\b", label, re.IGNORECASE)
+           for w in scope.split()):
+        return label
+    if label.lower().startswith("use "):
+        return f"{label} for the {scope}"
+    return f"for the {scope}: {label}"
 
 
 # More distinct paths than this in one message makes it a listing.
@@ -1407,6 +1463,20 @@ class HybridExtractor:
             if _NEGATION_WORDS.search(m.group(1)):
                 continue
             label = "Use " + _clip(m.group(1), 60)
+            # The name's capture stops before "for …". What follows is kept
+            # when it says what the choice covers — "for caching", "for the
+            # orders service" — or "Redis for caching" and "Redis for rate
+            # limiting" became one "Use Redis". A bare reason ("for speed")
+            # is not kept: see decision_tracker.decision_scope.
+            scope = _TRAILING_SCOPE.match(content, m.end())
+            if scope:
+                kept = []
+                for w in scope.group(1).split():
+                    if w.lower() in _SCOPE_CUT:
+                        break
+                    kept.append(w)
+                if len(kept) > 1 or (kept and kept[0].lower() not in ("the", "our")):
+                    label = f"{label} for {' '.join(kept)}"
             norm  = self._normalize(label)
             if norm not in seen_decisions:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
@@ -1495,6 +1565,22 @@ class HybridExtractor:
                     result.decisions.append({"label": label, "reason": reason,
                                              "evidence": surrounding[:120], "source_role": role})
                     seen_decisions.add(norm)
+
+        # "Switch the partition key to `account_id`", "let's store sessions in
+        # X instead": a change of mind naming the slot, not the old value. The
+        # decision is recorded; the graph supersedes whatever it last held
+        # for that slot (GraphMemory._supersede_slot). Both used to produce
+        # nothing, and the old choice stayed current in every resume.
+        for slot, label, m_start, _m_end in find_slot_changes(content):
+            if _is_negated_context(content, m_start) or _quoted_or_question(content, m_start):
+                continue
+            label = _with_fronted_scope(label, content, at=m_start)
+            norm = self._normalize(label)
+            if norm not in seen_decisions and len(norm) > 4:
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
+                seen_decisions.add(norm)
+            if slot:
+                result.superseded.append({"old": "", "new": label, "slot": slot})
 
         self._extract_structure(original, result, seen_files, seen_endpoints, seen_schemas)
         self._extract_errors(content, result, _ALL_ERROR_PATTERNS, original=original)
@@ -1963,6 +2049,7 @@ class HybridExtractor:
             if role != "system":
                 open_proposals = []
 
+            first_decision = len(result.decisions)
             self._extract_one_message(
                 content, role, i, is_recent,
                 result, seen_decisions, seen_tasks, seen_files,
@@ -1979,6 +2066,8 @@ class HybridExtractor:
                 original=original,
                 english=role != "tool" and looks_english(original),
             )
+            for d in result.decisions[first_decision:]:
+                d["label"] = _with_fronted_scope(d["label"], content)
 
         # Cross-granularity dedup. Without this the heuristic path
         # returns both `scripts/backfill.py` and `backfill.py`, and both

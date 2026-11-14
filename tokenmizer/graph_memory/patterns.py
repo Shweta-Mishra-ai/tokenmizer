@@ -548,7 +548,10 @@ _SUPERSEDED = re.compile(
 
 # "replaced X with Y", "replacing X by Y"
 _SUPERSEDED_REPLACE = re.compile(
-    r'replac(?:ed|ing|es)?\s+(' + _OPERAND + r')\s+(?:with|by)\s+(' + _OPERAND + r')',
+    # `replac(?:ed|ing|es)?\s` never matched the imperative "replace": the
+    # optional group cannot take a lone "e", so "Let's replace Jest with
+    # Vitest" recorded Vitest and never that it replaced Jest.
+    r'replac(?:e|ed|ing|es)\s+(' + _OPERAND + r')\s+(?:with|by)\s+(' + _OPERAND + r')',
     re.IGNORECASE,
 )
 
@@ -623,6 +626,64 @@ def _is_common_phrase(span: str) -> bool:
     cut = _OPERAND_SENTENCE.search(head)
     head = head[:cut.start()] if cut else head
     return bool(_COMMON_PHRASE.match(head.strip(" ,;:.\u2014-")))
+
+
+# A change of mind that names the SLOT, not the old value:
+# "switch the partition key to `account_id`", "change our default model to
+# gpt-4o". The old value is whatever this session last chose for that slot,
+# so the graph resolves it (GraphMemory._supersede_slot).
+_SLOT_VALUE = r"(`[^`\n]{1,60}`|(?!(?:the|a|an|my|our|your|their)\b)[\w][\w./@+\-]*(?:[ \t]+[\w][\w./@+\-]*){0,3}?)"
+_SWITCH_SLOT = re.compile(
+    r"\b(?:switch(?:ed|ing)?|chang(?:e|ed|ing))\s+(?:the|our)\s+"
+    r"((?:(?!from\b|away\b)[a-z][\w-]*\s+){0,3}?(?!from\b|away\b)[a-z][\w-]*)"
+    r"\s+(?:over\s+)?to\s+" + _SLOT_VALUE + r"(?=\s*(?:[.,;:!?)]|\n|$|\s+(?:instead|now|because|since|so|for|as)\b))",
+    re.IGNORECASE,
+)
+# "Actually, let's store sessions in `memcached_pool` instead." The clause is
+# the decision; "instead" says it replaces the earlier choice it restates.
+# Not "instead of" — that names the rejected option in the same breath, one
+# decision (see _SUPERSEDED_REPLACE's note below).
+_INSTEAD_CLAUSE = re.compile(
+    r"\b(?:let'?s|let us|we'?ll|we will|we should|i'?ll|we're going to|going to)\s+"
+    r"((?:(?!\binstead\b)[^.!?\n]){6,100}?)\s+instead\b(?!\s+of\b)",
+    re.IGNORECASE,
+)
+_SLOT_PREPOSITIONS = frozenset("in on to with for as at into onto via from by".split())
+_SLOT_FILLER = frozenset("the a an our use go with just".split())
+
+
+def _value_text(value: str) -> str:
+    return " ".join(value.split()).rstrip(".,;:")
+
+
+def find_slot_changes(content: str) -> list[tuple[str, str, int, int]]:
+    """Every change of mind that names what it changes, as
+    (slot, new decision label, start, end).
+
+    The slot is the words a previous decision for the same thing will also
+    contain: "partition key", or "store sessions" for "store sessions in
+    X instead". A clause with too little left to identify a slot (a bare
+    "go with gRPC instead") still yields its decision, with an empty slot.
+    """
+    found: list[tuple[str, str, int, int]] = []
+    for m in _SWITCH_SLOT.finditer(content or ""):
+        slot = " ".join(m.group(1).lower().split())
+        value = _value_text(m.group(2))
+        if not value or value.lower() in ("it", "that", "this", "them"):
+            continue
+        found.append((slot, f"{value} as the {slot}", m.start(), m.end()))
+    for m in _INSTEAD_CLAUSE.finditer(content or ""):
+        clause = " ".join(m.group(1).split()).rstrip(",;:")
+        words = clause.split()
+        # The slot is what comes before the last preposition: "store
+        # sessions" in "store sessions in X". No preposition, no slot.
+        cut = max((i for i, w in enumerate(words) if w.lower() in _SLOT_PREPOSITIONS),
+                  default=-1)
+        slot_words = [w.lower() for w in words[:cut] if w.lower() not in _SLOT_FILLER] \
+            if cut > 0 else []
+        slot = " ".join(slot_words) if len(slot_words) >= 2 else ""
+        found.append((slot, clause, m.start(), m.end()))
+    return found
 
 
 def find_supersessions(content: str) -> list[tuple[str, str, int, int]]:

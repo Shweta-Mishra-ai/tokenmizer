@@ -1,5 +1,18 @@
+import atexit
 import os
+import shutil
+import tempfile
 from unittest.mock import patch
+
+# Every test run gets its own storage directory, set before anything reads
+# settings. The default is ./checkpoints in the repository, which every run
+# shared: sessions, ownership rows and analytics accumulated across runs,
+# and once a hundred older sessions existed, tests that list "the caller's
+# sessions" found theirs pushed off the list and failed on their own.
+if "TOKENMIZER_GRAPH_CHECKPOINT__STORAGE_DIR" not in os.environ:
+    _STORAGE = tempfile.mkdtemp(prefix="tokenmizer-tests-")
+    os.environ["TOKENMIZER_GRAPH_CHECKPOINT__STORAGE_DIR"] = _STORAGE
+    atexit.register(shutil.rmtree, _STORAGE, True)
 
 import pytest
 

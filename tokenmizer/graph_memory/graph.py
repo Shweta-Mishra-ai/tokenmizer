@@ -1358,6 +1358,11 @@ class GraphMemory:
             if not isinstance(sup, dict):
                 continue
             old_label, new_label = sup.get("old", ""), sup.get("new", "")
+            if not old_label and new_label and sup.get("slot"):
+                new_id = self._find_decision(new_label)
+                if new_id:
+                    self._supersede_slot(new_id, sup["slot"])
+                continue
             if not old_label or not new_label:
                 continue
             old_id = self._find_decision(old_label)
@@ -1535,6 +1540,34 @@ class GraphMemory:
         "typescript":   frozenset({"ts", "typescript"}),
         "js":           frozenset({"js", "javascript", "node", "nodejs"}),
     }
+
+    def _supersede_slot(self, new_id: str, slot: str) -> bool:
+        """Supersede the latest active decision for `slot` by `new_id`.
+
+        "Change the default model to claude-sonnet-5" names the slot, not the
+        value it replaces; the old value is whichever active decision last
+        filled that slot — its label carries every word of the slot — and
+        covers the same scope (decision_tracker.decision_scope). Without
+        this, both models stayed current in every resume.
+        """
+        from tokenmizer.graph_memory.decision_tracker import _different_scope
+
+        new = self._nodes.get(new_id)
+        words = [w for w in slot.lower().split() if len(w) > 2]
+        if new is None or not words:
+            return False
+        patterns = [re.compile(r"\b" + re.escape(w) + r"s?\b", re.IGNORECASE) for w in words]
+        candidates = [
+            n for nid, n in self._nodes.items()
+            if nid != new_id and n.type == NodeType.DECISION and not n._evicted
+            and n.status == NodeStatus.COMPLETED
+            and all(p.search(n.label) for p in patterns)
+            and not _different_scope(new.label, new.summary, n.label, n.summary)
+        ]
+        if not candidates:
+            return False
+        old = max(candidates, key=lambda n: n.updated_at)
+        return self.record_supersession(old.id, new_id, trigger=f"changed the {slot}")
 
     def _find_decision(self, text: str) -> str:
         """Id of the decision node naming `text`, or "".
