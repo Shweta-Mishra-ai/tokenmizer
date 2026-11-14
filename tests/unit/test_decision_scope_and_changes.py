@@ -115,3 +115,9 @@ def test_decision_scope(label, scope):
 def test_a_fronted_scope_stays_in_the_label(tmp_path):
     d = _decisions(tmp_path, "For the search service we'll use Elasticsearch.")
     assert any("search service" in label for label in d), d
+
+
+def test_restating_the_current_choice_supersedes_nothing(tmp_path):
+    d = _decisions(tmp_path, "Decision: `account_id` as the partition key.",
+                   "To be clear: switch the partition key to `account_id`.")
+    assert set(d.values()) == {"completed"}, d

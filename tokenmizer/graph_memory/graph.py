@@ -1550,7 +1550,7 @@ class GraphMemory:
         covers the same scope (decision_tracker.decision_scope). Without
         this, both models stayed current in every resume.
         """
-        from tokenmizer.graph_memory.decision_tracker import _different_scope
+        from tokenmizer.graph_memory.decision_tracker import _different_scope, _is_same_decision
 
         new = self._nodes.get(new_id)
         words = [w for w in slot.lower().split() if len(w) > 2]
@@ -1563,6 +1563,7 @@ class GraphMemory:
             and n.status == NodeStatus.COMPLETED
             and all(p.search(n.label) for p in patterns)
             and not _different_scope(new.label, new.summary, n.label, n.summary)
+            and not _is_same_decision(new.label, n.label)   # a restatement, not a change
         ]
         if not candidates:
             return False
