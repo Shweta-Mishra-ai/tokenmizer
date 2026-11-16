@@ -965,6 +965,14 @@ class GeminiProvider(BaseProvider):
                 gen_kw["tool_config"] = config
         return gen_kw
 
+    def _client(self, genai):
+        """A client with this provider's request timeout, in milliseconds
+        as the SDK takes it. None is the SDK's own default (no timeout)."""
+        timeout = self.request_timeout
+        http_options = ({"timeout": int(timeout * 1000)}
+                        if timeout and timeout > 0 else None)
+        return genai.Client(api_key=self.api_key, http_options=http_options)
+
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
             from google import genai
@@ -972,11 +980,7 @@ class GeminiProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install google-genai") from None
 
-        client = genai.Client(
-            api_key=self.api_key,
-            **({"http_options": {"timeout": int(self.request_timeout * 1000)}}
-               if self.request_timeout and self.request_timeout > 0 else {}),
-        )
+        client = self._client(genai)
 
         # Extract system prompt
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
@@ -1017,7 +1021,12 @@ class GeminiProvider(BaseProvider):
             usage = resp.usage_metadata
             if usage is not None and usage.prompt_token_count:
                 input_tokens = usage.prompt_token_count
-                output_tokens = usage.candidates_token_count
+                # Absent when the model returned no candidate (a blocked
+                # or empty response): count what came back rather than
+                # pass None on as a token count.
+                output_tokens = (usage.candidates_token_count
+                                 if usage.candidates_token_count is not None
+                                 else count_tokens(text, model))
             else:
                 input_tokens = count_messages_tokens(conversation, model)
                 output_tokens = count_tokens(text, model)
@@ -1050,11 +1059,7 @@ class GeminiProvider(BaseProvider):
             raise ImportError("pip install google-genai") from None
 
         model = model or self.default_model
-        client = genai.Client(
-            api_key=self.api_key,
-            **({"http_options": {"timeout": int(self.request_timeout * 1000)}}
-               if self.request_timeout and self.request_timeout > 0 else {}),
-        )
+        client = self._client(genai)
 
         sys_parts = [m["content"] for m in messages if m.get("role") == "system"]
         if system:
