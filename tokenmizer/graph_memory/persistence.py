@@ -90,7 +90,7 @@ def quarantine_db(db_path, reason: str) -> bool:
         return False
 
 
-def safe_init_db(graph: "GraphMemory") -> None:
+def safe_init_db(graph: GraphMemory) -> None:
     """Initialize DB, quarantining a corrupt file if necessary."""
     try:
         graph._init_db()
@@ -113,7 +113,7 @@ def safe_init_db(graph: "GraphMemory") -> None:
             graph._persistence_broken = True
 
 
-def db_connect(graph: "GraphMemory") -> "sqlite3.Connection":
+def db_connect(graph: GraphMemory) -> sqlite3.Connection:
     """
     Open a SQLite connection with safe concurrent settings:
     - WAL journal mode: readers don't block writers, writers don't block readers
@@ -145,7 +145,7 @@ def edge_key(edge: MemoryEdge) -> str:
     return f"{edge.source_id}|{edge.target_id}|{etype}"
 
 
-def init_db(graph: "GraphMemory") -> None:
+def init_db(graph: GraphMemory) -> None:
     conn = graph._db_connect()
     try:
         # ── Per-row storage (schema v2) ──────────────────────────────────
@@ -190,9 +190,20 @@ def init_db(graph: "GraphMemory") -> None:
                 session_id       TEXT PRIMARY KEY,
                 processed_hashes TEXT NOT NULL DEFAULT '[]',
                 schema_version   INTEGER NOT NULL DEFAULT 2,
-                updated_at       REAL NOT NULL
+                updated_at       REAL NOT NULL,
+                version          INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # `version` counts committed writes to a session. Each worker of a
+        # multi-process deployment keeps its own in-memory copy of a
+        # session, and compares this counter against the one it last
+        # read or wrote to tell whether another process has written since
+        # (see stored_version). Added after graph_meta first shipped, so
+        # an older database gets the column here.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(graph_meta)")}
+        if "version" not in cols:
+            conn.execute(
+                "ALTER TABLE graph_meta ADD COLUMN version INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_nodes_session "
             "ON graph_nodes(session_id)"
@@ -211,6 +222,19 @@ def init_db(graph: "GraphMemory") -> None:
                 edges_json TEXT NOT NULL,
                 processed_hashes TEXT NOT NULL DEFAULT '[]',
                 updated_at REAL NOT NULL
+            )
+        """)
+        # Cold storage for pruned nodes. prune() used to DELETE a node once
+        # a session passed its cap, and with it whatever only that node
+        # said. It now moves the node here first: out of ranking and out of
+        # the resume block, but kept whole, listable and restorable.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS graph_pruned (
+                session_id TEXT NOT NULL,
+                node_id    TEXT NOT NULL,
+                data_json  TEXT NOT NULL,
+                pruned_at  REAL NOT NULL,
+                PRIMARY KEY (session_id, node_id)
             )
         """)
         # Separate table for decision transitions — full causal story
@@ -235,7 +259,7 @@ def init_db(graph: "GraphMemory") -> None:
         conn.close()
 
 
-def persist_transition(graph: "GraphMemory", t: DecisionTransition) -> None:
+def persist_transition(graph: GraphMemory, t: DecisionTransition) -> None:
     """Persist a single DecisionTransition to its own SQLite table."""
     try:
         conn = graph._db_connect()
@@ -257,12 +281,182 @@ def persist_transition(graph: "GraphMemory", t: DecisionTransition) -> None:
         logger.error(f"Transition persist failed: {e}")
 
 
-def get_transitions(graph: "GraphMemory") -> list[DecisionTransition]:
+def store_pruned(graph: GraphMemory, nodes: list) -> bool:
+    """Write nodes about to be pruned into cold storage. Returns success;
+    a caller must not delete what this could not keep."""
+    if not nodes:
+        return True
+    try:
+        conn = graph._db_connect()
+        try:
+            with conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO graph_pruned VALUES (?,?,?,?)",
+                    [(graph.session_id, n.id,
+                      json.dumps(asdict(n), sort_keys=True, default=str), time.time())
+                     for n in nodes])
+        finally:
+            conn.close()
+        return True
+    except Exception as e:
+        logger.error("Could not move %d pruned node(s) of %s to cold storage: %s",
+                     len(nodes), graph.session_id, e)
+        return False
+
+
+def list_pruned(graph: GraphMemory) -> list[dict]:
+    try:
+        conn = graph._db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT data_json, pruned_at FROM graph_pruned WHERE session_id=? "
+                "ORDER BY pruned_at DESC", (graph.session_id,)).fetchall()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error("Could not read cold storage for %s: %s", graph.session_id, e)
+        return []
+    out = []
+    for data_json, pruned_at in rows:
+        try:
+            d = json.loads(data_json)
+        except (TypeError, ValueError):
+            continue
+        d["pruned_at"] = pruned_at
+        out.append(d)
+    return out
+
+
+def restore_pruned(graph: GraphMemory, node_id: str) -> bool:
+    """Bring one node back from cold storage into the live graph."""
+    conn = graph._db_connect()
+    try:
+        row = conn.execute(
+            "SELECT data_json FROM graph_pruned WHERE session_id=? AND node_id=?",
+            (graph.session_id, node_id)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return False
+    before = len(graph._nodes)
+    _hydrate_nodes(graph, [json.loads(row[0])])
+    if len(graph._nodes) == before and node_id not in graph._nodes:
+        return False
+    graph._nodes[node_id].touch()
+    graph._mark_mentioned(node_id)
+    if not graph._persist():
+        return False
+    conn = graph._db_connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM graph_pruned WHERE session_id=? AND node_id=?",
+                         (graph.session_id, node_id))
+    finally:
+        conn.close()
+    return True
+
+
+def delete_session_rows(storage_dir, session_id: str) -> int:
+    """Delete every graph row of one session. Returns nodes deleted."""
+    from pathlib import Path
+    db = Path(storage_dir) / "graph_memory.db"
+    if not db.exists():
+        return 0
+    conn = sqlite3.connect(str(db), timeout=5.0)
+    try:
+        with conn:
+            n = conn.execute("DELETE FROM graph_nodes WHERE session_id=?",
+                             (session_id,)).rowcount
+            for table in ("graph_edges", "graph_meta", "graphs",
+                          "decision_transitions", "graph_pruned"):
+                try:
+                    conn.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
+                except sqlite3.OperationalError:
+                    pass  # table predates this build
+    finally:
+        conn.close()
+    return n
+
+
+def stored_version(graph: GraphMemory) -> int | None:
+    """The session's write counter on disk: 0 if it has never been
+    written, None if the database could not be read. One indexed lookup,
+    cheap enough to run on every request."""
+    try:
+        conn = graph._db_connect()
+        try:
+            row = conn.execute(
+                "SELECT version FROM graph_meta WHERE session_id=?",
+                (graph.session_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("Could not read the stored version of %s: %s", graph.session_id, e)
+        return None
+    return row[0] if row else 0
+
+
+def stale_session_ids(storage_dir, cutoff: float, ownership) -> list[str]:
+    """Sessions whose last graph write, or failing that whose claim, is
+    older than `cutoff`."""
+    from pathlib import Path
+    last: dict[str, float] = {}
+    db = Path(storage_dir) / "graph_memory.db"
+    if db.exists():
+        conn = sqlite3.connect(str(db), timeout=5.0)
+        try:
+            for sid, ts in conn.execute("SELECT session_id, updated_at FROM graph_meta"):
+                last[sid] = max(last.get(sid, 0.0), ts or 0.0)
+        finally:
+            conn.close()
+    for sid, created in ownership.all_sessions():
+        last[sid] = max(last.get(sid, 0.0), created or 0.0)
+    return [sid for sid, ts in last.items() if ts < cutoff]
+
+
+def session_summaries(storage_dir, session_ids: list[str]) -> dict[str, dict]:
+    """Node/edge counts, node counts by type, and last update per session,
+    read straight from SQLite — no GraphMemory is built.
+
+    The session list used to construct a full GraphMemory for every
+    session a caller owned, on every dashboard refresh: each one a full
+    load, a cache insertion and potentially an eviction of a session
+    someone was actually using.
+    """
+    from pathlib import Path
+    out: dict[str, dict] = {sid: {"node_count": 0, "edge_count": 0, "by_type": {},
+                                  "updated_at": 0.0} for sid in session_ids}
+    db = Path(storage_dir) / "graph_memory.db"
+    if not session_ids or not db.exists():
+        return out
+    marks = ",".join("?" * len(session_ids))
+    conn = sqlite3.connect(str(db), timeout=5.0)
+    try:
+        for sid, ntype, count, updated in conn.execute(
+                f"SELECT session_id, json_extract(data_json, '$.type'), COUNT(*), "
+                f"MAX(updated_at) FROM graph_nodes WHERE session_id IN ({marks}) "
+                f"AND COALESCE(json_extract(data_json, '$._evicted'), 0) = 0 "
+                f"GROUP BY session_id, json_extract(data_json, '$.type')", session_ids):
+            row = out[sid]
+            row["by_type"][ntype] = count
+            row["node_count"] += count
+            row["updated_at"] = max(row["updated_at"], updated or 0.0)
+        for sid, count in conn.execute(
+                f"SELECT session_id, COUNT(*) FROM graph_edges WHERE session_id IN ({marks}) "
+                f"GROUP BY session_id", session_ids):
+            out[sid]["edge_count"] = count
+    finally:
+        conn.close()
+    return out
+
+
+def get_transitions(graph: GraphMemory) -> list[DecisionTransition]:
     """Return all decision transitions for this session, newest first."""
     return sorted(graph._transitions, key=lambda t: t.timestamp, reverse=True)
 
 
-def load_transitions(graph: "GraphMemory") -> None:
+def load_transitions(graph: GraphMemory) -> None:
     """Load transitions from SQLite into memory."""
     try:
         conn = graph._db_connect()
@@ -301,7 +495,7 @@ def load_transitions(graph: "GraphMemory") -> None:
         graph._transitions = []
 
 
-def _serialize_state(graph: "GraphMemory") -> tuple[dict, dict]:
+def _serialize_state(graph: GraphMemory) -> tuple[dict, dict]:
     """Current nodes and edges as {key: canonical_json}.
 
     sort_keys makes the JSON canonical, so string equality against the
@@ -318,7 +512,7 @@ def _serialize_state(graph: "GraphMemory") -> tuple[dict, dict]:
     return nodes, edges
 
 
-def persist(graph: "GraphMemory", force: bool = False) -> bool:
+def persist(graph: GraphMemory, force: bool = False) -> bool:
     """
     Persist the graph to SQLite, writing only what actually changed.
 
@@ -391,7 +585,7 @@ def persist(graph: "GraphMemory", force: bool = False) -> bool:
         return False
 
 
-def _reconcile_with_disk(graph: "GraphMemory") -> tuple[int, int]:
+def _reconcile_with_disk(graph: GraphMemory) -> tuple[int, int]:
     """Merge another process's committed changes into this instance
     before writing. Caller holds the lock. Returns (nodes, edges) dropped.
 
@@ -453,7 +647,7 @@ def _reconcile_with_disk(graph: "GraphMemory") -> tuple[int, int]:
     return (len(dropped_nodes), len(dropped_edges))
 
 
-def _write_diff(graph: "GraphMemory", nodes: dict, edges: dict, *, force: bool) -> bool:
+def _write_diff(graph: GraphMemory, nodes: dict, edges: dict, *, force: bool) -> bool:
     """Compute and apply the row-level diff. Caller holds the lock."""
     prev_nodes = {} if force else graph._persisted_nodes
     prev_edges = {} if force else graph._persisted_edges
@@ -503,11 +697,16 @@ def _write_diff(graph: "GraphMemory", nodes: dict, edges: dict, *, force: bool) 
                         "DELETE FROM graph_edges WHERE session_id=? AND edge_key=?",
                         [(sid, k) for k in edge_deletes],
                     )
+                row = conn.execute(
+                    "SELECT version FROM graph_meta WHERE session_id=?", (sid,),
+                ).fetchone()
+                disk_version = row[0] if row else 0
+                new_version = disk_version + 1
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta "
-                    "(session_id, processed_hashes, schema_version, updated_at) "
-                    "VALUES (?,?,?,?)",
-                    (sid, hashes_json, SCHEMA_VERSION, now),
+                    "(session_id, processed_hashes, schema_version, updated_at, version) "
+                    "VALUES (?,?,?,?,?)",
+                    (sid, hashes_json, SCHEMA_VERSION, now, new_version),
                 )
         finally:
             conn.close()
@@ -521,6 +720,11 @@ def _write_diff(graph: "GraphMemory", nodes: dict, edges: dict, *, force: bool) 
     graph._persisted_edges = edges
     graph._persisted_hashes_json = hashes_json
     graph._dirty = False
+    # If another process wrote between this instance's last read and this
+    # write, the merge kept its rows on disk but this instance never
+    # loaded the ones it added. Leave the version unknown so the next
+    # freshness check reloads, instead of claiming to be current.
+    graph._disk_version = new_version if disk_version == graph._disk_version else None
     logger.debug(
         "Persisted %s: %d node upserts, %d edge upserts, %d/%d deletes "
         "(graph has %d nodes)",
@@ -530,7 +734,7 @@ def _write_diff(graph: "GraphMemory", nodes: dict, edges: dict, *, force: bool) 
     return True
 
 
-def _hydrate_nodes(graph: "GraphMemory", nodes_data: list) -> None:
+def _hydrate_nodes(graph: GraphMemory, nodes_data: list) -> None:
     """Rebuild MemoryNode objects from stored dicts.
 
     Enum restoration matters: asdict() writes NodeType/NodeStatus (both
@@ -562,7 +766,7 @@ def _hydrate_nodes(graph: "GraphMemory", nodes_data: list) -> None:
         graph._nodes[n.id] = n
 
 
-def _hydrate_edges(graph: "GraphMemory", edges_data: list) -> None:
+def _hydrate_edges(graph: GraphMemory, edges_data: list) -> None:
     for ed in edges_data:
         try:
             ed["type"] = EdgeType(ed["type"])
@@ -580,7 +784,7 @@ def _hydrate_edges(graph: "GraphMemory", edges_data: list) -> None:
             )
 
 
-def _migrate_blob_session(graph: "GraphMemory", conn) -> bool:
+def _migrate_blob_session(graph: GraphMemory, conn) -> bool:
     """One-time migration of one session from the v1 blob to per-row.
 
     Returns True if a v1 row existed and was loaded into memory. The
@@ -627,7 +831,7 @@ def _migrate_blob_session(graph: "GraphMemory", conn) -> bool:
     return True
 
 
-def load(graph: "GraphMemory") -> None:
+def load(graph: GraphMemory) -> None:
     try:
         conn = graph._db_connect()
         try:
@@ -640,9 +844,12 @@ def load(graph: "GraphMemory") -> None:
                 (graph.session_id,),
             ).fetchall()
             meta_row = conn.execute(
-                "SELECT processed_hashes FROM graph_meta WHERE session_id=?",
+                "SELECT processed_hashes, version FROM graph_meta WHERE session_id=?",
                 (graph.session_id,),
             ).fetchone()
+            # Read in the same connection as the rows, before any write by
+            # this instance, so it names the state just loaded.
+            graph._disk_version = meta_row[1] if meta_row is not None else 0
 
             if not node_rows and not edge_rows and meta_row is None:
                 # Nothing in v2 for this session — it may predate the
@@ -694,6 +901,8 @@ def load(graph: "GraphMemory") -> None:
 
         _hydrate_nodes(graph, good_nodes)
         _hydrate_edges(graph, good_edges)
+        graph._turn = max((n.turn for n in graph._nodes.values()), default=0)
+        graph._seq = max((n.seq for n in graph._nodes.values()), default=0)
 
         # Record what is on disk so persist() can diff against it. Built
         # by re-serializing what we just hydrated, so it reflects exactly

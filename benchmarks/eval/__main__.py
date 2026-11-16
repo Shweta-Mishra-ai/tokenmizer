@@ -29,12 +29,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.eval import corpus as corpus_mod  # noqa: E402
-from benchmarks.eval.metrics import (  # noqa: E402
+from benchmarks.eval import corpus as corpus_mod
+from benchmarks.eval.metrics import (
     label_quality,
     score,
 )
-from tokenmizer.graph_memory.graph import (  # noqa: E402
+from tokenmizer.graph_memory.graph import (
     GraphMemory,
     NodeStatus,
     NodeType,

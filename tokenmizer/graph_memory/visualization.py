@@ -10,7 +10,7 @@ Re-exported from graph.py for backward compatibility:
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from tokenmizer.graph_memory.graph import GraphMemory
@@ -292,7 +292,7 @@ def _analytics(vis_nodes: list[dict], vis_edges: list[dict],
     }
 
 
-def to_vis_json(graph: "GraphMemory") -> dict:
+def to_vis_json(graph: GraphMemory) -> dict:
     """
     Export graph as D3-compatible JSON: {nodes, edges, transitions, meta}.
     Node colors and sizes encode type + status; `community` groups nodes
@@ -300,7 +300,7 @@ def to_vis_json(graph: "GraphMemory") -> dict:
     Only exports non-evicted nodes. meta also carries the health fields
     the graph page needs to explain an empty graph honestly.
     """
-    vis_nodes = []
+    vis_nodes: list[dict[str, Any]] = []
     active_ids: set[str] = set()
 
     for nid, n in graph._nodes.items():
@@ -398,7 +398,7 @@ def to_vis_json(graph: "GraphMemory") -> dict:
     }
 
 
-def to_obsidian_canvas(graph: "GraphMemory") -> dict:
+def to_obsidian_canvas(graph: GraphMemory) -> dict:
     """
     Export graph as Obsidian Canvas JSON (.canvas format).
     Nodes are laid out in clusters by type using a grid algorithm.
@@ -664,7 +664,7 @@ applySide();
 let W=Math.max(360,(innerWidth||1280)-SIDE), H=Math.max(300,innerHeight||800);
 const NS="http://www.w3.org/2000/svg";
 function el(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e}
-function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function $(id){return document.getElementById(id)}
 function when(ts){return ts?new Date(ts*1000).toLocaleString():""}
 function colorOf(t){return COLOR[t]||"#8a8f9e"}
@@ -1623,7 +1623,7 @@ layoutRadial();render();applyFilters();fit();
 """
 
 
-def to_share_html(graph: "GraphMemory") -> str:
+def to_share_html(graph: GraphMemory) -> str:
     """Self-contained dark interactive graph HTML — open in any browser,
     zero network dependencies (works offline / air-gapped demo).
 

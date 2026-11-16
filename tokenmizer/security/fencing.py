@@ -56,7 +56,9 @@ _PREAMBLE = (
 # every UI a reviewer would use to read a message, so a phrase carrying
 # them passes a denylist and reads normally to the model.
 _INVISIBLE = re.compile(
-    r"[​-‏‪-‮⁠-⁤﻿­]"
+    # Written as escapes: the literal characters are invisible in an editor
+    # and a diff, which is exactly the property this pattern exists to catch.
+    "[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad]"
 )
 
 # Injection phrasings, applied to text ABOUT to be remembered. Narrower

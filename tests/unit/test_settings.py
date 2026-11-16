@@ -34,12 +34,14 @@ broader gaps found while implementing the fix:
 """
 from __future__ import annotations
 
+import pydantic
 import pytest
 import yaml
 
 from tokenmizer.config import settings as settings_module
 from tokenmizer.config.settings import (
     CompressionSettings,
+    ConfigSecurityError,
     MemorySettings,
     Settings,
     TerseOutputSettings,
@@ -68,7 +70,7 @@ class TestExtraForbidCatchesTypos:
 
     def test_misspelled_key_raises_instead_of_silently_dropping(self, tmp_path):
         path = _write_yaml(tmp_path, {"api_keys": "super-secret-key"})  # typo
-        with pytest.raises(Exception):
+        with pytest.raises(pydantic.ValidationError):
             Settings.from_yaml(path)
 
     def test_correctly_spelled_key_still_works(self, tmp_path):
@@ -77,21 +79,21 @@ class TestExtraForbidCatchesTypos:
         assert s.api_key == "super-secret-key"
 
 
-class TestProductionFailsClosedOnLoadFailure(object):
+class TestProductionFailsClosedOnLoadFailure:
 
     def test_production_raises_on_malformed_yaml(self, tmp_path, monkeypatch):
         path = tmp_path / "tokenmizer.yaml"
         path.write_text("not: valid: yaml: at: all: [", encoding="utf-8")
         monkeypatch.setenv("TOKENMIZER_ENV", "production")
         monkeypatch.setenv("TOKENMIZER_CONFIG", str(path))
-        with pytest.raises(Exception):
+        with pytest.raises(ConfigSecurityError):
             get_settings()
 
     def test_production_raises_on_misspelled_key(self, tmp_path, monkeypatch):
         path = _write_yaml(tmp_path, {"api_keys": "typo-key", "cors_origin": ["x"]})
         monkeypatch.setenv("TOKENMIZER_ENV", "production")
         monkeypatch.setenv("TOKENMIZER_CONFIG", path)
-        with pytest.raises(Exception):
+        with pytest.raises(ConfigSecurityError):
             get_settings()
 
     def test_development_still_falls_back_gracefully(self, tmp_path, monkeypatch, caplog):
@@ -117,7 +119,7 @@ class TestProductionFailsClosedOnPermissiveResult:
         path = _write_yaml(tmp_path, {"provider": "anthropic"})  # no api_key set
         monkeypatch.setenv("TOKENMIZER_ENV", "production")
         monkeypatch.setenv("TOKENMIZER_CONFIG", path)
-        with pytest.raises(Exception):
+        with pytest.raises(ConfigSecurityError):
             get_settings()
 
     def test_production_succeeds_when_api_key_is_set(self, tmp_path, monkeypatch):
@@ -133,7 +135,7 @@ class TestProductionFailsClosedOnPermissiveResult:
         monkeypatch.setenv("TOKENMIZER_ENV", "production")
         monkeypatch.setenv("TOKENMIZER_CONFIG", str(tmp_path / "does-not-exist.yaml"))
         monkeypatch.delenv("TOKENMIZER_API_KEY", raising=False)
-        with pytest.raises(Exception):
+        with pytest.raises(ConfigSecurityError):
             get_settings()
 
 

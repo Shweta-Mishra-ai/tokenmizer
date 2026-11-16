@@ -37,7 +37,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any
 
 from tokenmizer.core.tokenizer import count_tokens
 
@@ -65,11 +65,11 @@ class CodeBlockGuard:
     """
 
     @staticmethod
-    def segment(text: str) -> List[Tuple[bool, str]]:
+    def segment(text: str) -> list[tuple[bool, str]]:
         """Returns ordered (is_code, segment_text) pairs covering the
         entire input losslessly — concatenating all segment_text values
         back together reproduces the original text exactly."""
-        segments: List[Tuple[bool, str]] = []
+        segments: list[tuple[bool, str]] = []
         pos = 0
         # Fenced blocks first (they take priority over inline spans found inside them)
         for m in _FENCED_CODE_RE.finditer(text):
@@ -82,9 +82,9 @@ class CodeBlockGuard:
         return segments
 
     @staticmethod
-    def _segment_inline(text: str) -> List[Tuple[bool, str]]:
+    def _segment_inline(text: str) -> list[tuple[bool, str]]:
         """Within non-fenced text, also protect inline `code spans`."""
-        segments: List[Tuple[bool, str]] = []
+        segments: list[tuple[bool, str]] = []
         pos = 0
         for m in _INLINE_CODE_RE.finditer(text):
             if m.start() > pos:
@@ -96,33 +96,36 @@ class CodeBlockGuard:
         return segments
 
     @staticmethod
-    def reassemble(segments: List[Tuple[bool, str]]) -> str:
+    def reassemble(segments: list[tuple[bool, str]]) -> str:
         return "".join(seg for _, seg in segments)
 
 # ─── Filler patterns ────────────────────────────────────────────────────────
 
+# Every pattern is anchored to a SENTENCE START and ends on sentence
+# punctuation, so it can only ever remove a whole filler sentence or a
+# standalone interjection — never part of a word and never the opening of
+# a sentence that goes on to say something.
+#
+# The unanchored versions deleted from inside words and real sentences:
+# "has an aim" contains "as an ai" and became "hm"; "In this
+# case-sensitive comparison" lost its first three words; "As an AI
+# engineer, I need..." lost its subject; "Certainly not." became "not.".
+# Phrases that only ever shortened a sentence without removing it ("In
+# this case,", "Basically,", "Let me explain") are gone entirely: what they
+# saved was a token or two, and what they cost was a sentence the reader
+# could no longer parse.
+_S = r"(?:(?<=\A)|(?<=\n)|(?<=[.!?]\s))"   # sentence start
 _FILLER = [
-    r"As an AI(?:\s+language model)?,?\s*",
-    r"I(?:'d| would) be (?:happy|glad|pleased) to\s+(?:help\s+)?",
-    r"(?:That'?s?\s+a?\s*)?(?:great|excellent|good|wonderful|fantastic)\s+question[.!]\s*",
-    # A one-word interjection is filler only where a sentence begins. With
-    # neither an anchor nor a word boundary this alternation matched INSIDE
-    # words and on every older prose message: "pressure" -> "pres",
-    # "measure" -> "mea", "ensure" -> "en", "insurer" -> "inr". The model was
-    # reading corrupted English. Anchored to start of text or to the space
-    # after sentence punctuation, and bounded on the right so "Surely" and
-    # "Absolutely" as an adverb mid-sentence are left alone.
-    r"(?:^|(?<=[.!?]\s))(?:Certainly|Of course|Sure|Absolutely|Indeed)\b[!.,]?\s*",
-    r"It(?:'s| is) (?:worth noting|important to note|crucial to understand) that\s+",
-    r"In this (?:case|context|scenario),?\s*",
-    r"(?:Essentially|Basically|Simply put|In other words),?\s*",
-    r"As you can see(?:,| from)?\s*",
-    r"As (?:mentioned|noted|discussed) (?:earlier|above|previously|before),?\s*",
-    r"Let me (?:explain|clarify|elaborate|break this down)(?:\s+for you)?\s*",
-    r"I hope this (?:helps|answers your question|clarifies things)[.!]\s*",
-    r"Feel free to (?:ask|reach out)[^.]*[.!]\s*",
-    r"Please (?:let me know|don't hesitate)[^.]*[.!]\s*",
-    r"(?:Thank you for|Thanks for) (?:asking|your question|reaching out)[.!]\s*",
+    _S + r"As an AI(?:\s+language model|\s+assistant)?,\s+(?=I\b)",
+    _S + r"I(?:'d| would) be (?:happy|glad|pleased) to help(?: (?:you )?with that)?[.!]\s*",
+    _S + r"(?:That'?s?\s+an?\s+)?(?:great|excellent|good|wonderful|fantastic)\s+question[.!]\s*",
+    # "!" or "." only: "Sure, but only after the backup" and "Certainly
+    # not." are sentences, "Sure!" is an interjection.
+    _S + r"(?:Certainly|Of course|Sure|Absolutely)[!.]\s+",
+    _S + r"I hope (?:this|that) (?:helps|answers your question|clarifies things)[.!]\s*",
+    _S + r"Feel free to (?:ask|reach out)[^.!?\n]{0,60}[.!]\s*",
+    _S + r"Please (?:let me know|don't hesitate to ask) if you (?:have|need)[^.!?\n]{0,60}[.!]\s*",
+    _S + r"(?:Thank you for|Thanks for) (?:asking|your question|reaching out)[.!]\s*",
 ]
 _FILLER_RE = [re.compile(p, re.IGNORECASE) for p in _FILLER]
 
@@ -134,7 +137,7 @@ class CompressionResult:
     compressed_tokens: int
     original_text: str
     compressed_text: str
-    strategies_applied: List[str] = field(default_factory=list)
+    strategies_applied: list[str] = field(default_factory=list)
     quality_score: float = 1.0  # 0-1, estimated
 
     @property
@@ -161,39 +164,77 @@ class CompressionResult:
 # ─── Heuristic strategies ────────────────────────────────────────────────────
 
 class FillerRemover:
-    """Remove AI filler phrases. Zero dependencies. ~10-20% reduction on verbose responses."""
+    """Remove whole filler sentences an assistant wrote. Zero dependencies.
 
-    def apply(self, text: str) -> Tuple[str, str]:
+    Leaves whitespace alone apart from the blank lines a removal opens up:
+    collapsing runs of spaces here is what flattened the indentation of
+    every unfenced code block that passed through.
+    """
+
+    def apply(self, text: str) -> tuple[str, str]:
         for pat in _FILLER_RE:
             text = pat.sub("", text)
         text = re.sub(r'\n{3,}', '\n\n', text)
-        text = re.sub(r'  +', ' ', text)
-        return text.strip(), "filler_removal"
+        return text, "filler_removal"
+
+
+# How many times a line must repeat IN A ROW before the run is collapsed.
+_REPEAT_RUN_MIN = 3
 
 
 class DuplicateLineRemover:
-    """Remove exact duplicate lines (common in repeated context). ~5-15% on long chats."""
+    """Collapse a run of identical consecutive lines into one line and a count.
 
-    def apply(self, text: str) -> Tuple[str, str]:
-        seen: set = set()
-        lines = []
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped and stripped in seen and len(stripped) > 40:
-                continue  # skip duplicate non-trivial lines
-            seen.add(stripped)
-            lines.append(line)
-        return "\n".join(lines), "duplicate_removal"
+    This used to drop every later occurrence of any line over 40
+    characters, anywhere in the message. In prose that is rare; in what
+    people actually paste — logs, CSV rows, tracebacks, code — a repeated
+    line is data, and deleting it silently changed counts, row totals and
+    programs. A run is now collapsed only when the same line repeats at
+    least three times back to back, and the count is kept, so nothing the
+    reader could have learned from the original is gone.
+    """
+
+    def apply(self, text: str) -> tuple[str, str]:
+        lines = text.split("\n")
+        out: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            j = i + 1
+            if len(line.strip()) > 40:
+                while j < len(lines) and lines[j] == line:
+                    j += 1
+            run = j - i
+            if run >= _REPEAT_RUN_MIN:
+                out.append(line)
+                out.append(f"[previous line repeated {run - 1} more times]")
+            else:
+                out.extend(lines[i:j])
+            i = j
+        return "\n".join(out), "duplicate_removal"
 
 
 class WhitespaceNormalizer:
-    """Collapse excessive whitespace. ~2-5% reduction."""
+    """Drop trailing whitespace and collapse runs of blank lines.
 
-    def apply(self, text: str) -> Tuple[str, str]:
-        text = re.sub(r'\t', '  ', text)
-        text = re.sub(r' {4,}', '   ', text)
+    Nothing else. Leading whitespace is structure — Python blocks, YAML
+    nesting, Makefile tabs, a diff's context column — and a paste with no
+    code fence reaches this stage as "prose". The previous version turned
+    tabs into spaces and every run of four or more spaces into three, so
+    two indentation levels became one and the model was shown code that
+    meant something else.
+    """
+
+    def apply(self, text: str) -> tuple[str, str]:
+        # Per line, not `[ \t]+(?=\n)`: that pattern rescans a run of spaces
+        # from every position when no newline follows, and one 50 KB line of
+        # padding took 16 seconds.
+        # The last line is left alone: it is followed by no newline, and in a
+        # prose segment it is the space before an inline `code span`.
+        lines = text.split("\n")
+        text = "\n".join([line.rstrip(" \t") for line in lines[:-1]] + lines[-1:])
         text = re.sub(r'\n{3,}', '\n\n', text)
-        return text.strip(), "whitespace_normalization"
+        return text, "whitespace_normalization"
 
 
 class CommentStripper:
@@ -220,7 +261,7 @@ class CommentStripper:
     _DOCSTRING = re.compile(r'""".*?"""', re.DOTALL)
 
     @staticmethod
-    def _strip_line_comments(text: str, markers: Tuple[str, ...]) -> str:
+    def _strip_line_comments(text: str, markers: tuple[str, ...]) -> str:
         """
         String-aware line-comment stripper, shared by both Python (#) and
         JS-style (//) comments.
@@ -262,7 +303,7 @@ class CommentStripper:
             out_lines.append(line[:best_pos].rstrip() if best_pos is not None else line)
         return '\n'.join(out_lines)
 
-    def apply(self, text: str, strip_docstrings: bool = False) -> Tuple[str, str]:
+    def apply(self, text: str, strip_docstrings: bool = False) -> tuple[str, str]:
         result = self._strip_line_comments(text, ('#', '//'))
         result = self._BLOCK_COMMENT.sub('', result)
         if strip_docstrings:
@@ -289,12 +330,12 @@ class RepetitiveHistoryPruner:
     is what the model needs to know and nothing it does not.
     """
 
-    def apply(self, messages: List[Dict]) -> Tuple[List[Dict], str]:
+    def apply(self, messages: list[dict]) -> tuple[list[dict], str]:
         if len(messages) < 6:
             return messages, "history_pruning_skipped"
 
         result = []
-        first_seen: Dict[str, int] = {}
+        first_seen: dict[str, int] = {}
         pruned = False
 
         for i, msg in enumerate(messages):
@@ -404,7 +445,7 @@ class FileContentFilter:
             + "\n".join(tail)
         )
 
-    def filter_by_extension(self, content: str, filename: str) -> Tuple[str, str]:
+    def filter_by_extension(self, content: str, filename: str) -> tuple[str, str]:
         """Auto-detect file type and apply appropriate filter."""
         ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
         if ext == "csv":
@@ -460,7 +501,7 @@ class LLMLinguaEngine:
     def available(self) -> bool:
         return self._available
 
-    def compress(self, text: str, ratio: Optional[float] = None) -> CompressionResult:
+    def compress(self, text: str, ratio: float | None = None) -> CompressionResult:
         """
         Compress text via LLMLingua-2, EXCLUDING code segments.
 
@@ -497,7 +538,7 @@ class LLMLinguaEngine:
         code_segment_count = sum(1 for is_code, _ in segments if is_code)
 
         try:
-            out_parts: List[str] = []
+            out_parts: list[str] = []
             any_compressed = False
             for is_code, seg in segments:
                 if is_code or count_tokens(seg) < 20:
@@ -505,6 +546,9 @@ class LLMLinguaEngine:
                     out_parts.append(seg)
                     continue
                 engine = self._long if count_tokens(seg) > self.LONG_THRESHOLD else self._short
+                if engine is None:      # not loaded; _available is False then
+                    out_parts.append(seg)
+                    continue
                 result = engine.compress_prompt(
                     seg,
                     rate=target,
@@ -575,7 +619,8 @@ class CompressionPipeline:
         self.file_filter = FileContentFilter()
         self.lingua = LLMLinguaEngine(ratio=ratio) if enable_ml else None
 
-    def _apply_heuristics_to_prose(self, text: str) -> Tuple[str, List[str]]:
+    def _apply_heuristics_to_prose(self, text: str,
+                                   strip_filler: bool = True) -> tuple[str, list[str]]:
         """Run the heuristic stages over the prose segments of `text` only.
 
         Code segments (fenced blocks and inline spans, per CodeBlockGuard)
@@ -583,44 +628,37 @@ class CompressionPipeline:
         rather than on the joined prose, so a duplicate-line check cannot
         see across a code block and the segment boundaries stay exact.
         """
-        stages = [self.whitespace, self.filler, self.dedup]
+        stages: list[Any] = [self.whitespace, self.dedup]
+        if strip_filler:
+            stages.insert(1, self.filler)
         if self.strip_comments:
             stages.append(self.comments)
 
-        applied: List[str] = []
-        out: List[Tuple[bool, str]] = []
+        applied: list[str] = []
+        pieces: list[str] = []
         for is_code, segment in CodeBlockGuard.segment(text):
-            if is_code:
-                out.append((True, segment))
-                continue
-            for stage in stages:
-                segment, name = stage.apply(segment)
-                if name not in applied:
-                    applied.append(name)
-            out.append((False, segment))
-
-        # Each stage strips its segment, which would glue a prose segment
-        # onto an adjacent code fence; keep a newline at the boundary.
-        pieces: List[str] = []
-        for i, (is_code, segment) in enumerate(out):
-            if not is_code and segment and i + 1 < len(out) and out[i + 1][0]:
-                segment = segment + "\n\n"
-            if not is_code and segment and i > 0 and out[i - 1][0]:
-                segment = "\n\n" + segment
+            if not is_code:
+                for stage in stages:
+                    segment, name = stage.apply(segment)
+                    if name not in applied:
+                        applied.append(name)
+            # No stage strips its segment, so the whitespace between prose
+            # and an inline `code span` or a fence is exactly what it was.
             pieces.append(segment)
-        return "".join(pieces), applied
+        return "".join(pieces).strip("\n"), applied
 
     def compress_text(
         self,
         text: str,
-        filename: Optional[str] = None,
+        filename: str | None = None,
         min_tokens: int = 100,
+        strip_filler: bool = True,
     ) -> CompressionResult:
         """Compress a single text block through the full pipeline."""
 
         original = text
         orig_tokens = count_tokens(text)
-        strategies: List[str] = []
+        strategies: list[str] = []
 
         if orig_tokens < min_tokens:
             return CompressionResult(
@@ -654,7 +692,7 @@ class CompressionPipeline:
         # Raw pastes with no fence markup are still reachable by these
         # stages; that is the same documented gap CodeBlockGuard has for
         # LLMLingua, not a new one.
-        text, applied = self._apply_heuristics_to_prose(text)
+        text, applied = self._apply_heuristics_to_prose(text, strip_filler=strip_filler)
         strategies.extend(applied)
 
         # Save the heuristic-only result BEFORE running ML compression so we can
@@ -705,9 +743,9 @@ class CompressionPipeline:
 
     def compress_messages(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         protect_recent: int = 3,
-    ) -> Tuple[List[Dict], int]:
+    ) -> tuple[list[dict], int]:
         """
         Compress all messages except the most recent N.
         Returns (compressed_messages, total_tokens_saved).
@@ -747,7 +785,11 @@ class CompressionPipeline:
                 result.append(msg)
                 continue
 
-            cr = self.compress_text(content, min_tokens=self.min_tokens_to_compress)
+            # Filler is an assistant's habit. A user's "Please let me know
+            # if you need the schema." is a request, not boilerplate.
+            cr = self.compress_text(
+                content, min_tokens=self.min_tokens_to_compress,
+                strip_filler=msg.get("role") == "assistant")
             total_saved += cr.original_tokens - cr.compressed_tokens
             result.append({**msg, "content": cr.compressed_text})
 
@@ -762,30 +804,20 @@ class CompressionPipeline:
         buys is in what the model writes back, and that is measured after
         the fact by the output trimmer's numbers, never estimated here.
         """
+        # Billed as input on every request, so every word has to earn its
+        # place. The previous wording ran to 200-450 characters and was the
+        # whole of the proxy's overhead on a short chat (+49% on a measured
+        # six-turn session); the rules are the same, stated once.
         if style == "minimal":
             return (
-                "Work like a senior engineer who writes as little as possible: "
-                "reuse what exists in this codebase, then the standard library, "
-                "then a dependency, before adding new code. Ship the shortest "
-                "diff that works \u2014 no speculative abstractions, no "
-                "scaffolding, no config for values that never change. Fix the "
-                "root cause once, not each call site. Answer first, then at "
-                "most three lines on what was skipped. No preamble, no "
-                "closing. Preserve code, paths and URLs exactly."
+                "Answer first; no preamble or closing. Ship the shortest diff that "
+                "works: reuse existing code, then the standard library, before "
+                "a new dependency; fix the root cause once; no speculative "
+                "abstractions. Preserve code, paths and URLs exactly."
             )
         levels = {
-            "lite": (
-                "Be concise. No preamble (e.g., 'Sure!', 'Great question!'). "
-                "No closing remarks. Start answer immediately."
-            ),
-            "full": (
-                "Respond like a senior engineer: no filler, no preamble, no 'I'd be happy to', "
-                "no closing fluff. Use fragments when clear. Preserve code/paths/URLs exactly. "
-                "Technical accuracy 100%. Start with the answer."
-            ),
-            "ultra": (
-                "Ultra-terse. Fragments only. No articles if obvious. "
-                "No preamble or closing. Code/paths exact. Maximum compression."
-            ),
+            "lite": "Be concise: no preamble or closing remarks.",
+            "full": "Answer directly; no preamble or closing remarks. Preserve code, paths and URLs exactly.",
+            "ultra": "Terse fragments; no preamble or closing. Keep code, paths and URLs exact.",
         }
         return levels.get(level, levels["full"])

@@ -108,7 +108,7 @@ class TestOllamaStreamSampling:
             [{"role": "user", "content": "x"}], temperature=0.2, top_p=0.9, stop="END")]
         assert chunks == ["hi"]
         assert captured["options"] == {
-            "num_predict": 4096, "temperature": 0.2, "top_p": 0.9, "stop": ["END"]}
+            "num_predict": 4096, "num_ctx": 8192, "temperature": 0.2, "top_p": 0.9, "stop": ["END"]}
 
 
 class TestMaxCompletionTokens:

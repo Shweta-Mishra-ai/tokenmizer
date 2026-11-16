@@ -59,13 +59,14 @@ class TestDashboardShowsRealState:
         assert "d.source === 'live_graph'" in DASHBOARD_HTML
 
     def test_health_is_polled_and_rendered(self):
-        assert "fetch('/health')" in DASHBOARD_HTML
+        assert "Fetch('/health')" in DASHBOARD_HTML  # dashboardFetch: sends the key, so ids are shown
         assert "renderHealth" in DASHBOARD_HTML
         assert "persist_failures" in DASHBOARD_HTML
         assert "sessions_with_unreadable_graph" in DASHBOARD_HTML
-        # /health takes no API key, so it must not go through dashboardFetch
-        # (which would prompt for one on a 401 that cannot happen).
-        assert "dashboardFetch('/health')" not in DASHBOARD_HTML
+        # /health never answers 401, so dashboardFetch cannot prompt for a
+        # key on it; it goes through dashboardFetch so that a stored key is
+        # sent and the affected session ids are shown instead of counts.
+        assert "dashboardFetch('/health')" in DASHBOARD_HTML
 
     def test_graph_preview_uses_srcdoc_not_a_second_request(self):
         """The graph page is self-contained; srcdoc means the iframe makes

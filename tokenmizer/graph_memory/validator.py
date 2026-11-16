@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 from tokenmizer.graph_memory.patterns import _FILE_EXTENSIONLESS
 
@@ -94,7 +93,7 @@ class ValidationResult:
     accepted: bool
     confidence: float           # 0.0–1.0
     rejection_reason: str = ""  # non-empty if rejected
-    corrected_type: Optional[str] = None  # if type was wrong
+    corrected_type: str | None = None  # if type was wrong
 
 
 class GraphValidator:
@@ -117,7 +116,7 @@ class GraphValidator:
         label: str,
         node_type: str,
         summary: str = "",
-        source_role: Optional[str] = "assistant",
+        source_role: str | None = "assistant",
         extractor_confidence: float | None = None,
     ) -> ValidationResult:
         """
@@ -359,9 +358,7 @@ class GraphValidator:
         if len(label) < 15:
             base -= 0.20  # "fix bug" is not a goal
         lowered = label.lower()
-        if any(v in lowered for v in self._GOAL_BUILD):
-            base += 0.15
-        elif any(v in lowered for v in self._GOAL_OUTCOME):
+        if any(v in lowered for v in self._GOAL_BUILD) or any(v in lowered for v in self._GOAL_OUTCOME):
             base += 0.15
         return base
 
@@ -396,7 +393,7 @@ class GraphValidator:
     # points of task recall and of file precision.
     _MAX_PATH_LABEL_WORDS = 2
 
-    def _check_type_mismatch(self, label: str, node_type: str) -> Optional[str]:
+    def _check_type_mismatch(self, label: str, node_type: str) -> str | None:
         """Return corrected type if we detect a mismatch, else None."""
         # Never an ERROR: "ERROR tests/unit/test_api.py" is pytest reporting
         # a failure in that file, and retyping it filed the failure as a
@@ -415,7 +412,7 @@ class GraphValidator:
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
 
-_validator: Optional[GraphValidator] = None
+_validator: GraphValidator | None = None
 
 
 def get_validator(min_confidence: float | None = None) -> GraphValidator:

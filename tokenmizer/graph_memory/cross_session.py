@@ -21,7 +21,7 @@ safe.
 from __future__ import annotations
 
 import logging
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 from tokenmizer.graph_memory.graph import GraphMemory
 from tokenmizer.graph_memory.types import MemoryNode

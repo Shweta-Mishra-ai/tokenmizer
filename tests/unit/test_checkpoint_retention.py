@@ -37,7 +37,7 @@ class TestAutoCheckpointRetention:
 
     def test_auto_checkpoints_beyond_cap_are_pruned(self, tmp_path, graph):
         mgr = CheckpointManager(storage_dir=str(tmp_path), auto_retention=5)
-        for i in range(12):
+        for _ in range(12):
             mgr.create(
                 session_id="retention-test", messages=MESSAGES, graph=graph,
                 context_pct=0.85, trigger="auto_threshold",
@@ -51,7 +51,7 @@ class TestAutoCheckpointRetention:
     def test_retention_keeps_the_most_recent(self, tmp_path, graph):
         mgr = CheckpointManager(storage_dir=str(tmp_path), auto_retention=3)
         ids = []
-        for i in range(6):
+        for _ in range(6):
             ckpt = mgr.create(
                 session_id="retention-order-test", messages=MESSAGES, graph=graph,
                 context_pct=0.85, trigger="auto_threshold",
@@ -71,7 +71,7 @@ class TestAutoCheckpointRetention:
             session_id="manual-preserved-test", messages=MESSAGES, graph=graph,
             context_pct=0.0, trigger="manual",
         )
-        for i in range(10):
+        for _ in range(10):
             mgr.create(
                 session_id="manual-preserved-test", messages=MESSAGES, graph=graph,
                 context_pct=0.85, trigger="auto_threshold",

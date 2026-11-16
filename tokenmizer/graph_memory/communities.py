@@ -14,7 +14,7 @@ edges) sweep costs nothing measurable.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Iterable
+from collections.abc import Iterable
 
 # ponytail: label propagation, O(iter * E). Swap for Louvain only if graphs
 # ever exceed the 200-node prune cap and the groupings look wrong at that

@@ -21,7 +21,7 @@ import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar
 
 from tokenmizer.core.tokenizer import count_tokens
 
@@ -191,7 +191,7 @@ class CacheEntry:
 class EmbeddingEngine:
     """Sentence-transformers based embeddings. Falls back to None if not installed."""
 
-    _instance: Optional["EmbeddingEngine"] = None
+    _instance: EmbeddingEngine | None = None
 
     def __init__(self):
         self._model = None
@@ -273,7 +273,7 @@ class EmbeddingEngine:
         return float(np.dot(a, b))
 
     @classmethod
-    def get(cls) -> "EmbeddingEngine":
+    def get(cls) -> EmbeddingEngine:
         if cls._instance is None:
             cls._instance = EmbeddingEngine()
         return cls._instance
@@ -440,7 +440,7 @@ class SemanticCache:
     _SWEEP_EVERY = 256
 
     def get(self, prompt: str, session_id: str = "",
-            context: str = "") -> Optional[CacheEntry]:
+            context: str = "") -> CacheEntry | None:
         """
         Look up cache.
         Checks session-scoped key first (using session_id, or "__private__"
@@ -542,7 +542,7 @@ class SemanticCache:
         return None
 
     # Patterns that indicate session-specific content — never cross-session cache
-    _SENSITIVE_PATTERNS = [
+    _SENSITIVE_PATTERNS: ClassVar[list[re.Pattern]] = [
         re.compile(r'sk-ant-|sk-proj-|sk-[A-Za-z0-9]{20,}|ghp_|AIza|Bearer\s', re.I),
         re.compile(r'\b(my|our)\s+(name|email|password|key|secret|token|api[_\s]key)\b', re.I),
         re.compile(r'(?:DATABASE_URL|REDIS_URL|MONGO_URL|postgres://|mysql://|redis://)', re.I),
@@ -552,13 +552,10 @@ class SemanticCache:
 
     def _is_session_sensitive(self, prompt: str) -> bool:
         """True if prompt contains session-specific content — never share cross-session."""
-        for pat in self._SENSITIVE_PATTERNS:
-            if pat.search(prompt):
-                return True
-        # Long prompts with code/data are likely session-specific
-        if len(prompt) > 800 and ("\n" in prompt or "```" in prompt):
+        if any(pat.search(prompt) for pat in self._SENSITIVE_PATTERNS):
             return True
-        return False
+        # Long prompts with code/data are likely session-specific
+        return len(prompt) > 800 and ("\n" in prompt or "```" in prompt)
 
     def set(
         self,
@@ -692,6 +689,13 @@ class SemanticCache:
                 self._drop(key)
                 removed += 1
         return removed
+
+    def invalidate_session(self, session_id: str) -> int:
+        """Drop every entry scoped to `session_id`. Returns how many."""
+        keys = [k for k, e in self._exact.items() if e.scope == session_id]
+        for k in keys:
+            self._drop(k)
+        return len(keys)
 
     def clear(self) -> None:
         self._exact.clear()

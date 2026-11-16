@@ -29,6 +29,7 @@ import threading
 from collections import OrderedDict
 from typing import TYPE_CHECKING
 
+from tokenmizer.core.bounded_cache import MISSING, BoundedCache
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.security.fencing import fence
 
@@ -67,7 +68,7 @@ class SmartMessageWindow:
         # conversation-level lead-in). Bounded: a proxy serves many sessions
         # and this is only a cost optimisation — a forgotten entry re-cuts,
         # it never loses a turn.
-        self._frozen: "OrderedDict[str, tuple[int, str, dict, list]]" = OrderedDict()
+        self._frozen: OrderedDict[str, tuple[int, str, dict, list]] = OrderedDict()
         self._frozen_max = 10_000
         # apply() runs off the event loop, on whichever worker thread the
         # request landed on, and two sessions' requests can be in it at once.
@@ -78,9 +79,10 @@ class SmartMessageWindow:
     def apply(
         self,
         messages: list[dict],
-        graph: "GraphMemory",
+        graph: GraphMemory,
         model: str = "gpt-4o",
         stable: bool = False,
+        min_request_tokens: int = 0,
     ) -> tuple[list[dict], int]:
         """
         Apply smart windowing to messages.
@@ -111,6 +113,12 @@ class SmartMessageWindow:
             return messages, 0  # not enough history to window
 
         split = self._choose_split(conv_msgs, model)
+        if split is not None and min_request_tokens > 0:
+            split = self._respect_floor(conv_msgs, system_msgs, split, model, min_request_tokens)
+            if split == 0:
+                # Keeping enough to stay cacheable means keeping everything:
+                # there is nothing to cut, and a bridge on top would only add.
+                return messages, 0
 
         if split is None:
             # No step to open the window on — nothing safe to window down
@@ -192,7 +200,7 @@ class SmartMessageWindow:
         system_msgs: list[dict],
         conv_msgs: list[dict],
         model: str,
-    ) -> "list[dict] | None":
+    ) -> list[dict] | None:
         """The previous request's cut and bridge, if they still apply.
 
         Sliding the window forward one turn per request replaces the bridge
@@ -225,7 +233,31 @@ class SmartMessageWindow:
                 self._frozen.move_to_end(session_id)
         return candidate
 
-    def _choose_split(self, conv: list[dict], model: str) -> "int | None":
+    def _respect_floor(self, conv: list[dict], system_msgs: list[dict], split: int,
+                       model: str, floor: int) -> int:
+        """Move the cut earlier, a whole step at a time, until what is kept
+        is at least `floor` tokens.
+
+        A provider caches a prompt prefix only above a minimum length. Cut
+        below it, every following request is billed at full price until it
+        grows back: measured on a 150-turn replay against Anthropic's rules,
+        a cut to ~870 tokens (minimum 1,024) cost 866 units a request where
+        the uncut, cached history cost 428 — windowing made the session 9%
+        dearer than not windowing. Keeping a slightly longer tail keeps the
+        request cacheable. The bridge is not counted, so this errs long.
+        """
+        starts = [i for i, m in enumerate(conv)
+                  if m.get("role") == "user"
+                  or (m.get("role") == "assistant" and m.get("tool_calls"))]
+        base = count_messages_tokens(system_msgs, model)
+        while split > 0 and base + count_messages_tokens(conv[split:], model) < floor:
+            earlier = [i for i in starts if i < split]
+            if not earlier:
+                break
+            split = earlier[-1]
+        return split
+
+    def _choose_split(self, conv: list[dict], model: str) -> int | None:
         """Where the verbatim tail begins, or None if there is no safe place.
 
         A tail may only open at the start of a step: a user turn, or an
@@ -313,6 +345,27 @@ def _as_path(word: str) -> str:
     return word if dot and stem and ext.lower() in _PATH_EXTENSIONS else ""
 
 
+# Paths per tool output, by a digest of its text. A cut is remade whenever
+# the verbatim tail outgrows its budget — in an agent loop with large tool
+# output, most requests — and each remade cut read every dropped output word
+# by word again: 151,134 words and half a second per request at 300 turns,
+# for the same answer as last time. Bounded by paths held (200,000, about
+# 17 MB): a cap on entries alone let large listings reach gigabytes.
+_PATHS_CACHE: BoundedCache[tuple[str, ...]] = BoundedCache(20_000, 200_000, len)
+
+
+def _paths_in(text: str) -> tuple[str, ...]:
+    """The paths in one tool output or tool call, in first-seen order."""
+    scanned = text[:_MAX_SCAN_CHARS]
+    key = BoundedCache.key(scanned)
+    hit = _PATHS_CACHE.get(key)
+    if hit is not MISSING:
+        return hit
+    found = tuple(dict.fromkeys(p for p in map(_as_path, scanned.split()) if p))
+    _PATHS_CACHE.put(key, found)
+    return found
+
+
 def path_index(dropped: list[dict], budget: int, model: str = "gpt-4o") -> str:
     """The paths mentioned in the tool calls and tool output that windowing
     is dropping, grouped by directory, newest directories first, within
@@ -353,10 +406,8 @@ def path_index(dropped: list[dict], budget: int, model: str = "gpt-4o") -> str:
         for call in m.get("tool_calls") or []:
             texts.append((call.get("function") or {}).get("arguments") or "")
         for text in texts:
-            for word in text[:_MAX_SCAN_CHARS].split():
-                path = _as_path(word)
-                if path:
-                    seen.setdefault(path)
+            for path in _paths_in(text):
+                seen.setdefault(path)
     if not seen:
         return ""
     groups: dict[str, list[str]] = {}

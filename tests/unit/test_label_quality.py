@@ -35,9 +35,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.eval.metrics import label_quality  # noqa: E402
-from tokenmizer.graph_memory.hybrid_extractor import HybridExtractor  # noqa: E402
-from tokenmizer.graph_memory.patterns import _CLAUSE_SPAN  # noqa: E402
+from benchmarks.eval.metrics import label_quality
+from tokenmizer.graph_memory.hybrid_extractor import HybridExtractor
+from tokenmizer.graph_memory.patterns import _CLAUSE_SPAN
 
 
 def _done(text: str) -> list[str]:

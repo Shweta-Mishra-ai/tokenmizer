@@ -34,9 +34,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tokenmizer.compression.window import SmartMessageWindow  # noqa: E402
-from tokenmizer.core.tokenizer import count_tokens  # noqa: E402
-from tokenmizer.graph_memory.graph import GraphMemory  # noqa: E402
+from tokenmizer.compression.window import SmartMessageWindow
+from tokenmizer.core.tokenizer import count_tokens
+from tokenmizer.graph_memory.graph import GraphMemory
 
 # Each fixture: a session whose opening turns state a fact the ontology
 # has no node for, followed by enough ordinary work that those turns are

@@ -49,12 +49,14 @@ from tokenmizer.core.tokenizer import count_tokens
 # Anchored with \A, not ^ with re.MULTILINE: an opening pleasantry is only
 # an opening if it opens the RESPONSE. Anywhere else it is a sentence.
 _OPENING_FILLERS = [
-    re.compile(r"\ACertainly[!,.]?\s+", re.IGNORECASE),
-    re.compile(r"\AOf course[!,.]?\s+", re.IGNORECASE),
-    re.compile(r"\AAbsolutely[!,.]?\s+", re.IGNORECASE),
-    re.compile(r"\ASure[!,.]?\s+", re.IGNORECASE),
-    re.compile(r"\AGreat question[!,.]?\s+", re.IGNORECASE),
-    re.compile(r"\AThat'?s? (?:a )?(?:great|good|excellent|interesting) question[!,.]?\s+", re.IGNORECASE),
+    # "!" or "." only. With "[!,.]?" the punctuation was optional, so the
+    # first word of a real answer went too: "Certainly not. Dropping that
+    # table would delete production data." reached the reader as "not.
+    # Dropping that table...", and "Sure thing, but only after the backup"
+    # as "thing, but only...". An interjection ends; a sentence goes on.
+    re.compile(r"\A(?:Certainly|Of course|Absolutely|Sure)[!.]\s+", re.IGNORECASE),
+    re.compile(r"\AGreat question[!.]\s+", re.IGNORECASE),
+    re.compile(r"\AThat'?s? (?:a )?(?:great|good|excellent|interesting) question[!.]\s+", re.IGNORECASE),
     re.compile(r"\AI(?:'d| would) be happy to (?:help|assist)[^.\n]*\.\s*", re.IGNORECASE),
     re.compile(r"\AI(?:'d| would) love to (?:help|assist)[^.\n]*\.\s*", re.IGNORECASE),
     re.compile(r"\AI understand(?: that)? you(?:'re| are)[^.\n]*\.\s*", re.IGNORECASE),
@@ -164,7 +166,7 @@ class OutputTrimmer:
             first = prose_indices[0]
             if first == 0:
                 for pat in _OPENING_FILLERS:
-                    parts[first] = pat.sub("", parts[first], count=1)
+                    parts[first] = _sub_if_contentless(pat, parts[first], count=1)
 
             if level in ("full", "ultra"):
                 # A closing sign-off can only close the LAST prose segment,
@@ -185,6 +187,10 @@ class OutputTrimmer:
         for i in prose_indices:
             parts[i] = re.sub(r"\n{3,}", "\n\n", parts[i])
         result = "".join(parts).strip()
+        if result == text.strip():
+            # Nothing was removed: hand back exactly what the model wrote,
+            # leading and trailing whitespace included.
+            return text, 0
 
         saved = max(0, original_tokens - count_tokens(result))
         return result, saved

@@ -12,7 +12,7 @@ python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
 python -m benchmarks.savings.runner                 # input cost, with and without
-pytest tests/ -q                                     # 2131 tests
+pytest tests/ -q                                     # 2359 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -91,10 +91,10 @@ cache marker, per-model minimum, reads at 0.1x the input price, writes at
 
 | Turns | History | Client alone, no caching | Client caching its own history | Through TokenMizer |
 |---:|---:|---:|---:|---:|
-| 10 | 462 | 2,333 | 2,333 | 2,833 (**21% more**) |
-| 40 | 2,057 | 41,556 | 14,745 | 16,158 (**61% less** / 10% more) |
-| 150 | 7,967 | 596,900 | 77,998 | 77,472 (**87% less** / level) |
-| 300 | 16,040 | 2,399,067 | 268,767 | 157,818 (**93% less** / **41% less**) |
+| 10 | 462 | 2,333 | 2,333 | 2,333 (level / level) |
+| 40 | 2,057 | 41,556 | 14,745 | 15,108 (**64% less** / 2.5% more) |
+| 150 | 7,967 | 596,900 | 77,998 | 69,193 (**88% less** / **11% less**) |
+| 300 | 16,040 | 2,399,067 | 268,767 | 149,757 (**94% less** / **44% less**) |
 
 The two percentages are against the two client columns. Where the saving
 comes from: below about 4,000 tokens of history, prompt caching — the
@@ -102,13 +102,28 @@ proxy marks the history cacheable and keeps every earlier byte of the
 request identical; above it, windowing, with the cut held still between
 cuts so the windowed history is cached too.
 
-**Short sessions still cost more on input**, and this is why: a ten-turn
-session of 462 tokens is under the model's cache minimum, so nothing can
-be cached, and the proxy adds its ~50-token brevity instruction to every
-request. That instruction exists to shorten what the model writes back,
-which costs several times more per token than input; this benchmark
-returns a fixed one-word answer and so charges the instruction while
-crediting it nothing. `terse_output.enabled: false` removes it.
+**Short sessions now go upstream exactly as sent.** The brevity
+instruction is left out until a conversation reaches
+`terse_output.min_conversation_tokens` (1,500). The 2.5% at 40 turns is
+that instruction once it switches on: it is then appended after the
+history, not to the system prompt, because changing the cached prefix
+mid-session made the provider re-write the whole history (that alone was
++10% at 40 turns). It exists to shorten what the model writes back, which
+this benchmark cannot see; `terse_output.enabled: false` removes it.
+
+Three things were fixed to get here, each measured with this runner:
+
+* the brevity instruction switching on mid-session rewrote the cached
+  prefix (+10% at 40 turns);
+* a windowing cut could leave a request under the provider's cache
+  minimum, so every request after it was billed at full price — the cut
+  now keeps at least the minimum plus 20% (150 turns went from 9% more
+  to 11% less);
+* history compression changed a message's bytes the turn it aged past the
+  protected tail, re-writing the cache from there every turn. Under
+  caching every message is now compressed the first time it is sent. On
+  a 60-turn replay with long replies: 54% more than a self-caching client
+  before, 29% less after.
 
 Read before quoting:
 
@@ -222,7 +237,12 @@ re-render"). If the question quoted the answer, the person would not have
 needed to ask — and those are exactly the cases token-overlap ranking
 cannot serve.
 
-**recall@6 88%** with keyword ranking. Every case is checked to be
+**recall@6 92%** (37/40) with keyword ranking. It was 88% before the ranker
+learned to read a question's intent (failure, decision, progress or location
+words, and present tense), and 90% before identifiers were also matched by
+their parts (`quartz_uploader` answers "the quartz uploader"), function words
+stopped counting as overlap, and a question naming what it wants started
+ranking the other kinds of node lower. Every case is checked to be
 answerable from its own transcript before scoring: an ungrounded question
 measures extraction, not retrieval, and reads as a retrieval failure
 forever.
@@ -232,6 +252,94 @@ headline by 8 points. The 92% figure once quoted for
 `semantic_retrieval` came from that smaller set and has **not** been
 re-measured against these 40 — `--semantic` needs the embedding weights,
 and they could not be fetched where this was run.
+
+## Long sessions — `benchmarks/soak`
+
+```bash
+python -m benchmarks.soak                              # 1,000 turns, 4 MB tool output
+python -m benchmarks.soak --concurrent 8 --turns 200   # isolation across sessions
+```
+
+The real proxy (windowing, compression, extraction, SQLite, recall) driven
+the way a client drives it — the whole history resent on every request —
+with only the provider replaced by a stand-in that records what it was
+sent. The session mixes filler from the captured transcripts, tool output
+of 1–200 KB, one 4 MB tool output, and **50 planted facts** (10 each of
+decisions, errors, pending tasks, edited files, finished tasks), each with
+an answer token that appears nowhere else. At the end each fact is asked
+about, long after its turn left the window, and the answer must be in what
+the proxy sends upstream.
+
+Measured on one shared 4-core VM: `main` on 2026-11-14 (today's harness
+against its own code), the current version re-run 2026-11-16 on its final
+commit.
+
+| | `main` | Now |
+|---|---:|---:|
+| **120 turns:** facts in the graph / recalled / after a restart | 22 / 22 / 22 of 50 | **50 / 50 / 50** |
+| **1,000 turns, 19.7 MB, one 4 MB tool output:** facts in the graph / recalled / after a restart | does not finish in an hour | **50 / 50 / 50** |
+| Newest client message altered (1,000 turns) | — | 0 of 1,000 requests |
+| Latency, first / last 10% of requests, median (1,000 turns) | — | 66 / 631 ms |
+| Latency, last 10%, 95th percentile; slowest request | — | 1,140 ms; 1.66 s (the 4 MB turn) |
+| Process memory, start → end (1,000 turns) | — | 109 → 331 MB |
+| **8 sessions in parallel, 200 turns each:** own facts recalled / another session's facts leaked | — | **80 of 80 / 0 of 80** |
+
+Process memory includes the client's own copy of the history (19.7 MB of
+JSON as Python objects, plus a serialised copy per request), which lives in
+the same process here. Attributed with `tracemalloc` between turns 200 and
+600 of a 600-turn run, the proxy itself grew about 8 MB, nearly all of it
+size-bounded memos (`core/bounded_cache.py`); before this round one memo
+alone grew 38 MB there and had no size bound.
+
+**Cold start** — the first request on an existing conversation extracts its
+whole history in one call:
+
+| History | `main` | Now |
+|---|---:|---:|
+| 300 turns, 4 MB | 18.3 s | **2.4 s** |
+| 1,000 turns, 15 MB | 63.8 s | **6.3 s** |
+| Real agent session, 6.5 MB (one 6.3 MB observation) | 48.3 s | **1.3 s** |
+| Real agent session, 643 KB | 2.7 s | 2.6 s |
+| Real agent session, 582 KB | 2.8 s | 2.4 s |
+
+**Limits:** facts are planted in explicit wording, so this measures what
+happens to extracted facts over length, not extraction of implicit phrasing
+(the research held-out corpora measure that); one process, no real network.
+
+## Load — `benchmarks/load`
+
+```bash
+python -m benchmarks.load --workers 1 --sessions 32 --turns 30
+python -m benchmarks.load --workers 4 --sessions 48 --turns 30
+```
+
+The real server (`uvicorn tokenmizer.api.app:app`, 1 or 4 worker
+processes) over real HTTP, with `provider=ollama` pointed at a stand-in
+that speaks the Ollama API. Sessions run concurrently, each resending its
+whole history; a quarter of requests stream. Every request is checked,
+not sampled: the response (status, OpenAI shape, exact reply, SSE ending
+in `[DONE]`), the request the proxy sent upstream (the client's newest
+message verbatim, no other session's marker), malformed requests (a 4xx,
+never a 5xx or a crash). At the end each session asks for the decision
+it settled on, which its last turn made.
+
+Measured 2026-11-16 on one shared 4-core VM; the client, the stand-in and
+the server share it.
+
+| | 1 worker, 32 sessions × 30 turns | 4 workers, 48 sessions × 30 turns |
+|---|---:|---:|
+| Requests that succeeded and passed every check | 960 of 960 | 1,440 of 1,440 |
+| Upstream requests missing the newest message / leaking another session | 0 / 0 | 0 / 0 |
+| Malformed requests answered with a 5xx | 0 | 0 |
+| Latest decision recalled | 32 of 32 | **48 of 48** (23 of 48 before the fix) |
+| Throughput | 46 req/s | 148 req/s |
+| Latency p50 / p95 / p99 | 667 / 932 / 1,096 ms | 279 / 538 / 704 ms |
+| Server memory, start → end | 102 → 225 MB | 448 → 692 MB (4 processes) |
+
+The 4-worker recall was 23 of 48 until a worker reloaded a cached session
+that another worker had written (see the changelog). Latency is
+dominated by sharing four cores among the client, the stand-in and the
+server; the proxy's own per-request cost is in the soak above.
 
 ## Domains other than coding
 

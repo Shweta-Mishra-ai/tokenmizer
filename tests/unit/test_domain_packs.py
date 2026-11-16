@@ -27,14 +27,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tokenmizer.graph_memory import domains as domains_mod  # noqa: E402
-from tokenmizer.graph_memory.domains import (  # noqa: E402
+from tokenmizer.graph_memory import domains as domains_mod
+from tokenmizer.graph_memory.domains import (
     PACKS,
     get_pack,
     normalize_domain,
 )
-from tokenmizer.graph_memory.graph import GraphMemory  # noqa: E402
-from tokenmizer.graph_memory.hybrid_extractor import (  # noqa: E402
+from tokenmizer.graph_memory.graph import GraphMemory
+from tokenmizer.graph_memory.hybrid_extractor import (
     HybridExtractor,
     get_hybrid_extractor,
 )
