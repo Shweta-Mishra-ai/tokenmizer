@@ -45,7 +45,7 @@ from tokenmizer.core import privacy
 from tokenmizer.core.tokenizer import count_messages_tokens, count_tokens
 from tokenmizer.filters.file_intelligence import FileIntelligence
 from tokenmizer.graph_memory.graph import GraphMemory
-from tokenmizer.graph_memory.helpers import _content_to_text
+from tokenmizer.graph_memory.helpers import _content_to_text, scrub_surrogates
 from tokenmizer.providers.providers import build_provider, missing_provider_sdk
 from tokenmizer.security.auth import verify_api_key
 from tokenmizer.security.fencing import fence
@@ -1726,7 +1726,11 @@ async def chat_completions(req: ChatRequest, request: Request):
     #   - checkpoint storage (SQLite) and the graph DB itself
     # Redacting once here means every downstream path is safe by construction
     # instead of relying on each call site to remember to redact.
-    raw_messages = [m.to_dict() for m in req.messages]
+    # A lone UTF-16 surrogate ("\ud800") is legal JSON and cannot be encoded
+    # as UTF-8: forwarded as sent, the provider call failed and the client got
+    # a 502 for its own text. Replaced with U+FFFD here, once, before anything
+    # reads the messages.
+    raw_messages = scrub_surrogates([m.to_dict() for m in req.messages])
     raw_messages = redact_messages(raw_messages)
     # Per-dict copy, not raw_messages[:]. A shallow list copy shares every
     # dict, so Layer 2's terse-prompt injection — which prepends onto the
