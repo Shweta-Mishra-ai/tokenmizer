@@ -30,6 +30,13 @@ writer adopts another's deletions instead of reinstating them. Measured
 lossless with 4 processes writing one session — see
 [Benchmarks](benchmarks.md).
 
+Reads follow writes too: each worker caches its own copy of a session,
+and reloads it when another worker has written the session since (a write
+counter in SQLite, checked under the session lock on every request).
+Measured with `python -m benchmarks.load --workers 4`: every one of 48
+sessions recalled its latest decision. Before the reload existed, 23 of 48
+did, because a worker kept answering from the copy it loaded first.
+
 What is **still per-process**, and therefore differs per worker:
 
 | Component | Consequence of >1 worker |
@@ -37,7 +44,6 @@ What is **still per-process**, and therefore differs per worker:
 | Rate limiter | Limits apply per worker — the effective limit is ~N× what you configured |
 | Analytics | `/api/stats` reflects only the worker that served the request |
 | Semantic cache | Cache hit rate drops; each worker warms its own |
-| Graph LRU cache | A session's in-memory copy can be briefly stale between writes |
 
 The image ships `--workers 1` for that reason. If you raise it, put a
 real rate limiter in front and treat `/api/stats` as per-worker.

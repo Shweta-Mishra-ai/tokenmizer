@@ -305,6 +305,41 @@ whole history in one call:
 happens to extracted facts over length, not extraction of implicit phrasing
 (the research held-out corpora measure that); one process, no real network.
 
+## Load — `benchmarks/load`
+
+```bash
+python -m benchmarks.load --workers 1 --sessions 32 --turns 30
+python -m benchmarks.load --workers 4 --sessions 48 --turns 30
+```
+
+The real server (`uvicorn tokenmizer.api.app:app`, 1 or 4 worker
+processes) over real HTTP, with `provider=ollama` pointed at a stand-in
+that speaks the Ollama API. Sessions run concurrently, each resending its
+whole history; a quarter of requests stream. Every request is checked,
+not sampled: the response (status, OpenAI shape, exact reply, SSE ending
+in `[DONE]`), the request the proxy sent upstream (the client's newest
+message verbatim, no other session's marker), malformed requests (a 4xx,
+never a 5xx or a crash). At the end each session asks for the decision
+it settled on, which its last turn made.
+
+Measured 2026-11-16 on one shared 4-core VM; the client, the stand-in and
+the server share it.
+
+| | 1 worker, 32 sessions × 30 turns | 4 workers, 48 sessions × 30 turns |
+|---|---:|---:|
+| Requests that succeeded and passed every check | 960 of 960 | 1,440 of 1,440 |
+| Upstream requests missing the newest message / leaking another session | 0 / 0 | 0 / 0 |
+| Malformed requests answered with a 5xx | 0 | 0 |
+| Latest decision recalled | 32 of 32 | **48 of 48** (23 of 48 before the fix) |
+| Throughput | 42 req/s | 137 req/s |
+| Latency p50 / p95 / p99 | 735 / 1,018 / 1,241 ms | 308 / 530 / 676 ms |
+| Server memory, start → end | 102 → 214 MB | 448 → 692 MB (4 processes) |
+
+The 4-worker recall was 23 of 48 until a worker reloaded a cached session
+that another worker had written (see the changelog). Latency is
+dominated by sharing four cores among the client, the stand-in and the
+server; the proxy's own per-request cost is in the soak above.
+
 ## Domains other than coding
 
 `python -m benchmarks.eval --corpus benchmarks/eval/corpus_domains`, three

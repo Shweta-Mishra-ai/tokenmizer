@@ -24,6 +24,10 @@ client does. Every request is checked, not sampled:
               session's marker is — sessions never leak into each other
   hostile     malformed requests get a 4xx, never a 5xx, and never take the
               server down: requests after them still succeed
+  recall      at the end each session asks which partition key it settled
+              on; the decision of its LAST turn must reach upstream. With
+              several workers, consecutive turns land on different ones,
+              so this checks that a worker sees what the others extracted
 
 Measured: throughput, latency percentiles, the server's resident memory
 before and after, and every failure with its reason.

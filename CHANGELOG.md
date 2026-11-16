@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Fixed — a worker answered from a stale copy of a session; a lone surrogate failed a request
+
+Found by the new `benchmarks/load`, which runs the real server under
+uvicorn (1 to N workers) against a stand-in Ollama and checks every
+response and every upstream request.
+
+- **With more than one worker, a session's turns could be answered from
+  an outdated graph.** Each worker cached its own copy of a session and
+  never re-read it, so a turn routed to a worker saw nothing the other
+  workers had extracted since. Writes merged safely on disk; reads did not
+  follow them. With 4 workers, 23 of 48 sessions were answered with a
+  decision a later turn had replaced. `graph_meta` now carries a write
+  counter (added to older databases on open); a worker reloads a cached
+  session when the counter has moved, after saving its own unsaved
+  changes. Now 48 of 48, with throughput unchanged (137 req/s).
+- **A lone UTF-16 surrogate in a message (`"\ud800"`, legal JSON) failed
+  the request with a 502** when the provider client encoded it. Request
+  text is scrubbed at entry, as stored text already was.
+
 ### Fixed — which decision replaces which; memory that grew with input size
 
 Decisions (both present on `main`, found last round):
