@@ -188,9 +188,9 @@ def prune(
     now = time.time()
     cutoff = now - max_age_days * 86400
 
-    # (importance, 0 = history / 1 = recent, updated_at, node id)
-    tier1: list[tuple[float, int, float, str]] = []
-    tier2: list[tuple[float, int, float, str]] = []
+    # (importance, 0 = history / 1 = recent, recency, node id)
+    tier1: list[tuple[float, int, tuple[int, float], str]] = []
+    tier2: list[tuple[float, int, tuple[int, float], str]] = []
     for nid, node in graph._nodes.items():
         if _protected(node):
             continue
@@ -199,9 +199,9 @@ def prune(
                 or (node.type == NodeType.DECISION
                     and node.status in (NodeStatus.SUPERSEDED, NodeStatus.MODIFIED,
                                         NodeStatus.ARCHIVED))):
-            tier1.append((node.importance, 0, node.updated_at, nid))
+            tier1.append((node.importance, 0, node.recency(), nid))
         else:
-            tier2.append((node.importance, 1, node.updated_at, nid))
+            tier2.append((node.importance, 1, node.recency(), nid))
     chosen = [nid for *_, nid in sorted(tier1 + tier2)[:to_prune]]
 
     if len(chosen) < to_prune:

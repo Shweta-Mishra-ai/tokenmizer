@@ -343,7 +343,7 @@ def restore_pruned(graph: GraphMemory, node_id: str) -> bool:
     if len(graph._nodes) == before and node_id not in graph._nodes:
         return False
     graph._nodes[node_id].touch()
-    graph._dirty = True
+    graph._mark_mentioned(node_id)
     if not graph._persist():
         return False
     conn = graph._db_connect()
@@ -901,6 +901,8 @@ def load(graph: GraphMemory) -> None:
 
         _hydrate_nodes(graph, good_nodes)
         _hydrate_edges(graph, good_edges)
+        graph._turn = max((n.turn for n in graph._nodes.values()), default=0)
+        graph._seq = max((n.seq for n in graph._nodes.values()), default=0)
 
         # Record what is on disk so persist() can diff against it. Built
         # by re-serializing what we just hydrated, so it reflects exactly

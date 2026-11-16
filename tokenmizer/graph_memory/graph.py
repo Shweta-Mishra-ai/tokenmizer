@@ -387,6 +387,12 @@ class GraphMemory:
         # when unknown. Another process's write moves the stored counter
         # past it — see is_stale().
         self._disk_version: int | None = None
+        # Counters behind MemoryNode.turn / .seq; load() resumes them from
+        # the stored nodes. _in_turn is set while extract_from_messages()
+        # runs, so every node one call adds shares its turn.
+        self._turn = 0
+        self._seq = 0
+        self._in_turn = False
         # True if this session's data came from the v1 blob table and is
         # awaiting its first per-row write.
         self._migrated_from_blob = False
@@ -451,7 +457,37 @@ class GraphMemory:
     def _normalize_label(self, label: str) -> str:
         return label.lower().strip().rstrip(".,!?")
 
+    def _mark_mentioned(self, node_id: str) -> None:
+        """Record that `node_id` was just added or mentioned again."""
+        node = self._nodes.get(node_id)
+        if node is None:
+            return
+        if not self._in_turn:
+            self._turn += 1     # outside extraction, each call is its own turn
+        self._seq += 1
+        node.turn, node.seq = self._turn, self._seq
+        self._dirty = True
+
     def add_node(
+        self,
+        node_type: NodeType,
+        label: str,
+        status: NodeStatus = NodeStatus.PENDING,
+        summary: str = "",
+        importance: float = 0.5,
+        confidence: float = 0.7,
+        source_role: str | None = "assistant",
+        reinforce: bool = True,
+    ) -> str:
+        """Add a node, or update the one it duplicates. Returns its id, or
+        "" if it was refused. See _add_node."""
+        node_id = self._add_node(node_type, label, status, summary, importance,
+                                 confidence, source_role, reinforce)
+        if node_id:
+            self._mark_mentioned(node_id)
+        return node_id
+
+    def _add_node(
         self,
         node_type: NodeType,
         label: str,
@@ -824,7 +860,7 @@ class GraphMemory:
             existing.label = note[:120]
             existing.summary = f"from {len(dropped)} windowed turns"
             existing.touch()
-            self._dirty = True
+            self._mark_mentioned(existing.id)
             return existing.id
 
         node_id = self.add_node(
@@ -1055,6 +1091,23 @@ class GraphMemory:
         }
 
     def extract_from_messages(
+        self,
+        messages: list[dict],
+        incremental: bool = True,
+        extracted_data=None,
+    ) -> None:
+        """Update graph from messages; every node this call adds or
+        mentions shares one turn. See _extract_from_messages."""
+        if self._in_turn:       # re-entered: stay in the caller's turn
+            return self._extract_from_messages(messages, incremental, extracted_data)
+        self._turn += 1
+        self._in_turn = True
+        try:
+            return self._extract_from_messages(messages, incremental, extracted_data)
+        finally:
+            self._in_turn = False
+
+    def _extract_from_messages(
         self,
         messages: list[dict],
         incremental: bool = True,
@@ -1580,7 +1633,7 @@ class GraphMemory:
         ]
         if not candidates:
             return False
-        old = max(candidates, key=lambda n: n.updated_at)
+        old = max(candidates, key=lambda n: n.recency())
         return self.record_supersession(old.id, new_id, trigger=f"changed the {slot}")
 
     def _find_decision(self, text: str) -> str:

@@ -114,7 +114,21 @@ class MemoryNode:
     # absolute node age — repeated calls with no real time passing decay
     # by approximately nothing, as they should.
     last_decayed_at: float = field(default_factory=time.time)
+    # Recency without the wall clock. `turn` is the extraction call that
+    # last mentioned this node (one request's worth of facts shares one),
+    # `seq` the order of mentions within the session. The resume and
+    # pruning ordered by updated_at, so which node made the block depended
+    # on where a second boundary fell and how fast the machine was:
+    # identical input gave different resumes from one run to the next.
+    # 0 for nodes stored before these existed; they keep updated_at order.
+    turn: int = 0
+    seq: int = 0
     _evicted: bool = field(default=False, repr=False)
+
+    def recency(self) -> tuple[int, float]:
+        """Sort key, larger = more recently mentioned. updated_at only
+        orders nodes stored before `seq` existed, which all have seq 0."""
+        return (self.seq, self.updated_at if self.seq == 0 else 0.0)
 
     def is_valid_at(self, t: float) -> bool:
         """True if this node was active at time t."""

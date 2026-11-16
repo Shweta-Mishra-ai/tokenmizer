@@ -373,7 +373,7 @@ class CheckpointManager:
 
         done_tasks = self._live_nodes(graph, NodeType.TASK,
                                       statuses={NodeStatus.COMPLETED})
-        done_tasks.sort(key=lambda x: x.updated_at, reverse=True)
+        done_tasks.sort(key=lambda x: x.recency(), reverse=True)
         if done_tasks:
             parts.append("Recently completed: " + " | ".join(t.label for t in done_tasks[:6]))
 

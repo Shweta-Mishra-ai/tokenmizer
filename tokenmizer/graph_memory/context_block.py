@@ -32,20 +32,22 @@ _DEFAULT_WORDS = {
 
 
 def _recent_first_key(graph):
-    """Sort key: most recently updated first, then most important, then
-    latest created.
+    """Sort key: mentioned in the latest request first, then most
+    important, then latest created.
 
     This read `updated_at * 0.6 + importance * 0.4`, where `updated_at` is a
     Unix timestamp near 1.8e9 and importance is at most 1 — importance never
-    counted, and the order was the wall clock to the microsecond. Nodes
-    created in one extraction call are microseconds apart, so which of them
-    made the block depended on machine speed: identical input gave a
-    different resume in 5 of 716 real sessions. Whole seconds keep real
-    recency (requests are seconds apart) and make the order within one call
-    deterministic.
+    counted, and the order was the wall clock to the microsecond. Whole
+    seconds fixed that within one call but not across them: whether two
+    requests' facts tied depended on where a second boundary fell, so
+    identical input still gave a different resume in 18 of 716 real
+    sessions between two runs. The extraction call (MemoryNode.turn)
+    is what "one request" meant; nodes stored before it existed (turn 0)
+    keep the whole-second order.
     """
     order = {nid: i for i, nid in enumerate(graph._nodes)}
-    return lambda n: (int(n.updated_at), n.importance, order.get(n.id, 0))
+    return lambda n: (n.turn, int(n.updated_at) if n.turn == 0 else 0,
+                      n.importance, order.get(n.id, 0))
 
 def _vocabulary(graph: GraphMemory) -> dict:
     """The section headers for this graph's domain pack."""
@@ -120,7 +122,7 @@ def to_context_block(graph: GraphMemory, token_budget: int = 400) -> str:
     order = {nid: i for i, nid in enumerate(graph._nodes)}
 
     def _recent_first(n):
-        return (n.importance, n.updated_at, order.get(n.id, 0))
+        return (n.importance, n.recency(), order.get(n.id, 0))
 
     open_tasks = sorted(
         [n for n in graph._nodes.values()
@@ -253,7 +255,7 @@ def to_context_block(graph: GraphMemory, token_budget: int = 400) -> str:
     notes = sorted(
         [n for n in graph._nodes.values()
          if n.type == NodeType.SUMMARY and not n._evicted],
-        key=lambda x: x.updated_at, reverse=True
+        key=lambda x: x.recency(), reverse=True
     )
     if notes:
         # "Noted:" and not "Constraints:": the selector keeps hard figures

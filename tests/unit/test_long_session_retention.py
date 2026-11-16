@@ -236,3 +236,56 @@ def test_the_resume_block_does_not_depend_on_clock_resolution(tmp_path):
         return g.to_context_block(token_budget=400)
 
     assert block("coarse", 0.0) == block("fine", 1e-4)
+
+
+def _resume_under_clock(tmp_path, name, step):
+    """Twelve requests, each finishing a task, with time.time() advancing
+    `step` seconds per call. Earlier tasks are the more important ones, so
+    a key that lets importance outrank recency within a second picks
+    different tasks than one that orders by request."""
+    import time as _time
+    from unittest import mock
+    t = [1_800_000_000.0]
+
+    def clock():
+        t[0] += step
+        return t[0]
+
+    with mock.patch.object(_time, "time", clock):
+        g = _graph(tmp_path, name)
+        for i in range(12):
+            g.add_node(NodeType.TASK, f"Migrated the svc{i:02d}x exporter to the new API",
+                       NodeStatus.COMPLETED, importance=0.9 if i < 6 else 0.6)
+        return g.to_context_block(token_budget=400)
+
+
+def test_the_resume_does_not_depend_on_where_a_second_boundary_falls(tmp_path):
+    """Whole-second recency tied the facts of requests made in the same
+    second, where importance then decided, and separated them otherwise:
+    the same session gave a different resume in 18 of 716 real sessions
+    between two runs. Recency is now counted in requests (MemoryNode.turn)."""
+    blocks = {step: _resume_under_clock(tmp_path, f"c{i}", step)
+              for i, step in enumerate((1e-4, 0.05, 0.4, 1.0, 3.0))}
+    assert len(set(blocks.values())) == 1, blocks
+    assert "svc11x" in blocks[1.0]          # the latest request's task is there
+
+
+def test_recency_counters_survive_a_reload(tmp_path):
+    g = _graph(tmp_path, "r")
+    g.extract_from_messages([{"role": "user", "content": "TODO: write the svc01x docs."}])
+    g.extract_from_messages([{"role": "user", "content": "TODO: write the svc02x docs."}])
+    g._persist()
+    again = _graph(tmp_path, "r")
+    assert (again._turn, again._seq) == (g._turn, g._seq) and g._turn == 2
+    nid = again.add_node(NodeType.TASK, "Write the svc03x docs", NodeStatus.PENDING)
+    assert again._nodes[nid].turn == 3 and again._nodes[nid].seq == g._seq + 1
+
+
+def test_nodes_stored_before_the_counters_keep_their_order(tmp_path):
+    g = _graph(tmp_path, "old")
+    a = g.add_node(NodeType.TASK, "Write the svc01x docs", NodeStatus.COMPLETED)
+    b = g.add_node(NodeType.TASK, "Write the svc02x docs", NodeStatus.COMPLETED)
+    for nid, t in ((a, 1_800_000_005.0), (b, 1_800_000_001.0)):
+        g._nodes[nid].turn = g._nodes[nid].seq = 0       # as an old row loads
+        g._nodes[nid].updated_at = t
+    assert max(g._nodes.values(), key=lambda n: n.recency()).id == a
