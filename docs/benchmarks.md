@@ -270,17 +270,18 @@ an answer token that appears nowhere else. At the end each fact is asked
 about, long after its turn left the window, and the answer must be in what
 the proxy sends upstream.
 
-Measured 2026-11-14 on one shared 4-core VM. `main` runs today's harness
-against its own code.
+Measured on one shared 4-core VM: `main` on 2026-11-14 (today's harness
+against its own code), the current version re-run 2026-11-16 on its final
+commit.
 
 | | `main` | Now |
 |---|---:|---:|
 | **120 turns:** facts in the graph / recalled / after a restart | 22 / 22 / 22 of 50 | **50 / 50 / 50** |
 | **1,000 turns, 19.7 MB, one 4 MB tool output:** facts in the graph / recalled / after a restart | does not finish in an hour | **50 / 50 / 50** |
 | Newest client message altered (1,000 turns) | — | 0 of 1,000 requests |
-| Latency, first / last 10% of requests, median (1,000 turns) | — | 58 / 576 ms |
-| Latency, last 10%, 95th percentile; slowest request | — | 979 ms; 1.46 s (the 4 MB turn) |
-| Process memory, start → end (1,000 turns) | — | 109 → 348 MB |
+| Latency, first / last 10% of requests, median (1,000 turns) | — | 66 / 631 ms |
+| Latency, last 10%, 95th percentile; slowest request | — | 1,140 ms; 1.66 s (the 4 MB turn) |
+| Process memory, start → end (1,000 turns) | — | 109 → 331 MB |
 | **8 sessions in parallel, 200 turns each:** own facts recalled / another session's facts leaked | — | **80 of 80 / 0 of 80** |
 
 Process memory includes the client's own copy of the history (19.7 MB of
@@ -331,9 +332,9 @@ the server share it.
 | Upstream requests missing the newest message / leaking another session | 0 / 0 | 0 / 0 |
 | Malformed requests answered with a 5xx | 0 | 0 |
 | Latest decision recalled | 32 of 32 | **48 of 48** (23 of 48 before the fix) |
-| Throughput | 42 req/s | 137 req/s |
-| Latency p50 / p95 / p99 | 735 / 1,018 / 1,241 ms | 308 / 530 / 676 ms |
-| Server memory, start → end | 102 → 214 MB | 448 → 692 MB (4 processes) |
+| Throughput | 46 req/s | 148 req/s |
+| Latency p50 / p95 / p99 | 667 / 932 / 1,096 ms | 279 / 538 / 704 ms |
+| Server memory, start → end | 102 → 225 MB | 448 → 692 MB (4 processes) |
 
 The 4-worker recall was 23 of 48 until a worker reloaded a cached session
 that another worker had written (see the changelog). Latency is

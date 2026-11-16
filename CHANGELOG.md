@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-### Fixed — a worker answered from a stale copy of a session; a lone surrogate failed a request
+### Fixed — a worker answered from a stale copy of a session; the resume followed the clock; a lone surrogate failed a request
 
 Found by the new `benchmarks/load`, which runs the real server under
 uvicorn (1 to N workers) against a stand-in Ollama and checks every
@@ -16,10 +16,20 @@ response and every upstream request.
   decision a later turn had replaced. `graph_meta` now carries a write
   counter (added to older databases on open); a worker reloads a cached
   session when the counter has moved, after saving its own unsaved
-  changes. Now 48 of 48, with throughput unchanged (137 req/s).
+  changes. Now 48 of 48, with throughput unchanged (131 → 137 req/s).
 - **A lone UTF-16 surrogate in a message (`"\ud800"`, legal JSON) failed
   the request with a 502** when the provider client encoded it. Request
   text is scrubbed at entry, as stored text already was.
+- **The resume depended on the machine's clock.** It ranked recent facts
+  by whole seconds of `updated_at`, then importance, so whether two
+  requests' facts tied depended on where a second boundary fell: identical
+  input gave a different resume in 18 of 716 real sessions between two
+  runs (15 of those 18 varied across six repeat runs of unchanged code).
+  Nodes now carry `turn` (the extraction call that last mentioned them)
+  and `seq` (mention order), and the resume, checkpoints, change-of-mind
+  supersession and the pruning tie-break order by those. Two full runs of
+  the 716 sessions are now identical in both modes. Nodes stored earlier
+  keep their `updated_at` order.
 
 ### Fixed — which decision replaces which; memory that grew with input size
 
