@@ -190,9 +190,20 @@ def init_db(graph: GraphMemory) -> None:
                 session_id       TEXT PRIMARY KEY,
                 processed_hashes TEXT NOT NULL DEFAULT '[]',
                 schema_version   INTEGER NOT NULL DEFAULT 2,
-                updated_at       REAL NOT NULL
+                updated_at       REAL NOT NULL,
+                version          INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # `version` counts committed writes to a session. Each worker of a
+        # multi-process deployment keeps its own in-memory copy of a
+        # session, and compares this counter against the one it last
+        # read or wrote to tell whether another process has written since
+        # (see stored_version). Added after graph_meta first shipped, so
+        # an older database gets the column here.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(graph_meta)")}
+        if "version" not in cols:
+            conn.execute(
+                "ALTER TABLE graph_meta ADD COLUMN version INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_nodes_session "
             "ON graph_nodes(session_id)"
@@ -365,6 +376,25 @@ def delete_session_rows(storage_dir, session_id: str) -> int:
     finally:
         conn.close()
     return n
+
+
+def stored_version(graph: GraphMemory) -> int | None:
+    """The session's write counter on disk: 0 if it has never been
+    written, None if the database could not be read. One indexed lookup,
+    cheap enough to run on every request."""
+    try:
+        conn = graph._db_connect()
+        try:
+            row = conn.execute(
+                "SELECT version FROM graph_meta WHERE session_id=?",
+                (graph.session_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("Could not read the stored version of %s: %s", graph.session_id, e)
+        return None
+    return row[0] if row else 0
 
 
 def stale_session_ids(storage_dir, cutoff: float, ownership) -> list[str]:
@@ -667,11 +697,16 @@ def _write_diff(graph: GraphMemory, nodes: dict, edges: dict, *, force: bool) ->
                         "DELETE FROM graph_edges WHERE session_id=? AND edge_key=?",
                         [(sid, k) for k in edge_deletes],
                     )
+                row = conn.execute(
+                    "SELECT version FROM graph_meta WHERE session_id=?", (sid,),
+                ).fetchone()
+                disk_version = row[0] if row else 0
+                new_version = disk_version + 1
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta "
-                    "(session_id, processed_hashes, schema_version, updated_at) "
-                    "VALUES (?,?,?,?)",
-                    (sid, hashes_json, SCHEMA_VERSION, now),
+                    "(session_id, processed_hashes, schema_version, updated_at, version) "
+                    "VALUES (?,?,?,?,?)",
+                    (sid, hashes_json, SCHEMA_VERSION, now, new_version),
                 )
         finally:
             conn.close()
@@ -685,6 +720,11 @@ def _write_diff(graph: GraphMemory, nodes: dict, edges: dict, *, force: bool) ->
     graph._persisted_edges = edges
     graph._persisted_hashes_json = hashes_json
     graph._dirty = False
+    # If another process wrote between this instance's last read and this
+    # write, the merge kept its rows on disk but this instance never
+    # loaded the ones it added. Leave the version unknown so the next
+    # freshness check reloads, instead of claiming to be current.
+    graph._disk_version = new_version if disk_version == graph._disk_version else None
     logger.debug(
         "Persisted %s: %d node upserts, %d edge upserts, %d/%d deletes "
         "(graph has %d nodes)",
@@ -804,9 +844,12 @@ def load(graph: GraphMemory) -> None:
                 (graph.session_id,),
             ).fetchall()
             meta_row = conn.execute(
-                "SELECT processed_hashes FROM graph_meta WHERE session_id=?",
+                "SELECT processed_hashes, version FROM graph_meta WHERE session_id=?",
                 (graph.session_id,),
             ).fetchone()
+            # Read in the same connection as the rows, before any write by
+            # this instance, so it names the state just loaded.
+            graph._disk_version = meta_row[1] if meta_row is not None else 0
 
             if not node_rows and not edge_rows and meta_row is None:
                 # Nothing in v2 for this session — it may predate the

@@ -118,8 +118,8 @@ def _warn_if_multi_worker_risk() -> None:
 
     What is still per-process, and therefore divergent per worker:
     analytics counters, rate-limit buckets, and the semantic cache. Each
-    worker also keeps its own `_graph_cache`, so a session's in-memory
-    copy can be briefly stale between writes.
+    worker also keeps its own `_graph_cache`; a cached session is reloaded
+    when another worker has written it since (see _reload_if_stale).
 
     Not detectable with certainty from inside one process (there is no
     universal "how many workers am I one of" signal), so this checks
@@ -604,23 +604,72 @@ def _graph_cache_touch(session_id: str) -> None:
             break  # every remaining victim would hit the same DB problem
 
 
+def _new_graph(session_id: str) -> GraphMemory:
+    return GraphMemory(
+        session_id,
+        storage_dir=settings.graph_checkpoint.storage_dir,
+        semantic_retrieval=_SEMANTIC_RETRIEVAL,
+        max_nodes=settings.graph_checkpoint.max_nodes,
+    )
+
+
+def _reload_if_stale(session_id: str, graph: GraphMemory) -> GraphMemory:
+    """The instance to use for `session_id`: `graph`, or a fresh load of
+    it if another process has written the session since `graph` last read
+    or wrote it. Blocking; the caller holds the session lock.
+
+    Each worker of a multi-process deployment (`uvicorn --workers N`)
+    keeps its own cached copy of a session. Writes merge safely on disk,
+    but a worker kept answering from the copy it loaded first, so a turn
+    routed to it saw none of what the other workers had extracted since:
+    with 4 workers, 23 of 48 sessions were answered with an outdated
+    decision (benchmarks/load).
+    """
+    if not graph.is_stale():
+        return graph
+    if graph._dirty:
+        # Write this instance's own changes first: persist merges them
+        # with the other process's rows, so the reload below has both.
+        graph._persist()
+    fresh = _new_graph(session_id)
+    if fresh._load_failed:
+        return graph   # keep serving what we have; the next request retries
+    return fresh
+
+
+async def _refresh_graph(session_id: str, graph: GraphMemory) -> GraphMemory:
+    """Run _reload_if_stale off the event loop and swap the cached
+    instance. Caller holds the session lock."""
+    fresh = await asyncio.to_thread(_reload_if_stale, session_id, graph)
+    if fresh is not graph and _graph_cache.get(session_id) is graph:
+        _graph_cache[session_id] = fresh
+    return fresh
+
+
 async def _get_graph_async(session_id: str) -> GraphMemory:
     """
     Race-safe, LRU-bounded graph accessor for async handlers.
     Double-checked locking: avoids creating two GraphMemory objects
     for the same session when concurrent requests both see a cache miss.
+
+    A cached instance is reloaded if another process has written the
+    session since (see _reload_if_stale), but only when the session is
+    idle in this process. Waiting here for a busy session's lock could
+    deadlock a caller that already holds another session's lock
+    (cross-session recall); the proxy path re-checks under its own lock.
     """
     if session_id in _graph_cache:
         _graph_cache_touch(session_id)
-        return _graph_cache[session_id]
+        graph = _graph_cache[session_id]
+        lock = _get_session_lock(session_id)
+        if not lock.locked() and not _session_inflight.get(session_id):
+            async with lock:   # free, so this does not wait
+                with _session_in_use(session_id):
+                    graph = await _refresh_graph(session_id, graph)
+        return graph
     async with _graph_cache_lock:
         if session_id not in _graph_cache:  # re-check after lock
-            _graph_cache[session_id] = GraphMemory(
-                session_id,
-                storage_dir=settings.graph_checkpoint.storage_dir,
-                semantic_retrieval=_SEMANTIC_RETRIEVAL,
-                max_nodes=settings.graph_checkpoint.max_nodes,
-            )
+            _graph_cache[session_id] = _new_graph(session_id)
         _graph_cache_touch(session_id)
         return _graph_cache[session_id]
 
@@ -1780,6 +1829,9 @@ async def chat_completions(req: ChatRequest, request: Request):
         # hits it. One lock, both paths.
         async with _get_session_lock(session_id):
             with _session_in_use(session_id):
+                # Again under the lock: another worker may have written
+                # while this request waited for it.
+                graph = await _refresh_graph(session_id, graph)
                 messages, checkpoint_status = await _update_graph(
                     session_id, graph, raw_messages, messages, model, savings,
                     user_query, principal,

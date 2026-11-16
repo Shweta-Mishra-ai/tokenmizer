@@ -70,6 +70,7 @@ class _Upstream:
         self.requests = 0
         self.violations: list[str] = []
         self.expected: dict[str, str] = {}      # session marker -> newest message
+        self.capture: dict[str, list] = {}      # probe question -> upstream texts
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -131,6 +132,9 @@ class _Upstream:
             parts.append(c if isinstance(c, str) else json.dumps(c, ensure_ascii=False))
         text = "\n".join(parts)
         marks = set(MARK.findall(text))
+        for question, sink in list(self.capture.items()):
+            if question in text:
+                sink.append(text)
         with self.lock:
             self.requests += 1
             if body.get("format"):
@@ -200,7 +204,8 @@ def _rss_mb(pid: int) -> float:
 def _user_turn(rng: random.Random, sid: int, t: int) -> str:
     kinds = [
         f"Turn {t}: let's continue with the export step for session part {t}.",
-        f"Turn {t}: Decision: use `queue_{sid}_{t}` as the partition key for this stage.",
+        # A header starts its line, as people write it.
+        f"Turn {t}:\nDecision: use `queue_{sid}_{t}` as the partition key for this stage.",
         f"Turn {t}: TODO: write tests for the handler in src/svc_{sid}/mod_{t}.py",
         f"Turn {t}: the job failed with RuntimeError: overflow in batch {t}",
         f"Turn {t}: " + "log line ok\n" * rng.choice([5, 50, 400]),
@@ -209,7 +214,7 @@ def _user_turn(rng: random.Random, sid: int, t: int) -> str:
 
 
 async def _session(client, base, up: _Upstream, sid: int, turns: int, stream_share: float,
-                   lat: list, failures: list, rng: random.Random):
+                   lat: list, failures: list, rng: random.Random, latest_decision: dict):
     marker = f"SESSMARK{sid:04d}Z"
     history = [{"role": "user", "content": f"We are building the {marker} service. Start."}]
     for t in range(turns):
@@ -218,6 +223,9 @@ async def _session(client, base, up: _Upstream, sid: int, turns: int, stream_sha
             # it is; the tag is not the marker the leak check looks for.
             history.append({"role": "user", "content": f"[client {sid}] " + _user_turn(rng, sid, t)})
         newest = history[-1]["content"]
+        decided = re.search(r"`(queue_\d+_\d+)` as the partition key", newest)
+        if decided:
+            latest_decision[sid] = decided.group(1)
         with up.lock:
             up.expected[marker] = newest
         stream = rng.random() < stream_share
@@ -266,6 +274,20 @@ async def _session(client, base, up: _Upstream, sid: int, turns: int, stream_sha
         history.append({"role": "assistant", "content": REPLY})
 
 
+async def _recall_probe(client, base, up: _Upstream, sid: int, value: str) -> bool:
+    """After the run: does the session still know the last partition key it
+    decided — whichever worker handled the turns that said it?"""
+    question = f"[client {sid}] Which partition key did we decide on in the end?"
+    seen = []
+    up.capture[question] = seen
+    with up.lock:
+        up.expected[f"SESSMARK{sid:04d}Z"] = question
+    r = await client.post(f"{base}/v1/chat/completions", timeout=120, json={
+        "model": "llama3.1:8b", "session_id": f"load-{sid}", "max_tokens": 50,
+        "messages": [{"role": "user", "content": question}]})
+    return r.status_code == 200 and any(value in t for t in seen)
+
+
 HOSTILE = [
     ("not json", b"{this is not json"),
     ("wrong types", json.dumps({"model": 5, "messages": "hello"}).encode()),
@@ -305,12 +327,15 @@ async def _run(args) -> dict:
         async with httpx.AsyncClient(limits=limits) as client:
             hostile_before = await _hostile(client, base)
             rng = random.Random(args.seed)
+            latest: dict[int, str] = {}
             t0 = time.perf_counter()
             await asyncio.gather(*[
                 _session(client, base, up, sid, args.turns, args.stream_share, lat, failures,
-                         random.Random(rng.random()))
+                         random.Random(rng.random()), latest)
                 for sid in range(args.sessions)])
             wall = time.perf_counter() - t0
+            recalled = [await _recall_probe(client, base, up, sid, value)
+                        for sid, value in sorted(latest.items())]
             hostile_after = await _hostile(client, base)
             alive = (await client.get(f"{base}/health", timeout=10)).status_code < 500
         rss1 = _rss_mb(proc.pid)
@@ -334,6 +359,7 @@ async def _run(args) -> dict:
         "response_failures": failures[:20], "response_failure_count": len(failures),
         "upstream_violations": up.violations[:20], "upstream_violation_count": len(up.violations),
         "hostile_5xx": hostile_before + hostile_after, "alive_after": alive,
+        "latest_decision_recalled": f"{sum(recalled)}/{len(recalled)}",
     }
 
 
@@ -352,7 +378,8 @@ def main() -> int:
         Path(args.json).write_text(json.dumps(res, indent=2))
     clean = (res["response_failure_count"] == 0 and res["upstream_violation_count"] == 0
              and not res["hostile_5xx"] and res["alive_after"]
-             and res["requests_ok"] == res["requests_expected"])
+             and res["requests_ok"] == res["requests_expected"]
+             and res["latest_decision_recalled"].split("/")[0] == res["latest_decision_recalled"].split("/")[1])
     return 0 if clean else 1
 
 

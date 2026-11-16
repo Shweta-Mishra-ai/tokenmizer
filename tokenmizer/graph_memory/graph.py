@@ -383,6 +383,10 @@ class GraphMemory:
         self._persisted_nodes: dict[str, str] = {}
         self._persisted_edges: dict[str, str] = {}
         self._persisted_hashes_json: str = ""
+        # graph_meta.version as of this instance's last load or write; None
+        # when unknown. Another process's write moves the stored counter
+        # past it — see is_stale().
+        self._disk_version: int | None = None
         # True if this session's data came from the v1 blob table and is
         # awaiting its first per-row write.
         self._migrated_from_blob = False
@@ -429,6 +433,14 @@ class GraphMemory:
     def _load(self) -> None:
         from tokenmizer.graph_memory.persistence import load
         load(self)
+
+    def is_stale(self) -> bool:
+        """True if another process has written this session since this
+        instance last read or wrote it. False when that cannot be told
+        (unreadable database): keep serving the copy in memory."""
+        from tokenmizer.graph_memory.persistence import stored_version
+        on_disk = stored_version(self)
+        return on_disk is not None and on_disk != self._disk_version
 
     # ── Nodes ────────────────────────────────────────────────────────────────
 
