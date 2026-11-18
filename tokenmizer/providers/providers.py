@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import logging
 import re
 import time
@@ -183,6 +184,9 @@ class BaseProvider(ABC):
     # cannot see the tools for.
     supports_tools: bool = False
     supports_tool_stream: bool = False
+    # Whether image content blocks can be forwarded (see api/app.py
+    # _with_media). Without it they are dropped, and the response says so.
+    supports_images: bool = False
 
     # How long an upstream call may hang before it is abandoned.
     #
@@ -205,19 +209,28 @@ class BaseProvider(ABC):
         self._retry_delays = [1.0, 2.0, 4.0]
 
     def _cached_client(self, factory_key, build):
-        """One SDK client per adapter, not one per request.
+        """One SDK client per adapter and event loop, not one per request.
 
         Every call used to construct a fresh client, which is a fresh
         connection pool: a TCP and TLS handshake on every request, and a
         pool that was never closed. Keyed on the SDK class and the timeout
-        so a test that swaps the class, or a changed timeout, builds anew.
+        so a test that swaps the class, or a changed timeout, builds anew;
+        and held per running event loop, because an async HTTP client is
+        bound to the loop that created it and fails on any other.
         """
+        import weakref
         key = (factory_key, self.request_timeout)
-        cached = getattr(self, "_client_cache", None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return build()
+        cache = self.__dict__.setdefault("_client_cache", weakref.WeakKeyDictionary())
+        cached = cache.get(loop)
         if cached is None or cached[0] != key:
             cached = (key, build())
-            self._client_cache = cached
+            cache[loop] = cached
         return cached[1]
+
 
     @property
     def _timeout_kwargs(self) -> dict:
@@ -248,9 +261,16 @@ class BaseProvider(ABC):
     ) -> LLMResponse:
         model = model or self.default_model
         t0 = time.monotonic()
+        # request_timeout bounds each attempt; this bounds them together.
+        # Four attempts at 120s each was an eight-minute request.
+        budget = self.request_timeout if self.request_timeout and self.request_timeout > 0 else None
 
         for attempt, delay in enumerate([0] + self._retry_delays):
             if delay:
+                if budget is not None and time.monotonic() - t0 + delay >= budget:
+                    raise ProviderError(self.__class__.__name__, "timeout",
+                                        f"retries exhausted the {budget:.0f}s request budget",
+                                        retryable=False)
                 await asyncio.sleep(delay)
             try:
                 resp = await self._call(messages, model, max_tokens, stream, system, **kwargs)
@@ -384,9 +404,47 @@ def _anthropic_input(usage) -> tuple[int, int, int]:
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 
+_dropped_anthropic_params: set[str] = set()
+
+
+def _anthropic_sampling(kwargs: dict, method) -> dict:
+    """Sampling params in Anthropic's shape, limited to what `method` (the
+    installed SDK's messages.create or messages.stream) accepts.
+
+    anthropic 2.x removed `temperature` and `top_p` from both methods, and
+    any pyproject floor (>=0.30) installs it: every request from a client
+    that set either one failed in the SDK with "unexpected keyword
+    argument" before anything was sent, and came back as a 502. They are
+    dropped instead, with one log line each. Where the SDK still takes
+    `temperature`, it is clamped to Anthropic's 0-1 (OpenAI clients send
+    up to 2, which the API rejects).
+    """
+    out = _sampling(kwargs)
+    if "stop" in out:
+        out["stop_sequences"] = _as_stop_list(out.pop("stop"))
+    try:
+        params = inspect.signature(method).parameters
+        accepts_any = any(p.kind is p.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        params, accepts_any = {}, True  # type: ignore[assignment]
+    for name in ("temperature", "top_p"):
+        if name not in out:
+            continue
+        if not accepts_any and name not in params:
+            out.pop(name)
+            if name not in _dropped_anthropic_params:
+                _dropped_anthropic_params.add(name)
+                logger.warning("The installed anthropic SDK has no `%s` parameter; "
+                               "it is dropped from requests to Anthropic.", name)
+        elif name == "temperature":
+            out[name] = min(max(out[name], 0.0), 1.0)
+    return out
+
+
 class AnthropicProvider(BaseProvider):
 
     supports_tools = True
+    supports_images = True
     # text_stream carries only text, so the raw event stream is read
     # instead: content_block_start(tool_use) then input_json_delta. See
     # chat_stream.
@@ -429,10 +487,8 @@ class AnthropicProvider(BaseProvider):
         system_text = "\n\n".join(sys_parts) if sys_parts else None
 
         try:
-            kwargs_clean = _sampling(kwargs)
-            # Anthropic SDK uses `stop_sequences`, not OpenAI's `stop`
-            if "stop" in kwargs_clean:
-                kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
+            kwargs_clean = _anthropic_sampling(
+                kwargs, client.messages.stream if stream else client.messages.create)
             if system_text:
                 kwargs_clean["system"] = _anthropic_system_param(system_text, model)
             kwargs_clean.update(self._tool_params(kwargs))
@@ -512,9 +568,7 @@ class AnthropicProvider(BaseProvider):
             sys_parts.insert(0, system)
         conv = _mark_history_cacheable(
             anthropic_messages(conversation_messages(messages)))
-        kwargs_clean = _sampling(kwargs)
-        if "stop" in kwargs_clean:
-            kwargs_clean["stop_sequences"] = _as_stop_list(kwargs_clean.pop("stop"))
+        kwargs_clean = _anthropic_sampling(kwargs, client.messages.stream)
         kwargs_clean.update(self._tool_params(kwargs))
         if sys_parts:
             # Same cacheability rule as the non-streaming path — this used
@@ -614,6 +668,9 @@ class OpenAIProvider(BaseProvider):
     # through, streamed or not.
     supports_tools = True
     supports_tool_stream = True
+    # Image blocks pass through in the same shape. Subclasses whose API has
+    # no vision input set this back to False.
+    supports_images = True
 
     def __init__(self, api_key: str, model: str = "gpt-4o",
                  base_url: str | None = None):
@@ -754,6 +811,7 @@ class OpenAIProvider(BaseProvider):
 # ── DeepSeek ──────────────────────────────────────────────────────────────────
 
 class DeepSeekProvider(OpenAIProvider):
+    supports_images = False
     def __init__(self, api_key: str, model: str = "deepseek-chat"):
         super().__init__(api_key, model, base_url="https://api.deepseek.com/v1")
         self.default_model = model
@@ -817,7 +875,9 @@ class CohereProvider(BaseProvider):
         except ImportError:
             raise ImportError("pip install cohere") from None
 
-        client = cohere.AsyncClientV2(api_key=self.api_key, **self._timeout_kwargs)
+        client = self._cached_client(cohere.AsyncClientV2, lambda: cohere.AsyncClientV2(
+            api_key=self.api_key, **self._timeout_kwargs))
+
 
         all_messages = messages[:]
         if system:
@@ -828,13 +888,19 @@ class CohereProvider(BaseProvider):
                                      messages=cohere_messages(all_messages),
                                      max_tokens=max_tokens,
                                      **self._chat_kwargs(kwargs))
-            text = resp.message.content[0].text if resp.message.content else ""
+            # Every text item, not only the first: a reply can carry
+            # several, and a non-text item first made [0].text raise.
+            text = "".join(getattr(c, "text", "") or "" for c in (resp.message.content or [])
+                           if getattr(c, "type", "text") == "text")
             calls = normalize_tool_calls(getattr(resp.message, "tool_calls", None))
             usage = resp.usage
             return LLMResponse(
                 text=text,
-                input_tokens=usage.tokens.input_tokens if usage else count_messages_tokens(all_messages),
-                output_tokens=usage.tokens.output_tokens if usage else count_tokens(text),
+                # Cohere reports counts as floats (6.0); clients read ints.
+                input_tokens=int(usage.tokens.input_tokens) if usage and usage.tokens
+                else count_messages_tokens(all_messages),
+                output_tokens=int(usage.tokens.output_tokens) if usage and usage.tokens
+                else count_tokens(text),
                 model=model,
                 provider="cohere",
                 finish_reason=finish_reason(getattr(resp, "finish_reason", None), calls),
@@ -866,7 +932,9 @@ class CohereProvider(BaseProvider):
             raise ImportError("pip install cohere") from None
 
         model = model or self.default_model
-        client = cohere.AsyncClientV2(api_key=self.api_key, **self._timeout_kwargs)
+        client = self._cached_client(cohere.AsyncClientV2, lambda: cohere.AsyncClientV2(
+            api_key=self.api_key, **self._timeout_kwargs))
+
         all_messages = messages[:]
         if system:
             all_messages = [{"role": "system", "content": system}] + all_messages
@@ -877,6 +945,10 @@ class CohereProvider(BaseProvider):
                                         max_tokens=max_tokens,
                                         **self._chat_kwargs(kwargs))
             async for event in stream:
+                delta = getattr(event, "delta", None)
+                ended = str(getattr(delta, "finish_reason", "") or "")
+                if ended.upper() == "MAX_TOKENS":
+                    yield {"finish_reason": "length"}
                 mapped = cohere_stream_event(event)
                 if not mapped:
                     continue
@@ -937,6 +1009,9 @@ class GeminiProvider(BaseProvider):
     # The SDK carries function_call parts on the streamed chunks, so a
     # streamed tool request does not have to fall back to a buffered call.
     supports_tool_stream = True
+    # Base64 images go as inline_data (see tools.gemini_parts); they were
+    # dropped before, with a warning, though Gemini reads images.
+    supports_images = True
 
     def __init__(self, api_key: str, model: str = "gemini-1.5-pro"):
         super().__init__(api_key, model)
@@ -971,7 +1046,8 @@ class GeminiProvider(BaseProvider):
         timeout = self.request_timeout
         http_options = ({"timeout": int(timeout * 1000)}
                         if timeout and timeout > 0 else None)
-        return genai.Client(api_key=self.api_key, http_options=http_options)
+        return self._cached_client(genai.Client, lambda: genai.Client(
+            api_key=self.api_key, http_options=http_options))
 
     async def _call(self, messages, model, max_tokens, stream, system, **kwargs) -> LLMResponse:
         try:
@@ -1120,6 +1196,11 @@ class OllamaProvider(BaseProvider):
     # instructions. 0 leaves Ollama's default. Set from settings.ollama_num_ctx.
     num_ctx: int = 8192
 
+    def _http_client(self, httpx):
+        """Reused per event loop (see BaseProvider._cached_client)."""
+        return self._cached_client(httpx.AsyncClient, lambda: httpx.AsyncClient(
+            timeout=self.request_timeout or None))
+
     def __init__(self, model: str = "llama3", base_url: str = "http://localhost:11434"):
         super().__init__(api_key="", model=model)
         self._base_url = base_url.rstrip("/")
@@ -1176,35 +1257,41 @@ class OllamaProvider(BaseProvider):
             # tool_choice, so "none"/"required" cannot be enforced here.
             payload["tools"] = tk["tools"]
 
-        async with httpx.AsyncClient(timeout=self.request_timeout or None) as client:
-            try:
+        client = self._http_client(httpx)
+        try:
+            r = await client.post(f"{self._base_url}/api/chat", json=payload)
+            if ("format" in payload or "think" in payload) and r.status_code == 400:
+                # An Ollama too old for structured output or the
+                # thinking switch: ask again without them. The prompt
+                # still asks for JSON, and the reply is parsed leniently.
+                logger.info("Ollama rejected format/think (%s); retrying without them",
+                            r.text[:120])
+                payload.pop("format", None)
+                payload.pop("think", None)
                 r = await client.post(f"{self._base_url}/api/chat", json=payload)
-                if ("format" in payload or "think" in payload) and r.status_code == 400:
-                    # An Ollama too old for structured output or the
-                    # thinking switch: ask again without them. The prompt
-                    # still asks for JSON, and the reply is parsed leniently.
-                    logger.info("Ollama rejected format/think (%s); retrying without them",
-                                r.text[:120])
-                    payload.pop("format", None)
-                    payload.pop("think", None)
-                    r = await client.post(f"{self._base_url}/api/chat", json=payload)
-                r.raise_for_status()
-                data = r.json()
-                message = data.get("message", {})
-                text = message.get("content", "") or ""
-                calls = ollama_tool_calls(message.get("tool_calls"))
-                return LLMResponse(
-                    text=text,
-                    input_tokens=data.get("prompt_eval_count", count_messages_tokens(all_messages)),
-                    output_tokens=data.get("eval_count", count_tokens(text)),
-                    model=model,
-                    provider="ollama",
-                    finish_reason=finish_reason(data.get("done_reason"), calls),
-                    tool_calls=calls,
-                )
-            except Exception as e:
-                raise ProviderError("ollama", "api_error", str(e),
-                                    retryable=_ollama_error_is_retryable(e)) from e
+            r.raise_for_status()
+            data = r.json()
+            if data.get("error"):
+                raise ProviderError("ollama", "api_error", str(data["error"]),
+                                    retryable=False)
+            message = data.get("message", {})
+            text = message.get("content", "") or ""
+            calls = ollama_tool_calls(message.get("tool_calls"))
+            return LLMResponse(
+                text=text,
+                input_tokens=data.get("prompt_eval_count", count_messages_tokens(all_messages)),
+                output_tokens=data.get("eval_count", count_tokens(text)),
+                model=model,
+                provider="ollama",
+                finish_reason=finish_reason(data.get("done_reason"), calls),
+                tool_calls=calls,
+            )
+        except ProviderError:
+            raise
+        except Exception as e:
+            raise ProviderError("ollama", "api_error", str(e),
+                                retryable=_ollama_error_is_retryable(e)) from e
+
 
     async def chat_stream(self, messages: list[dict], model: str = "",
                           max_tokens: int = 4096, system: str = "", **kwargs):
@@ -1227,34 +1314,41 @@ class OllamaProvider(BaseProvider):
             # that asked for tools AND a stream got a model that could not
             # see them — the same silent drop the non-streaming path had.
             payload["tools"] = tk["tools"]
+        client = self._http_client(httpx)
         try:
-            async with httpx.AsyncClient(timeout=self.request_timeout or None) as client:
-                async with client.stream("POST", f"{self._base_url}/api/chat",
-                                         json=payload) as r:
-                    r.raise_for_status()
-                    async for line in r.aiter_lines():
-                        if not line.strip():
-                            continue
-                        data = _json.loads(line)
-                        message = data.get("message", {}) or {}
-                        chunk = message.get("content", "")
-                        if chunk:
-                            yield chunk
-                        # Ollama sends finished calls on one message rather
-                        # than fragments, so each becomes a single delta
-                        # carrying the whole arguments string. The proxy
-                        # assembles by index either way.
-                        calls = ollama_tool_calls(message.get("tool_calls"))
-                        if calls:
-                            yield {"tool_calls": [
-                                {"index": i, "id": c["id"], "type": "function",
-                                 "function": dict(c["function"])}
-                                for i, c in enumerate(calls)
-                            ]}
-                        if data.get("done"):
-                            if data.get("done_reason") == "length":
-                                yield {"finish_reason": "length"}
-                            break
+            async with client.stream("POST", f"{self._base_url}/api/chat",
+                                     json=payload) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line.strip():
+                        continue
+                    data = _json.loads(line)
+                    # A failure after the stream started (the model
+                    # runner crashing, out of memory) arrives as an
+                    # {"error": ...} line. It was skipped, so the
+                    # client got the text so far as a finished answer.
+                    if data.get("error"):
+                        raise ProviderError("ollama", "api_error", str(data["error"]),
+                                            retryable=False)
+                    message = data.get("message", {}) or {}
+                    chunk = message.get("content", "")
+                    if chunk:
+                        yield chunk
+                    # Ollama sends finished calls on one message rather
+                    # than fragments, so each becomes a single delta
+                    # carrying the whole arguments string. The proxy
+                    # assembles by index either way.
+                    calls = ollama_tool_calls(message.get("tool_calls"))
+                    if calls:
+                        yield {"tool_calls": [
+                            {"index": i, "id": c["id"], "type": "function",
+                             "function": dict(c["function"])}
+                            for i, c in enumerate(calls)
+                        ]}
+                    if data.get("done"):
+                        if finish_reason(data.get("done_reason"), []) == "length":
+                            yield {"finish_reason": "length"}
+                        break
         except ProviderError:
             raise
         except Exception as e:
@@ -1337,14 +1431,27 @@ def missing_provider_sdk(provider: str) -> str | None:
     return None if found else f'pip install "tokenmizer[{extra}]"'
 
 
+_SETTINGS_DEFAULT_MODEL = "claude-sonnet-4-6"   # Settings.default_model's default
+
+
 def build_provider(settings, model: str | None = None,
                    provider: str | None = None) -> BaseProvider:
+
     """Build the correct provider from settings. `model` overrides
     settings.default_model, and `provider` settings.provider (both used by
     the extraction pass when graph_checkpoint pins them)."""
     provider = (provider or settings.provider).lower()
     key = settings.get_api_key_for_provider(provider)
     model = model or settings.default_model
+    # default_model's own default is a Claude model. With provider: ollama
+    # (or gemini, deepseek...) and no default_model set, that name was sent
+    # to a server that has never heard of it. Fall back to the provider's
+    # own default instead — but only for the untouched default; a model the
+    # operator chose is always used as given.
+    if provider not in ("anthropic", "claude", "openrouter") \
+            and model == _SETTINGS_DEFAULT_MODEL:
+        model = ""
+
     _warn_on_model_provider_mismatch(provider, model)
     openai_base = (getattr(settings, "openai_base_url", "") or "").strip() or None
     ollama_base = (getattr(settings, "ollama_base_url", "") or "").strip()
@@ -1352,8 +1459,8 @@ def build_provider(settings, model: str | None = None,
     mapping = {
         "anthropic": lambda: AnthropicProvider(key, model),
         "claude": lambda: AnthropicProvider(key, model),
-        "openai": lambda: OpenAIProvider(key, model, base_url=openai_base),
-        "gpt": lambda: OpenAIProvider(key, model, base_url=openai_base),
+        "openai": lambda: OpenAIProvider(key, model or "gpt-4o", base_url=openai_base),
+        "gpt": lambda: OpenAIProvider(key, model or "gpt-4o", base_url=openai_base),
         "deepseek": lambda: DeepSeekProvider(key, model or "deepseek-chat"),
         "mistral": lambda: MistralProvider(key, model or "mistral-large-latest"),
         "grok": lambda: GrokProvider(key, model or "grok-3"),

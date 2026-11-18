@@ -521,7 +521,7 @@ class TestFileIntelligenceKeepsWhatTheUserSent:
         from tokenmizer.filters.file_intelligence import FileIntelligence
         table = "id,name,value\n" + "\n".join(f"{i},item_{i},{i * 10}" for i in range(400))
         out, saved = FileIntelligence().process_message_files(
-            [{"role": "user", "content": "Analyze:\n" + table}], 300)
+            [{"role": "user", "content": "Analyze:\n" + table}], 300, digest_current_turn=True)
         assert saved > 0 and out[0]["content"].startswith("Analyze:")
 
     def test_every_fenced_block_is_considered(self):
@@ -529,7 +529,8 @@ class TestFileIntelligenceKeepsWhatTheUserSent:
         table = "a,b,c\n" + "\n".join(f"{i},{i * 2},{i * 3}" for i in range(300))
         msg = {"role": "user", "content":
                f"code:\n```python\n{_CODE}```\ndata:\n```csv\n{table}\n```\nthanks"}
-        out, saved = FileIntelligence().process_message_files([msg], 200)
+        out, saved = FileIntelligence().process_message_files([msg], 200,
+                                                              digest_current_turn=True)
         assert saved > 0
         assert _CODE in out[0]["content"]          # the code block untouched
         assert out[0]["content"].endswith("thanks")
@@ -591,7 +592,7 @@ class TestExtractionDoesNotInventFacts:
 @pytest.mark.parametrize("text", [
     "use redis, " * 7000,
     "\n".join(f"ERROR worker {i} failed: timeout in a/b/c_{i}.py line {i}" for i in range(1500)),
-])
+], ids=["comma-list", "error-log"])
 def test_extraction_is_not_quadratic(text):
     """80 KB of either took 35 s and 10.7 s, on a thread holding the GIL."""
     t0 = time.perf_counter()

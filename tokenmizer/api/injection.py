@@ -83,6 +83,22 @@ def _content_words(text: str) -> frozenset:
     return result
 
 
+# Standing context every turn needs, whatever it is about.
+_ALWAYS_INJECTABLE = frozenset({"goal", "decision"})
+
+
+def _worth_injecting(graph, node, query_words: frozenset) -> bool:
+    """A node goes into the prompt only if it shares vocabulary with the
+    turn, or is a goal or an active decision — the standing context every
+    turn needs. query() ranks every live node (its floor is cleared by
+    importance alone), which is right for ranking and wrong as a gate:
+    six unrelated files and tasks went into every turn, paid for each time."""
+    if node.type.value in _ALWAYS_INJECTABLE:
+        return True
+    node_words = graph._expand_with_aliases(graph._search_words(node))
+    return bool(node_words & query_words)
+
+
 def _already_in_payload(node, message_words: list[frozenset]) -> bool:
     """True when one message being sent already states this node.
 

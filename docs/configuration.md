@@ -73,7 +73,7 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_GRAPH_CHECKPOINT__TRIGGER_AT_PERCENT` | `0.85` | Auto-checkpoint at this share of the context window |
 | `TOKENMIZER_GRAPH_CHECKPOINT__STORAGE_DIR` | `./checkpoints` | Where the SQLite database lives |
 | `TOKENMIZER_GRAPH_CHECKPOINT__MAX_RESUME_TOKENS` | `400` | Budget for the injected resume block |
-| `TOKENMIZER_GRAPH_CHECKPOINT__USE_LLM_EXTRACTION` | `false` | Hybrid LLM + heuristic extraction (needs a key, ~$0.001/turn) |
+| `TOKENMIZER_GRAPH_CHECKPOINT__USE_LLM_EXTRACTION` | `false` | Hybrid LLM + heuristic extraction. Runs a background call to the **chat model itself** each turn unless `extraction_model` pins a cheaper one, so its cost is comparable to a turn's input |
 | `TOKENMIZER_CACHE__ENABLED` | `true` | Semantic cache |
 | `TOKENMIZER_CACHE__SIMILARITY_THRESHOLD` | `0.92` | How close a hit must be. Similarity is necessary but not sufficient: a candidate that clears this bar is still refused when it disagrees with the query on polarity (enable/disable) or on a literal (a number, a filename, a flag, an identifier), because cosine barely moves on exactly those. `rejected_unsafe` in `/api/cache/stats` counts the refusals |
 | `TOKENMIZER_CACHE__MAX_SIZE` | `10000` | Cap on cached **entries** |
@@ -111,7 +111,7 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_PREFERENCES__ENABLED` | `false` | Cross-session preference memory. Off by default on purpose — see the section below before enabling it |
 | `TOKENMIZER_PREFERENCES__MAX_ITEMS` | `4` | Preference lines injected into the system prompt |
 | `TOKENMIZER_PREFERENCES__MAX_CHARS` | `400` | Total size of those lines |
-| `TOKENMIZER_TERSE_OUTPUT__ENABLED` | `true` | Inject the output-style instruction at all |
+| `TOKENMIZER_TERSE_OUTPUT__ENABLED` | `auto` | Inject the output-style instruction. `auto` adds it from the request where windowing first cuts the history, so a short session never pays for it; `true` / `false` force it |
 | `TOKENMIZER_TERSE_OUTPUT__LEVEL` | `full` | How hard `lite`/`full`/`ultra` push, both in the injected instruction and in how much boilerplate the response trimmer strips. Ignored for the injected prompt when `style: minimal`, which is a single fixed instruction |
 | `TOKENMIZER_TERSE_OUTPUT__STYLE` | `terse` | Output-style prompt injected each turn: `terse`, `minimal`, or `off` |
 | `TOKENMIZER_TERSE_OUTPUT__MIN_MAX_TOKENS` | `512` | Leave the output-style instruction out of requests whose output limit is below this. It is billed as input on every request and can only shorten output, so on short replies it costs more than it saves |
@@ -124,9 +124,14 @@ underscore for the dot: `graph_checkpoint.trigger_at_percent` becomes
 | `TOKENMIZER_SECURITY__REDACT_EMAILS` | `true` | Redact email addresses. Git remotes (`git@host:repo`), scp targets and `a@b` expressions are not addresses and are left alone |
 | `TOKENMIZER_SECURITY__REDACT_PII` | `false` | Also redact Luhn-valid card numbers and US SSNs |
 | `TOKENMIZER_SECURITY__INJECTION_FILTER` | `block` | The keyword denylist for prompt-injection phrasings: `block` (400), `log` (allow and log) or `off` |
+| `TOKENMIZER_SECURITY__TRUSTED_HOSTS` | `[]` | Host names the proxy answers to. With no `api_key` set and this list empty, only `localhost`, `127.0.0.1` and `::1` are accepted (421 otherwise), which stops DNS-rebinding pages from reading your graphs through the browser. List your hostname here when serving keyless on a LAN or behind a proxy; `["*"]` disables the check. With an `api_key` set, any Host is accepted |
+| `TOKENMIZER_SECURITY__MAX_REQUEST_BYTES` | `33554432` (32 MiB) | Largest request body accepted; larger bodies get 413 before any of it is parsed |
 | `TOKENMIZER_RATE_LIMIT__ENABLED` | `true` | Per-client rate limiting |
-| `TOKENMIZER_RATE_LIMIT__REQUESTS_PER_MINUTE` | `60` | Sustained requests per minute per client address |
-| `TOKENMIZER_RATE_LIMIT__BURST` | `10` | Extra requests allowed in a burst above that |
+| `TOKENMIZER_RATE_LIMIT__REQUESTS_PER_MINUTE` | `600` | Sustained rate per client address. On localhost the agent, the dashboard and the MCP server share one address |
+| `TOKENMIZER_RATE_LIMIT__BURST` | `100` | Requests allowed above the sustained rate in a burst |
+| `TOKENMIZER_FILE_INTELLIGENCE__ENABLED` | `true` | Replace large pasted files in **older** turns with a digest |
+| `TOKENMIZER_FILE_INTELLIGENCE__TOKEN_BUDGET_PER_FILE` | `600` | Size of each digest |
+| `TOKENMIZER_FILE_INTELLIGENCE__DIGEST_CURRENT_TURN` | `false` | Also digest the turn being asked. Off: a digest is a sample, and "which line is wrong" or "sum this column" cannot be answered from one |
 | `TOKENMIZER_RETENTION__SESSION_TTL_DAYS` | `0` | Delete sessions nobody has touched for this many days (graph, checkpoints, archive, cache, ownership). `0` keeps everything. `DELETE /api/session/{id}` removes one on request |
 | `TOKENMIZER_API_KEY_NAMES` | `{}` | Stable names for keys, as JSON `{"<key>": "team-a"}`. A named key's sessions belong to the name, so rotating the key (give the new one the same name) keeps them. Naming an existing key moves its sessions to the name at startup |
 | `TOKENMIZER_PRICING` | `{}` | Price per 1K tokens, `[input, output]` in USD, keyed by a substring of the model name (longest match wins) or by provider, as JSON. Used for the cost estimates in `/api/stats`; the built-in figures are rough per-provider defaults |

@@ -8,7 +8,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/v1/chat/completions` | POST | OpenAI-compatible proxy, including `tools` / `tool_choice` and `role: "tool"` messages (see below) |
+| `/v1/chat/completions` | POST | OpenAI-compatible proxy, including `tools` / `tool_choice` and `role: "tool"` messages (see below). Memory needs a session: `session_id` in the body or an `X-Session-ID` header; without one the request is stateless. Image blocks are forwarded to providers that accept them (Anthropic, OpenAI and OpenAI-compatible except DeepSeek, and Gemini for base64 `data:` images; an image by URL is not sent to Gemini) and otherwise counted in `tokenmizer.dropped_non_text_blocks`. The semantic cache is skipped for `temperature` > 0 and for `Cache-Control: no-cache` |
 | `/api/resume/{id}` | GET | Resume context. Built live from the graph whenever it is newer than the latest checkpoint (or there is none) — `source: "live_graph"` — else from the checkpoint. 404 only when both are empty |
 | `/api/checkpoint` | POST | Manual checkpoint. Optional JSON body `{"messages": [{role, content}, ...]}` is extracted into the graph first, so a checkpoint made outside the proxy (MCP tool, CLI) populates the session |
 | `/api/analyze` | POST | File → token-budgeted digest (CSV/JSON/PDF/Excel/logs/code) |
@@ -22,7 +22,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 | `/api/preferences` | DELETE | Forget one (`?key=...`) or all of this principal's preferences |
 | `/api/decision/invalidate` | POST | Mark decision as invalid |
 | `/api/sessions` | GET | The caller's sessions with node counts, last activity and a link to each graph page. Scoped by ownership: one API key never sees another's sessions |
-| `/api/session/{session_id}` | DELETE | Delete everything stored for the session: graph, cold storage, transitions, checkpoints, archived turns, cached answers and the ownership record |
+| `/api/session/{session_id}` | DELETE | Delete everything stored for the session: graph, cold storage, transitions, checkpoints, archived turns, cached answers and the ownership record. Owner only (anyone else gets 404). Analytics keep the request counts with the session id cleared. `tokenmizer forget <session>` calls it |
 | `/api/session/{session_id}/archive` | GET | Turns windowing stopped sending, kept verbatim. `?q=` returns the best matches; without it, only the count |
 | `/api/graph/{session_id}/pruned` | GET | Nodes moved to cold storage when the session passed `graph_checkpoint.max_nodes` |
 | `/api/graph/{session_id}/restore` | POST | `?node_id=` puts one pruned node back into the live graph |
@@ -31,7 +31,7 @@ Every HTTP endpoint, every CLI command, and the MCP tools. The endpoint table is
 | `/api/graph/{id}/why?q=` | GET | **Reasoning:** causal chain behind a decision (old → new with trigger/reason/evidence) |
 | `/api/graph/{id}/reasoning` | GET | **Reasoning view:** active decisions by topic, recent changes, consistency audit |
 | `/api/ontology` | GET | Machine-readable graph ontology (types, relations, status state machine) |
-| `/api/stats` | GET | Token savings analytics |
+| `/api/stats` | GET | Token savings analytics. With several `api_keys`, only the caller's own sessions |
 | `/health` | GET | Liveness AND durability. `status` is `degraded`, not `ok`, when a write has failed, a session's stored graph could not be read, storage is not durable, or memory was displaced by corruption recovery; the counters behind it are in the body. No API key required |
 | `/docs` | GET | Swagger UI |
 
@@ -82,7 +82,15 @@ tokenmizer serve [--port 8000]
 tokenmizer checkpoint [session-id]      # default: the working directory name
 tokenmizer resume [session-id] [--level standard|full|critical]
 tokenmizer stats
+tokenmizer forget my-session            # delete a session's memory (asks first; --yes to skip)
+tokenmizer reassign-sessions --from-key OLD --to-key NEW   # after rotating a key
+tokenmizer reassign-sessions --from-dev --to-key NEW       # after setting the first key
 ```
+
+Sessions belong to the API key that created them. After a key is rotated
+— or the first key is set on a deployment that ran without one — run
+`reassign-sessions` on the host that holds `storage_dir`, or the old
+sessions stay unreachable.
 
 > **File analysis, three ways.** `FileIntelligence` turns a large CSV /
 > JSON / PDF / Excel / log / code file into a token-budgeted digest, and

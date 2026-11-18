@@ -9,8 +9,6 @@ call sites in app.py still look each name up in app.py's own namespace.
 """
 from __future__ import annotations
 
-import uuid
-
 from fastapi import HTTPException, Request
 
 from tokenmizer.api.schemas import ChatRequest
@@ -30,10 +28,16 @@ _CONTEXT_WINDOWS = {
     # OpenAI: the 4.1 family and the 5 series are far larger than 4o; the
     # reasoning models sit at 200k. Longest-key matching keeps "gpt-4o"
     # from being shadowed by "gpt-4", and "gpt-4.1" from matching "gpt-4".
-    "gpt-4.1": 1_000_000, "gpt-4o": 128_000, "gpt-4": 128_000, "gpt-3.5": 16_000,
+    # Bare "gpt-4" is the original 8k model (and gpt-4-32k its 32k
+    # sibling); only the turbo/preview builds are 128k. A 128k figure for
+    # the 8k model meant the checkpoint never fired.
+    "gpt-4.1": 1_000_000, "gpt-4o": 128_000, "gpt-4-turbo": 128_000,
+    "gpt-4-1106": 128_000, "gpt-4-0125": 128_000, "gpt-4-32k": 32_000,
+    "gpt-4": 8_000, "gpt-3.5": 16_000,
     "gpt-5": 400_000,
     "o1": 200_000, "o3": 200_000, "o4": 200_000,
-    "gemini": 1_000_000,
+    # Gemini 1.0 is 32k; 1.5 and later are 1M+.
+    "gemini-1.0": 32_000, "gemini-pro": 32_000, "gemini": 1_000_000,
     "deepseek": 128_000,
     "mistral": 128_000, "codestral": 256_000,
     "grok": 128_000,
@@ -120,14 +124,17 @@ def _net_layers(savings: dict, original: int, sent: int) -> dict:
     return layers
 
 
-def _session_id_for(req: ChatRequest, request: Request) -> str:
-    """Body `session_id`, else the X-Session-ID header, else a new id.
+def _session_id_for(req: ChatRequest, request: Request) -> str | None:
+    """Body `session_id`, else the X-Session-ID header, else None.
 
     The header was in the CORS allow-list and documented as a way to name
     a session, and nothing read it. A standard OpenAI SDK cannot add a body
-    field without `extra_body`, but every one of them can set a header —
-    so for most clients every request started a brand-new session, memory
-    never accumulated, and sessions.db gained a row per request.
+    field without `extra_body`, but every one of them can set a header.
+
+    With neither, the request is stateless: no session is claimed, given a
+    graph, persisted or checkpointed. A generated id did all of that on
+    every request, so sessions.db gained a row per request and none of
+    those one-message sessions could ever be resumed.
     """
     if req.session_id:
         return req.session_id
@@ -136,27 +143,32 @@ def _session_id_for(req: ChatRequest, request: Request) -> str:
         if len(header) > 256:
             raise HTTPException(status_code=422, detail="X-Session-ID is longer than 256 characters.")
         return header
-    return str(uuid.uuid4())
+    return None
 
 
-def _reject_unrepresentable_content(req: ChatRequest) -> None:
-    """422 for content this text proxy would otherwise drop silently.
+def _reject_unrepresentable_content(req: ChatRequest, provider=None) -> None:
+    """422 for content the configured provider cannot be sent.
 
-    Image, audio and file blocks were stripped to their text parts and the
-    request answered with a 200: the model replied about a picture it was
-    never shown. Refusing names the problem; sending the request straight
-    to the provider is the way to use those modalities today.
+    Image, audio and file blocks ride beside the text and are restored for
+    a provider that accepts them (see app._with_media). For one that does
+    not, they used to be stripped and the request answered with a 200: the
+    model replied about a picture it was never shown. Refusing names it.
     """
+    # `is True`: only a provider that declares it. Audio and file blocks
+    # have no adapter on any provider, so they are refused everywhere.
+    images_ok = getattr(provider, "supports_images", False) is True
     for i, m in enumerate(req.messages):
         if not isinstance(m.content, list):
             continue
         for block in m.content:
             kind = block.get("type") if isinstance(block, dict) else None
+            if images_ok and kind in ("image_url", "image"):
+                continue
             if kind not in (None, "text"):
                 raise HTTPException(
                     status_code=422,
-                    detail=(f"messages[{i}] carries a {kind!r} content block. "
-                            f"TokenMizer proxies text only and would drop it, so the "
-                            f"model would answer without it. Send this request to the "
-                            f"provider directly, or remove the block."),
+                    detail=(f"messages[{i}] carries a {kind!r} content block, and the "
+                            f"configured provider does not accept one, so the model "
+                            f"would answer without it. Use a provider that reads images "
+                            f"(Anthropic, OpenAI, Gemini) or remove the block."),
                 )

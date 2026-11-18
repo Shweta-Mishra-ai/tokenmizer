@@ -127,7 +127,10 @@ _PEM = re.compile(
     r'-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----.{0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY-----',
     re.DOTALL)
 
-_EMAIL = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')
+# Parts capped at RFC 5321's limits (64-char local part, 253-char domain).
+# Unbounded, a 40k-char run of "1.1.1..." with no "@" was rescanned from
+# every start position: 2 s per message, quadratic in its length.
+_EMAIL = re.compile(r'\b[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,253}\.[A-Za-z]{2,63}\b')
 # Local parts that name a transport account, not a person.
 _SERVICE_ACCOUNTS = frozenset({"git", "hg", "svn"})
 _CARD = re.compile(r'\b(?:\d[ -]?){13,19}\b')

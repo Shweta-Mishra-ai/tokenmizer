@@ -352,6 +352,12 @@ class GraphMemory:
         # are in-memory: the node itself is persisted like any other, and
         # on a reload the first windowed turn re-selects over the whole
         # span, which is correct rather than merely cheap.
+        # Provenance, for the proxy's "is every fact already in the payload"
+        # test: True once a node exists that did NOT come from extracting a
+        # message (added directly through the library or API, or a summary
+        # of windowed turns). Such a node cannot be found in any payload.
+        self._extracting = False
+        self._unsourced_nodes = False
         self._summary_node_id: str | None = None
         self._summarised_turns = 0
         # True if the SQLite DB could not be reinitialized after corruption —
@@ -396,6 +402,9 @@ class GraphMemory:
         # True if this session's data came from the v1 blob table and is
         # awaiting its first per-row write.
         self._migrated_from_blob = False
+        # Compared with persistence._DELETED_AT: an object older than its
+        # session's deletion is an orphan and does not write.
+        self._created_at = time.monotonic()
         self._db_path = Path(storage_dir) / "graph_memory.db"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._safe_init_db()
@@ -439,6 +448,10 @@ class GraphMemory:
     def _load(self) -> None:
         from tokenmizer.graph_memory.persistence import load
         load(self)
+        # Stored nodes with no record of the messages they came from were
+        # added directly; provenance is not persisted beyond this.
+        if self._nodes and not (self._processed_hashes - {_HASHES_TRIMMED}):
+            self._unsourced_nodes = True
 
     def is_stale(self) -> bool:
         """True if another process has written this session since this
@@ -452,7 +465,7 @@ class GraphMemory:
 
     def _node_id(self, node_type: str, label: str) -> str:
         normalized = f"{node_type}:{label.lower().strip()}"
-        return hashlib.sha1(normalized.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+        return hashlib.sha1(normalized.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:12]
 
     def _normalize_label(self, label: str) -> str:
         return label.lower().strip().rstrip(".,!?")
@@ -477,12 +490,14 @@ class GraphMemory:
         importance: float = 0.5,
         confidence: float = 0.7,
         source_role: str | None = "assistant",
+        detect_conflicts: bool = True,
         reinforce: bool = True,
+
     ) -> str:
         """Add a node, or update the one it duplicates. Returns its id, or
         "" if it was refused. See _add_node."""
         node_id = self._add_node(node_type, label, status, summary, importance,
-                                 confidence, source_role, reinforce)
+                                 confidence, source_role, reinforce, detect_conflicts)
         if node_id:
             self._mark_mentioned(node_id)
         return node_id
@@ -497,6 +512,7 @@ class GraphMemory:
         confidence: float = 0.7,
         source_role: str | None = "assistant",
         reinforce: bool = True,
+        detect_conflicts: bool = True,
     ) -> str:
         """Add a node, or update the one it duplicates.
 
@@ -527,6 +543,8 @@ class GraphMemory:
             return ""
 
         label, summary = redact_node(label, summary)
+        if not self._extracting:
+            self._unsourced_nodes = True
 
         stored_label = label[:120]
         # A label is clipped to 120 characters for display and identity.
@@ -745,7 +763,25 @@ class GraphMemory:
                     node_id = self._node_id(node_type.value, norm)
                 except ValueError:
                     pass  # keep original type if correction is unknown
+                # The corrected id can name a node that already exists. The
+                # dedup above ran against the ORIGINAL type's id, so without
+                # this the new node replaced the existing one outright —
+                # status, summary, importance and created_at all lost.
+                clash = self._nodes.get(node_id)
+                if clash is not None:
+                    clash.touch()
+                    self._dirty = True
+                    clash.status = _next_status(node_type, clash.status, status)
+                    if stored_summary and not clash.summary:
+                        clash.summary = stored_summary
+                    return node_id
 
+        # A SUMMARY node skips the validator, so there is no validator score
+        # to fall back on: it keeps the confidence it was given.
+        if node_type is NodeType.SUMMARY or confidence != 0.7 or result is None:
+            node_confidence = confidence
+        else:
+            node_confidence = result.confidence
         node = MemoryNode(
             id=node_id,
             type=node_type,
@@ -753,12 +789,7 @@ class GraphMemory:
             status=status,
             summary=stored_summary,
             importance=importance,
-            # A SUMMARY skips validation, so there is no validator score to
-            # fall back on; it keeps the confidence it was given. This read
-            # `result.confidence` unconditionally and raised
-            # UnboundLocalError for a SUMMARY added at the default.
-            confidence=(confidence if confidence != 0.7 or result is None
-                        else result.confidence),
+            confidence=node_confidence,
         )
         self._nodes[node_id] = node
         self._dirty = True
@@ -766,7 +797,7 @@ class GraphMemory:
             self._file_index.setdefault(stored_label.rsplit("/", 1)[-1], []).append(node_id)
 
         # Decision contradiction detection — capture full transition story
-        if node_type == NodeType.DECISION and status == NodeStatus.COMPLETED:
+        if node_type == NodeType.DECISION and status == NodeStatus.COMPLETED and detect_conflicts:
             try:
                 from tokenmizer.graph_memory.decision_tracker import (
                     find_contested_decisions,
@@ -950,9 +981,10 @@ class GraphMemory:
         self._transitions.append(transition)
         self._persist_transition(transition)
 
+        from tokenmizer.graph_memory.patterns import clip_words
         old_node.summary = (
-            f"Superseded by: {new_node.label[:60]}"
-            + (f" — {reason_text[:40]}" if reason_text else "")
+            f"Superseded by: {clip_words(new_node.label, 60)}"
+            + (f" — {clip_words(reason_text, 40)}" if reason_text else "")
         )
         self.add_edge(new_id, old_id, EdgeType.SUPERSEDES, weight=1.0)
         self._dirty = True
@@ -995,6 +1027,13 @@ class GraphMemory:
                 h = prev[i][1]
             else:
                 h = self._msg_hash(m)
+                # A short reply ("yes", "ok", "continue") recurs throughout
+                # a session, and hashed on its text alone the second one
+                # read as already processed and was never extracted — the
+                # "yes" accepting a later proposal was lost. Chained to the
+                # message before it, each occurrence is its own message.
+                if fp is None and hashes and len(_content_to_text(m.get("content"))) <= 24:
+                    h = hashlib.sha1((hashes[-1] + h).encode(), usedforsecurity=False).hexdigest()[:16]
             hashes.append(h)
             cache.append((fp, h))
         self._hash_cache = cache
@@ -1052,8 +1091,8 @@ class GraphMemory:
                 )
             except (TypeError, ValueError):
                 payload = repr(msg)
-            return hashlib.sha1(payload.encode("utf-8", "surrogatepass")).hexdigest()[:16]
-        return hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+            return hashlib.sha1(payload.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:16]
+        return hashlib.sha1(text.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:16]
 
     @staticmethod
     def _extracted_to_dict(extracted) -> dict:
@@ -1178,7 +1217,8 @@ class GraphMemory:
                 prior_message = scrub_surrogates(messages[new_idx[0] - 1])
         else:
             new_messages = messages
-            new_hashes = [self._msg_hash(m) for m in messages]
+            hashes = self._history_hashes(messages)
+            new_hashes = hashes
         # Lone surrogates would reach node labels and from there SQLite — see
         # helpers.scrub_surrogates. Only the messages about to be extracted
         # are scrubbed: _msg_hash is surrogate-safe on its own, and copying
@@ -1201,7 +1241,11 @@ class GraphMemory:
                                                    prior_message=prior_message)
         data = extracted_data if isinstance(extracted_data, dict) \
             else self._extracted_to_dict(extracted_data)
-        self._apply_extracted(data, new_messages)
+        self._extracting = True
+        try:
+            self._apply_extracted(data, new_messages)
+        finally:
+            self._extracting = False
 
         # Hashed as sent, not as scrubbed: the next call compares against the
         # raw messages.
@@ -1216,8 +1260,7 @@ class GraphMemory:
         # with the hashes (no schema change) and tells the check above to
         # treat messages older than the window as processed rather than new.
         if len(self._processed_hashes - {_HASHES_TRIMMED}) > _MAX_PROCESSED_HASHES:
-            recent = (hashes[-_MAX_PROCESSED_HASHES:] if hashes is not None
-                      else [self._msg_hash(m) for m in messages[-_MAX_PROCESSED_HASHES:]])
+            recent = hashes[-_MAX_PROCESSED_HASHES:]
             self._processed_hashes = set(recent) | {_HASHES_TRIMMED}
             self._dirty = True  # processed_hashes is part of the persisted row
 
@@ -1360,6 +1403,15 @@ class GraphMemory:
                 for gid in goal_ids:
                     self.add_edge(nid, gid, EdgeType.PART_OF)
 
+        # The replaced side of each switch the transcript states ("switched
+        # from MySQL to PostgreSQL" emits "Use MySQL" and "Use PostgreSQL").
+        # It is history, not a new choice: run through topic detection as
+        # the newest database decision, "Use MySQL" superseded an earlier
+        # "use PostgreSQL for orders", then was itself superseded by it, and
+        # the session was left with no active database decision at all.
+        replaced = {f"Use {sup.get('old', '')}" for sup in data.get("superseded", [])
+                    if isinstance(sup, dict) and sup.get("old")}
+
         # Decisions — linked to tasks that share vocabulary
         for d in data.get("decisions", []):
             label = d.get("label", "")
@@ -1380,7 +1432,8 @@ class GraphMemory:
             nid = self.add_node(NodeType.DECISION, label, NodeStatus.COMPLETED,
                                 summary=summary, importance=0.9,
                                 confidence=node_confidence,
-                                source_role=d.get("source_role") or "assistant")
+                                source_role=d.get("source_role") or "assistant",
+                                detect_conflicts=label not in replaced)
             if nid:
                 decision_ids.append(nid)
                 # A decision naming a file that was already in the graph.
@@ -1485,6 +1538,21 @@ class GraphMemory:
                 continue
             status = NodeStatus.COMPLETED if resolved else NodeStatus.FAILED
             importance = 0.5 if resolved else 0.9
+            if resolved:
+                # "Fixed the ImportError: the Order class was renamed" is the
+                # resolution of the open "ImportError: cannot import name
+                # 'Order'", worded differently. Close that node rather than
+                # add a resolved twin beside a still-open original.
+                open_id = self._open_error_resolved_by(label)
+                if open_id:
+                    err: MemoryNode | None = self._nodes[open_id]
+                    assert err is not None
+                    err.status = NodeStatus.COMPLETED
+                    err.importance = min(err.importance, 0.5)
+                    err.touch()
+                    self._dirty = True
+                    error_ids.append(open_id)
+                    continue
             err_nid = self.add_node(NodeType.ERROR, label, status, importance=importance)
             if err_nid:
                 error_ids.append(err_nid)
@@ -1572,6 +1640,37 @@ class GraphMemory:
             if schema:
                 self.add_node(NodeType.SCHEMA, schema, NodeStatus.COMPLETED, importance=0.7)
 
+    _EXCEPTION_NAME = re.compile(r"\b([A-Z]\w*(?:Error|Exception|Failure))\b")
+    _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+    _HTTP_STATUS = re.compile(r"(?<![\d.])([45]\d\d)(?![\d.])")
+
+    def _open_error_resolved_by(self, label: str) -> str:
+        """Id of the one open ERROR that `label` (a resolved error) closes,
+        or "". Same exception class AND at least one other shared
+        identifier, and unambiguous — two candidates close neither."""
+        kinds = set(self._EXCEPTION_NAME.findall(label))
+        # An HTTP status ("Login keeps returning 422" / "Fixed: 422 error was
+        # missing email validation") names the failure as precisely as an
+        # exception class does, and needs no second shared word.
+        codes = set(self._HTTP_STATUS.findall(label))
+        if not kinds and not codes:
+            return ""
+        words = {w.lower() for w in self._IDENT.findall(label)} - {k.lower() for k in kinds}
+        words -= self._STOP_WORDS | {"fixed", "fix", "error", "the", "was", "now"}
+        matches = []
+        for nid, n in self._nodes.items():
+            if n.type != NodeType.ERROR or n._evicted or n.status != NodeStatus.FAILED:
+                continue
+            if codes & set(self._HTTP_STATUS.findall(n.label)):
+                matches.append(nid)
+                continue
+            if not kinds & set(self._EXCEPTION_NAME.findall(n.label)):
+                continue
+            other = {w.lower() for w in self._IDENT.findall(n.label)}
+            if words & other:
+                matches.append(nid)
+        return matches[0] if len(matches) == 1 else ""
+
     _STOP_WORDS = frozenset({
         "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
         "for", "of", "with", "is", "are", "was", "were", "be", "been",
@@ -1605,6 +1704,25 @@ class GraphMemory:
         "ts":           frozenset({"ts", "typescript"}),
         "typescript":   frozenset({"ts", "typescript"}),
         "js":           frozenset({"js", "javascript", "node", "nodejs"}),
+        # Everyday words for the same engineering concern.
+        "slow":         frozenset({"slow", "latency", "performance", "perf", "render",
+                                   "renders", "rerender", "re-render", "speed"}),
+        "fast":         frozenset({"fast", "latency", "performance", "perf", "speed"}),
+        "speed":        frozenset({"speed", "latency", "performance", "perf", "fast", "slow"}),
+        "check":        frozenset({"check", "checking", "verify", "verified", "validate",
+                                   "count", "counts", "compare"}),
+        "checking":     frozenset({"check", "checking", "verify", "verified", "validate",
+                                   "count", "counts", "compare"}),
+        "lost":         frozenset({"lost", "loss", "missing", "dropped"}),
+        "sign":         frozenset({"sign", "signin", "signup", "login", "logon",
+                                   "register", "registration"}),
+        "signing":      frozenset({"sign", "signin", "signup", "login", "logon",
+                                   "register", "registration"}),
+        "login":        frozenset({"login", "signin", "sign", "logon"}),
+        "logout":       frozenset({"logout", "signout"}),
+        "cleanup":      frozenset({"cleanup", "clean", "cleaned", "teardown", "tear"}),
+        "cleaned":      frozenset({"cleanup", "clean", "cleaned", "teardown", "tear"}),
+        "teardown":     frozenset({"cleanup", "clean", "cleaned", "teardown", "tear"}),
     }
 
     def _supersede_slot(self, new_id: str, slot: str) -> bool:
@@ -1745,9 +1863,12 @@ class GraphMemory:
         if vectors is None:
             return scored
 
+        # Clamped at zero: a negative best similarity made the ratio below
+        # flip sign, ranking the WORST matches highest.
         similarities = [
-            (EmbeddingEngine.cosine(q_emb, vector), node)
+            (max(0.0, EmbeddingEngine.cosine(q_emb, vector)), node)
             for node, vector in zip(nodes, vectors, strict=True) if vector is not None
+
         ]
         if not similarities:
             return scored
@@ -1876,7 +1997,11 @@ class GraphMemory:
         without the semantic pass on; that pass is what turns "related"
         into something the ranker can measure.
         """
-        query_words = self._expand_with_aliases(self._query_tokens(task))
+        # Each word of the question counts once, matched through any of its
+        # aliases. Expanding the question first and dividing by the expanded
+        # size penalised a question for using a word with many aliases.
+        base_words = self._query_tokens(task)
+        word_forms = [self._expand_with_aliases(frozenset({w})) for w in base_words]
         # Nodes the keyword pass rejected. Kept because they are exactly the
         # ones a semantic pass exists to rescue: a node sharing no vocabulary
         # with the question is the case token overlap cannot serve.
@@ -1927,7 +2052,8 @@ class GraphMemory:
             if not node_words:
                 continue
 
-            overlap = len(query_words & node_words) / max(1, len(query_words))
+            overlap = (sum(1 for forms in word_forms if forms & node_words)
+                       / max(1, len(word_forms)))
             recency = 1.0 / (1.0 + node.age_days() * 0.1)
             type_boost = _TYPE_BOOST.get(node.type, 1.0)
             if present and node.status in _OPEN_STATUSES:

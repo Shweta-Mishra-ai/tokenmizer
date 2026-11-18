@@ -20,7 +20,7 @@ import json
 import logging
 import sqlite3
 import time
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from typing import TYPE_CHECKING
 
 from tokenmizer.graph_memory.filelock import LockUnavailable, session_lock
@@ -78,6 +78,16 @@ def quarantine_db(db_path, reason: str) -> bool:
     target = db_path.with_name(f"{db_path.name}.corrupt-{stamp}")
     try:
         db_path.replace(target)
+        # The -wal and -shm files belong to the quarantined database. Left
+        # in place, a fresh file created at db_path would meet the old WAL
+        # and SQLite would try to replay frames from a different database.
+        for suffix in ("-wal", "-shm"):
+            sibling = db_path.with_name(db_path.name + suffix)
+            if sibling.exists():
+                try:
+                    sibling.replace(target.with_name(target.name + suffix))
+                except OSError as e:
+                    logger.error("Could not quarantine %s: %s", sibling, e)
         logger.error(
             "Quarantined corrupt DB %s -> %s (%s). This file held EVERY "
             "session in this storage_dir; a fresh empty DB is being created. "
@@ -259,8 +269,23 @@ def init_db(graph: GraphMemory) -> None:
         conn.close()
 
 
+# session_id -> monotonic time it was deleted in this process. A graph
+# object created before that time is an orphan of the deleted session (a
+# background extraction captured it, or it was evicted and is still held)
+# and must not write the session back; one created after it is a new
+# session that happens to reuse the id.
+_DELETED_AT: dict[str, float] = {}
+
+
+def _orphaned(graph: GraphMemory) -> bool:
+    t = _DELETED_AT.get(graph.session_id)
+    return t is not None and getattr(graph, "_created_at", 0.0) <= t
+
+
 def persist_transition(graph: GraphMemory, t: DecisionTransition) -> None:
     """Persist a single DecisionTransition to its own SQLite table."""
+    if _orphaned(graph):
+        return
     try:
         conn = graph._db_connect()
         try:
@@ -357,11 +382,21 @@ def restore_pruned(graph: GraphMemory, node_id: str) -> bool:
 
 
 def delete_session_rows(storage_dir, session_id: str) -> int:
-    """Delete every graph row of one session. Returns nodes deleted."""
+    """Delete every graph row of one session. Returns nodes deleted.
+
+    Marks the session deleted first (see _orphaned), so a graph object that
+    predates this cannot write it back, and runs under the same
+    cross-process lock as a write so it cannot interleave with one."""
     from pathlib import Path
     db = Path(storage_dir) / "graph_memory.db"
+    _DELETED_AT[session_id] = time.monotonic()
     if not db.exists():
         return 0
+    with session_lock(db.parent, session_id):
+        return _delete_rows(db, session_id)
+
+
+def _delete_rows(db, session_id: str) -> int:
     conn = sqlite3.connect(str(db), timeout=5.0)
     try:
         with conn:
@@ -495,18 +530,26 @@ def load_transitions(graph: GraphMemory) -> None:
         graph._transitions = []
 
 
+_NODE_FIELDS = tuple(f.name for f in fields(MemoryNode))
+_EDGE_FIELDS = tuple(f.name for f in fields(MemoryEdge))
+
+
 def _serialize_state(graph: GraphMemory) -> tuple[dict, dict]:
     """Current nodes and edges as {key: canonical_json}.
 
     sort_keys makes the JSON canonical, so string equality against the
     previously written value is a reliable "did this row change?" test.
     """
+    # Field-by-field rather than dataclasses.asdict(): every field is a
+    # primitive or a str-Enum, so the JSON is byte-identical, and asdict's
+    # recursive deep copy was a third of the cost of a persist on every turn.
     nodes = {
-        nid: json.dumps(asdict(n), sort_keys=True, default=str)
+        nid: json.dumps({f: getattr(n, f) for f in _NODE_FIELDS}, sort_keys=True, default=str)
         for nid, n in graph._nodes.items()
     }
     edges = {
-        edge_key(e): json.dumps(asdict(e), sort_keys=True, default=str)
+        edge_key(e): json.dumps({f: getattr(e, f) for f in _EDGE_FIELDS},
+                                sort_keys=True, default=str)
         for e in graph._edges
     }
     return nodes, edges
@@ -542,6 +585,8 @@ def persist(graph: GraphMemory, force: bool = False) -> bool:
 
     force=True rewrites every row regardless of the diff.
     """
+    if _orphaned(graph):
+        return True   # the session was deleted; nothing of it is to be kept
     if not graph._dirty and not force:
         return True
 
@@ -554,8 +599,7 @@ def persist(graph: GraphMemory, force: bool = False) -> bool:
     # transient, self-healing read failure must not become permanent
     # loss. Try the read once more; only proceed if it succeeds.
     if graph._load_failed:
-        graph._load_failed = False
-        graph._load()
+        _reload_keeping_unsaved(graph)
         if graph._load_failed:
             logger.error(
                 "Refusing to persist session %s: its stored state could "
@@ -583,6 +627,40 @@ def persist(graph: GraphMemory, force: bool = False) -> bool:
         # records the failure.
         logger.warning("Persist deferred for session %s: %s", graph.session_id, e)
         return False
+
+
+def _reload_keeping_unsaved(graph: GraphMemory) -> None:
+    """Retry a failed load without losing what was added since.
+
+    Everything in memory was created after the failed load, so none of it
+    is on disk. Reloading on top of it used to record those nodes as
+    already persisted; the reconcile step then found them missing from
+    disk, read that as another process deleting them, and dropped them —
+    while persist() reported success. So: load into a clean state, then
+    put the unsaved work back as NEW (absent from _persisted_*), which
+    the diff writes and reconcile leaves alone.
+    """
+    unsaved_nodes = dict(graph._nodes)
+    unsaved_edges = list(graph._edges)
+    unsaved_hashes = set(graph._processed_hashes)
+    graph._nodes = {}
+    graph._edges = []
+    graph._processed_hashes = set()
+    graph._load_failed = False
+    graph._load()
+    if graph._load_failed:
+        graph._nodes = unsaved_nodes
+        graph._edges = unsaved_edges
+        graph._processed_hashes = unsaved_hashes
+        return
+    for nid, node in unsaved_nodes.items():
+        stored = graph._nodes.get(nid)
+        if stored is None or node.updated_at >= stored.updated_at:
+            graph._nodes[nid] = node
+    known = {edge_key(e) for e in graph._edges}
+    graph._edges.extend(e for e in unsaved_edges if edge_key(e) not in known)
+    graph._processed_hashes |= unsaved_hashes
+    graph._dirty = True
 
 
 def _reconcile_with_disk(graph: GraphMemory) -> tuple[int, int]:
@@ -947,7 +1025,13 @@ def load(graph: GraphMemory) -> None:
         try:
             conn = graph._db_connect()
             try:
-                conn.execute("DELETE FROM graphs WHERE session_id=?", (graph.session_id,))
+                # Every table this session has rows in — the v2 per-row
+                # tables are where its data actually lives; `graphs` is
+                # only the v1 rollback copy.
+                for table in ("graph_nodes", "graph_edges", "graph_meta", "graphs"):
+                    # `table` is one of four literals above, never input.
+                    conn.execute(f"DELETE FROM {table} WHERE session_id=?",  # nosec B608
+                                 (graph.session_id,))
                 conn.commit()
             finally:
                 conn.close()

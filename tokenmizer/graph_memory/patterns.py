@@ -395,12 +395,20 @@ _WORK_CLAUSE_START = re.compile(
 # stalled with it). A clause longer than this is a run-on, and context
 # further back than this does not govern a word here anyway.
 _CLAUSE_SCAN = 400
+_SENTENCE_END_FWD = re.compile(r"[.!?\n]")
+
 
 
 def _clause_start(content: str, pos: int) -> int:
     lo = max(0, pos - _CLAUSE_SCAN)
     cut = max(content.rfind(c, lo, pos) for c in ".!?\n")
     return cut + 1 if cut >= 0 else lo
+
+
+def _sentence_end(content: str, match_start: int) -> int:
+    hi = min(len(content), match_start + _CLAUSE_SCAN)
+    m = _SENTENCE_END_FWD.search(content, match_start, hi)
+    return m.start() if m else hi
 
 
 def _tech_mention_is_a_decision(content: str, start: int, end: int) -> bool:
@@ -451,10 +459,52 @@ _NEGATION_WORDS = re.compile(
 )
 
 
+# Someone else's choice, or an option weighed and dropped, is not this
+# session's decision. "For comparison, many teams use MongoDB for orders"
+# and "I considered using MySQL but rejected it" both read as a choice to
+# every pass above, and the new "decision" then superseded the real one.
+# Scoped to the clause (back to a comma, "but", "and", or a sentence
+# boundary), so "We considered Kafka, and chose RabbitMQ" keeps RabbitMQ.
+_REPORTED_CHOICE = re.compile(
+    r"\b(?:(?:many|most|some|other|lots\s+of|a\s+lot\s+of)\s+"
+    r"(?:teams|people|companies|projects|folks|devs|developers|orgs|shops)|"
+    r"for\s+comparison|in\s+comparison|compared\s+(?:to|with)|"
+    r"considered|considering|thought\s+about|looked\s+at|evaluated|"
+    r"rejected|ruled\s+out|decided\s+against|instead\s+of)\b",
+    re.IGNORECASE,
+)
+# The rejection that arrives after the option: "MySQL ... but rejected it".
+_REJECTED_AFTER = re.compile(
+    r"\bbut\s+(?:then\s+|later\s+|ultimately\s+)?(?:rejected|dropped|"
+    r"abandoned|ruled\s+(?:it|that|them)\s+out|decided\s+against)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_BREAK_BACK = re.compile(r"[.!?\n,;:]|\s(?:but|and|so|then|however)\s",
+                                re.IGNORECASE)
+
+
 def _is_negated_context(content: str, match_start: int) -> bool:
-    """True if `match_start` in `content` falls inside a negated clause."""
-    return bool(_NEGATION_WORDS.search(
-        content, _clause_start(content, match_start), match_start))
+    """True if `match_start` in `content` falls inside a negated clause, or
+    in a clause that reports someone else's choice or a rejected option."""
+    clause_start = _clause_start(content, match_start)
+    before = content[clause_start:match_start]
+    if _NEGATION_WORDS.search(before):
+        return True
+    breaks = list(_CLAUSE_BREAK_BACK.finditer(before))
+    clause = before[breaks[-1].end():] if breaks else before
+    if _REPORTED_CHOICE.search(clause):
+        return True
+    return bool(_REJECTED_AFTER.search(content[match_start:_sentence_end(content, match_start)]))
+
+
+# A label that names no option at all ("our choice", "the plan") or states
+# the negation itself ("not to use MongoDB") cannot be a decision.
+_BOGUS_DECISION_LABEL = re.compile(
+    r"^(?:(?:our|my|the|this|that|their|your|same|current|original)\s+)?"
+    r"(?:choice|decision|plan|approach|option|pick|call|stack|setup|one|idea)s?$"
+    r"|^(?:not|no|never|don'?t|avoid)\b",
+    re.IGNORECASE,
+)
 
 
 # The verb itself is negated: "is NOT done", "haven't fixed", "never
@@ -466,10 +516,13 @@ _NEGATED_VERB = re.compile(
     # The apostrophe is required: without it "incide|nt| was resolved" read
     # as "n't was resolved" and a finished task was thrown away.
     r"(?:\bnot|\bnever|\bcannot|n['\u2019]t|\bno longer|\byet to(?:\s+be)?)\s+(?:\w+\s+)?$",
+
     re.IGNORECASE,
 )
 
 
+def is_bogus_decision_label(label: str) -> bool:
+    return bool(_BOGUS_DECISION_LABEL.search(label.strip().rstrip(".!")))
 def is_negated_verb(content: str, verb_start: int) -> bool:
     return bool(_NEGATED_VERB.search(content[max(0, verb_start - 30):verb_start]))
 
@@ -508,8 +561,9 @@ def _is_question_context(content: str, match_start: int) -> bool:
     """True if the clause containing `match_start` ends in a question mark.
     Looks at most _CLAUSE_SCAN characters ahead; see _clause_start."""
     hi = min(len(content), match_start + _CLAUSE_SCAN)
-    ends = [i for i in (content.find(c, match_start, hi) for c in ".!?\n") if i >= 0]
-    return bool(ends) and content[min(ends)] == "?"
+    m = _SENTENCE_END_FWD.search(content, match_start, hi)
+    return m is not None and m.group() == "?"
+
 
 
 # Pass 5: config decisions — "expires in 15 minutes", "cost factor 12"
@@ -923,6 +977,20 @@ def _sentence_index(text: str, position: int) -> int:
 def _content_words(text: str) -> int:
     """How much a label actually says — distinct words over two characters."""
     return len({w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2})
+
+
+def clip_words(text: str, max_chars: int) -> str:
+    """`text` within `max_chars`, cut at a word boundary and marked with an
+    ellipsis. A plain slice injected "(We switched from moment.js to
+    date-fns because the )" into the request: half a reason, read by the
+    model as a whole one."""
+    text = " ".join((text or "").split())
+    if len(text) <= max_chars:
+        return text
+    head = text[:max_chars - 1]
+    if " " in head and not text[max_chars - 1].isspace():
+        head = head.rsplit(" ", 1)[0]
+    return head.rstrip(" ,;:-") + "…"
 
 
 def _clip(text: str, max_chars: int = 90) -> str:
@@ -2013,9 +2081,26 @@ _DEPENDENCY = re.compile(
     re.IGNORECASE,
 )
 
+# A runtime, framework or platform with its version: "FastAPI 0.111",
+# "Node 20", "CUDA 12.1", "Kubernetes 1.29". The list was ten names, so a
+# stack line named three components and two were kept. Names that are also
+# ordinary words ("go", "rust", "react", "spring") need a dotted version;
+# the rest also take a bare major version ("Postgres 15", "Java 21").
+_ENV_ANY_VERSION = (
+    r"Python|Node(?:\.?js)?|Docker|Redis|Postgres(?:QL)?|"
+    r"SQLite|MongoDB|MySQL|MariaDB|Linux|macOS|Windows|Ubuntu|Debian|Alpine|"
+    r"CentOS|Fedora|RHEL|Java|JDK|OpenJDK|Kotlin|Scala|Ruby|PHP|Perl|Elixir|"
+    r"Erlang/OTP|\.NET|dotnet|TypeScript|Deno|Bun|Django|Flask|FastAPI|"
+    r"Rails|Laravel|Angular|Next\.js|Nuxt|Svelte|Vite|webpack|Kubernetes|k8s|"
+    r"Helm|Terraform|Ansible|Kafka|RabbitMQ|Elasticsearch|OpenSearch|nginx|"
+    r"CUDA|cuDNN|PyTorch|TensorFlow|JAX|NumPy|pandas|Spark|Airflow|iOS|Android|"
+    r"Xcode|Gradle|Maven|Clang|GCC|LLVM"
+)
+_ENV_DOTTED_ONLY = (r"Go|Golang|Rust|React|Vue|Spring(?:\s+Boot)?|Swift|Dart|Flutter|"
+                    r"npm|pnpm|yarn|pip")
 _ENV = re.compile(
-    r'(?:Python|Node\.?js?|npm|pip|Docker|Redis|PostgreSQL|SQLite|MongoDB|'
-    r'Linux|macOS|Windows|Ubuntu|Debian)\s+([\d\.]+\+?)',
+    r"\b(?:(?:" + _ENV_ANY_VERSION + r")\s+v?\d+(?:\.\d+)*\+?"
+    r"|(?:" + _ENV_DOTTED_ONLY + r")\s+v?\d+(?:\.\d+)+\+?)(?![\w.])",
     re.IGNORECASE,
 )
 
@@ -2213,7 +2298,9 @@ def looks_english(text: str) -> bool:
 # exception, `FAILED tests/…`, `error: …` — is left visible. And a quoted
 # span naming an exception or a status code is the error message itself
 # ('I get "TypeError: x is undefined"'), so it is left visible too.
-_FENCED = re.compile(r"(```|~~~)[^\n]*\n.*?(?:\1|\Z)", re.DOTALL)
+# The info string after the opening fence is capped: unbounded, a run of
+# backticks with no newline was rescanned from every position (quadratic).
+_FENCED = re.compile(r"(```|~~~)[^\n]{0,200}\n.*?(?:\1|\Z)", re.DOTALL)
 _TABLE_ROW = re.compile(r"^[ \t]*\|.*\|[ \t]*$", re.MULTILINE)
 _QUOTED = re.compile(r'"[^"\n]{1,300}"|“[^”\n]{1,300}”')
 _LOG_ERROR_LINE = re.compile(

@@ -39,6 +39,10 @@ dependencies = [
     "rich>=13.7.0",
     "tiktoken>=0.7.0",
     "pyyaml>=6.0.1",
+    # Not used directly: httpx and the provider SDKs verify TLS against it.
+    # Floor set past PYSEC-2026-4320 (a root whose intermediates' keys were
+    # compromised), so a fresh install cannot resolve to an affected bundle.
+    "certifi>=2026.10.19",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +55,9 @@ cohere = ["cohere>=5.5.0"]
 cache = ["sentence-transformers>=3.0.0", "numpy>=1.26.0"]
 
 # File intelligence extras (better PDF/Excel support)
-files = ["pypdf>=4.0.0", "openpyxl>=3.1.0"]
+# pypdf parses PDFs users paste or upload. 6.21.2 fixes a run of crafted-PDF
+# denial-of-service bugs (infinite loops, unbounded memory) in 6.17-6.21.1.
+files = ["pypdf>=6.21.2", "openpyxl>=3.1.0"]
 
 # ML compression (much better than heuristic-only)
 compression = ["llmlingua>=0.2.0"]
@@ -64,7 +70,9 @@ compression = ["llmlingua>=0.2.0"]
 redis = ["redis>=5.0.0"]
 
 # Observability
-observability = ["prometheus-client>=0.20.0", "opentelemetry-sdk>=1.25.0", "opentelemetry-api>=1.25.0"]
+# opentelemetry-api floor: CVE-2026-114603, quadratic-time parsing of an
+# inbound `tracestate` header (one request can hold a worker for seconds).
+observability = ["prometheus-client>=0.20.0", "opentelemetry-sdk>=1.45.1", "opentelemetry-api>=1.45.1"]
 
 # Framework adapters under examples/ (langchain_memory.py,
 # langgraph_checkpointer.py). Not a runtime dependency of the proxy or of

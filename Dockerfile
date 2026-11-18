@@ -12,6 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # an editable/-e install here would fail because hatchling can't find the
 # package dir). tomllib is stdlib in 3.11+.
 COPY pyproject.toml README.md ./
+# The base image's pip, setuptools and wheel carry known path-traversal and
+# code-execution advisories in their install paths; upgrade them before
+# they install anything.
+RUN pip install --no-cache-dir --upgrade "pip>=26.2" "setuptools>=84.1.0" "wheel>=0.46.2"
 RUN python -c "import tomllib; \
     deps = tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']; \
     print('\n'.join(deps))" > /tmp/reqs.txt \
@@ -93,12 +97,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# IMPORTANT: --workers 1. Session locks, graph LRU cache, rate limiter and
-# analytics are in-process. With >1 worker each process holds divergent state
-# for the same session (last-writer-wins graph loss, split rate limits).
-# Scale horizontally only after moving state to the Redis backend
-# (TOKENMIZER_STATE_BACKEND=redis) AND making graph/analytics multi-process
-# safe. Until then: one worker, scale vertically.
+# One worker by default. Graph and checkpoint writes are safe across
+# processes (per-row storage under a cross-process file lock), but the
+# graph cache, analytics and semantic cache are per process; with more
+# workers set TOKENMIZER_STATE_BACKEND=sqlite so rate limits are shared.
 CMD ["python", "-m", "uvicorn", "tokenmizer.api.app:app", \
      "--host", "0.0.0.0", "--port", "8000", \
      "--workers", "1", "--log-level", "info"]

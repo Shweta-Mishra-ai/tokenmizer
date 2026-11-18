@@ -6,14 +6,17 @@ Split out of api/app.py. Re-exported there, so `app.ChatRequest` and
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from tokenmizer.graph_memory.helpers import scrub_surrogates
+from tokenmizer.security.http_guard import MAX_SESSION_ID_LENGTH, RESERVED_SESSION_PREFIX
 
 
 class ChatMessage(BaseModel):
     """OpenAI-style message. `content` accepts a plain string OR a list of
-    content blocks (multimodal format). Blocks are normalized to text —
-    TokenMizer is a text proxy; non-text blocks (images) are dropped with
-    their text parts preserved.
+    content blocks (multimodal format). The pipeline works on the text;
+    non-text blocks (images, documents) ride beside it and are put back
+    for a provider that accepts them (see app._with_media).
 
     Tool calling carries three more fields, all optional: an assistant
     turn's `tool_calls`, and a `role: "tool"` turn's `tool_call_id` (and
@@ -28,9 +31,26 @@ class ChatMessage(BaseModel):
     tool_call_id: str | None = None
     name: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _valid_text(cls, data):
+        # A lone surrogate is legal JSON and unencodable UTF-8: the provider
+        # SDK failed to serialise the request and the client got a 502.
+        return scrub_surrogates(data)
+
     def text(self) -> str:
         from tokenmizer.graph_memory.helpers import _content_to_text
         return _content_to_text(self.content)
+
+    def media_blocks(self) -> list:
+        """Content blocks text() drops (images, documents, audio)."""
+        if not isinstance(self.content, list):
+            return []
+        return [b for b in self.content
+                if isinstance(b, dict) and b.get("type") not in (None, "text")]
+
+    def non_text_blocks(self) -> int:
+        return len(self.media_blocks())
 
     def to_dict(self) -> dict:
         """The pipeline's message shape: role + text content, plus the
@@ -44,6 +64,12 @@ class ChatMessage(BaseModel):
             d["tool_call_id"] = self.tool_call_id
         if self.name:
             d["name"] = self.name
+        # Images and other non-text blocks ride beside the text, untouched
+        # by every layer, and are put back just before the provider call
+        # (see _with_media) for a provider that accepts them.
+        media = self.media_blocks()
+        if media:
+            d["_media"] = media
         return d
 
 
@@ -83,6 +109,12 @@ class ChatRequest(BaseModel):
     # far from the cause.
     n: int | None = Field(default=None, ge=1, le=1)
 
+    @field_validator("tools", "stop", mode="before")
+    @classmethod
+    def _valid_payload_text(cls, v):
+        # Sent to the provider verbatim: the same rule as message content.
+        return scrub_surrogates(v)
+
     @field_validator("session_id")
     @classmethod
     def _session_id_is_text(cls, v: str | None) -> str | None:
@@ -95,6 +127,10 @@ class ChatRequest(BaseModel):
                 v.encode("utf-8")
             except UnicodeEncodeError:
                 raise ValueError("session_id must be valid Unicode text") from None
+            if len(v) > MAX_SESSION_ID_LENGTH:
+                raise ValueError(f"session_id is longer than {MAX_SESSION_ID_LENGTH} characters")
+            if v.startswith(RESERVED_SESSION_PREFIX):
+                raise ValueError(f"session_id may not start with {RESERVED_SESSION_PREFIX!r}")
         return v
 
 

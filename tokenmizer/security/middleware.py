@@ -69,11 +69,18 @@ _INJECTION_PATTERNS = [
     # filter rules with double encoding".
     re.compile(r'(?:print|reveal|show|output)\s+(?:your\s+|the\s+)?system\s+prompt', re.IGNORECASE),
     re.compile(r'(?:print|reveal)\s+your\s+(?:instructions|api\s+key)', re.IGNORECASE),
-    re.compile(r'repeat\s+(?:the\s+|your\s+)?words?\s+above', re.IGNORECASE),
+    # The object must be the prompt's own text: "repeat the words above" is
+    # the extraction trick, "repeat the above steps in TypeScript" is not.
+    re.compile(r'repeat\s+(?:the\s+|your\s+)?(?:words?|text|prompt|instructions)\s+above', re.IGNORECASE),
     re.compile(r'bypass\s+your\s+(?:safety|filters?|restrictions?|guardrails?)', re.IGNORECASE),
     re.compile(r'pretend\s+(?:you\s+have\s+no|there\s+(?:are|is)\s+no)\s+(?:restrictions?|rules?|filters?)', re.IGNORECASE),
     re.compile(r'this\s+is\s+a\s+(?:test|simulation)[,.]?\s+(?:ignore|disregard|skip)', re.IGNORECASE),
 ]
+
+# Text inside quotes is being talked ABOUT ("make the bot refuse 'ignore
+# previous instructions'"), not said to the model. Removed before matching.
+_QUOTED = re.compile(r'"[^"\n]{0,300}"|\u201c[^\u201d\n]{0,300}\u201d|'
+                     r"(?<![A-Za-z])'[^'\n]{0,300}'(?![A-Za-z])|`[^`\n]{0,300}`")
 
 
 def _content_to_plain_text(content) -> str:
@@ -121,7 +128,7 @@ def _scan_messages(messages: list[dict]) -> bool:
     content would let an attacker bypass the filter completely by
     wrapping the text in a one-element content-block list."""
     for msg in _new_user_turns(messages):
-        text = _content_to_plain_text(msg.get("content"))
+        text = _QUOTED.sub(" ", _content_to_plain_text(msg.get("content")))
         if not text:
             continue
         # Same normalisation the memory-side check uses: a zero-width

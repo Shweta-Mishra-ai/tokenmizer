@@ -12,7 +12,7 @@ python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
 python -m benchmarks.savings.runner                 # input cost, with and without
-pytest tests/ -q                                     # 2359 tests
+pytest tests/ -q                                     # 2535 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -93,8 +93,8 @@ cache marker, per-model minimum, reads at 0.1x the input price, writes at
 |---:|---:|---:|---:|---:|
 | 10 | 462 | 2,333 | 2,333 | 2,333 (level / level) |
 | 40 | 2,057 | 41,556 | 14,745 | 15,108 (**64% less** / 2.5% more) |
-| 150 | 7,967 | 596,900 | 77,998 | 69,193 (**88% less** / **11% less**) |
-| 300 | 16,040 | 2,399,067 | 268,767 | 149,757 (**94% less** / **44% less**) |
+| 150 | 7,967 | 596,900 | 77,998 | 62,355 (**90% less** / **20% less**) |
+| 300 | 16,040 | 2,399,067 | 268,767 | 131,778 (**95% less** / **51% less**) |
 
 The two percentages are against the two client columns. Where the saving
 comes from: below about 4,000 tokens of history, prompt caching — the
@@ -124,6 +124,11 @@ Three things were fixed to get here, each measured with this runner:
   caching every message is now compressed the first time it is sent. On
   a 60-turn replay with long replies: 54% more than a self-caching client
   before, 29% less after.
+* the cut keeps the tail at the cache minimum and no more (every cut
+  rewrites the cached prefix, so a smaller tail is a cheaper rewrite and a
+  longer run before the next one), and a graph node is injected only when
+  it shares vocabulary with the turn or is a goal or an active decision:
+  150 turns 11% → 20% less, 300 turns 44% → 51% less.
 
 Read before quoting:
 
@@ -237,7 +242,10 @@ re-render"). If the question quoted the answer, the person would not have
 needed to ask — and those are exactly the cases token-overlap ranking
 cannot serve.
 
-**recall@6 92%** (37/40) with keyword ranking. It was 88% before the ranker
+**recall@6 95%** (38/40) with keyword ranking. It was 92% before overlap was
+scored per question word through its aliases (expanding first penalised a
+question for using a word with many synonyms) and everyday synonyms were
+added (slow ↔ latency, check ↔ verify, sign in ↔ login). It was 88% before the ranker
 learned to read a question's intent (failure, decision, progress or location
 words, and present tense), and 90% before identifiers were also matched by
 their parts (`quartz_uploader` answers "the quartz uploader"), function words

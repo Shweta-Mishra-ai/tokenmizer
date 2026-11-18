@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from collections import OrderedDict
@@ -31,7 +33,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from tokenmizer import __version__
 from tokenmizer.analytics.engine import AnalyticsEngine
@@ -72,6 +74,7 @@ from tokenmizer.api.injection import (  # noqa: E402,F401
     _content_words,
     _inject_context,
     _last_substantive_query,
+    _worth_injecting,
 )
 from tokenmizer.api.request_helpers import (  # noqa: E402,F401
     _CONTEXT_WINDOWS,
@@ -466,6 +469,13 @@ def _get_provider():
     return _provider
 
 
+def _provider_or_none():
+    try:
+        return _get_provider()
+    except Exception:
+        return None
+
+
 def _provider_failure_detail(correlation_id: str) -> str:
     """The client-facing text of a failed provider call. It stays opaque (SDK
     exceptions embed URLs and other internals), except for one cause that is
@@ -702,6 +712,10 @@ async def _get_graph_async(session_id: str) -> GraphMemory:
 # kill can lose at most this much graph activity.
 FLUSH_INTERVAL_SECONDS = 30
 
+# New messages between two auto-checkpoints of one session. See _update_graph.
+AUTO_CHECKPOINT_EVERY = 10
+_last_auto_checkpoint: OrderedDict[str, int] = OrderedDict()
+
 
 async def _flush_all_graphs(reason: str, skip_busy: bool = False) -> tuple[int, int]:
     """force-persist every cached graph. Returns (flushed, failed).
@@ -854,7 +868,26 @@ async def lifespan(app: FastAPI):
 # The data files that cannot import Python (server.json, plugin.json,
 # marketplace.json) still pin literals, and tests/unit/test_version_
 # consistency.py holds those to __version__.
+class _SafeJSONResponse(JSONResponse):
+    r"""JSON that cannot fail to render.
+
+    A route that echoes client text (a checkpoint's resume block, a
+    filename, a query) crashed in Starlette's UTF-8 encode when that text
+    held a lone surrogate, and the client got a bare "Internal Server
+    Error". Escaping to ASCII writes it back as the same `\ud83d` the
+    client sent; ordinary responses keep the compact UTF-8 form.
+    """
+
+    def render(self, content) -> bytes:
+        try:
+            return super().render(content)
+        except UnicodeEncodeError:
+            return json.dumps(content, ensure_ascii=True, allow_nan=False,
+                              separators=(",", ":")).encode("ascii")
+
+
 app = FastAPI(
+    default_response_class=_SafeJSONResponse,
     title="TokenMizer",
     description="Never lose your AI context again.",
     version=__version__,
@@ -876,6 +909,17 @@ async def _validation_error(request: Request, exc: RequestValidationError) -> Re
     body = json.dumps({"detail": jsonable_encoder(exc.errors())}, ensure_ascii=True)
     return Response(content=body, status_code=422, media_type="application/json")
 
+# Outermost: runs before routing and before any body is read. See
+# security/http_guard.py for the four attacks it closes.
+from tokenmizer.security.http_guard import HTTPGuard  # noqa: E402
+
+app.add_middleware(
+    HTTPGuard,
+    auth_configured=lambda: bool(settings.api_key or any(settings.api_keys)),
+    trusted_hosts=lambda: settings.security.trusted_hosts,
+    cors_origins=lambda: settings.cors_origins,
+    max_body_bytes=settings.security.max_request_bytes,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,  # defaults: localhost:3000, localhost:8000
@@ -917,7 +961,6 @@ def _cache_context(req: ChatRequest, model: str, raw_messages: list[dict]) -> st
     "stop". Two requests may share an answer only when they asked the same
     model the same thing under the same limits.
     """
-    import hashlib
     params = json.dumps({
         "model": model,
         "max_tokens": _max_tokens(req),
@@ -1090,11 +1133,16 @@ def _apply_compression_layers(
     user_query = next(
         (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
     )
-    # Layer 0: File intelligence
-    messages, file_saved = _file_intelligence.process_message_files(
-        messages, token_budget_per_file=600, query=user_query
-    )
-    savings["file_extraction"] = file_saved
+    # Layer 0: File intelligence. Older turns only, unless configured
+    # otherwise — see FileIntelligenceSettings.
+    fi = settings.file_intelligence
+    if fi.enabled:
+        messages, file_saved = _file_intelligence.process_message_files(
+            messages, token_budget_per_file=fi.token_budget_per_file,
+            query=user_query, digest_current_turn=fi.digest_current_turn,
+        )
+        if file_saved:
+            savings["file_extraction"] = file_saved
 
     # Layer 1: Prompt compression
     if settings.compression.enabled:
@@ -1215,6 +1263,13 @@ async def _cross_session_query(
             other_graphs[sid] = await _get_graph_async(sid)
         except Exception as e:
             logger.warning(f"Cross-session recall: could not load session {sid!r}: {e}")
+    # A session whose lock is held may have an extraction running in a
+    # worker thread, mutating its node dict while query_across_sessions
+    # iterates it ("dictionary changed size during iteration"). Skip it for
+    # this turn. Nothing below awaits, so a lock free now stays free until
+    # the query has returned.
+    other_graphs = {sid: g for sid, g in other_graphs.items()
+                    if not (_session_locks.get(sid) and _session_locks[sid].locked())}
 
     return query_across_sessions(
         graph, list(other_graphs), retrieval_query, top_k,
@@ -1282,11 +1337,14 @@ async def _update_graph(
                 await _extract_heuristic(graph, raw_messages)
                 _lock_ref = _get_session_lock(session_id)
 
+                _started = [False]
+
                 async def _background_extract(
                     _g=graph, _msgs=new_msgs, _all=raw_messages,
                     _cheap=cheap, _lock=_lock_ref, _sid=session_id,
                 ):
                     global _extraction_pending
+                    _started[0] = True
                     _extraction_pending -= 1
                     with _extraction_slot() as got_slot:
                         if not got_slot:
@@ -1347,7 +1405,15 @@ async def _update_graph(
 
                 if _extraction_has_capacity():
                     _extraction_pending += 1
-                    _track_background_task(_background_extract())
+                    task = _track_background_task(_background_extract())
+
+                    def _release_if_never_started(_t, _s=_started):
+                        # Cancelled (e.g. at shutdown) before it ran: the
+                        # body that decrements the queue count never did.
+                        global _extraction_pending
+                        if not _s[0]:
+                            _extraction_pending -= 1
+                    task.add_done_callback(_release_if_never_started)
                 else:
                     # Do not even build the coroutine: its closure holds
                     # this turn's transcript, and a queue of those is the
@@ -1442,9 +1508,11 @@ async def _update_graph(
             message_words = await asyncio.to_thread(
                 lambda: [_content_words(_content_to_text(m.get("content")))
                          for m in messages])
+            query_words = graph._expand_with_aliases(graph._query_tokens(retrieval_query))
             relevant_pairs = [
                 (n, sid) for n, sid in relevant_pairs
                 if not _already_in_payload(n, message_words)
+                and _worth_injecting(graph, n, query_words)
             ]
             if relevant_pairs:
                 _inject_context(messages, session_id, relevant_pairs)
@@ -1519,8 +1587,14 @@ async def _update_graph(
     # CheckpointManager._prune_auto_checkpoints, which caps retained
     # auto-checkpoints per session and never touches manual ones.
     checkpoint_status: dict[str, Any] = {"attempted": False, "succeeded": False, "checkpoint_id": None}
+    # Once a session is over the threshold it stays over it, and every turn
+    # used to write a full snapshot. One per AUTO_CHECKPOINT_EVERY new
+    # messages keeps the safety net current without paying that each turn.
+    last = _last_auto_checkpoint.get(session_id)
+    due = last is None or len(raw_messages) - last >= AUTO_CHECKPOINT_EVERY \
+        or len(raw_messages) < last
     if (context_pct >= settings.graph_checkpoint.trigger_at_percent
-            and settings.graph_checkpoint.enabled):
+            and settings.graph_checkpoint.enabled and due):
         checkpoint_status["attempted"] = True
         last_error: Exception | None = None
         for attempt in range(2):  # one retry for transient SQLite lock contention
@@ -1536,6 +1610,9 @@ async def _update_graph(
                     trigger="auto_threshold",
                     model=model,
                 )
+                _last_auto_checkpoint[session_id] = len(raw_messages)
+                while len(_last_auto_checkpoint) > _SESSION_LOCK_MAX:
+                    _last_auto_checkpoint.pop(next(iter(_last_auto_checkpoint)))
                 logger.info(f"Auto-checkpoint {ckpt.checkpoint_id} for {session_id}")
                 checkpoint_status["succeeded"] = True
                 checkpoint_status["checkpoint_id"] = ckpt.checkpoint_id
@@ -1547,7 +1624,8 @@ async def _update_graph(
                     logger.warning(
                         f"Auto-checkpoint attempt 1 failed for {session_id}, retrying once: {e}"
                     )
-                await asyncio.sleep(0.1)
+                if attempt == 0:
+                    await asyncio.sleep(0.1)
         if last_error is not None:
             logger.error(
                 f"Auto-checkpoint FAILED for {session_id} after retry — "
@@ -1557,6 +1635,55 @@ async def _update_graph(
             _analytics.record_silent_failure("checkpoint")
 
     return messages, checkpoint_status
+
+
+# Provider errors that say nothing about the request's SHAPE: the same
+# request, retried untransformed, would fail or succeed for the same
+# reason. Retrying them doubled traffic to a rate-limiting provider and,
+# when the retry happened to succeed, reported a transient upstream blip
+# as a TokenMizer pipeline bug.
+_NOT_A_REQUEST_FAULT = re.compile(
+    r"rate_limit|http_(?:401|403|408|429|5\d\d)|timeout|max_retries", re.I)
+
+
+def _should_retry_untransformed(e: Exception) -> bool:
+    from tokenmizer.providers.providers import ProviderError
+    if not isinstance(e, ProviderError):
+        return True
+    if e.retryable or _NOT_A_REQUEST_FAULT.search(e.error_type or ""):
+        return False
+    return True
+
+
+def _with_media(messages: list[dict], provider) -> list[dict]:
+    """The messages as the provider should receive them: each message's
+    non-text blocks restored after its text when the provider accepts
+    images, and the internal `_media` key removed either way."""
+    keep = getattr(provider, "supports_images", False) is True
+    out = []
+    for m in messages:
+        media = m.get("_media")
+        if not media:
+            out.append(m)
+            continue
+        m = {k: v for k, v in m.items() if k != "_media"}
+        if keep:
+            text = m.get("content") or ""
+            m["content"] = ([{"type": "text", "text": text}] if text else []) + list(media)
+        out.append(m)
+    return out
+
+
+def _net_saved(savings: dict, orig: int, sent: int, cache_hit: bool) -> int:
+    """Input tokens the provider was NOT sent, net of what the proxy added.
+
+    Summing the per-layer savings ignored the other direction — the terse
+    system prompt, the injected context, the fence preambles — so a turn
+    could report savings while sending more than the client did. The
+    per-layer breakdown stays in `savings`; the headline is the net."""
+    if cache_hit:
+        return orig
+    return max(0, orig - sent)
 
 
 async def _call_provider(
@@ -1594,7 +1721,7 @@ async def _call_provider(
     kwargs = dict(model=model, max_tokens=_max_tokens(req), stream=False,
                   **_sampling_kwargs(req), **_tool_kwargs(req))
     try:
-        resp = await provider.chat(messages=messages, **kwargs)
+        resp = await provider.chat(messages=_with_media(messages, provider), **kwargs)
     except Exception as e:
         # The request that failed is the one TokenMizer BUILT — windowed,
         # compressed, with context injected. If it differs from what the
@@ -1617,7 +1744,8 @@ async def _call_provider(
                 f"messages: {type(e).__name__}"
             )
             try:
-                resp = await provider.chat(messages=raw_messages, **kwargs)
+                resp = await provider.chat(messages=_with_media(raw_messages, provider),
+                                           **kwargs)
             except Exception as e2:
                 logger.error(f"Provider error [{correlation_id}] (both attempts): "
                              f"transformed={e!r}; untransformed={e2!r}")
@@ -1702,8 +1830,12 @@ async def chat_completions(req: ChatRequest, request: Request):
       _update_graph()           — graph extraction, windowing, context inject
       _call_provider()          — cache → LLM → output trim → cache write
     """
+    # No session id, no memory. A generated id used to be claimed, given a
+    # graph, persisted and auto-checkpointed on every request — and since
+    # standard OpenAI clients never send one, each of their requests became
+    # a permanent one-message session nobody could ever resume.
     session_id = _session_id_for(req, request)
-    _reject_unrepresentable_content(req)
+    _reject_unrepresentable_content(req, _provider_or_none())
     model      = req.model or settings.default_model
     # One exact-match substitution, never re-applied, so a map that points
     # at another of its own keys cannot loop. The original name is echoed
@@ -1750,8 +1882,13 @@ async def chat_completions(req: ChatRequest, request: Request):
     # into that session's graph — a write-side version of the same hole
     # the read endpoints had. See security/ownership.py.
     principal = getattr(request.state, "principal", DEV_PRINCIPAL)
+    # Cache scope and analytics key for a request with no session: per
+    # principal, so anonymous callers holding different keys never share
+    # cached answers.
+    scope_id = session_id or f"__anon__:{principal}"
     try:
-        _ownership.check_access(session_id, principal, claim=True)
+        if session_id is not None:
+            _ownership.check_access(session_id, principal, claim=True)
     except SessionAccessDenied:
         logger.warning(f"Denied chat request for session {session_id!r} — different principal")
         raise HTTPException(
@@ -1799,7 +1936,17 @@ async def chat_completions(req: ChatRequest, request: Request):
     # cacheable: the answer is a step in a plan, not a reply to a
     # question, and user_content="" disables both lookup and write.
     ends_on_user = bool(raw_messages) and raw_messages[-1].get("role") == "user"
-    user_content = user_query if (ends_on_user and not req.tools) else ""
+    # An image changes the question without changing its text, so a turn
+    # carrying one is never answered from, or written to, the cache.
+    #
+    # Nor is a request that asked for variety (temperature > 0) or said
+    # no-cache. A client's "regenerate" resends the identical conversation,
+    # which is exactly what the session-scoped cache matches — so it got
+    # the same answer back for an hour, at temperature 0.7.
+    cacheable = (ends_on_user and not req.tools and not raw_messages[-1].get("_media")
+                 and not (req.temperature is not None and req.temperature > 0)
+                 and "no-cache" not in request.headers.get("cache-control", "").lower())
+    user_content = user_query if cacheable else ""
 
     # Layer 0-2: file intelligence, compression, terse injection
     messages = _apply_compression_layers(messages, settings, savings,
@@ -1809,7 +1956,7 @@ async def chat_completions(req: ChatRequest, request: Request):
 
     # Layer 4: graph update + context injection (mutates messages)
     checkpoint_status: dict = {"attempted": False, "succeeded": False, "checkpoint_id": None}
-    if settings.graph_checkpoint.enabled:
+    if settings.graph_checkpoint.enabled and session_id is not None:
         graph    = await _get_graph_async(session_id)
         # Two separate protections, for two separate hazards.
         #
@@ -1847,13 +1994,14 @@ async def chat_completions(req: ChatRequest, request: Request):
     # input-side layers (file intel, compression, graph context) still apply.
     if req.stream:
         return _stream_response(req, messages, model, user_content,
-                                session_id, savings, orig_input_tokens,
-                                raw_messages=raw_messages)
+                                scope_id, savings, orig_input_tokens,
+                                raw_messages=raw_messages,
+                                public_session_id=session_id)
 
     # Layer 5: call provider (or return cache hit)
     outcome: dict = {}
     response_text, input_tokens_actual, output_tokens, latency_ms, cache_hit = await _call_provider(
-        req, messages, model, user_content, session_id, savings,
+        req, messages, model, user_content, scope_id, savings,
         raw_messages=raw_messages, outcome=outcome,
     )
     # What the provider answered with, and — separately — whether the
@@ -1880,7 +2028,7 @@ async def chat_completions(req: ChatRequest, request: Request):
     total_saved = orig_input_tokens - sent_input_tokens
     layers = _net_layers(savings, orig_input_tokens, sent_input_tokens)
     _analytics.record(
-        session_id=session_id,
+        session_id=scope_id,
         provider=settings.provider,
         model=model,
         input_tokens_original=orig_input_tokens,
@@ -1951,6 +2099,12 @@ async def chat_completions(req: ChatRequest, request: Request):
 
 # ── Health / Info ─────────────────────────────────────────────────────────────
 
+# record_silent_failure sources that mean stored data was not written.
+_DATA_FAILURES = frozenset({
+    "checkpoint", "graph_eviction", "graph_flush", "analytics_flush",
+})
+
+
 @app.get("/health")
 async def health(request: Request):
     """Liveness AND the failure counters that were only visible in logs.
@@ -1969,6 +2123,12 @@ async def health(request: Request):
     every counter here is also available in /api/stats.
     """
     failures = _analytics.persist_failures
+    # Only failures where something the proxy was trusted to KEEP was not
+    # kept make the deployment degraded. A failed background extraction or
+    # a transient upstream error loses nothing; counting them here left
+    # /health "degraded" for the rest of the process's life after one
+    # provider timeout, which teaches operators to ignore the field.
+    data_failures = {k: v for k, v in failures.items() if k in _DATA_FAILURES and v}
     sessions_load_failed = sorted(
         sid for sid, g in _graph_cache.items() if g._load_failed)
     sessions_no_durability = sorted(
@@ -1978,7 +2138,7 @@ async def health(request: Request):
     checkpoints_broken = bool(getattr(_checkpoint_mgr, "persistence_broken", False))
     checkpoints_data_loss = bool(getattr(_checkpoint_mgr, "data_loss_detected", False))
 
-    degraded = bool(failures or sessions_load_failed or sessions_no_durability
+    degraded = bool(data_failures or sessions_load_failed or sessions_no_durability
                     or sessions_data_loss or checkpoints_broken or checkpoints_data_loss)
     # Session ids only for a caller who could read those sessions anyway.
     # /health is deliberately unauthenticated (container health checks
@@ -1992,28 +2152,28 @@ async def health(request: Request):
         "timestamp": time.time(),
         "version": __version__,
         "sessions_in_memory": len(_graph_cache),
-        # Non-zero means something was lost or not written. Each key names
-        # the path that failed; see AnalyticsEngine.record_silent_failure.
+        # Every counter, including the ones that do not degrade health
+        # (llm_extraction, transform_rejected): visible, but not alarming.
         "persist_failures": failures,
-        # Deliberate, bounded degradation — NOT part of `degraded`. A
-        # proxy shedding the optional LLM extraction pass under load is
-        # working as configured; calling that unhealthy would train an
-        # operator to ignore the field that means something was lost.
         "shed": _analytics.shed,
+        # Ids for an authorised caller, counts for anyone else (above).
         "sessions_with_unreadable_graph": sessions_load_failed,
         "sessions_without_durable_storage": sessions_no_durability,
         "sessions_with_data_loss": sessions_data_loss,
         "checkpoint_storage_broken": checkpoints_broken,
         "checkpoint_data_loss": checkpoints_data_loss,
-        # Whether "nothing leaves this machine" is being enforced, checkable
-        # from outside. Not part of `degraded`: it is configuration, not a
-        # failure.
         "privacy": privacy.status(settings),
-        # The install command when the configured provider's SDK is missing,
-        # else null. Deliberately NOT part of `degraded`: a deployment that
-        # only checkpoints through MCP never needs a provider, and a clean
-        # `pip install tokenmizer` would otherwise report degraded forever.
         "provider_sdk_missing": missing_provider_sdk(settings.provider),
+        # Which layers are switched on. Configuration, not data, and read by
+        # the dashboard so its badges show what this server actually does.
+        "layers": {
+            "graph_memory": bool(settings.graph_checkpoint.enabled),
+            "semantic_cache": bool(settings.cache.enabled),
+            "compression": bool(settings.compression.enabled),
+            "file_intelligence": bool(settings.file_intelligence.enabled),
+            "terse_output": settings.terse_output.enabled,
+            "model_map": len(settings.model_map),
+        },
     }
 
 
@@ -2065,6 +2225,8 @@ async def delete_session_data(session_id: str) -> dict:
     from tokenmizer.graph_memory.persistence import delete_session_rows
     async with _get_session_lock(session_id):
         _graph_cache.pop(session_id, None)
+        _last_auto_checkpoint.pop(session_id, None)
+        _TERSE_PLACEMENT.pop(session_id, None)
         removed = {"graph": await asyncio.to_thread(
             delete_session_rows, settings.graph_checkpoint.storage_dir, session_id)}
         removed["checkpoints"] = await asyncio.to_thread(_checkpoint_mgr.delete_session, session_id)
@@ -2073,6 +2235,9 @@ async def delete_session_data(session_id: str) -> dict:
                                      if archive is not None else 0)
         removed["cache_entries"] = _cache.invalidate_session(session_id)
         removed["owner"] = await asyncio.to_thread(_ownership.release, session_id)
+        # Request counts stay (totals must not move); the id is cleared.
+        removed["analytics_rows_unlinked"] = await asyncio.to_thread(
+            _analytics.forget_session, session_id)
     return removed
 
 

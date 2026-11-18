@@ -46,7 +46,8 @@ logger = logging.getLogger(__name__)
 # ─── Code-block protection ──────────────────────────────────────────────────
 
 # Matches fenced code blocks: ```lang\n...\n``` or ```\n...\n```
-_FENCED_CODE_RE = re.compile(r'```[^\n]*\n.*?```', re.DOTALL)
+# Info string capped; see graph_memory.patterns._FENCED.
+_FENCED_CODE_RE = re.compile(r'```[^\n]{0,200}\n.*?```', re.DOTALL)
 # Matches inline code spans: `like this`
 _INLINE_CODE_RE = re.compile(r'`[^`\n]+`')
 
@@ -180,6 +181,13 @@ class FillerRemover:
 
 # How many times a line must repeat IN A ROW before the run is collapsed.
 _REPEAT_RUN_MIN = 3
+
+
+_CODE_LINE = re.compile(r"^\s+\S|[{};=()\[\]]|^\s*(?:def|class|return|import|from|if|for|while)\b")
+
+
+def _looks_like_code_line(line: str) -> bool:
+    return bool(_CODE_LINE.search(line))
 
 
 class DuplicateLineRemover:

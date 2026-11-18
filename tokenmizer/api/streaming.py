@@ -24,7 +24,8 @@ logger = logging.getLogger("tokenmizer.api.app")
 
 
 def _stream_response(req, messages, model, user_content, session_id,
-                     savings, orig_input_tokens, raw_messages=None) -> StreamingResponse:
+                     savings, orig_input_tokens, raw_messages=None,
+                     public_session_id: str | None = "") -> StreamingResponse:
     """True SSE passthrough (OpenAI chat.completion.chunk format).
 
     Cache hits stream as a single chunk. After the stream closes, analytics
@@ -58,7 +59,10 @@ def _stream_response(req, messages, model, user_content, session_id,
     def _chunk(delta: dict, finish: str | None = None, extra: dict | None = None) -> str:
         payload = {
             "id": resp_id, "object": "chat.completion.chunk",
-            "created": created, "model": model, "session_id": session_id,
+            "created": created, "model": model,
+            # The client's id, not the internal cache scope a stateless
+            # request runs under ("" = they are the same).
+            "session_id": session_id if public_session_id == "" else public_session_id,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
         if extra:
@@ -115,6 +119,7 @@ def _stream_response(req, messages, model, user_content, session_id,
                 succeeded = False
                 for attempt, candidate in enumerate(candidates):
                     last_error = None
+                    candidate = app_module._with_media(candidate, provider)
                     try:
                         pieces = (
                             _buffered_tool_stream(candidate) if buffered_tools
@@ -199,12 +204,16 @@ def _stream_response(req, messages, model, user_content, session_id,
                 {"error": {"message": f"Stream failed (ref: {correlation_id})",
                            "type": "internal_error"}}
             ) + "\n\n"
-        yield _chunk(
-            {}, finish=("tool_calls" if saw_tool_calls
-                        else "length" if truncated else "stop"),
-            extra={"tokenmizer": {"fallback": {"transform_rejected": True}}}
-            if transform_rejected else None,
-        )
+        # No finish chunk after an error event: "stop" told a client that
+        # reads finish_reason and ignores unknown keys that the truncated
+        # text it had was the whole answer.
+        if not stream_failed:
+            yield _chunk(
+                {}, finish=("tool_calls" if saw_tool_calls
+                            else "length" if truncated else "stop"),
+                extra={"tokenmizer": {"fallback": {"transform_rejected": True}}}
+                if transform_rejected else None,
+            )
         yield "data: [DONE]\n\n"
 
         # Post-stream bookkeeping. When the transformed request was

@@ -50,7 +50,26 @@ TOKENMIZER_API_KEY = os.environ.get("TOKENMIZER_API_KEY", "")
 # Where the graph lives when these tools read it directly. Matches the
 # proxy's own default (graph_checkpoint.storage_dir), so a local read sees
 # exactly what a running proxy would have written.
-TOKENMIZER_STORAGE_DIR = os.environ.get("TOKENMIZER_STORAGE_DIR", "./checkpoints")
+def _default_storage_dir() -> str:
+    """The proxy's storage_dir, as an absolute path.
+
+    "./checkpoints" was resolved against the MCP process's working
+    directory — usually the project an editor launched it in — while the
+    proxy wrote under its own. Offline writes then went to a store the
+    proxy never read. Reading the same setting the proxy reads, and
+    reporting the absolute path, makes any remaining mismatch visible.
+    """
+    explicit = os.environ.get("TOKENMIZER_STORAGE_DIR")
+    if explicit:
+        return os.path.abspath(explicit)
+    try:
+        from tokenmizer.config.settings import get_settings
+        return os.path.abspath(get_settings().graph_checkpoint.storage_dir)
+    except Exception:
+        return os.path.abspath("./checkpoints")
+
+
+TOKENMIZER_STORAGE_DIR = _default_storage_dir()
 
 # The MCP server is installed by a plugin; the proxy is a separate process
 # nobody started. So the single most likely state on a fresh install is
@@ -84,39 +103,32 @@ def _memory(session_id: str):
 
 # ── MCP Tool definitions ──────────────────────────────────────────────────────
 
+# Every request an MCP client makes carries these schemas, so each word here
+# is paid on every turn of every session: keep them to what a model needs to
+# pick the tool and fill its arguments.
+_SID = {"type": "string", "description": "Session ID"}
 TOOLS = [
     {
         "name": "checkpoint_session",
-        "description": (
-            "Save the current AI session to TokenMizer's graph memory. "
-            "Creates a checkpoint that can be resumed later with full context. "
-            "Use this when: finishing a work session, before switching tasks, "
-            "or when the conversation is getting long."
-        ),
+        "description": "Save the session to graph memory so it can be resumed later "
+                       "with full context. Use when finishing a session, before "
+                       "switching tasks, or when the conversation is getting long.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Unique identifier for this session (e.g. 'my-project-auth')",
-                },
-                # The conversation so far. This tool runs beside the
-                # conversation rather than through the proxy, so without
-                # it the checkpoint has nothing to extract from and the
-                # session is recorded with zero nodes.
+                "session_id": {"type": "string",
+                               "description": "Stable ID for this work, e.g. 'my-project-auth'"},
+                # This tool runs beside the conversation, not through the
+                # proxy: without the transcript there is nothing to extract.
                 "messages": {
                     "type": "array",
-                    "description": (
-                        "The conversation to save, as {role, content} objects "
-                        "(user/assistant). Decisions, tasks, files and errors "
-                        "are extracted from it into the session's graph memory."
-                    ),
+                    "description": "The conversation so far, as {role, content}. "
+                                   "Decisions, tasks, files and errors are extracted "
+                                   "from it; without it nothing is saved.",
                     "items": {
                         "type": "object",
-                        "properties": {
-                            "role": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
+                        "properties": {"role": {"type": "string"},
+                                       "content": {"type": "string"}},
                         "required": ["role", "content"],
                     },
                 },
@@ -126,103 +138,61 @@ TOOLS = [
     },
     {
         "name": "resume_session",
-        "description": (
-            "Get the resume context for a previous session. "
-            "Returns a compact summary of what was done, decided, and what's pending. "
-            "Inject this into the system prompt when starting a new session on the same project."
-        ),
+        "description": "Get a compact summary of a previous session (done, decided, "
+                       "pending). Put it in the system prompt when starting a new "
+                       "session on the same project.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Session ID to resume",
-                },
-                "level": {
-                    "type": "string",
-                    "enum": ["critical", "standard", "full"],
-                    "description": "critical=~100 tokens, standard=~300 tokens, full=~600 tokens",
-                    "default": "standard",
-                },
+                "session_id": _SID,
+                "level": {"type": "string", "enum": ["critical", "standard", "full"],
+                          "description": "critical ~100, standard ~300, full ~600 tokens",
+                          "default": "standard"},
             },
             "required": ["session_id"],
         },
     },
     {
         "name": "get_graph_stats",
-        "description": (
-            "See the knowledge graph stats for a session: "
-            "how many tasks, decisions, files, and errors are tracked."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Session ID to inspect",
-                },
-            },
-            "required": ["session_id"],
-        },
+        "description": "Count the tasks, decisions, files and errors tracked for a session.",
+        "inputSchema": {"type": "object", "properties": {"session_id": _SID},
+                        "required": ["session_id"]},
     },
     {
         "name": "analyze_file",
-        "description": (
-            "Analyze a large file (CSV, Excel, PDF, JSON) and return a token-efficient summary. "
-            "Instead of pasting thousands of rows into the chat, use this to get schema, "
-            "statistics, and sample data in ~300-500 tokens."
-        ),
+        "description": "Summarise a large CSV, Excel, PDF or JSON file (schema, stats, "
+                       "samples) in ~300-500 tokens instead of pasting it into the chat.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "Absolute path to the file to analyze",
-                },
-                "token_budget": {
-                    "type": "integer",
-                    "description": "Max tokens for the summary (default: 500)",
-                    "default": 500,
-                },
-                "query": {
-                    "type": "string",
-                    "description": "What you want to know about the file (improves relevance)",
-                    "default": "",
-                },
+                "file_path": {"type": "string", "description": "Absolute path"},
+                "token_budget": {"type": "integer", "default": 500,
+                                 "description": "Max tokens for the summary"},
+                "query": {"type": "string",
+                          "description": "What you want to know (improves relevance)",
+                          "default": ""},
             },
             "required": ["file_path"],
         },
     },
     {
         "name": "get_savings_stats",
-        "description": "Get token savings analytics — how many tokens were saved today/this week.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "description": "Tokens saved today and this week.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "why_decision",
-        "description": (
-            "Reason over the session's decision history: why is something "
-            "the current choice? Traces the supersession chain (old → new "
-            "with trigger, reason, and evidence per hop) for decisions "
-            "matching the query, and reports the currently active choice. "
-            "Use when the user asks 'why did we pick X', 'what happened to "
-            "Y', or 'what was the previous approach'."
-        ),
+        "description": "Explain why a decision is the current one: the chain of earlier "
+                       "choices it replaced, with trigger and reason per step. For 'why "
+                       "did we pick X', 'what happened to Y', 'what was the previous "
+                       "approach'.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Session whose decision history to query",
-                },
-                "query": {
-                    "type": "string",
-                    "description": "Substring of the decision to explain (e.g. 'react', 'postgres')",
-                },
+                "session_id": _SID,
+                "query": {"type": "string",
+                          "description": "Words from the decision, e.g. 'postgres' "
+                                         "(substring or similar meaning)"},
             },
             "required": ["session_id", "query"],
         },
@@ -255,15 +225,26 @@ def _get(path: str) -> dict:
 def _is_transport_error(exc: Exception) -> bool:
     """True if the proxy could not be reached at all.
 
-    A connect failure or a timeout means nothing answered. An HTTP status
-    means something did, and its answer stands — see the OFFLINE note.
+    Only a failure to CONNECT means nothing answered. A read timeout means
+    the proxy received the request and is still working on it — a slow
+    checkpoint of a long transcript — so answering from local storage as
+    well would extract the same conversation twice. An HTTP status means
+    something answered, and its answer stands — see the OFFLINE note.
     """
     try:
         import httpx
     except ImportError:
         return False
-    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
-                           httpx.ReadTimeout, httpx.TimeoutException))
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+
+
+def _response_detail(response) -> str:
+    """The `detail` string of a proxy error response, or ""."""
+    try:
+        detail = response.json().get("detail")
+    except Exception:
+        return ""
+    return detail[:300] if isinstance(detail, str) else ""
 
 
 def _explain(exc: Exception) -> str:
@@ -300,14 +281,19 @@ def _explain(exc: Exception) -> str:
         )
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
-        if code in (401, 403):
+        if code == 404:
+            return "Not found — nothing has been checkpointed under that session id yet."
+        # A 4xx `detail` says what to change: a 421 names the setting for
+        # an untrusted Host, a 429 when to retry, a 413 the size limit.
+        # "HTTP 421" alone said none of it. 5xx details are not passed on:
+        # some name the session, which this reply keeps out (see above).
+        detail = _response_detail(exc.response) if 400 <= code < 500 else ""
+        if code == 401 or (code == 403 and not detail):
             return (
                 f"TokenMizer rejected the request ({code}). Set TOKENMIZER_API_KEY "
                 "in the MCP server's env to match the proxy's api_key."
             )
-        if code == 404:
-            return "Not found — nothing has been checkpointed under that session id yet."
-        return f"TokenMizer returned HTTP {code}."
+        return f"TokenMizer returned HTTP {code}" + (f": {detail}" if detail else ".")
     return f"{type(exc).__name__}"
 
 
