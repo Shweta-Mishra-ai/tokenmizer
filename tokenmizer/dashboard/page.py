@@ -483,21 +483,15 @@ function renderHealth(h) {
   const f = h.persist_failures || {};
   Object.keys(f).sort().forEach(k => lines.push(
     `<b>${esc(k)}</b> failed ${f[k]} time${f[k] === 1 ? '' : 's'} since start.`));
-  // /health reports COUNTS here (it is unauthenticated, and session ids
-  // belong to whoever claimed them). Older servers sent lists of ids, so
-  // both shapes are read; calling forEach on a number threw and left the
-  // banner empty exactly when something had gone wrong.
-  const count = v => Array.isArray(v) ? v.length : (Number(v) || 0);
-  const plural = (k, one, many) => `${k} session${k === 1 ? '' : 's'} ${k === 1 ? one : many}`;
-  const unreadable = count(h.sessions_with_unreadable_graph);
-  if (unreadable) lines.push(plural(unreadable, 'has a stored graph that could not be read',
-    'have stored graphs that could not be read') + '. Nothing was lost; it retries.');
-  const volatile = count(h.sessions_without_durable_storage);
-  if (volatile) lines.push(plural(volatile, 'is', 'are') +
-    ' running without durable storage — they will not survive a restart.');
-  const displaced = count(h.sessions_with_data_loss);
-  if (displaced) lines.push(plural(displaced, 'had its', 'had their') +
-    ' memory displaced during database recovery.');
+  // Without a key, /health reports how many sessions, not which.
+  const ids = v => Array.isArray(v) ? v
+    : (v ? [`${v} session${v === 1 ? '' : 's'} (add your API key to see which)`] : []);
+  (ids(h.sessions_with_unreadable_graph)).forEach(s => lines.push(
+    `Stored graph for <code>${esc(s)}</code> could not be read. Nothing was lost; it retries.`));
+  (ids(h.sessions_without_durable_storage)).forEach(s => lines.push(
+    `<code>${esc(s)}</code> is running without durable storage — it will not survive a restart.`));
+  (ids(h.sessions_with_data_loss)).forEach(s => lines.push(
+    `Memory for <code>${esc(s)}</code> was displaced during database recovery.`));
   if (h.checkpoint_storage_broken) lines.push('Checkpoint storage could not be initialised.');
   if (h.checkpoint_data_loss) lines.push('The checkpoint database was quarantined after corruption.');
   lines.push('Full detail is in the server log and under <code>/api/stats</code>.');
@@ -511,7 +505,9 @@ async function loadStats() {
       dashboardFetch('/api/stats').catch(() => null),
       dashboardFetch('/api/cache/stats').catch(() => null),
       dashboardFetch('/api/sessions').catch(() => null),
-      fetch('/health').catch(() => null),
+      // With the key, so /health names the affected sessions; without
+      // one it only counts them.
+      dashboardFetch('/health').catch(() => null),
     ]);
 
     renderHealth(healthRes && healthRes.ok ? await healthRes.json() : null);

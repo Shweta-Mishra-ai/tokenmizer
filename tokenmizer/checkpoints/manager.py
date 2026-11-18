@@ -17,7 +17,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import sqlite3
@@ -88,7 +88,7 @@ class CheckpointManager:
         # snapshot per distinct session for the life of the process.
         # Losing an entry only costs diff fidelity for one checkpoint
         # (it reports every node as "added"), never any stored data.
-        self._prev_snapshots: "OrderedDict[str, dict]" = OrderedDict()
+        self._prev_snapshots: OrderedDict[str, dict] = OrderedDict()
 
     _MAX_PREV_SNAPSHOTS = 500
 
@@ -234,15 +234,6 @@ class CheckpointManager:
         )
         return ckpt
 
-    def delete_session(self, session_id: str) -> int:
-        """Remove every checkpoint of `session_id`. Returns how many."""
-        from contextlib import closing
-        with closing(self._db_connect()) as conn, conn:
-            n = conn.execute("DELETE FROM checkpoints WHERE session_id=?",
-                             (session_id,)).rowcount
-        self._prev_snapshots.pop(session_id, None)
-        return n
-
     def _prune_auto_checkpoints(self, session_id: str) -> None:
         """
         Cap AUTO-triggered checkpoints at self._auto_retention for this
@@ -387,7 +378,7 @@ class CheckpointManager:
 
         done_tasks = self._live_nodes(graph, NodeType.TASK,
                                       statuses={NodeStatus.COMPLETED})
-        done_tasks.sort(key=lambda x: x.updated_at, reverse=True)
+        done_tasks.sort(key=lambda x: x.recency(), reverse=True)
         if done_tasks:
             parts.append("Recently completed: " + " | ".join(t.label for t in done_tasks[:6]))
 
@@ -464,7 +455,19 @@ class CheckpointManager:
                 f"session {ckpt.session_id}: {e}"
             ) from e
 
-    def get_latest(self, session_id: str) -> Optional[Checkpoint]:
+    def delete_session(self, session_id: str) -> int:
+        """Delete every checkpoint of one session. Returns how many."""
+        self._prev_snapshots.pop(session_id, None)
+        conn = self._db_connect()
+        try:
+            n = conn.execute("DELETE FROM checkpoints WHERE session_id=?",
+                             (session_id,)).rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        return n
+
+    def get_latest(self, session_id: str) -> Checkpoint | None:
         try:
             conn = self._db_connect()
             try:

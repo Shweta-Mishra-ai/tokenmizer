@@ -23,7 +23,6 @@ from collections import Counter, defaultdict
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +66,39 @@ _COST_PER_1K = {
 }
 
 
-def _cost(input_tokens: int, output_tokens: int, provider: str) -> float:
+# Local inference has no per-token bill. Ollama fell through to "default"
+# and was reported as costing Claude Sonnet's price.
+_ZERO_COST_PROVIDERS = frozenset({"ollama"})
+
+
+def _configured_pricing() -> dict:
+    try:
+        from tokenmizer.config.settings import get_settings
+        return get_settings().pricing or {}
+    except Exception:
+        return {}
+
+
+def _rates(provider: str, model: str = "") -> tuple[float, float]:
+    """(input, output) USD per 1K tokens: configured pricing by the longest
+    substring of the model name, then by provider, then the built-in
+    per-provider estimate."""
+    provider = (provider or "").lower()
+    if provider in _ZERO_COST_PROVIDERS:
+        return (0.0, 0.0)
+    pricing = {k.lower(): v for k, v in _configured_pricing().items()}
+    name = (model or "").lower()
+    for key in sorted(pricing, key=len, reverse=True):
+        if key and key in name and len(pricing[key]) == 2:
+            return float(pricing[key][0]), float(pricing[key][1])
+    if provider in pricing and len(pricing[provider]) == 2:
+        return float(pricing[provider][0]), float(pricing[provider][1])
+    return _COST_PER_1K.get(provider, _COST_PER_1K["default"])
+
+
+def _cost(input_tokens: int, output_tokens: int, provider: str, model: str = "") -> float:
     """Estimated USD cost, charging input and output at their own rates."""
-    in_rate, out_rate = _COST_PER_1K.get(provider.lower(), _COST_PER_1K["default"])
+    in_rate, out_rate = _rates(provider, model)
     return (input_tokens / 1000) * in_rate + (output_tokens / 1000) * out_rate
 
 
@@ -85,7 +114,7 @@ class AnalyticsRecord:
     tokens_saved: int
     latency_ms: float
     cache_hit: bool
-    layer_savings: Dict[str, int] = field(default_factory=dict)
+    layer_savings: dict[str, int] = field(default_factory=dict)
 
 
 class AnalyticsEngine:
@@ -118,13 +147,13 @@ class AnalyticsEngine:
         # Rows written but not yet flushed. Bounded by flush frequency, not
         # by request volume — flush() is called on the proxy's existing
         # periodic timer and at shutdown.
-        self._pending: List[AnalyticsRecord] = []
-        self._records: List[AnalyticsRecord] = []
-        self._by_provider: Dict[str, List[AnalyticsRecord]] = defaultdict(list)
+        self._pending: list[AnalyticsRecord] = []
+        self._records: list[AnalyticsRecord] = []
+        self._by_provider: dict[str, list[AnalyticsRecord]] = defaultdict(list)
         # Provider counts must survive record trimming — a total that
         # silently decreases as old records age out is worse than no
         # total at all.
-        self._provider_totals: Dict[str, int] = defaultdict(int)
+        self._provider_totals: dict[str, int] = defaultdict(int)
         self._total_requests = 0
         # Silent failures (checkpoint save, graph
         # eviction persist, Redis write, AND background LLM extraction
@@ -136,9 +165,9 @@ class AnalyticsEngine:
         # buried in a log line. Dict key is `persist_failures` for API
         # stability even though it now covers a slightly broader category
         # than literal persistence (see record_silent_failure docstring).
-        self._persist_failures: Dict[str, int] = defaultdict(int)
+        self._persist_failures: dict[str, int] = defaultdict(int)
         # Work dropped on purpose to stay inside a limit — see record_shed.
-        self._shed: Dict[str, int] = defaultdict(int)
+        self._shed: dict[str, int] = defaultdict(int)
 
         if self._db_path is not None:
             self._init_db()
@@ -169,6 +198,8 @@ class AnalyticsEngine:
         must degrade to the previous in-memory behaviour rather than fail a
         request, so every path here is best-effort and says so in the log.
         """
+        if self._db_path is None:
+            return
         try:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             with closing(self._connect()) as conn, conn:
@@ -275,7 +306,7 @@ class AnalyticsEngine:
         n = 0
         for rec in self._records + self._pending:
             if rec.session_id == session_id:
-                rec.session_id = None
+                rec.session_id = ""  # matches a row read back with NULL
                 n += 1
         if self._db_path is not None:
             try:
@@ -300,7 +331,7 @@ class AnalyticsEngine:
         self._persist_failures[source] += 1
 
     @property
-    def persist_failures(self) -> Dict[str, int]:
+    def persist_failures(self) -> dict[str, int]:
         return dict(self._persist_failures)
 
     def record_shed(self, source: str) -> None:
@@ -315,7 +346,7 @@ class AnalyticsEngine:
         self._shed[source] += 1
 
     @property
-    def shed(self) -> Dict[str, int]:
+    def shed(self) -> dict[str, int]:
         return dict(self._shed)
 
     def record(
@@ -329,7 +360,7 @@ class AnalyticsEngine:
         tokens_saved: int,
         latency_ms: float,
         cache_hit: bool,
-        layer_savings: Dict[str, int] | None = None,
+        layer_savings: dict[str, int] | None = None,
     ) -> None:
         r = AnalyticsRecord(
             timestamp=time.time(),
@@ -392,8 +423,10 @@ class AnalyticsEngine:
             # intelligence and cache all reduce the prompt), so they are
             # priced at the input rate rather than a blend that silently
             # inflated them with output pricing.
-            stats.cost_saved += _cost(r.tokens_saved, 0, r.provider)
-            stats.cost_actual += _cost(r.input_tokens_sent, r.output_tokens, r.provider)
+            # Negative when the proxy added more than it removed: the
+            # estimate says so rather than reporting a saving.
+            stats.cost_saved += _cost(r.tokens_saved, 0, r.provider, r.model)
+            stats.cost_actual += _cost(r.input_tokens_sent, r.output_tokens, r.provider, r.model)
         return stats
 
     @property
@@ -408,8 +441,8 @@ class AnalyticsEngine:
     def monthly(self) -> PeriodStats:
         return self._period_stats(time.time() - 30 * 86_400)
 
-    def layer_breakdown(self, scope=None) -> Dict[str, int]:
-        totals: Dict[str, int] = defaultdict(int)
+    def layer_breakdown(self, scope=None) -> dict[str, int]:
+        totals: dict[str, int] = defaultdict(int)
         for r in self._records:
             if scope is not None and r.session_id not in scope:
                 continue
@@ -423,7 +456,13 @@ class AnalyticsEngine:
         if d.requests == 0:
             suggestions.append("No requests yet — start sending requests to see analytics.")
             return suggestions
-        if d.tokens_saved == 0:
+        if d.tokens_saved < 0:
+            suggestions.append(
+                "Requests sent today were larger than the client's own requests "
+                f"({-d.tokens_saved} tokens net). On short sessions the proxy's additions "
+                "outweigh what it removes; check terse_output.min_max_tokens and the "
+                "'added_by_proxy' line in layer_breakdown.")
+        elif d.tokens_saved == 0:
             suggestions.append("Enable compression in tokenmizer.yaml to start saving tokens.")
         breakdown = self.layer_breakdown()
         if breakdown.get("cache", 0) == 0:
@@ -468,6 +507,9 @@ class AnalyticsEngine:
                 "cost_saved_usd": round(m.cost_saved, 4),
             },
             "layer_breakdown": self.layer_breakdown(scope),
+            # Prices are per-provider defaults unless `pricing` is set; the
+            # USD figures are estimates, not an invoice.
+            "cost_is_estimate": True,
             "by_provider": by_provider,
             "suggestions": self.generate_suggestions(),
             # persistence failures (checkpoint/graph/redis writes that

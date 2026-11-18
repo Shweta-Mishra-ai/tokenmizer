@@ -22,12 +22,14 @@ be defined here directly is still an attribute of this module.
 """
 from __future__ import annotations
 
+import difflib
+import functools
 import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
+from tokenmizer.graph_memory.decision_tracker import _SCOPE_CUT
 from tokenmizer.graph_memory.domains import get_pack, normalize_domain
 from tokenmizer.graph_memory.helpers import tool_signals
 from tokenmizer.graph_memory.patterns import (
@@ -146,9 +148,12 @@ from tokenmizer.graph_memory.patterns import (
     _sentence_index,
     _tech_mention_is_a_decision,
     clause_subject,
+    find_slot_changes,
     find_supersessions,
+    inside_quotation,
     is_bogus_decision_label,
     is_library_name,
+    is_negated_verb,
     looks_english,
     mask_mentions,
     restore_verb,
@@ -162,7 +167,36 @@ logger = logging.getLogger(__name__)
 DEFAULT_EXTRACTION_MAX_TOKENS = 2048
 
 
-def _parse_json_object(raw: str) -> Optional[dict]:
+_MAX_ERRORS_PER_MESSAGE = 60
+# An exception with its message, as a traceback's last line prints it:
+# "AttributeError: 'X' object has no attribute 'y'",
+# "django.core.exceptions.ImproperlyConfigured: Requested setting ...",
+# "StopIteration: ...". What a failure was, as opposed to which test failed.
+_NAMED_EXCEPTION = re.compile(
+    r"(?:^|[\s(])(?:[a-z_]\w*\.)*"
+    r"(?:[A-Z]\w*(?:Error|Exception|Warning)|[A-Z][a-z]+(?:[A-Z][a-z]*)+)\b:\s*\S")
+
+# A decision verb followed by what was ruled out, not chosen.
+# Applied with .match() to a stripped label. No leading \s*: every
+# extraction regex is also run with .search() over long whitespace by the
+# linearity test, and a leading optional run is quadratic there.
+_REJECTION_LEAD = re.compile(r"(?:against|not\s+to|to\s+not|no\b|to\s+drop|to\s+remove)\b",
+                             re.IGNORECASE)
+
+# "go WITH x", "settled ON x", "switching TO x": the preposition is the
+# verb's, and the label is what follows it.
+_CHOICE_PREPOSITION = re.compile(r"^(?:with|on|to|for)\s+(?=\S)", re.IGNORECASE)
+
+# The error just quoted is reported as dealt with, after it: "The
+# TypeError … in billing.py is fixed now". It was kept as an open bug.
+_FIXED_AFTER = re.compile(
+    r"[^.!?\n]{0,40}?\b(?:is|was|are|were|has been|have been|got|now)\s+"
+    r"(?:now\s+|finally\s+|already\s+)?(?:fixed|resolved|solved|gone|patched)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_json_object(raw: str) -> dict | None:
     """The first JSON object in a model reply, or None.
 
     The prompt says "JSON only", and most replies comply, but a smaller or
@@ -193,7 +227,7 @@ def _parse_json_object(raw: str) -> Optional[dict]:
     return _recover_truncated_object(text[start:])
 
 
-def _recover_truncated_object(text: str) -> Optional[dict]:
+def _recover_truncated_object(text: str) -> dict | None:
     """The complete leading part of a JSON object cut off mid-reply, or None.
 
     A reply that hits the output-token cap ends mid-structure, and
@@ -586,6 +620,82 @@ _LISTING_LINE = re.compile(
 )
 
 
+# Pattern extraction reads at most the first and last 100 KB of a message.
+# Typed messages never come near that; what does is machine output, and a
+# real agent once printed 6.3 MB of built HTML in one observation, which
+# took 50 s of regex passes on the request path. On the 716 held-out real
+# sessions, every labelled error in a message this long is in its first or
+# last 100 KB — where a test runner and a traceback put them — and one
+# labelled file (named by coincidence inside that HTML) is not. The whole
+# message still goes to the model, and to the turn archive.
+_EXTRACT_HEAD = 100_000
+_EXTRACT_TAIL = 100_000
+
+
+def _bounded(text: str) -> str:
+    if len(text) <= _EXTRACT_HEAD + _EXTRACT_TAIL:
+        return text
+    return text[:_EXTRACT_HEAD] + "\n\n" + text[-_EXTRACT_TAIL:]
+
+
+# Only ever applied ANCHORED, with .match() right after a tech name. As a
+# search it is quadratic on long runs of whitespace (0.97 s on 20 KB).
+_TRAILING_SCOPE = re.compile(
+    r"\s+for\s+((?:the|our)\s+(?:[a-z0-9][\w-]*\s+){0,2}[a-z0-9][\w-]*"
+    r"|(?:[a-z0-9][\w-]*\s+){0,2}?[a-z][\w-]{2,}ing)\b(?!\s*[-'])",
+    re.IGNORECASE)
+
+
+# "For the search service we'll use Elasticsearch": the scope comes first and
+# the decision patterns start at the choice, so the label was "Use
+# Elasticsearch" and the next service's choice superseded it. A scope stated
+# at the head of the decision's own sentence is kept in its label.
+_FRONTED_SCOPE = re.compile(
+    # `[ \t]*`, not `\s*`, after the boundary: `\s*` also eats newlines, and
+    # from every newline in a run of blank lines it scanned to the run's end.
+    r"(?:^|[.:!?\n])[ \t]*(?:decision:[ \t]*|so,?[ \t]+|ok,?[ \t]+|and[ \t]+)?for[ \t]+(?:the|our)[ \t]+"
+    r"((?:[a-z0-9][\w-]*\s+){0,2}?[a-z0-9][\w-]*)"
+    # "For the X, <anything>" — the comma marks the fronted scope — or no
+    # comma and a subject or verb that starts the decision itself.
+    r"(?:\s*,\s*|\s+(?=(?:we|we'll|we're|we've|i|i'll|let's|let|use|go|going|switch|"
+    r"change|move|replace|keep|stick)\b))",
+    re.IGNORECASE)
+
+
+def _with_fronted_scope(label: str, content: str, at: int | None = None) -> str:
+    """`label` with the scope stated at the head of its sentence, if any.
+    `at` is where the decision starts in `content`; by default it is found
+    by searching for the label's own text."""
+    if at is None:
+        core = label[4:] if label.lower().startswith("use ") else label
+        probe = core[:24].strip()
+        if len(probe) < 3:
+            return label
+        at = content.lower().find(probe.lower())
+        if at < 0:
+            return label
+    head = content[:at]
+    sentence = max(head.rfind(c) for c in ".!?\n")
+    # Search from the boundary itself, so the pattern's own (?:^|[.:!?\n])
+    # anchor sees it.
+    matches = list(_FRONTED_SCOPE.finditer(content, max(0, sentence), at))
+    if not matches:
+        return label
+    m = matches[-1]
+    scope = " ".join(m.group(1).split())
+    # Whole words: "amber" inside `amber_billing_s00` is not the scope.
+    if all(re.search(r"\b" + re.escape(w) + r"\b", label, re.IGNORECASE)
+           for w in scope.split()):
+        return label
+    if label.lower().startswith("use "):
+        return f"{label} for the {scope}"
+    return f"for the {scope}: {label}"
+
+
+# More distinct paths than this in one message makes it a listing.
+_BULK_PATHS = 12
+
+
 def _listing_spans(text: str, min_lines: int = 5) -> list[tuple[int, int]]:
     """Character spans of directory listings: runs of `min_lines` or more
     listing lines. A listing says what exists in the repository, not what
@@ -734,6 +844,33 @@ _PREFILTER: dict = {
                        "not applied", "not enforced"),
     id(_TASK_DONE_PASSIVE): ("working", "ready", "done", "complete", "live", "passing",
                              "implemented", "deployed", "fixed", "resolved", "running"),
+    # The four below have no literal prefix, so the engine tries them at every
+    # line start and after every full stop: _TASK_TODO_HEADER took 40 ms per
+    # 64 KB of tool output with nothing to find. Each key list is the
+    # pattern's own alternation, lowercased; test_regex_gates checks that no
+    # text the pattern matches is ever skipped.
+    id(_TASK_TODO_HEADER): (
+        "todo", "to do", "to-do", "next step", "next up", "up next", "remaining",
+        "open item", "follow", "backlog", "outstanding", "not started", "not yet started",
+        "action item", "still needed", "deferred", "next task", "queued", "planned",
+        "tomorrow", "later", "still open", "upcoming", "scheduled", "parked", "on hold",
+        "wishlist", "pendiente", "por hacer", "a faire", "\u00e0 faire", "offen",
+        "ausstehend", "baaki", "baki", "pending hai"),
+    id(_DECISION_HEADER): (
+        "decision", "choice", "approach", "stack", "agreed", "final call", "verdict",
+        "conclusion", "chosen", "our pick", "selection", "decisi\u00f3n", "d\u00e9cision",
+        "entscheidung", "faisla", "going with", "settled", "locked in", "going forward",
+        "consensus"),
+    id(_TASK_DONE_CHECK): ("[x]", "[done]", "[complete", "[fixed]", "[shipped]",
+                           "\u2612", "\u2705", "\u2714", "\u2713"),
+    # Same shape as the header patterns above: 45 ms per 64 KB of tool output
+    # with nothing to find, on every tool result an agent session produces.
+    id(_ERROR_HEADER): (
+        "bug", "issue", "error", "problem", "exception", "failure", "blocker",
+        "regression", "incident", "defect", "root cause", "symptom", "snag", "failing",
+        "root of the", "fehler", "erreur", "dikkat"),
+    id(_TASK_TODO_CHECK): ("[ ]", "[todo]", "[to do]", "[pending]", "[wip]", "[open]",
+                           "\u2610", "\u2b1c"),
 }
 
 
@@ -762,6 +899,9 @@ class ExtractedData:
     # `files`: the strongest evidence that a file was worked on, not just
     # named. The graph ranks them above mentions.
     edited_files: list[str] = field(default_factory=list)
+    # Files named only inside a bulk listing (a subset of `files`): real,
+    # but no evidence they were worked on. Ranked below other files.
+    listed_files: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     # Errors the transcript says were fixed, by label (a subset of
     # `errors`). Kept as a parallel list rather than a flag on each entry
@@ -820,7 +960,7 @@ class HybridExtractor:
 
     async def llm_extract(
         self, messages: list[dict], provider_fn
-    ) -> Optional[ExtractedData]:
+    ) -> ExtractedData | None:
         """Call provider to extract structured data. Returns None on failure."""
         # Format messages as readable text for the LLM.
         #
@@ -907,7 +1047,7 @@ class HybridExtractor:
         role: str,
         turn_idx: int,
         is_recent: bool,
-        result: "ExtractedData",
+        result: ExtractedData,
         seen_decisions: set,
         seen_tasks: set,
         seen_files: set,
@@ -960,6 +1100,12 @@ class HybridExtractor:
         # Tasks done: full history (completed = permanent fact)
         for m in _TASK_DONE.finditer(content):
             raw_task = m.group(1)
+            # "The migration is NOT done yet, and the refund endpoint still
+            # fails" was recorded as the FINISHED task "yet, and the refund
+            # endpoint still fails" — the resume then told the next session
+            # the work was complete. A negated verb is the opposite claim.
+            if is_negated_verb(content, m.start()):
+                continue
             # "Implemented: POST /a, POST /b, POST /c" is three pieces of
             # finished work, not one task whose label is a route list cut
             # off at 80 chars (which also left the last route truncated).
@@ -1051,8 +1197,13 @@ class HybridExtractor:
             # not a report that the backfill is done.
             if _CONDITIONAL_LEAD.match(m.group(1).strip()):
                 continue
+            # The subject window is bounded, so it can open inside a word:
+            # "'NoneType' object …" became "oneType' object …". Start on the
+            # word, or not at all if that leaves nothing.
+            start, _ = _word_bounded(content, m.start(1), m.end(1))
+            subject = content[start:m.end(1)] if start >= m.start(1) - 40 else m.group(1)
             task = _clip(re.sub(r'^(?:the|a|an|this|that)\s+', '',
-                                m.group(1), flags=re.IGNORECASE))
+                                subject, flags=re.IGNORECASE))
             if len(task) > 5 and _is_subject_label(task):
                 norm = self._normalize(task)
                 if any(self._subsumes(task, t) for t in result.tasks_done):
@@ -1076,13 +1227,16 @@ class HybridExtractor:
                 result.tasks_done.append(task)
                 seen_tasks.add(norm)
 
+        low = content.lower()
         for pattern in (_TASK_DONE_CHECK, _TASK_DONE_PHRASAL, _TASK_DONE_GOT,
                         _TASK_DONE_MANAGED, _TASK_DONE_POSTFIX, _TASK_DONE_NO_WORRY,
                         _TASK_DONE_CROSSED_OFF, _TASK_DONE_BEHIND_US):
+            if not _may_match(pattern, low):
+                continue
             for m in pattern.finditer(content):
                 if pattern is not _TASK_DONE_CHECK and (
                         _is_negated_context(content, m.start())
-                        or _is_question_context(content, m.start())):
+                        or _quoted_or_question(content, m.start())):
                     continue
                 task = _clip(m.group(1))
                 if pattern is _TASK_DONE_PHRASAL:
@@ -1098,13 +1252,13 @@ class HybridExtractor:
                 _add_done(task)
         # "With X sorted, …", "Once X was in, …": the premise is finished work.
         for m in _TASK_DONE_PREMISE.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             premise = m.group(1) or m.group(2)
             if premise and _is_subject_label(premise) and not _NEGATION_WORDS.search(premise):
                 _add_done(_clip(premise))
         for m in _TASK_DONE_WENT.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             subject = clause_subject(content, m.start())
             if _CONDITIONAL_LEAD.match(subject) or _NEGATION_WORDS.search(subject) \
@@ -1112,7 +1266,7 @@ class HybridExtractor:
                 continue
             _add_done(_clip(subject))
         for m in _TASK_DONE_STATE.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             subject = clause_subject(content, m.start())
             # "No tests are in place" says the opposite of what it matches.
@@ -1160,7 +1314,7 @@ class HybridExtractor:
                     result.tasks_wip.append(wip)
             # Narrated intent is WIP-like: see _TASK_TODO_INTENT.
             for m in _TASK_TODO_INTENT.finditer(content):
-                if _is_question_context(content, m.start()):
+                if _quoted_or_question(content, m.start()):
                     continue
                 todo = _clip(_todo_label(m.group(1)))
                 if _outstanding(todo, m.start(1), result.tasks_todo):
@@ -1178,16 +1332,19 @@ class HybridExtractor:
         # completion, and that is reconciled where it can be seen across
         # extraction calls — GraphMemory.add_node merges a completed task into
         # the pending node it finishes.
+        low = content.lower()
         for pattern in (_TASK_TODO, _TASK_TODO_HEADER, _TASK_TODO_CHECK,
                         _TASK_TODO_NOT_DONE, _TASK_TODO_DEFER, _TASK_TODO_FRONTED,
                         _TASK_TODO_REMIND, _TASK_TODO_PARKED,
                         _TASK_TODO_OWED):
+            if not _may_match(pattern, low):
+                continue
             for m in pattern.finditer(content):
                 todo = _clip(_todo_label(m.group(1)))
                 if _outstanding(todo, m.start(1), result.tasks_todo):
                     result.tasks_todo.append(todo)
         for m in _TASK_TODO_STATE.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             subject = clause_subject(content, m.start())
             if _CONDITIONAL_LEAD.match(subject) or _NEGATION_WORDS.search(subject) \
@@ -1199,7 +1356,13 @@ class HybridExtractor:
 
         # Decision Pass 1: explicit verb
         for m in _DECISION.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _quoted_or_question(content, m.start()):
+                continue
+            # "We decided AGAINST Redis" is a rejection; it was recorded as
+            # the decision "against Redis too". And a decision someone is
+            # QUOTING ("the docs say: 'Decided: use SQLite'") is not one
+            # this session made.
+            if _REJECTION_LEAD.match(m.group(1).lstrip()) or inside_quotation(content, m.start()):
                 continue
             # "Finished up dark mode using CSS custom properties": `using`
             # names how reported work was done — see _WORK_CLAUSE_START.
@@ -1207,14 +1370,20 @@ class HybridExtractor:
                     content[_clause_start(content, m.start()):m.start()]):
                 continue
             label = _clip(m.group(1))
+            # "Let's go with PostgreSQL" captured "with PostgreSQL": the
+            # preposition belongs to the verb. What was chosen is the rest.
+            bare = _CHOICE_PREPOSITION.sub("", label)
+            if bare != label:
+                label = "Use " + bare
             norm  = self._normalize(label)
             if norm not in seen_decisions and len(norm) > 4:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
                 seen_decisions.add(norm)
 
         # Decision Pass 2: header format
-        for m in _DECISION_HEADER.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+        for m in (_DECISION_HEADER.finditer(content)
+                  if _may_match(_DECISION_HEADER, content.lower()) else ()):
+            if (_is_negated_context(content, m.start()) or _quoted_or_question(content, m.start())):
                 continue
             label = _clip(m.group(1))
             norm  = self._normalize(label)
@@ -1224,7 +1393,7 @@ class HybridExtractor:
 
         # Decision Pass 2b: "Kafka it is." — the choice precedes the verb.
         for m in _DECISION_IT_IS.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _quoted_or_question(content, m.start()):
                 continue
             label = "Use " + m.group(1).strip()
             norm  = self._normalize(label)
@@ -1252,7 +1421,7 @@ class HybridExtractor:
         # assistant, that is the decision; stated by the user it is a
         # proposal until the assistant agrees.
         for m in _DECISION_EVALUATIVE.finditer(content):
-            if _is_question_context(content, m.start()):
+            if _quoted_or_question(content, m.start()):
                 continue
             subject = clause_subject(content, m.start())
             # Negation is scoped to this clause, not the sentence: in "It
@@ -1297,7 +1466,7 @@ class HybridExtractor:
 
         # Decision Pass 3: tech names
         for m in _DECISION_FOR.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _quoted_or_question(content, m.start()):
                 continue
             # A bare tech name is only a decision with choosing context —
             # see _tech_mention_is_a_decision.
@@ -1310,6 +1479,20 @@ class HybridExtractor:
             if _NEGATION_WORDS.search(m.group(1)):
                 continue
             label = "Use " + _clip(m.group(1), 60)
+            # The name's capture stops before "for …". What follows is kept
+            # when it says what the choice covers — "for caching", "for the
+            # orders service" — or "Redis for caching" and "Redis for rate
+            # limiting" became one "Use Redis". A bare reason ("for speed")
+            # is not kept: see decision_tracker.decision_scope.
+            scope = _TRAILING_SCOPE.match(content, m.end())
+            if scope:
+                kept = []
+                for w in scope.group(1).split():
+                    if w.lower() in _SCOPE_CUT:
+                        break
+                    kept.append(w)
+                if len(kept) > 1 or (kept and kept[0].lower() not in ("the", "our")):
+                    label = f"{label} for {' '.join(kept)}"
             norm  = self._normalize(label)
             if norm not in seen_decisions:
                 result.decisions.append({"label": label, "reason": "", "source_role": role})
@@ -1323,7 +1506,7 @@ class HybridExtractor:
         for pattern in self.pack.decisions:
             for m in pattern.finditer(content):
                 if _is_negated_context(content, m.start()) or \
-                        _is_question_context(content, m.start()):
+                        _quoted_or_question(content, m.start()):
                     continue
                 label = _clip(m.group(1))
                 norm = self._normalize(label)
@@ -1373,7 +1556,7 @@ class HybridExtractor:
         # "migrate 40M rows from MySQL to Postgres with no downtime" — a
         # statement of the problem — into the decision "Use Postgres".
         for m in _DECISION_PASSIVE.finditer(content):
-            if _is_negated_context(content, m.start()) or _is_question_context(content, m.start()):
+            if _is_negated_context(content, m.start()) or _quoted_or_question(content, m.start()):
                 continue
             if not _tech_mention_is_a_decision(content, m.start(1), m.end(1)):
                 continue
@@ -1387,7 +1570,7 @@ class HybridExtractor:
         # "switched from A to B" and "B instead of A" state the same change
         # with the operands in opposite orders, and reading both with one
         # pattern recorded the rationale as the replacement decision.
-        for old_label, new_label, m_start, m_end in find_supersessions(content):
+        for old_label, new_label, m_start, _m_end in find_supersessions(content):
             result.superseded.append({"old": old_label, "new": new_label})
             # The sentence that states the switch, not a fixed character
             # window: 60 characters back reached into the sentence before,
@@ -1406,6 +1589,22 @@ class HybridExtractor:
                     result.decisions.append({"label": label, "reason": reason,
                                              "evidence": surrounding[:120], "source_role": role})
                     seen_decisions.add(norm)
+
+        # "Switch the partition key to `account_id`", "let's store sessions in
+        # X instead": a change of mind naming the slot, not the old value. The
+        # decision is recorded; the graph supersedes whatever it last held
+        # for that slot (GraphMemory._supersede_slot). Both used to produce
+        # nothing, and the old choice stayed current in every resume.
+        for slot, label, m_start, _m_end in find_slot_changes(content):
+            if _is_negated_context(content, m_start) or _quoted_or_question(content, m_start):
+                continue
+            label = _with_fronted_scope(label, content, at=m_start)
+            norm = self._normalize(label)
+            if norm not in seen_decisions and len(norm) > 4:
+                result.decisions.append({"label": label, "reason": "", "source_role": role})
+                seen_decisions.add(norm)
+            if slot:
+                result.superseded.append({"old": "", "new": label, "slot": slot})
 
         self._extract_structure(original, result, seen_files, seen_endpoints, seen_schemas)
         self._extract_errors(content, result, _ALL_ERROR_PATTERNS, original=original)
@@ -1443,25 +1642,30 @@ class HybridExtractor:
                 result.evidence.append({"text": text, "type": "standard", "turn": turn_idx})
 
 
-    def _extract_language_neutral(self, content: str, original: str, result: "ExtractedData",
+    def _extract_language_neutral(self, content: str, original: str, result: ExtractedData,
                                   seen_tasks: set, seen_decisions: set, seen_files: set,
                                   seen_endpoints: set, seen_schemas: set, role: str) -> None:
         """What a message in another language still says in a form these
         patterns can read: checkboxes, "TODO:"/"Decision:" headers, file and
         route names, exception names and status codes. See
         patterns.looks_english for why nothing else is attempted."""
-        for m in _TASK_DONE_CHECK.finditer(content):
+        low = content.lower()
+        for m in (_TASK_DONE_CHECK.finditer(content)
+                  if _may_match(_TASK_DONE_CHECK, low) else ()):
             task = _clip(m.group(1))
             norm = self._normalize(task)
             if len(task) >= 5 and norm not in seen_tasks:
                 result.tasks_done.append(task)
                 seen_tasks.add(norm)
         for pattern in (_TASK_TODO_CHECK, _TASK_TODO_HEADER):
+            if not _may_match(pattern, low):
+                continue
             for m in pattern.finditer(content):
                 todo = _clip(m.group(1))
                 if len(todo) >= 5 and not any(self._subsumes(todo, t) for t in result.tasks_todo):
                     result.tasks_todo.append(todo)
-        for m in _DECISION_HEADER.finditer(content):
+        for m in (_DECISION_HEADER.finditer(content)
+                  if _may_match(_DECISION_HEADER, low) else ()):
             label = _clip(m.group(1))
             norm = self._normalize(label)
             if norm not in seen_decisions and len(norm) > 4:
@@ -1470,7 +1674,31 @@ class HybridExtractor:
         self._extract_structure(original, result, seen_files, seen_endpoints, seen_schemas)
         self._extract_errors(content, result, _STRUCTURAL_ERROR_PATTERNS)
 
-    def _extract_structure(self, original: str, result: "ExtractedData",
+        # Hindi in Latin script gets its own verb-final patterns: see
+        # graph_memory/hinglish.py. Any other language keeps only what the
+        # structural passes above can read.
+        from tokenmizer.graph_memory.hinglish import extract_hinglish, looks_hinglish
+        if role != "tool" and looks_hinglish(content):
+            found = extract_hinglish(content)
+            for task in found["tasks_done"]:
+                norm = self._normalize(task)
+                if norm not in seen_tasks:
+                    result.tasks_done.append(task)
+                    seen_tasks.add(norm)
+            for todo in found["tasks_todo"]:
+                if not any(self._subsumes(todo, t) for t in result.tasks_todo + result.tasks_done):
+                    result.tasks_todo.append(todo)
+            for decision in found["decisions"]:
+                norm = self._normalize(decision["label"])
+                if norm not in seen_decisions:
+                    result.decisions.append({**decision, "source_role": role})
+                    seen_decisions.add(norm)
+            for err in found["errors"]:
+                if not any(self._subsumes(err, e) for e in result.errors):
+                    result.errors.append(err)
+            result.resolved_errors.extend(found["resolved_errors"])
+
+    def _extract_structure(self, original: str, result: ExtractedData,
                            seen_files: set, seen_endpoints: set, seen_schemas: set) -> None:
         """Files, endpoints and schemas. These are names, not prose, so they
         are read from the original text — quotes and code blocks included —
@@ -1484,28 +1712,47 @@ class HybridExtractor:
         for m in _FILE_COMMON.finditer(original):
             if is_library_name(m.group(1).strip()):
                 seen_files.add(m.group(1).strip())   # never a file; see _LIBRARY_NOT_FILE
+        # Every file this message names, before deduplication against
+        # earlier messages: whether the message is a bulk listing depends on
+        # all of them, and a file already seen is upgraded below when this
+        # message names it on its own.
+        found: dict[str, None] = {}
         for m in _FILE_PATH.finditer(original):
             f = _strip_diff_side(m.group(1).strip(), original, m.start(1))
-            if f not in seen_files and len(f) > 4 and not _is_example_mention(original, m.start(1)) \
+            if not is_library_name(f) and len(f) > 4 and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
-                result.files.append(f)
-                seen_files.add(f)
+                found[f] = None
         for m in _FILE_COMMON.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files and not _is_example_mention(original, m.start(1)) \
+            if not is_library_name(f) and f not in found \
+                    and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not _is_code_attribute(f, original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
-                result.files.append(f)
-                seen_files.add(f)
+                found[f] = None
         for m in _FILE_EXTENSIONLESS.finditer(original):
             f = m.group(1).strip()
-            if f not in seen_files and not _is_example_mention(original, m.start(1)) \
+            if not is_library_name(f) and f not in found \
+                    and not _is_example_mention(original, m.start(1)) \
                     and not _is_module_reference(original, m.start(1), m.end(1)) \
                     and not in_listing(m.start(1)):
+                found[f] = None
+        # A message naming many paths is output — `wc -l`, `git diff --stat`,
+        # `du`, a checksum list — not a statement about what was worked on.
+        # Its files are still recorded, marked as listed, so the graph ranks
+        # them below files named on their own and prunes them first. One 16 KB
+        # listing used to add 200 files at full weight, and in a long session
+        # they pushed open TODOs out of the graph.
+        bulk = len(found) > _BULK_PATHS
+        for f in found:
+            if f not in seen_files:
                 result.files.append(f)
                 seen_files.add(f)
+                if bulk:
+                    result.listed_files.append(f)
+            elif not bulk and f in result.listed_files:
+                result.listed_files.remove(f)
 
         # Endpoints — "POST /api/auth/login"
         for m in _ENDPOINT.finditer(original):
@@ -1542,7 +1789,7 @@ class HybridExtractor:
                 result.schemas.append(schema)
                 seen_schemas.add(norm)
 
-    def _extract_errors(self, content: str, result: "ExtractedData", patterns,
+    def _extract_errors(self, content: str, result: ExtractedData, patterns,
                         original: str | None = None) -> None:
         """Run the error patterns over `content` in `patterns` order, which
         is precedence (see _ALL_ERROR_PATTERNS)."""
@@ -1555,6 +1802,7 @@ class HybridExtractor:
         # a session that diagnosed three failures early and spent the rest
         # of its turns fixing them carried none of them forward.
         sentence_claims: dict[tuple[int, int], tuple[str, int]] = {}
+        errors_at_start = len(result.errors)
         low = content.lower()
         for pattern in patterns:
             if not _may_match(pattern, low):
@@ -1657,6 +1905,29 @@ class HybridExtractor:
                 floor = 3 if pattern is _ERROR_VULN else 5
                 if len(err) < floor or err.lower() in _ERROR_STOPWORDS:
                     continue
+                # A pasted log can hold thousands of failure lines, and each
+                # new one is compared with every one kept so far: quadratic,
+                # and an 85 KB log took seconds on a thread holding the GIL.
+                # Past this many, more ERROR nodes from one message do not
+                # make a resume more useful; the message itself still goes
+                # to the model and to the turn archive whole.
+                if len(result.errors) - errors_at_start >= _MAX_ERRORS_PER_MESSAGE:
+                    # ...but not at the price of the failure itself. A test
+                    # run names every failing test before the traceback that
+                    # says what broke, and keeping the first sixty kept the
+                    # names and dropped "AttributeError: 'AllValidTests'
+                    # object has no attribute 'make_choiceformset'" — the
+                    # one line that was the bug. A named exception takes the
+                    # place of the latest label from this message naming none.
+                    if not _NAMED_EXCEPTION.search(err):
+                        continue
+                    weak = next((i for i in range(len(result.errors) - 1, errors_at_start - 1, -1)
+                                 if not _NAMED_EXCEPTION.search(result.errors[i])), None)
+                    if weak is None or any(self._subsumes(err, e) for e in result.errors):
+                        continue
+                    gone = result.errors.pop(weak)
+                    if gone in result.resolved_errors:
+                        result.resolved_errors.remove(gone)
                 # One failure, two labels: keep the more specific. A pattern
                 # later in the order can recover the whole description of a
                 # failure an earlier one only clipped a piece of.
@@ -1688,7 +1959,8 @@ class HybridExtractor:
                 # open bug. The fix prefix stripped from the label above is
                 # the same signal when it sat inside the captured span.
                 if _FIX_LEAD.search(before) or _FIX_PREFIX.match(raw.strip()) \
-                        or _under_fixed_heading(content, span_start):
+                        or _under_fixed_heading(content, span_start) \
+                        or _FIXED_AFTER.match(content, span_end):
                     result.resolved_errors.append(err)
                 key = (id(pattern), _sentence_index(content, label_start))
                 prior = sentence_claims.get(key)
@@ -1726,7 +1998,7 @@ class HybridExtractor:
         messages: list[dict],
         window_size: int = 0,
         prior_message: dict | None = None,
-    ) -> "ExtractedData":
+    ) -> ExtractedData:
         """
         Fast regex-based extraction. No API calls.
 
@@ -1791,7 +2063,7 @@ class HybridExtractor:
             for e in tool_errors:
                 if not any(self._subsumes(e, x) for x in result.errors):
                     result.errors.append(e)
-            original = _strip_emphasis(_content_to_text(msg.get("content", "")))
+            original = _bounded(_strip_emphasis(_content_to_text(msg.get("content", ""))))
             if not original.strip():
                 continue
             content = mask_mentions(original)
@@ -1816,13 +2088,25 @@ class HybridExtractor:
                 assistant_proposals = (self._question_proposals(content)
                                        if role == "assistant" else [])
 
+            first_decision = len(result.decisions)
             self._extract_one_message(
                 content, role, i, is_recent,
                 result, seen_decisions, seen_tasks, seen_files,
                 seen_endpoints, seen_schemas,
                 proposals=open_proposals if role == "user" else None,
-                original=original, english=looks_english(original),
+                # A tool result is machine output — a file's contents, a
+                # listing, a test run — and nothing in it decides or
+                # finishes anything. Read as English prose, the comments in
+                # a file an agent merely opened ("# retry on timeout")
+                # became open ERROR nodes: 60 of them for a 60-step session
+                # that never failed. It gets the structure-only reading:
+                # files, routes, exception names, status codes and log
+                # error lines, which is what is real in tool output.
+                original=original,
+                english=role != "tool" and looks_english(original),
             )
+            for d in result.decisions[first_decision:]:
+                d["label"] = _with_fronted_scope(d["label"], content)
 
         # Cross-granularity dedup. Without this the heuristic path
         # returns both `scripts/backfill.py` and `backfill.py`, and both
@@ -1866,7 +2150,7 @@ class HybridExtractor:
 
     def merge(
         self,
-        llm: Optional[ExtractedData],
+        llm: ExtractedData | None,
         heuristic: ExtractedData,
     ) -> ExtractedData:
         """
@@ -1927,20 +2211,19 @@ class HybridExtractor:
             # insertion-ordered llm_by_norm/heu_by_norm dicts, never from
             # set operations (llm_keys & heu_keys, ...). Python's
             # string-hash randomization makes set iteration order unstable
-            # across processes, so with more than 15 items, WHICH 15
-            # survive combined[:15] would vary between runs on identical
-            # input — the same conversation could yield different graphs
-            # on two workers. Every LLM item in the LLM's order, then
+            # across processes, so the ORDER of the merged list would vary
+            # between runs on identical input — and with it which node wins
+            # a dedup or a cap downstream, on two workers. Every LLM item in the LLM's order, then
             # heuristic-only items in the heuristic's order: a pure,
             # deterministic function of input order.
             combined: list[str] = []
-            for k, v in llm_by_norm.items():
+            for v in llm_by_norm.values():
                 combined.append(v)  # prefer LLM casing when corroborated
             for k, v in heu_by_norm.items():
                 if k not in llm_keys:
                     combined.append(v)
 
-            setattr(merged, attr, combined[:15])
+            setattr(merged, attr, combined)
             merged.confidence[attr] = (
                 0.95 if corroborated else
                 0.80 if llm_only else
@@ -1980,7 +2263,7 @@ class HybridExtractor:
             else:
                 seen[key] = {**d, "confidence": 0.65, "_source": "heuristic"}
 
-        merged.decisions = list(seen.values())[:15]
+        merged.decisions = list(seen.values())
         merged.confidence["decisions"] = (
             0.95 if any(d.get("_source") == "both" for d in merged.decisions) else
             0.80 if any(d.get("_source") == "llm"  for d in merged.decisions) else
@@ -2009,12 +2292,10 @@ class HybridExtractor:
         working now" arrive as two labels for one event. Compared on
         content words, one clearly subsumes the other.
         """
-        wa = {w for w in re.findall(r"[a-z0-9]+", a.lower()) if len(w) > 2}
-        wb = {w for w in re.findall(r"[a-z0-9]+", b.lower()) if len(w) > 2}
-        if not wa or not wb:
-            return False
-        smaller = wa if len(wa) <= len(wb) else wb
-        return len(wa & wb) / len(smaller) >= 0.75
+        from tokenmizer.graph_memory.decision_tracker import _different_identifiers
+        # Overlapping words, and not the same sentence about a different thing.
+        return (_subsumes_words(_label_words(a), _label_words(b))
+                and not _different_identifiers(a, b) and not _substituted(a, b))
 
     # Fields on ExtractedData that are lists of DICTS, not lists of plain
     # strings — these can't go through the string-normalize-and-dedup
@@ -2058,7 +2339,7 @@ class HybridExtractor:
                 if norm not in seen and len(norm) > 3:
                     deduped.append(item)
                     seen.add(norm)
-            setattr(result, attr, deduped[:15])
+            setattr(result, attr, deduped)
         result.files = self._drop_shadowed_paths(result.files)
         result.decisions = self._drop_vaguer_decisions(self._drop_bogus_decisions(data.decisions))
         result.errors = self._drop_restated_errors(result.errors)
@@ -2103,6 +2384,8 @@ class HybridExtractor:
         trajectories, "ValueError: Imaginary coordinates are not permitted"
         was deleted by a later, unrelated "ValueError: Error from parse_expr".
         """
+        from tokenmizer.graph_memory.decision_tracker import _different_identifiers
+
         def key(label: str) -> str | None:
             m = re.search(r'\b[A-Z]\w*(?:Error|Exception)\b', label)
             if m:
@@ -2111,16 +2394,18 @@ class HybridExtractor:
             return m.group(0) if m else None
 
         def weight(label: str) -> int:
-            return len({w for w in re.findall(r"[a-z0-9]+", label.lower()) if len(w) > 2})
+            return len(_label_words(label))
 
         # The LLM path can hand back non-strings; this runs on both paths.
         errors = [e for e in errors if isinstance(e, str) and e.strip()]
 
-        def words(label: str) -> set[str]:
-            return {w for w in re.findall(r"[a-z0-9]+", label.lower()) if len(w) > 2}
+        def words(label: str) -> frozenset[str]:
+            return _label_words(label)
 
         def restates(a: str, b: str, k: str) -> bool:
             """Is `a` a less specific statement of the failure `b` names?"""
+            if _different_identifiers(a, b):
+                return False
             wa, wb = words(a) - {k}, words(b) - {k}
             if len(wa) <= 3:
                 return True
@@ -2176,7 +2461,7 @@ class HybridExtractor:
             # own list, so a name outside it (sqlc, Pydantic, Helm) kept its
             # duplicate.
             if short.startswith("Use "):
-                name = {w for w in re.findall(r"[a-z0-9]+", short[4:].lower())}
+                name = set(re.findall(r"[a-z0-9]+", short[4:].lower()))
                 long_words = set(re.findall(r"[a-z0-9]+", long.lower()))
                 if name and name <= long_words and len(long) > len(short):
                     return True
@@ -2257,6 +2542,62 @@ class HybridExtractor:
 # compiled once at import, so caching them costs nothing and keeps the
 # common case a dict lookup.
 _extractors: dict[str, HybridExtractor] = {}
+
+
+@functools.lru_cache(maxsize=8192)
+def _label_words(text: str) -> frozenset:
+    """Content words of a label, memoised.
+
+    Dedup compares every new label against every earlier one, and each
+    comparison re-ran the word regex on both sides: on an 80 KB log with
+    hundreds of error lines that was 660,000 regex calls and most of a
+    ten-second extraction. A label's words never change.
+    """
+    return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2)
+
+
+@functools.lru_cache(maxsize=65536)
+def _substituted(a: str, b: str) -> bool:
+    """Does one label swap a word of the other for a different one?
+
+    What _subsumes exists to collapse is several patterns matching
+    overlapping spans of one sentence: those differ at the edges, where one
+    label runs on further than the other. Two labels that differ in the
+    MIDDLE — "write the svc00x exporter docs" / "write the svc01x exporter
+    docs", "update the billing docs" / "update the ledger docs" — are the
+    same sentence about different things. Overlap alone (3 words of 4)
+    merged them, and a long call kept one TODO of thirty. A word and its
+    inflection (add / added, test / tests) is not a substitution.
+    """
+    ta = [w for w in re.findall(r"[a-z0-9_]+", a.lower()) if len(w) > 2]
+    tb = [w for w in re.findall(r"[a-z0-9_]+", b.lower()) if len(w) > 2]
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
+        if (tag == "replace" and 0 < i1 and i2 < len(ta) and 0 < j1 and j2 < len(tb)
+                and any(not _inflected(x, y) for x in ta[i1:i2] for y in tb[j1:j2])):
+            return True
+    return False
+
+
+_INFLECTION_ENDINGS = ("", "s", "es", "d", "ed", "ing", "er", "ers")
+
+
+def _inflected(x: str, y: str) -> bool:
+    """One word, inflected: add/added/adds, fix/fixes, test/tests."""
+    short, long_ = sorted((x, y), key=len)
+    return long_.startswith(short) and long_[len(short):] in _INFLECTION_ENDINGS
+
+
+def _subsumes_words(wa: frozenset, wb: frozenset) -> bool:
+    if not wa or not wb:
+        return False
+    smaller = wa if len(wa) <= len(wb) else wb
+    return len(wa & wb) / len(smaller) >= 0.75
+
+
+def _quoted_or_question(content: str, pos: int) -> bool:
+    """A choice that is asked about, or quoted from someone else, is not a
+    choice this session made."""
+    return _is_question_context(content, pos) or inside_quotation(content, pos)
 
 
 def get_hybrid_extractor(domain: str | None = None) -> HybridExtractor:

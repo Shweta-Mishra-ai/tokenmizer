@@ -29,7 +29,27 @@ _DEFAULT_WORDS = {
 }
 
 
-def _vocabulary(graph: "GraphMemory") -> dict:
+
+
+def _recent_first_key(graph):
+    """Sort key: mentioned in the latest request first, then most
+    important, then latest created.
+
+    This read `updated_at * 0.6 + importance * 0.4`, where `updated_at` is a
+    Unix timestamp near 1.8e9 and importance is at most 1 — importance never
+    counted, and the order was the wall clock to the microsecond. Whole
+    seconds fixed that within one call but not across them: whether two
+    requests' facts tied depended on where a second boundary fell, so
+    identical input still gave a different resume in 18 of 716 real
+    sessions between two runs. The extraction call (MemoryNode.turn)
+    is what "one request" meant; nodes stored before it existed (turn 0)
+    keep the whole-second order.
+    """
+    order = {nid: i for i, nid in enumerate(graph._nodes)}
+    return lambda n: (n.turn, int(n.updated_at) if n.turn == 0 else 0,
+                      n.importance, order.get(n.id, 0))
+
+def _vocabulary(graph: GraphMemory) -> dict:
     """The section headers for this graph's domain pack."""
     from tokenmizer.graph_memory.domains import get_pack
 
@@ -46,7 +66,7 @@ def _vocabulary(graph: "GraphMemory") -> dict:
     return {**_DEFAULT_WORDS, **get_pack(domain).vocabulary}
 
 
-def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
+def to_context_block(graph: GraphMemory, token_budget: int = 400) -> str:
     """
     Build tiered resume context block for LLM injection.
 
@@ -102,7 +122,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
     order = {nid: i for i, nid in enumerate(graph._nodes)}
 
     def _recent_first(n):
-        return (n.importance, n.updated_at, order.get(n.id, 0))
+        return (n.importance, n.recency(), order.get(n.id, 0))
 
     open_tasks = sorted(
         [n for n in graph._nodes.values()
@@ -121,7 +141,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
     )
     # Interleaved, so a tight budget keeps both the current step and the
     # next one rather than four in-progress items and no plan.
-    current_work = [t for pair in zip(open_tasks[:4], pending_tasks[:4]) for t in pair]
+    current_work = [t for pair in zip(open_tasks[:4], pending_tasks[:4], strict=False) for t in pair]
     n = len(current_work) // 2
     current_work += open_tasks[n:4] + pending_tasks[n:4]
     if current_work:
@@ -133,7 +153,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
          if n.type == NodeType.TASK
          and n.status == NodeStatus.COMPLETED
          and not n._evicted],
-        key=lambda x: (x.updated_at * 0.6 + x.importance * 0.4),
+        key=_recent_first_key(graph),
         reverse=True
     )
     # Deduplicate: skip if label is very similar to already-included task
@@ -235,7 +255,7 @@ def to_context_block(graph: "GraphMemory", token_budget: int = 400) -> str:
     notes = sorted(
         [n for n in graph._nodes.values()
          if n.type == NodeType.SUMMARY and not n._evicted],
-        key=lambda x: x.updated_at, reverse=True
+        key=lambda x: x.recency(), reverse=True
     )
     if notes:
         # "Noted:" and not "Constraints:": the selector keeps hard figures

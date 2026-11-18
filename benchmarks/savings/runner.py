@@ -298,7 +298,7 @@ def retention(requests, actions, sent: list[str]) -> tuple[int, int, list[str]]:
     """(needed, still present, examples of what was lost) over a replay."""
     needed = kept = 0
     lost: list[str] = []
-    for req, action, text in zip(requests, actions, sent):
+    for req, action, text in zip(requests, actions, sent, strict=True):
         for tok in needed_from_history(action, req):
             needed += 1
             if present(tok, text):

@@ -153,7 +153,7 @@ def _install_fake_embedder(monkeypatch, vectors: dict):
     def _dot(a, b) -> float:
         if a is None or b is None:
             return 0.0
-        return float(sum(x * y for x, y in zip(a, b)))
+        return float(sum(x * y for x, y in zip(a, b, strict=True)))
 
     engine = EmbeddingEngine.get()
     monkeypatch.setattr(engine, "_model", _FakeModel())

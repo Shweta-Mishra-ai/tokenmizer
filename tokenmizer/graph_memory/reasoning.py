@@ -113,7 +113,7 @@ def _semantic_matches(query: str, candidates: list[MemoryNode]) -> list[MemoryNo
     return [n for score, n in scored if score >= _SEMANTIC_RECALL_THRESHOLD][:_SEMANTIC_RECALL_LIMIT]
 
 
-def why(graph: "GraphMemory", query: str) -> dict:
+def why(graph: GraphMemory, query: str) -> dict:
     """
     Trace the causal chain behind a decision.
 
@@ -188,7 +188,7 @@ def why(graph: "GraphMemory", query: str) -> dict:
     }
 
 
-def impact(graph: "GraphMemory", query: str) -> dict:
+def impact(graph: GraphMemory, query: str) -> dict:
     """
     Typed 1-hop neighborhood of every node matching `query` — which files,
     tasks, errors, dependencies are connected, and via which relation.
@@ -224,7 +224,7 @@ def impact(graph: "GraphMemory", query: str) -> dict:
     }
 
 
-def decision_history(graph: "GraphMemory") -> dict:
+def decision_history(graph: GraphMemory) -> dict:
     """Decisions grouped by topic bucket, each bucket ordered oldest→newest."""
     buckets: dict[str, list[dict]] = {}
     for n in sorted(
@@ -240,7 +240,7 @@ def decision_history(graph: "GraphMemory") -> dict:
     return buckets
 
 
-def consistency_check(graph: "GraphMemory") -> list[dict]:
+def consistency_check(graph: GraphMemory) -> list[dict]:
     """
     Ontology-based audit of the graph's current state. Returns a list of
     anomalies (empty list = consistent). Each anomaly: {kind, detail, ids}.
@@ -295,7 +295,7 @@ def consistency_check(graph: "GraphMemory") -> list[dict]:
     return issues
 
 
-def summarize_reasoning(graph: "GraphMemory") -> dict:
+def summarize_reasoning(graph: GraphMemory) -> dict:
     """The full reasoning view — served at GET /api/graph/{session}/reasoning."""
     now = time.time()
     active_decisions = [

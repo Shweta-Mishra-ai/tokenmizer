@@ -27,9 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
@@ -113,14 +113,14 @@ async def verify_session_access(request: Request) -> None:
         raise HTTPException(
             status_code=404,
             detail=f"No session '{session_id}' found.",
-        )
+        ) from None
     except OwnershipUnavailable as e:
         logger.error(f"Ownership store unavailable, denying request: {e}")
         raise HTTPException(
             status_code=503,
             detail="Session ownership state unavailable — request rejected "
                    "for safety. This is a server-side problem.",
-        )
+        ) from e
 
 
 def _internal_error(context: str, e: Exception) -> HTTPException:
@@ -148,15 +148,15 @@ def _internal_error(context: str, e: Exception) -> HTTPException:
 
 
 @router.get("/api/stats", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
-async def stats(request: Request, session_id: Optional[str] = None):
+async def stats(request: Request, session_id: str | None = None):
     # With several API keys each key is a tenant, and the deployment-wide
     # totals are other tenants' traffic. Each sees its own sessions (and
     # its own session-less requests, recorded under its anonymous scope).
     #
     # A session_id narrows it to that session; access to it was checked by
-    # verify_session_access. It used to be ignored with one key, so
-    # `tokenmizer stats <session>` printed the global totals for any id,
-    # one that never existed included.
+    # verify_session_access. It used to be ignored, so `tokenmizer stats
+    # <session>` printed the global totals for any id, one that never
+    # existed included.
     if session_id:
         return app_module._analytics.summary(scope={session_id})
     if not _multi_tenant():
@@ -165,7 +165,8 @@ async def stats(request: Request, session_id: Optional[str] = None):
     try:
         owned = set(app_module._ownership.sessions_for(principal))
     except OwnershipUnavailable:
-        raise HTTPException(status_code=503, detail="Session ownership state unavailable.")
+        raise HTTPException(status_code=503,
+                            detail="Session ownership state unavailable.") from None
     owned.add(f"__anon__:{principal}")
     return app_module._analytics.summary(scope=owned)
 
@@ -211,7 +212,7 @@ async def analyze_file(req: AnalyzeRequest):
             token_budget=req.token_budget, query=req.query,
         )
     except Exception as e:
-        raise _internal_error("File analysis failed", e)
+        raise _internal_error("File analysis failed", e) from e
 
     return {
         "filename": req.filename,
@@ -451,7 +452,6 @@ async def create_manual_checkpoint(session_id: str, body: CheckpointBody | None 
         raw_messages = [m.to_dict() for m in (body.messages if body else [])]
         raw_messages = redact_messages(raw_messages)
         async with app_module._get_session_lock(session_id):
-            # Extraction over up to 500 messages: off the event loop.
             ckpt = await asyncio.to_thread(
                 app_module._checkpoint_mgr.create,
                 session_id=session_id,
@@ -471,75 +471,11 @@ async def create_manual_checkpoint(session_id: str, body: CheckpointBody | None 
             "trigger": ckpt.trigger,
         }
     except Exception as e:
-        raise _internal_error(f"Manual checkpoint failed for session {session_id}", e)
-
-
-def _session_summary(session_id: str, graph) -> dict:
-    stats = graph.stats()
-    return {
-        "session_id": session_id,
-        "node_count": stats.get("node_count", 0),
-        "edge_count": stats.get("edge_count", 0),
-        "by_type": stats.get("by_type", {}),
-        "updated_at": max((n.updated_at for n in graph._nodes.values()), default=0.0),
-        "graph_url": f"/api/graph/{session_id}/html",
-    }
-
-
-def _load_session_summary(session_id: str) -> dict:
-    from tokenmizer.graph_memory.graph import GraphMemory
-    graph = GraphMemory(session_id,
-                        storage_dir=app_module.settings.graph_checkpoint.storage_dir)
-    return _session_summary(session_id, graph)
-
-
-@router.delete("/api/sessions/{session_id}",
-               dependencies=[Depends(verify_api_key), Depends(verify_session_access),
-                             Depends(app_module._check_rate_limit)])
-async def delete_session(session_id: str):
-    """Forget a session: its graph memory, decision history, checkpoints and
-    cached answers, and who owned it. Request counts in the analytics stay,
-    with the session id cleared, so totals do not move.
-
-    There was no way to do this short of deleting SQLite files by hand,
-    and a session can hold anything a user pasted into it. Only the owner
-    may delete (anyone else gets the same 404 as a session that does not
-    exist). Held under the session's lock so an in-flight request cannot
-    write the graph back, and the cached graph is dropped WITHOUT being
-    persisted, for the same reason."""
-    from tokenmizer.graph_memory.filelock import LockUnavailable
-    from tokenmizer.graph_memory.persistence import delete_session as delete_graph
-
-    async with app_module._get_session_lock(session_id):
-        app_module._graph_cache.pop(session_id, None)
-        app_module._last_auto_checkpoint.pop(session_id, None)
-        app_module._terse_sessions.pop(session_id, None)
-        cached = app_module._cache.drop_scope(session_id)
-        storage = app_module.settings.graph_checkpoint.storage_dir
-        try:
-            graph_rows = await asyncio.to_thread(delete_graph, storage, session_id)
-            checkpoints = await asyncio.to_thread(
-                app_module._checkpoint_mgr.delete_session, session_id)
-        except LockUnavailable:
-            raise HTTPException(status_code=503,
-                                detail="Session is being written by another worker; retry.")
-        except Exception as e:
-            raise _internal_error("Session delete failed", e)
-        analytics = await asyncio.to_thread(app_module._analytics.forget_session, session_id)
-        try:
-            app_module._ownership.release(session_id)
-        except OwnershipUnavailable as e:
-            logger.error(f"Ownership store unavailable deleting {session_id!r}: {e}")
-            raise HTTPException(status_code=503, detail="Session ownership state unavailable.")
-    logger.info(f"Deleted session {session_id!r}: {graph_rows} graph rows, "
-                f"{checkpoints} checkpoints, {cached} cached answers")
-    return {"session_id": session_id, "deleted": {
-        "graph_rows": graph_rows, "checkpoints": checkpoints,
-        "cached_answers": cached, "analytics_rows_unlinked": analytics}}
+        raise _internal_error(f"Manual checkpoint failed for session {session_id}", e) from e
 
 
 @router.get("/api/sessions", dependencies=[Depends(verify_api_key), Depends(app_module._check_rate_limit)])
-async def list_sessions(request: Request):
+async def list_sessions(request: Request, limit: int = 100):
     """The caller's sessions, with size and recency, newest first.
 
     Scoped by ownership: graph_memory.db holds every principal's sessions in
@@ -558,23 +494,36 @@ async def list_sessions(request: Request):
     except OwnershipUnavailable as e:
         logger.error(f"Ownership store unavailable listing sessions: {e}")
         raise HTTPException(status_code=503,
-                            detail="Session ownership state unavailable.")
+                            detail="Session ownership state unavailable.") from e
 
+    # Counted in SQLite, not by building a GraphMemory per session: the
+    # dashboard polls this every 15 seconds, and loading every graph a
+    # principal ever made each time pushed real sessions out of the cache.
+    from tokenmizer.graph_memory.persistence import session_summaries
+    summaries = await asyncio.to_thread(
+        session_summaries, app_module.settings.graph_checkpoint.storage_dir, owned)
     sessions = []
     for session_id in owned:
-        # A cached graph is read under its lock. An uncached one is loaded
-        # for this listing only, off the event loop, and NOT put in the LRU:
-        # listing a principal with hundreds of sessions used to cycle all of
-        # them through the 200-entry cache, evicting (and force-persisting)
-        # the sessions that were actually in use.
-        if session_id in app_module._graph_cache:
-            async with _locked_graph(session_id) as graph:
-                summary = _session_summary(session_id, graph)
-        else:
-            summary = await asyncio.to_thread(_load_session_summary, session_id)
-        sessions.append(summary)
+        row = summaries.get(session_id, {})
+        cached = app_module._graph_cache.get(session_id)
+        if cached is not None:
+            # In memory and possibly ahead of disk by one flush interval.
+            stats = cached.stats()
+            row = {"node_count": stats["node_count"], "edge_count": stats["edge_count"],
+                   "by_type": stats["by_type"],
+                   "updated_at": max((n.updated_at for n in cached._nodes.values()),
+                                     default=0.0)}
+        sessions.append({
+            "session_id": session_id,
+            "node_count": row.get("node_count", 0),
+            "edge_count": row.get("edge_count", 0),
+            "by_type": row.get("by_type", {}),
+            "updated_at": row.get("updated_at", 0.0),
+            "graph_url": f"/api/graph/{session_id}/html",
+        })
     sessions.sort(key=lambda s: s["updated_at"], reverse=True)
-    return {"sessions": sessions, "count": len(sessions)}
+    total = len(sessions)
+    return {"sessions": sessions[:limit], "count": total}
 
 
 @router.get("/api/checkpoints/{session_id}", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
@@ -588,8 +537,8 @@ _INVALIDATE_MIN_LABEL_LEN = 3  # matches validator.py's own noise-pattern floor 
 @router.post("/api/decision/invalidate", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
 async def invalidate_decision(
     session_id: str,
-    decision_label: Optional[str] = None,
-    node_id: Optional[str] = None,
+    decision_label: str | None = None,
+    node_id: str | None = None,
     reason: str = "",
 ):
     """
@@ -630,17 +579,21 @@ async def invalidate_decision(
         async with _locked_graph(session_id) as graph:
 
             invalidated: list[dict] = []
+            now = time.time()
+            stamp = f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
 
             if node_id is not None:
                 node = graph._nodes.get(node_id)
                 if (node is not None and node.type == NodeType.DECISION
                         and node.status == NodeStatus.COMPLETED):
                     node.status = NodeStatus.INVALIDATED
-                    node.summary = (
-                        f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
-                    )
+                    # Without valid_until, /history?at_time= still reported
+                    # the decision as in force after it was withdrawn.
+                    node.valid_until = now
+                    node.summary = stamp
                     invalidated.append({"node_id": node_id, "label": node.label})
             else:
+                assert decision_label is not None  # checked at the top of the route
                 label_lower = decision_label.lower().strip()
                 pattern = re.compile(r'\b' + re.escape(label_lower) + r'\b')
                 # Only ACTIVE (COMPLETED) decisions are eligible: matching
@@ -653,9 +606,8 @@ async def invalidate_decision(
                             node.status == NodeStatus.COMPLETED and
                             pattern.search(node.label.lower())):
                         node.status = NodeStatus.INVALIDATED
-                        node.summary = (
-                            f"Invalidated: {reason[:100]}" if reason else "Explicitly invalidated"
-                        )
+                        node.valid_until = now
+                        node.summary = stamp
                         invalidated.append({"node_id": nid, "label": node.label})
 
             if not invalidated:
@@ -691,7 +643,53 @@ async def invalidate_decision(
     except HTTPException:
         raise
     except Exception as e:
-        raise _internal_error("Invalidate decision failed", e)
+        raise _internal_error("Invalidate decision failed", e) from e
+
+
+@router.delete("/api/session/{session_id}", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
+async def delete_session(session_id: str):
+    """Delete everything stored for one session: graph, cold storage,
+    transitions, checkpoints, archived turns, cached answers and the
+    ownership record. There was no way to do this at all; every session
+    lived forever."""
+    try:
+        removed = await app_module.delete_session_data(session_id)
+    except Exception as e:
+        raise _internal_error(f"Deleting session {session_id} failed", e) from e
+    return {"session_id": session_id, "deleted": removed}
+
+
+@router.get("/api/session/{session_id}/archive", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
+async def search_archive(session_id: str, q: str = "", limit: int = 5):
+    """Turns windowing stopped sending, verbatim. With `q`, the ones that
+    match it best; without, only how many there are."""
+    archive = app_module._get_archive()
+    if archive is None:
+        return {"session_id": session_id, "enabled": False, "turns": [], "count": 0}
+    count = await asyncio.to_thread(archive.count, session_id)
+    turns = (await asyncio.to_thread(archive.search, session_id, q, max(1, min(limit, 50)))
+             if q.strip() else [])
+    return {"session_id": session_id, "enabled": True, "count": count, "turns": turns}
+
+
+@router.get("/api/graph/{session_id}/pruned", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
+async def list_pruned_nodes(session_id: str):
+    """Nodes moved to cold storage when the session passed its node cap."""
+    graph = await app_module._get_graph_async(session_id)
+    nodes = await asyncio.to_thread(graph.pruned_nodes)
+    return {"session_id": session_id, "nodes": nodes, "count": len(nodes)}
+
+
+@router.post("/api/graph/{session_id}/restore", dependencies=[Depends(verify_api_key), Depends(verify_session_access), Depends(app_module._check_rate_limit)])
+async def restore_pruned_node(session_id: str, node_id: str):
+    """Put one pruned node back into the live graph."""
+    graph = await app_module._get_graph_async(session_id)
+    async with app_module._get_session_lock(session_id):
+        ok = await asyncio.to_thread(graph.restore_node, node_id)
+    if not ok:
+        raise HTTPException(status_code=404,
+                            detail=f"No pruned node {node_id!r} in session {session_id!r}.")
+    return {"session_id": session_id, "restored": node_id}
 
 
 def _live_resume(graph, level: str, next_action: str = "") -> str:
@@ -752,6 +750,7 @@ async def get_resume(session_id: str, level: str = "standard"):
                 text = _live_resume(graph, level, ckpt.next_action if ckpt else "")
                 source = "live_graph"
             else:
+                assert ckpt is not None  # use_live is False only when a checkpoint exists
                 resume_map = {
                     "critical": ckpt.resume_critical,
                     "standard": ckpt.resume_standard,
@@ -770,4 +769,4 @@ async def get_resume(session_id: str, level: str = "standard"):
     except HTTPException:
         raise
     except Exception as e:
-        raise _internal_error(f"Resume failed for {session_id}", e)
+        raise _internal_error(f"Resume failed for {session_id}", e) from e

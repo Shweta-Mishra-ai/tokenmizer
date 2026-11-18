@@ -30,6 +30,7 @@ continues to work unchanged.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -38,6 +39,7 @@ import sqlite3
 import time
 from collections import Counter
 from pathlib import Path
+from typing import ClassVar
 
 from tokenmizer.graph_memory.helpers import (
     _content_to_text,
@@ -206,69 +208,102 @@ def _names_file(name: str, text: str) -> bool:
     `postgres.py` to "PostgreSQL". Underscores and hyphens count as spaces
     on both sides, so `rate_limiter` matches "rate limiter".
     """
+    pattern = _file_name_pattern(name)
+    return pattern is not None and pattern.search(_spaced_lower(text)) is not None
+
+
+# Both memoised: _names_file runs for every new node against every file in
+# the graph, and built a fresh regex for each call — compiled anew whenever
+# Python's own pattern cache had cycled, which on a long session was always.
+@functools.lru_cache(maxsize=4096)
+def _file_name_pattern(name: str) -> re.Pattern | None:
     name = re.sub(r"[_\-]+", " ", name.lower()).strip()
     if len(name) <= 2:
-        return False
-    text = re.sub(r"[_\-]+", " ", text.lower())
-    return re.search(r"(?<![a-z0-9])" + re.escape(name) + _INFLECTION + r"(?![a-z0-9])",
-                     text) is not None
+        return None
+    return re.compile(r"(?<![a-z0-9])" + re.escape(name) + _INFLECTION + r"(?![a-z0-9])")
+
+
+@functools.lru_cache(maxsize=4096)
+def _spaced_lower(text: str) -> str:
+    return re.sub(r"[_\-]+", " ", text.lower())
 
 
 _INFLECTION = r"(?:s|es|d|ed|r|er|ers|ing|ment|ql)?"
 
-
-_TOKEN_SPLIT = re.compile(r"[\s/\\|<>=,;()\[\]{}\"'`]+")
-_PART_SPLIT = re.compile(r"[_\-.]+")
-
-
-# ── Query intent ─────────────────────────────────────────────────────────────
-#
-# A question says what KIND of memory it wants before it says what about:
-# "what broke when signing up" wants an error, "what is still outstanding"
-# wants open work, "which library did we settle on" a decision. Token
-# overlap cannot see that — "broke" shares no word with "422 Unprocessable
-# Entity on /signup" — and with every node scoring on importance alone, the
-# goal and the highest-importance decisions filled the top results instead.
-# The intent is a boost to the types that answer it, never a filter.
-
-_INTENT_PATTERNS = {
-    "failure": re.compile(
-        r"\b(?:broke|broken|break(?:s|ing)?|fail(?:s|ed|ing|ure)?|wrong|errors?|bugs?|"
-        r"crash(?:ed|es)?|complain(?:s|ed)?|issues?|problems?|exceptions?|regress\w*)\b", re.I),
-    "open": re.compile(
-        r"\b(?:still|outstanding|left|remaining|todo|pending|next|unfinished|"
-        r"not\s+(?:yet|safe|done|fixed)|open)\b", re.I),
-    "choice": re.compile(
-        r"\b(?:which|chose|choose|chosen|decided?|settle[d]?|pick(?:ed)?|"
-        r"go(?:ing)?\s+with|went\s+with|switch(?:ed)?|using|on\s+now)\b", re.I),
+# Question words that say which KIND of fact is wanted. Kept to plain,
+# domain-free vocabulary; see GraphMemory._score_nodes.
+_INTENT_WORDS: dict[NodeType, re.Pattern] = {
+    NodeType.ERROR: re.compile(
+        r"\b(?:broke|broken|break(?:s|ing)?|fail(?:s|ed|ing|ure)?|wrong|bugs?|crash\w*|"
+        r"errors?|issues?|problems?|slow\w*|unsafe|not safe|leak\w*|regress\w*|"
+        r"went wrong|goes wrong|go wrong)\b", re.IGNORECASE),
+    NodeType.DECISION: re.compile(
+        r"\b(?:decide\w*|decision\w*|chose|choose|chosen|pick(?:ed)?|which\s+\w+\s+(?:do|did|are|will)\s+we|"
+        r"went with|go(?:ing)? with|why (?:do|did|are) we (?:use|using))\b", re.IGNORECASE),
+    NodeType.TASK: re.compile(
+        r"\b(?:left|remaining|todo|to do|next|still need|pending|done|finished|"
+        r"checking|verify\w*|progress|status)\b", re.IGNORECASE),
+    NodeType.FILE: re.compile(r"\b(?:files?|where (?:is|are|does)|module|path)\b", re.IGNORECASE),
 }
+_INTENT_BOOST = 1.5
+_INTENT_DEMOTE = 1.25
+
+# A question about the present ("how ARE we checking", "what is STILL
+# broken", "right now") asks for what is open, not what is finished; the
+# fixed importances rank a completed task (0.8) above work in progress (0.6).
+_PRESENT = re.compile(r"\b(?:are we|is (?:it|there|this)? ?still|still|currently|"
+                      r"right now|at the moment|so far)\b", re.IGNORECASE)
+_PRESENT_BOOST = 1.3
 
 
-def _query_intent(task: str) -> frozenset:
-    return frozenset(k for k, p in _INTENT_PATTERNS.items() if p.search(task or ""))
+_OPEN_STATUSES = frozenset({NodeStatus.IN_PROGRESS, NodeStatus.PENDING, NodeStatus.FAILED,
+                            NodeStatus.CONTESTED})
 
 
-def _intent_boost(intent: frozenset, node: "MemoryNode") -> float:
-    if not intent:
-        return 1.0
-    boost = 1.0
-    if "failure" in intent and node.type == NodeType.ERROR:
-        # Resolved ones too: "what broke" is usually asked after the fix.
-        boost *= 2.0
-    if "open" in intent and (
-            (node.type == NodeType.TASK and node.status != NodeStatus.COMPLETED)
-            or (node.type == NodeType.ERROR and node.status == NodeStatus.FAILED)):
-        boost *= 1.5
-    if "choice" in intent and node.type == NodeType.DECISION:
-        boost *= 1.3
-    # A question about one kind of thing is not answered by the session
-    # goal, which otherwise tops every list on importance alone.
-    if node.type == NodeType.GOAL:
-        boost *= 0.7
-    return boost
+def _query_intent(task: str) -> list[NodeType]:
+    return [t for t, pattern in _INTENT_WORDS.items() if pattern.search(task or "")]
 
 
 # ── Graph ────────────────────────────────────────────────────────────────────
+
+
+# Where an identifier has more than one word in it: a separator, or a
+# lower-to-upper case change.
+_SUBWORD_SPLIT = re.compile(r"[_/.\-]|[a-z][A-Z]")
+_SUBWORD = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+")
+# Words that carry no subject. Counted as overlap they let "Redis for refresh
+# token storage" match "which file did we change for the quartz uploader"
+# as well as the file did, and a boosted type outranked the real answer.
+_FUNCTION_WORDS = frozenset((
+    "the and for are was were been being did does doing has have had having our "
+    "ours you your yours its this that these those what which who whom whose how "
+    "why when where with from into onto than then there their they them will would "
+    "should could can may might must also just any all some about over under after "
+    "before out off but per via its").split())
+# Path parts that say where a file sits, not what it is. As sub-words they
+# matched questions on "test" or "source" to every file under tests/ or src/
+# and pushed real answers down (retrieval eval: one case lost).
+_SCAFFOLD_PARTS = frozenset((
+    "src lib libs app apps pkg pkgs internal cmd test tests spec specs dist build "
+    "py js jsx ts tsx go rs java rb php cs cpp hpp md json yaml yml toml txt html "
+    "css sql sh cfg ini lock xml csv env").split())
+
+
+def _start_of_longest_run(flags: list[bool]) -> int | None:
+    """Index where the longest run of True values starts (the earliest such
+    run on a tie), or None when there is no True."""
+    best_start, best_len = None, 0
+    run_start, run_len = 0, 0
+    for i, f in enumerate(flags):
+        if f:
+            if run_len == 0:
+                run_start = i
+            run_len += 1
+            if run_len > best_len:
+                best_start, best_len = run_start, run_len
+        else:
+            run_len = 0
+    return best_start
 
 class GraphMemory:
     """
@@ -281,8 +316,12 @@ class GraphMemory:
     ARCHIVE_SUPERSEDED_AFTER_DAYS: float = 7.0
 
     def __init__(self, session_id: str, storage_dir: str = "./checkpoints",
-                 semantic_retrieval: bool = False, domain: str | None = None):
+                 semantic_retrieval: bool = False, domain: str | None = None,
+                 max_nodes: int = 500):
         self.session_id = session_id
+        # Above this, extraction prunes resolved nodes into cold storage.
+        # See graph_checkpoint.max_nodes.
+        self.max_nodes = max_nodes
         # Blend embedding similarity into query(). Off by default and passed
         # in rather than read from Settings, so this module stays independent
         # of config the way the rest of it is; api/app.py supplies the value.
@@ -295,6 +334,9 @@ class GraphMemory:
         self._embedding_cache: dict[str, tuple] = {}
         self._nodes: dict[str, MemoryNode] = {}
         self._edges: list[MemoryEdge] = []
+        # FILE nodes by the last component of their path, only while
+        # _apply_extracted runs; see _build_file_index.
+        self._file_index: dict[str, list[str]] | None = None
         self._transitions: list[DecisionTransition] = []   # full causal history
         self._processed_hashes: set[str] = set()
         # (fingerprint, hash) per position of the last history hashed; see
@@ -347,6 +389,16 @@ class GraphMemory:
         self._persisted_nodes: dict[str, str] = {}
         self._persisted_edges: dict[str, str] = {}
         self._persisted_hashes_json: str = ""
+        # graph_meta.version as of this instance's last load or write; None
+        # when unknown. Another process's write moves the stored counter
+        # past it — see is_stale().
+        self._disk_version: int | None = None
+        # Counters behind MemoryNode.turn / .seq; load() resumes them from
+        # the stored nodes. _in_turn is set while extract_from_messages()
+        # runs, so every node one call adds shares its turn.
+        self._turn = 0
+        self._seq = 0
+        self._in_turn = False
         # True if this session's data came from the v1 blob table and is
         # awaiting its first per-row write.
         self._migrated_from_blob = False
@@ -368,7 +420,7 @@ class GraphMemory:
     # ── DB ──────────────────────────────────────────────────────────────────
     # Full implementations in persistence.py.
 
-    def _db_connect(self) -> "sqlite3.Connection":
+    def _db_connect(self) -> sqlite3.Connection:
         from tokenmizer.graph_memory.persistence import db_connect
         return db_connect(self)
 
@@ -401,6 +453,14 @@ class GraphMemory:
         if self._nodes and not (self._processed_hashes - {_HASHES_TRIMMED}):
             self._unsourced_nodes = True
 
+    def is_stale(self) -> bool:
+        """True if another process has written this session since this
+        instance last read or wrote it. False when that cannot be told
+        (unreadable database): keep serving the copy in memory."""
+        from tokenmizer.graph_memory.persistence import stored_version
+        on_disk = stored_version(self)
+        return on_disk is not None and on_disk != self._disk_version
+
     # ── Nodes ────────────────────────────────────────────────────────────────
 
     def _node_id(self, node_type: str, label: str) -> str:
@@ -409,6 +469,17 @@ class GraphMemory:
 
     def _normalize_label(self, label: str) -> str:
         return label.lower().strip().rstrip(".,!?")
+
+    def _mark_mentioned(self, node_id: str) -> None:
+        """Record that `node_id` was just added or mentioned again."""
+        node = self._nodes.get(node_id)
+        if node is None:
+            return
+        if not self._in_turn:
+            self._turn += 1     # outside extraction, each call is its own turn
+        self._seq += 1
+        node.turn, node.seq = self._turn, self._seq
+        self._dirty = True
 
     def add_node(
         self,
@@ -420,7 +491,38 @@ class GraphMemory:
         confidence: float = 0.7,
         source_role: str | None = "assistant",
         detect_conflicts: bool = True,
+        reinforce: bool = True,
+
     ) -> str:
+        """Add a node, or update the one it duplicates. Returns its id, or
+        "" if it was refused. See _add_node."""
+        node_id = self._add_node(node_type, label, status, summary, importance,
+                                 confidence, source_role, reinforce, detect_conflicts)
+        if node_id:
+            self._mark_mentioned(node_id)
+        return node_id
+
+    def _add_node(
+        self,
+        node_type: NodeType,
+        label: str,
+        status: NodeStatus = NodeStatus.PENDING,
+        summary: str = "",
+        importance: float = 0.5,
+        confidence: float = 0.7,
+        source_role: str | None = "assistant",
+        reinforce: bool = True,
+        detect_conflicts: bool = True,
+    ) -> str:
+        """Add a node, or update the one it duplicates.
+
+        A repeated mention normally raises the existing node's importance
+        (MemoryNode.touch). `reinforce=False` refreshes it without that:
+        for a path that reappears in a listing, being listed again is not
+        evidence it matters. A 1,000-turn session's re-listed paths climbed
+        to 1.0 that way and pushed every file the agent named out of the
+        graph.
+        """
         from tokenmizer.security.fencing import is_injection_text
         from tokenmizer.security.redaction import redact_node
 
@@ -445,6 +547,12 @@ class GraphMemory:
             self._unsourced_nodes = True
 
         stored_label = label[:120]
+        # A label is clipped to 120 characters for display and identity.
+        # What was cut — often the half of the sentence that said WHY, or
+        # the path, or the version — used to be discarded. When the node
+        # has no summary of its own, the whole statement becomes it.
+        if len(label) > 120 and not summary:
+            summary = label
         stored_summary = summary[:300]
         norm = self._normalize_label(stored_label)
         node_id = self._node_id(node_type.value, norm)
@@ -452,7 +560,13 @@ class GraphMemory:
         if node_id in self._nodes:
             # Dedup: update existing node instead of creating duplicate
             existing = self._nodes[node_id]
-            existing.touch()
+            if reinforce:
+                existing.touch()
+            else:
+                existing.updated_at = time.time()
+            if node_type == NodeType.FILE and importance > existing.importance:
+                # A file first seen in a listing, now named on its own.
+                existing.importance = importance
             self._dirty = True  # touch() always changes updated_at, must persist
             # Only upgrade status (completed > in_progress > pending) —
             # except ERROR, see _next_status().
@@ -541,13 +655,23 @@ class GraphMemory:
         # any repository's. The shorter spelling is kept: it is the one the
         # resume should show.
         if node_type == NodeType.FILE and "/" in stored_label:
-            for ex_id, ex in self._nodes.items():
+            # Two spellings of one path end in the same last component, so
+            # while an index exists only those nodes can match.
+            candidates = (((i, self._nodes[i]) for i in
+                           self._file_index.get(stored_label.rsplit("/", 1)[-1], ())
+                           if i in self._nodes)
+                          if self._file_index is not None else self._nodes.items())
+            for ex_id, ex in candidates:
                 if ex.type != NodeType.FILE or ex._evicted or "/" not in ex.label:
                     continue
                 short, long_ = sorted((stored_label, ex.label), key=len)
                 if short.count("/") >= 1 and (short == long_ or long_.endswith("/" + short)):
-                    ex.touch()
+                    if reinforce:
+                        ex.touch()
+                    else:
+                        ex.updated_at = time.time()
                     self._dirty = True
+                    ex.importance = max(ex.importance, importance)
                     if len(stored_label) < len(ex.label):
                         ex.label = stored_label
                     return ex_id
@@ -618,6 +742,7 @@ class GraphMemory:
         # (prose, several sentences, no decision verb). It still goes
         # through redaction above, which is the check that matters for
         # text copied out of a transcript.
+        result = None
         if node_type is not NodeType.SUMMARY:
             validator = _get_validator()
             result = validator.validate(
@@ -642,18 +767,18 @@ class GraphMemory:
                 # dedup above ran against the ORIGINAL type's id, so without
                 # this the new node replaced the existing one outright —
                 # status, summary, importance and created_at all lost.
-                existing = self._nodes.get(node_id)
-                if existing is not None:
-                    existing.touch()
+                clash = self._nodes.get(node_id)
+                if clash is not None:
+                    clash.touch()
                     self._dirty = True
-                    existing.status = _next_status(node_type, existing.status, status)
-                    if stored_summary and not existing.summary:
-                        existing.summary = stored_summary
+                    clash.status = _next_status(node_type, clash.status, status)
+                    if stored_summary and not clash.summary:
+                        clash.summary = stored_summary
                     return node_id
 
         # A SUMMARY node skips the validator, so there is no validator score
         # to fall back on: it keeps the confidence it was given.
-        if node_type is NodeType.SUMMARY or confidence != 0.7:
+        if node_type is NodeType.SUMMARY or confidence != 0.7 or result is None:
             node_confidence = confidence
         else:
             node_confidence = result.confidence
@@ -668,6 +793,8 @@ class GraphMemory:
         )
         self._nodes[node_id] = node
         self._dirty = True
+        if node_type == NodeType.FILE and self._file_index is not None and "/" in stored_label:
+            self._file_index.setdefault(stored_label.rsplit("/", 1)[-1], []).append(node_id)
 
         # Decision contradiction detection — capture full transition story
         if node_type == NodeType.DECISION and status == NodeStatus.COMPLETED and detect_conflicts:
@@ -764,7 +891,7 @@ class GraphMemory:
             existing.label = note[:120]
             existing.summary = f"from {len(dropped)} windowed turns"
             existing.touch()
-            self._dirty = True
+            self._mark_mentioned(existing.id)
             return existing.id
 
         node_id = self.add_node(
@@ -833,8 +960,14 @@ class GraphMemory:
         trigger = trigger or _infer_trigger(old_node.label, new_node.label, summary)
         confidence = new_node.confidence if new_confidence is None else new_confidence
 
+        # The id is a primary key in a table every session shares. Built
+        # from the two node ids alone — which are hashes of the LABELS — two
+        # sessions making the same switch ("React" to "Next.js") produced
+        # the same id, and INSERT OR REPLACE handed the second session the
+        # first one's history row. The session is part of the identity.
+        sid_tag = hashlib.sha1(self.session_id.encode("utf-8", "surrogatepass")).hexdigest()[:8]
         transition = DecisionTransition(
-            id=f"tr_{old_id[:8]}_{new_id[:8]}",
+            id=f"tr_{sid_tag}_{old_id[:8]}_{new_id[:8]}",
             session_id=self.session_id,
             from_decision_id=old_id,
             to_decision_id=new_id,
@@ -983,6 +1116,7 @@ class GraphMemory:
             "decisions":    extracted.decisions,
             "files":        extracted.files,
             "edited_files": getattr(extracted, "edited_files", []),
+            "listed_files": getattr(extracted, "listed_files", []),
             "errors":       [
                 {"label": e, "resolved": e.lower().strip() in resolved}
                 for e in extracted.errors
@@ -996,6 +1130,23 @@ class GraphMemory:
         }
 
     def extract_from_messages(
+        self,
+        messages: list[dict],
+        incremental: bool = True,
+        extracted_data=None,
+    ) -> None:
+        """Update graph from messages; every node this call adds or
+        mentions shares one turn. See _extract_from_messages."""
+        if self._in_turn:       # re-entered: stay in the caller's turn
+            return self._extract_from_messages(messages, incremental, extracted_data)
+        self._turn += 1
+        self._in_turn = True
+        try:
+            return self._extract_from_messages(messages, incremental, extracted_data)
+        finally:
+            self._in_turn = False
+
+    def _extract_from_messages(
         self,
         messages: list[dict],
         incremental: bool = True,
@@ -1041,7 +1192,18 @@ class GraphMemory:
                 # re-extracted every message older than the window: on a
                 # real 914-message agent session, 414 messages per request
                 # and ~115 ms instead of ~15.
-                first_known = known.index(True) if True in known else None
+                #
+                # The processed window is the LONGEST run of recognised
+                # messages, not the first recognised one. A message older
+                # than the window that is identical to one inside it — a
+                # repeated "ok", the same tool output, an assistant reply
+                # said twice — is recognised too, and taking the first
+                # recognised message as the boundary made every trimmed
+                # message after that duplicate count as new on every
+                # request: a 300-turn session re-extracted ~60 old messages
+                # per request (12 s), growing with the session, and
+                # re-asserted their old statuses each time.
+                first_known = _start_of_longest_run(known)
                 if first_known is not None:
                     new_idx = [i for i in new_idx if i > first_known]
             if not new_idx:
@@ -1063,9 +1225,14 @@ class GraphMemory:
         # the whole history on every request cost more than extracting it.
         new_messages = scrub_surrogates(new_messages)
 
-        # Auto-select sliding window for long sessions
-        # For sessions > 30 messages: only extract WIP/errors from last 20
-        window_size = 20 if len(messages) > 30 else 0
+        # No window: every message is read the way the per-request path reads
+        # it. A window of the last 20 messages for tasks and errors used to
+        # apply whenever one call carried more than 30 messages, which in the
+        # proxy is exactly the cold start of a long existing conversation:
+        # 30 TODOs in 60 messages came out as 1, while the same messages fed
+        # one request at a time kept all 30. Stale work is resolved by the
+        # later messages that resolve it, in order, either way.
+        window_size = 0
 
         if extracted_data is None:
             from tokenmizer.graph_memory.hybrid_extractor import get_hybrid_extractor
@@ -1103,16 +1270,39 @@ class GraphMemory:
         if decayed:
             logger.debug(f"Importance decay applied to {len(decayed)} nodes")
 
-        # Auto-prune: if graph has grown large, remove low-importance old nodes.
-        # Runs only when over threshold — cheap no-op for typical sessions.
-        if len(self._nodes) > 200:
-            pruned = self.prune(max_nodes=200)
+        # Auto-prune: over the cap, move the least important resolved
+        # nodes to cold storage. Cheap no-op for typical sessions.
+        if len(self._nodes) > self.max_nodes:
+            pruned = self.prune(max_nodes=self.max_nodes)
             if pruned:
-                logger.debug(f"Auto-pruned {pruned} nodes (graph exceeded 200 nodes)")
+                logger.debug(f"Auto-pruned {pruned} nodes (graph exceeded {self.max_nodes} nodes)")
 
         self._persist()
 
+    def _build_file_index(self) -> dict[str, list[str]]:
+        index: dict[str, list[str]] = {}
+        for nid, n in self._nodes.items():
+            if n.type == NodeType.FILE and "/" in n.label:
+                index.setdefault(n.label.rsplit("/", 1)[-1], []).append(nid)
+        return index
+
     def _apply_extracted(self, data: dict, messages: list[dict]) -> None:
+        """Apply one extraction's results, with FILE nodes indexed by name.
+
+        add_node compares a new path with every FILE node to find another
+        spelling of it; one call over a long history adds thousands of
+        paths, and that comparison was quadratic: 7 million comparisons and
+        4.6 s for a 300-turn cold start. The index lives only for this call:
+        nothing here removes a node (pruning runs after), and any other
+        caller of add_node scans as before.
+        """
+        self._file_index = self._build_file_index()
+        try:
+            self._apply_extracted_indexed(data, messages)
+        finally:
+            self._file_index = None
+
+    def _apply_extracted_indexed(self, data: dict, messages: list[dict]) -> None:
         """
         Apply extracted structured data to the graph.
 
@@ -1287,6 +1477,11 @@ class GraphMemory:
             if not isinstance(sup, dict):
                 continue
             old_label, new_label = sup.get("old", ""), sup.get("new", "")
+            if not old_label and new_label and sup.get("slot"):
+                new_id = self._find_decision(new_label)
+                if new_id:
+                    self._supersede_slot(new_id, sup["slot"])
+                continue
             if not old_label or not new_label:
                 continue
             old_id = self._find_decision(old_label)
@@ -1299,10 +1494,13 @@ class GraphMemory:
 
         # Files — linked to tasks and decisions that name them
         edited = set(data.get("edited_files") or [])
+        listed = set(data.get("listed_files") or []) - edited
         for f in data.get("files", []):
             if not f or len(f) < 3:
                 continue
-            nid = self.add_node(NodeType.FILE, f, NodeStatus.IN_PROGRESS, importance=0.7)
+            nid = self.add_node(NodeType.FILE, f, NodeStatus.IN_PROGRESS,
+                                importance=0.35 if f in listed else 0.7,
+                                reinforce=f not in listed)
             if nid and f in edited and nid in self._nodes:
                 # Changed by a tool call: ranked above files only named.
                 node = self._nodes[nid]
@@ -1347,7 +1545,8 @@ class GraphMemory:
                 # add a resolved twin beside a still-open original.
                 open_id = self._open_error_resolved_by(label)
                 if open_id:
-                    err = self._nodes[open_id]
+                    err: MemoryNode | None = self._nodes[open_id]
+                    assert err is not None
                     err.status = NodeStatus.COMPLETED
                     err.importance = min(err.importance, 0.5)
                     err.touch()
@@ -1484,7 +1683,7 @@ class GraphMemory:
 
     # Tech aliases: maps common abbreviations/variants to canonical tokens
     # Allows "Use PG" to match task "Set up PostgreSQL database"
-    _TECH_ALIASES: dict[str, frozenset] = {
+    _TECH_ALIASES: ClassVar[dict[str, frozenset]] = {
         "postgres":     frozenset({"postgres", "postgresql", "pg", "psql"}),
         "postgresql":   frozenset({"postgres", "postgresql", "pg", "psql"}),
         "pg":           frozenset({"postgres", "postgresql", "pg", "psql"}),
@@ -1525,6 +1724,35 @@ class GraphMemory:
         "cleaned":      frozenset({"cleanup", "clean", "cleaned", "teardown", "tear"}),
         "teardown":     frozenset({"cleanup", "clean", "cleaned", "teardown", "tear"}),
     }
+
+    def _supersede_slot(self, new_id: str, slot: str) -> bool:
+        """Supersede the latest active decision for `slot` by `new_id`.
+
+        "Change the default model to claude-sonnet-5" names the slot, not the
+        value it replaces; the old value is whichever active decision last
+        filled that slot — its label carries every word of the slot — and
+        covers the same scope (decision_tracker.decision_scope). Without
+        this, both models stayed current in every resume.
+        """
+        from tokenmizer.graph_memory.decision_tracker import _different_scope, _is_same_decision
+
+        new = self._nodes.get(new_id)
+        words = [w for w in slot.lower().split() if len(w) > 2]
+        if new is None or not words:
+            return False
+        patterns = [re.compile(r"\b" + re.escape(w) + r"s?\b", re.IGNORECASE) for w in words]
+        candidates = [
+            n for nid, n in self._nodes.items()
+            if nid != new_id and n.type == NodeType.DECISION and not n._evicted
+            and n.status == NodeStatus.COMPLETED
+            and all(p.search(n.label) for p in patterns)
+            and not _different_scope(new.label, new.summary, n.label, n.summary)
+            and not _is_same_decision(new.label, n.label)   # a restatement, not a change
+        ]
+        if not candidates:
+            return False
+        old = max(candidates, key=lambda n: n.recency())
+        return self.record_supersession(old.id, new_id, trigger=f"changed the {slot}")
 
     def _find_decision(self, text: str) -> str:
         """Id of the decision node naming `text`, or "".
@@ -1639,7 +1867,8 @@ class GraphMemory:
         # flip sign, ranking the WORST matches highest.
         similarities = [
             (max(0.0, EmbeddingEngine.cosine(q_emb, vector)), node)
-            for node, vector in zip(nodes, vectors) if vector is not None
+            for node, vector in zip(nodes, vectors, strict=True) if vector is not None
+
         ]
         if not similarities:
             return scored
@@ -1678,15 +1907,18 @@ class GraphMemory:
             for node in nodes
         ]
         missing = [
-            text for node, text in zip(nodes, texts)
+            text for node, text in zip(nodes, texts, strict=True)
             if cache.get(node.id, (None, None))[0] != text
         ]
         if missing:
             fresh = engine.embed_batch(missing)
-            if fresh is None:
+            # A model that returned a different number of vectors than it
+            # was given texts would pair every later node with the wrong
+            # embedding; degrade to keyword ranking instead.
+            if fresh is None or len(fresh) != len(missing):
                 return None
-            for text, vector in zip(missing, fresh):
-                for node, node_text in zip(nodes, texts):
+            for text, vector in zip(missing, fresh, strict=True):
+                for node, node_text in zip(nodes, texts, strict=True):
                     if node_text == text:
                         cache[node.id] = (text, vector)
         # Drop entries for nodes that no longer exist, so a long session's
@@ -1711,21 +1943,30 @@ class GraphMemory:
         the singular; before this, "which datastore for orders" shared no
         word with "PostgreSQL for order storage"."""
         out = set()
-        # Split on paths and punctuation too, and add the parts of a
-        # compound identifier: "POST /api/auth/login" was ONE token,
-        # "/api/auth/login", so "how do people sign in" could never reach
-        # the login endpoint, and neither could "login_success".
-        for w in _TOKEN_SPLIT.split(text):
-            w = w.strip(".,!?:;()[]\"'").lower()
-            if len(w) <= 2:
-                continue
-            forms = {w} | {p for p in _PART_SPLIT.split(w) if len(p) > 2}
-            for f in forms:
-                out.add(f)
-                if len(f) > 4 and f.endswith("ies"):
-                    out.add(f[:-3] + "y")
-                elif len(f) > 3 and f.endswith("s") and not f.endswith("ss"):
-                    out.add(f[:-1])
+
+        def add(w: str) -> None:
+            if len(w) <= 2 or w in _FUNCTION_WORDS:
+                return
+            out.add(w)
+            if len(w) > 4 and w.endswith("ies"):
+                out.add(w[:-3] + "y")
+            elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+                out.add(w[:-1])
+
+        for raw in text.split():
+            raw = raw.strip(".,!?:;()[]\"'`")
+            add(raw.lower())
+            # Code names its things in one token — quartz_uploader,
+            # src/billing/handler.py, getUserName — and people ask in
+            # words: "the quartz uploader". Matched on the whole token
+            # only, a file node shared nothing with the question about it,
+            # and in a 1,000-turn session no file was ever recalled. The
+            # whole token stays, so a question that quotes the identifier
+            # still matches it exactly.
+            if _SUBWORD_SPLIT.search(raw):
+                for part in _SUBWORD.findall(raw):
+                    if part.lower() not in _SCAFFOLD_PARTS:
+                        add(part.lower())
         return frozenset(out)
 
     def _search_words(self, node: MemoryNode) -> frozenset:
@@ -1779,9 +2020,26 @@ class GraphMemory:
             NodeType.DEPENDENCY: 0.70,
             NodeType.ENVIRONMENT: 0.70,
         }
-
-        scored: list[tuple[float, MemoryNode]] = []
+        # What the question asks FOR. "What broke when signing people up"
+        # shares no word with "422 on POST /signup", but it is plainly
+        # asking for a failure; keyword overlap cannot see that, and the
+        # fixed type order ranked every decision above every error.
+        _TYPE_BOOST = {**_TYPE_BOOST}
+        # A question that names what it wants also makes every other kind of
+        # node a less likely answer. Raising the named kind alone was not
+        # enough once function words stopped counting as overlap: "what broke
+        # when signing people up" ranked four unrelated decisions (importance
+        # 0.9) above the signup error (0.6) — the error had only ever won on
+        # the shared word "when".
         intent = _query_intent(task)
+        for node_type in list(_TYPE_BOOST):
+            if intent and node_type not in intent:
+                _TYPE_BOOST[node_type] = _TYPE_BOOST[node_type] / _INTENT_DEMOTE
+        for node_type in intent:
+            _TYPE_BOOST[node_type] = _TYPE_BOOST.get(node_type, 1.0) * _INTENT_BOOST
+
+        present = bool(_PRESENT.search(task or ""))
+        scored: list[tuple[float, MemoryNode]] = []
 
         for node in self._nodes.values():
             if node._evicted:
@@ -1797,7 +2055,9 @@ class GraphMemory:
             overlap = (sum(1 for forms in word_forms if forms & node_words)
                        / max(1, len(word_forms)))
             recency = 1.0 / (1.0 + node.age_days() * 0.1)
-            type_boost = _TYPE_BOOST.get(node.type, 1.0) * _intent_boost(intent, node)
+            type_boost = _TYPE_BOOST.get(node.type, 1.0)
+            if present and node.status in _OPEN_STATUSES:
+                type_boost *= _PRESENT_BOOST
 
             # Score: overlap is primary signal; importance and recency are tiebreakers
             score = (overlap * 0.6 + node.importance * 0.3 + recency * 0.1) * type_boost
@@ -1870,13 +2130,11 @@ class GraphMemory:
                 scored.append((node.importance, node))
                 continue
 
-            node_words = self._expand_with_aliases(
-                frozenset(
-                    w.strip(".,!?:;()[]").lower()
-                    for w in node.label.split()
-                    if len(w) > 2
-                )
-            )
+            # Label AND summary, the same words query() matches on: the
+            # summary carries a decision's reason and a long label's tail,
+            # and "what did we decide about refunds last week" should find
+            # a decision whose reason is the only place refunds appear.
+            node_words = self._expand_with_aliases(self._search_words(node))
             if not node_words:
                 continue
 
@@ -1901,14 +2159,25 @@ class GraphMemory:
 
     def prune(
         self,
-        max_nodes: int = 200,
+        max_nodes: int | None = None,
         max_age_days: float = 60.0,
     ) -> int:
         """Remove low-importance, old, completed nodes. Preserve decisions,
         envs, goals. See graph_memory/pruning.py for the full pruning logic —
         extracted there to keep this file focused on core memory logic."""
         from tokenmizer.graph_memory.pruning import prune as _prune
-        return _prune(self, max_nodes=max_nodes, max_age_days=max_age_days)
+        return _prune(self, max_nodes=self.max_nodes if max_nodes is None else max_nodes,
+                      max_age_days=max_age_days)
+
+    def pruned_nodes(self) -> list[dict]:
+        """Nodes pruning moved to cold storage, newest first."""
+        from tokenmizer.graph_memory.persistence import list_pruned
+        return list_pruned(self)
+
+    def restore_node(self, node_id: str) -> bool:
+        """Bring one pruned node back into the live graph."""
+        from tokenmizer.graph_memory.persistence import restore_pruned
+        return restore_pruned(self, node_id)
 
     # ── Context block ────────────────────────────────────────────────────────
 

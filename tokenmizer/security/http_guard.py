@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Iterable
+from collections.abc import Callable, Iterable
 from urllib.parse import parse_qs
 
 logger = logging.getLogger(__name__)
@@ -65,8 +65,8 @@ class HTTPGuard:
     """Host allowlist, cross-origin write block, body and id limits, and
     browser hardening headers on every response."""
 
-    def __init__(self, app, *, auth_configured, trusted_hosts: Iterable[str],
-                 cors_origins: Iterable[str], max_body_bytes: int):
+    def __init__(self, app, *, auth_configured, trusted_hosts: Callable[[], Iterable[str]],
+                 cors_origins: Callable[[], Iterable[str]], max_body_bytes: int):
         self.app = app
         # Callables, so a key or host list changed in settings at runtime
         # (tests do this) is honoured without rebuilding the app.

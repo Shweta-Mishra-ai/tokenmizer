@@ -17,11 +17,10 @@ consumer shares the same already-safe copy.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-import threading
-from collections import OrderedDict
+
+from tokenmizer.core.bounded_cache import MISSING, BoundedCache
 
 _PATTERNS = [
     # Anthropic
@@ -46,7 +45,6 @@ _PATTERNS = [
     re.compile(r'eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+'),
     # Bearer tokens in Authorization headers
     re.compile(r'Bearer\s+[A-Za-z0-9\-_\.]{20,}', re.IGNORECASE),
-    # Generic: password=..., secret=..., token=..., key=...
     # URL-embedded credentials (postgres://user:pass@host/db): redact the
     # userinfo section only — scheme and host survive so the message stays
     # readable. Connection-string passwords match no keyword or provider
@@ -64,7 +62,6 @@ _PATTERNS = [
     # Together AI (64 hex chars after explicit assignment handled by generic
     # rule; standalone "together_" prefixed keys:)
     re.compile(r'together_[A-Za-z0-9]{20,}', re.IGNORECASE),
-    # Email addresses (PII)
 ]
 
 
@@ -75,95 +72,158 @@ _PATTERNS = [
 # all of them) is stored as None, so an entry costs a few dozen bytes
 # whatever the size of the text. A redacted text keeps its redacted copy
 # unless it is larger than _MEMO_MAX_CHARS, in which case it is recomputed.
-# `key = value` / `key: value` credentials. The value is replaced and the
-# key kept: redacting the whole match turned `api_key: Optional[str]` into
-# `[REDACTED][str]` and `password = os.environ["X"]` into
-# `[REDACTED]["X"]` — ordinary code, rewritten before the model saw it.
-# A value is treated as a secret when it is quoted, or when it is a bare
-# token that is not code: not a dotted reference, not a call or subscript,
-# not a type or identifier made only of letters.
-_KEY_VALUE = re.compile(
-    r'(?P<key>(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key'
-    r'|private[_\-]?key|auth[_\-]?key|client[_\-]?secret)\s*[=:]\s*)'
-    r'(?:(?P<q>["\'])(?P<qval>[^"\'\s]{8,})(?P=q)'
-    r'|(?P<val>[\w\-./+]{8,})(?P<after>[(\[]?))',
-    re.IGNORECASE,
-)
-
-
-def _key_value_sub(m: "re.Match") -> str:
-    if m.group("qval") is not None:
-        return f"{m.group('key')}{m.group('q')}[REDACTED]{m.group('q')}"
-    val, after = m.group("val"), m.group("after")
-    looks_like_code = (
-        after                                   # a call or a subscript
-        or "." in val and not any(c.isdigit() for c in val.split(".")[-1])
-        or val.isalpha()                        # a name or a type: Optional
-        or re.fullmatch(r"[a-z_]+", val) is not None
-    )
-    if looks_like_code:
-        return m.group(0)
-    return f"{m.group('key')}[REDACTED]"
-
-
-# Email addresses. Kept out of _PATTERNS: an address is personal data to
-# keep out of stored memory, but it is also the content of countless
-# legitimate requests ("send the report to alice@acme.com"), so the copy
-# sent to the provider keeps it unless the operator asks otherwise. The
-# lookahead leaves `git@github.com:org/repo` alone. The parts are capped at
-# RFC 5321's limits (64-char local part, 253-char domain): unbounded, a
-# 40k-char run of "1.1.1..." with no "@" was rescanned from every start
-# position and took 1.3s (quadratic).
-_EMAIL = re.compile(r'\b[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,253}\.[A-Za-z]{2,63}\b(?!:)')
-
 _MEMO_MAX_ENTRIES = 32_768
 _MEMO_MAX_CHARS = 64_000
-_memo: OrderedDict[bytes, str | None] = OrderedDict()
-_memo_lock = threading.Lock()
+# Redacted copies held in all: without this, 32,768 entries of up to 64,000
+# characters each could reach 2 GB on a long-running proxy.
+_MEMO_MAX_TOTAL_CHARS = 8_000_000
+_memo: BoundedCache[str | None] = BoundedCache(
+    _MEMO_MAX_ENTRIES, _MEMO_MAX_TOTAL_CHARS, lambda v: len(v or ""))
 
 
 def _memo_clear() -> None:
-    with _memo_lock:
-        _memo.clear()
+    _memo.clear()
 
 
-def _scrub(text: str, emails: bool = True) -> str:
-    for pat in _PATTERNS:
-        text = pat.sub("[REDACTED]", text)
-    text = _KEY_VALUE.sub(_key_value_sub, text)
-    if emails:
-        text = _EMAIL.sub("[REDACTED]", text)
+_SECRET_WORD = (r'(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key'
+                r'|private[_\-]?key|auth[_\-]?key|client[_\-]?secret)')
+
+# Rules that keep the NAME and redact only the VALUE. Group 1 is what
+# survives. The single rule these replace matched `<word> [=:] <8+ chars of
+# anything identifier-like>` and replaced all of it, which had two failures
+# at once:
+#
+#   - It rewrote ordinary code. `token = generate_token(user)` became
+#     `[REDACTED](user)`, `api_key = settings.openai_api_key` became
+#     `[REDACTED]`, `password: Optional[SecretStr]` became
+#     `[REDACTED][SecretStr]`. The model was then asked to fix code it had
+#     been shown a corrupted copy of, and an agent wrote the marker back
+#     into the file.
+#   - It missed the commonest way a secret is actually written down:
+#     `{"password": "..."}`. The quote after the key sits between the word
+#     and the colon, so the rule never matched JSON or a Python dict.
+_VALUE_RULES = [
+    # "password": "value"  /  'api_key': 'value'   (JSON, dict literals)
+    re.compile(r'''(["']''' + _SECRET_WORD + r'''["']\s*:\s*)(["'])[^"'\n]{6,}\2''',
+               re.IGNORECASE),
+    # password = "value"   — a quoted literal on the right-hand side
+    re.compile(r'(\b' + _SECRET_WORD + r'''\s*[=:]\s*)(["'])[^"'\n]{8,}\2''',
+               re.IGNORECASE),
+    # password=hunter2hunter2 — unquoted. It must contain a digit and must
+    # not continue into a call, an attribute or a subscript: that is what
+    # separates a literal from `get_token()`, `settings.key`, `os.environ[`.
+    re.compile(r'(\b' + _SECRET_WORD + r'\s*[=:]\s*)'
+               r'(?=[A-Za-z_\-/+]{0,64}\d)[\w\-/+]{8,}(?![\w.(\[])',
+               re.IGNORECASE),
+    # DB_PASS=..., AWS_SECRET_ACCESS_KEY=... — env-file style. An
+    # UPPER_SNAKE name that says it is a secret, assigned a literal.
+    re.compile(r'(\b[A-Z][A-Z0-9_]*(?:PASS(?:WORD|WD)?|SECRET|TOKEN|API_?KEY|'
+               r'ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Z0-9_]*\s*=\s*)'
+               r'''["']?[^\s"']{6,}["']?'''),
+]
+
+# A PEM private key, whole. No keyword and no prefix rule sees these.
+_PEM = re.compile(
+    r'-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----.{0,20000}?-----END [A-Z ]{0,40}PRIVATE KEY-----',
+    re.DOTALL)
+
+# Parts capped at RFC 5321's limits (64-char local part, 253-char domain).
+# Unbounded, a 40k-char run of "1.1.1..." with no "@" was rescanned from
+# every start position: 2 s per message, quadratic in its length.
+_EMAIL = re.compile(r'\b[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,253}\.[A-Za-z]{2,63}\b')
+# Local parts that name a transport account, not a person.
+_SERVICE_ACCOUNTS = frozenset({"git", "hg", "svn"})
+_CARD = re.compile(r'\b(?:\d[ -]?){13,19}\b')
+_SSN = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')
+
+# What redaction does, set once at startup from `security.*` in settings by
+# configure(). The defaults are what a bare import gets.
+_config = {"secrets": True, "emails": True, "pii": False}
+
+
+def configure(*, secrets: bool = True, emails: bool = True, pii: bool = False) -> None:
+    """Choose what is redacted. Clears the memo, which holds results
+    computed under the previous choice."""
+    _config.update(secrets=bool(secrets), emails=bool(emails), pii=bool(pii))
+    _memo_clear()
+
+
+def _email_sub(m: re.Match) -> str:
+    """Redact an address, but not the things that merely look like one.
+
+    `git clone git@github.com:acme/widgets.git` became `git clone
+    [REDACTED]:acme/widgets.git`, an scp target lost its host, and numpy's
+    matrix operator (`weights@np.linalg.inv(cov)`) was read as a mailbox.
+    An address followed by `:` `/` or `(` is a remote or an expression.
+    """
+    tail = m.string[m.end():m.end() + 1]
+    if tail in (":", "/", "("):
+        return m.group(0)
+    if m.group(0).split("@", 1)[0].lower() in _SERVICE_ACCOUNTS:
+        return m.group(0)
+    return "[REDACTED]"
+
+
+def _luhn(digits: str) -> bool:
+    total, alt = 0, False
+    for ch in reversed(digits):
+        d = int(ch)
+        if alt:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+        alt = not alt
+    return total % 10 == 0
+
+
+def _card_sub(m: re.Match) -> str:
+    digits = re.sub(r"\D", "", m.group(0))
+    return "[REDACTED]" if 13 <= len(digits) <= 19 and _luhn(digits) else m.group(0)
+
+
+def _value_sub(m: re.Match) -> str:
+    """Keep the name, redact the value, and keep the value's quotes so a
+    JSON document or a dict literal is still one afterwards."""
+    quote = m.group(2) if m.re.groups >= 2 else ""
+    return f"{m.group(1)}{quote}[REDACTED]{quote}"
+
+
+_SECRET_KEY_NAME = re.compile(r"^" + _SECRET_WORD + r"$", re.IGNORECASE)
+
+
+def _scrub(text: str) -> str:
+    if _config["secrets"]:
+        text = _PEM.sub("[REDACTED PRIVATE KEY]", text)
+        for pat in _PATTERNS:
+            text = pat.sub("[REDACTED]", text)
+        for pat in _VALUE_RULES:
+            text = pat.sub(_value_sub, text)
+    if _config["emails"]:
+        text = _EMAIL.sub(_email_sub, text)
+    if _config["pii"]:
+        text = _CARD.sub(_card_sub, text)
+        text = _SSN.sub("[REDACTED]", text)
     return text
 
 
-def redact(text: str, emails: bool = True) -> str:
+def redact(text: str) -> str:
     """Replace all detected secrets with [REDACTED]. Non-string input is
     passed through as the empty string rather than raising, since callers
-    (graph nodes, message content) may legitimately have None/empty values.
-
-    `emails=False` leaves email addresses in place (see _EMAIL)."""
+    (graph nodes, message content) may legitimately have None/empty values."""
     if not isinstance(text, str):
         return ""
     if not text:
         return text
-    key = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=32,
-                          person=b"e1" if emails else b"e0").digest()
-    with _memo_lock:
-        if key in _memo:
-            _memo.move_to_end(key)
-            hit = _memo[key]
-            return text if hit is None else hit
-    out = _scrub(text, emails)
+    key = BoundedCache.key(text)
+    hit = _memo.get(key)
+    if hit is not MISSING:
+        return text if hit is None else hit
+    out = _scrub(text)
     if out == text:
-        value = None
+        _memo.put(key, None)
     elif len(out) <= _MEMO_MAX_CHARS:
-        value = out
-    else:
-        return out
-    with _memo_lock:
-        _memo[key] = value
-        while len(_memo) > _MEMO_MAX_ENTRIES:
-            _memo.popitem(last=False)
+        _memo.put(key, out)
     return out
 
 
@@ -171,32 +231,41 @@ def redact_node(label: str, summary: str = "") -> tuple[str, str]:
     return redact(label), redact(summary)
 
 
-def _redact_values(value, emails: bool = True):
+def _redact_values(value):
     """Redact string values recursively without changing keys or types."""
     if isinstance(value, str):
-        return redact(value, emails)
+        return redact(value)
     if isinstance(value, list):
-        return [_redact_values(item, emails) for item in value]
+        return [_redact_values(item) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_values(item, emails) for key, item in value.items()}
+        # In parsed data the key is not in the string being scanned, so a
+        # value filed under a secret's name is redacted on the key alone.
+        return {
+            key: ("[REDACTED]"
+                  if (_config["secrets"] and isinstance(key, str)
+                      and isinstance(item, str) and len(item) >= 6
+                      and _SECRET_KEY_NAME.match(key))
+                  else _redact_values(item))
+            for key, item in value.items()
+        }
     return value
 
 
-def _redact_arguments(arguments, emails: bool = True):
+def _redact_arguments(arguments):
     """Scrub OpenAI tool arguments while preserving valid JSON."""
     if not isinstance(arguments, str):
-        return _redact_values(arguments, emails)
+        return _redact_values(arguments)
     try:
         parsed = json.loads(arguments)
     except (TypeError, ValueError):
-        return redact(arguments, emails)
-    cleaned = _redact_values(parsed, emails)
+        return redact(arguments)
+    cleaned = _redact_values(parsed)
     if cleaned == parsed:
         return arguments
     return json.dumps(cleaned, separators=(",", ":"))
 
 
-def _redact_tool_calls(tool_calls, emails: bool = True):
+def _redact_tool_calls(tool_calls):
     if not isinstance(tool_calls, list):
         return tool_calls
     cleaned = []
@@ -212,7 +281,7 @@ def _redact_tool_calls(tool_calls, emails: bool = True):
             **call,
             "function": {
                 **function,
-                "arguments": _redact_arguments(function["arguments"], emails),
+                "arguments": _redact_arguments(function["arguments"]),
             },
         })
     return cleaned
@@ -238,7 +307,7 @@ def _gemini_payload_key(block: dict):
     return None
 
 
-def _redact_content(content, emails: bool = True):
+def _redact_content(content):
     """
     Redact secrets from message content of any shape.
 
@@ -261,12 +330,12 @@ def _redact_content(content, emails: bool = True):
     if content is None:
         return None
     if isinstance(content, str):
-        return redact(content, emails)
+        return redact(content)
     if isinstance(content, list):
         cleaned = []
         for block in content:
             if isinstance(block, str):
-                cleaned.append(redact(block, emails))
+                cleaned.append(redact(block))
             elif isinstance(block, dict):
                 if "text" in block and (
                     block.get("type") == "text"
@@ -274,15 +343,15 @@ def _redact_content(content, emails: bool = True):
                 ):
                     # A Gemini part is {"text": ...} with no "type"; the
                     # extractor reads it as text, so it is redacted as text.
-                    cleaned.append({**block, "text": redact(str(block["text"]), emails)})
+                    cleaned.append({**block, "text": redact(str(block["text"]))})
                 elif block.get("type") == "tool_use" and "input" in block:
-                    cleaned.append({**block, "input": _redact_values(block["input"], emails)})
+                    cleaned.append({**block, "input": _redact_values(block["input"])})
                 elif _gemini_payload_key(block) is not None:
                     part = _gemini_payload_key(block)
                     field = _GEMINI_PAYLOAD_FIELDS[part]
                     cleaned.append({
                         **block,
-                        part: {**block[part], field: _redact_values(block[part][field], emails)},
+                        part: {**block[part], field: _redact_values(block[part][field])},
                     })
                 elif "content" in block and isinstance(block.get("content"), (str, list)):
                     # tool_result content is `str | list[block]` per the
@@ -296,7 +365,7 @@ def _redact_content(content, emails: bool = True):
                     # and the background extraction LLM. Recursing through
                     # _redact_content (which already handles both shapes)
                     # covers it the same way the top-level list does.
-                    cleaned.append({**block, "content": _redact_content(block["content"], emails)})
+                    cleaned.append({**block, "content": _redact_content(block["content"])})
                 else:
                     # image/document blocks — leave untouched
                     cleaned.append(block)
@@ -305,23 +374,23 @@ def _redact_content(content, emails: bool = True):
         return cleaned
     if isinstance(content, dict):
         if "text" in content:
-            return {**content, "text": redact(str(content["text"]), emails)}
+            return {**content, "text": redact(str(content["text"]))}
         return content
     return content
 
 
-def redact_messages(messages: list[dict], emails: bool = True) -> list[dict]:
+def redact_messages(messages: list[dict]) -> list[dict]:
     """Return a copy with secrets scrubbed from content and tool inputs."""
     cleaned = []
     for message in messages:
-        item = {**message, "content": _redact_content(message.get("content"), emails)}
+        item = {**message, "content": _redact_content(message.get("content"))}
         if "tool_calls" in message:
-            item["tool_calls"] = _redact_tool_calls(message["tool_calls"], emails)
+            item["tool_calls"] = _redact_tool_calls(message["tool_calls"])
         function_call = message.get("function_call")
         if isinstance(function_call, dict) and "arguments" in function_call:
             item["function_call"] = {
                 **function_call,
-                "arguments": _redact_arguments(function_call["arguments"], emails),
+                "arguments": _redact_arguments(function_call["arguments"]),
             }
         cleaned.append(item)
     return cleaned

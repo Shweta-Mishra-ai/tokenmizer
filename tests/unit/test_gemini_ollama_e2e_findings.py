@@ -67,7 +67,7 @@ def test_gemini_reuses_its_sdk_client(monkeypatch):
     p = GeminiProvider(api_key="k")
 
     async def twice():
-        return p._genai_client(genai), p._genai_client(genai)
+        return p._client(genai), p._client(genai)
     a, b = asyncio.run(twice())
     assert a is b and len(built) == 1
 

@@ -118,11 +118,18 @@ class TestCSVExtractor:
 # ── JSON extractor ────────────────────────────────────────────────────────────
 
 class TestJSONExtractor:
-    def test_small_json_schema(self):
+    def test_small_json_is_passed_through_whole(self):
+        # It fits the budget, so every value reaches the model. A schema in
+        # its place used to drop the values to save nothing.
         extractor = JSONExtractor()
         result = extractor.extract(SAMPLE_JSON, "users.json", token_budget=400)
+        assert result.content == SAMPLE_JSON
+        assert result.strategy_used == "passthrough"
+
+    def test_json_over_budget_gets_a_schema(self):
+        extractor = JSONExtractor()
+        result = extractor.extract(SAMPLE_JSON, "users.json", token_budget=20)
         assert "Schema" in result.content
-        assert "users" in result.content
 
     def test_large_json_savings(self):
         extractor = JSONExtractor()
@@ -204,7 +211,9 @@ class TestFileIntelligence:
     def test_process_message_files_detects_inline_csv(self):
         fi = FileIntelligence()
         # Message with embedded CSV data (>50 lines)
-        csv_block = "id,name,value\n" + "\n".join(f"{i},item_{i},{i*10}" for i in range(60))
+        # Large enough to exceed the budget whatever the tokenizer: a table
+        # that fits is passed through untouched, by design.
+        csv_block = "id,name,value\n" + "\n".join(f"{i},item_{i},{i*10}" for i in range(400))
         messages = [
             {"role": "user", "content": f"Analyze this data:\n{csv_block}"}
         ]
@@ -366,7 +375,7 @@ class TestSilentFailuresAreLogged:
         # invalid) -> falls all the way through to the truncation fallback.
         content = "{not json\nnor this one either{{{"
         with caplog.at_level(logging.WARNING, logger="tokenmizer.filters.file_intelligence"):
-            result = JSONExtractor().extract(content, "broken.json")
+            result = JSONExtractor().extract(content, "broken.json", token_budget=1)
         assert result.strategy_used == "fallback_truncation"
         assert any("json" in r.message.lower() for r in caplog.records), (
             "JSONL parse failure fell back to truncation with no log line — "

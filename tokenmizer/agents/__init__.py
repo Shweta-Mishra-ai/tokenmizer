@@ -24,7 +24,7 @@ proxy uses, so an agent and the proxy can share a session.
 from __future__ import annotations
 
 import logging
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 from tokenmizer.graph_memory.graph import GraphMemory
 from tokenmizer.graph_memory.types import NodeType
@@ -39,11 +39,11 @@ class Memory:
 
     def __init__(
         self,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         storage_dir: str = "./checkpoints",
-        semantic_retrieval: Optional[bool] = None,
-        cross_session_recall: Optional[bool] = None,
-        principal: Optional[str] = None,
+        semantic_retrieval: bool | None = None,
+        cross_session_recall: bool | None = None,
+        principal: str | None = None,
     ):
         if not session_id:
             from tokenmizer.core.session import default_session_id
@@ -127,7 +127,7 @@ class Memory:
     # ── Read ─────────────────────────────────────────────────────────────────
 
     def search(self, query: str, top_k: int = 8,
-               types: Optional[Iterable[str]] = None) -> list[dict]:
+               types: Iterable[str] | None = None) -> list[dict]:
         """Ranked memories relevant to `query`, as plain dicts.
 
         `types` filters to node types by name ("decision", "error", "task",

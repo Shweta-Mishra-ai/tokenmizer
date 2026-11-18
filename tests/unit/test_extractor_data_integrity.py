@@ -90,9 +90,11 @@ class TestMergeIsOrderDeterministic:
 
         # Deterministic, predictable order: all LLM items (in LLM's own
         # order) first, since none overlap with heuristic's, followed by
-        # heuristic-only items in heuristic's own order — truncated to 15.
-        expected_prefix = [f"src/llm_{i}.py" for i in range(15)]
-        assert merged.files == expected_prefix, (
+        # heuristic-only items in heuristic's own order. Nothing is cut: a
+        # cap of 15 per category silently dropped the rest of a long call.
+        expected = ([f"src/llm_{i}.py" for i in range(20)]
+                    + [f"src/heu_{i}.py" for i in range(20)])
+        assert merged.files == expected, (
             f"merge() output order is not a deterministic function of "
             f"input order: got {merged.files!r}"
         )

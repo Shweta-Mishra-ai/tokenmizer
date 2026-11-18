@@ -81,11 +81,9 @@ OpenAI SDK as the client:
 
 ### Deleting a session
 
-- New `DELETE /api/sessions/{session_id}` and `tokenmizer forget <session>`:
-  removes a session's graph memory, decision history, checkpoints, cached
-  answers and owner. Owner only. There was no way to do this short of
-  deleting SQLite files by hand. Analytics keep the request counts with the
-  session id cleared, so totals do not move.
+- `tokenmizer forget <session>` calls `DELETE /api/session/{session_id}`
+  and prints what was removed. The delete now also clears the session id
+  from analytics rows (the request counts stay, so totals do not move).
 - A graph object that predates the delete (held by a background
   extraction waiting on the session lock, or evicted but still referenced)
   can no longer write the session back.
@@ -210,31 +208,25 @@ of these returned a server error before:
 - A supersession's reason is the sentence that states it, not the tail of
   the sentence before.
 
-### A short session costs exactly what it costs without the proxy
+### Input cost after merging main
 
 `python -m benchmarks.savings.runner`, against a client caching its own
-history: 2, 4, 10, 30, 40 and 50 turns **0.0%** (was 30% more at 4 turns,
-11% more at 10, 4% more at 40); 100 turns **11% less**, 150 **25% less**,
-300 **54% less** (were 9%, 17%, 48%).
+history, on the merged tree: 10 turns **0.0%**, 40 turns 2.5% more, 150
+turns **20% less**, 300 turns **51% less** (main alone: 0.0%, 2.5% more,
+11% less, 44% less). The 2.5% at 40 turns is main's brevity instruction,
+which switches on at `terse_output.min_conversation_tokens` (1,500) and
+exists to shorten the reply, which this input-only benchmark cannot see;
+`terse_output.enabled: false` removes it. This branch's own `auto` mode
+(off until the first windowing cut) was replaced by main's placement.
 
-- `terse_output.enabled` defaults to `auto`: the brevity instruction joins
-  a session's requests at the first windowing cut, which rewrites the start
-  of the request anyway, and stays from then on. Before that cut nothing is
-  added to the request.
 - A windowing cut keeps the tail at the cache minimum rather than half the
   budget: each cut rewrites the cached prefix, so a smaller tail is a
   cheaper rewrite and a longer run before the next cut.
-- One-off dips remain at exactly two points, both recovered within a few
-  turns: right after the history first becomes cacheable (20 turns, vs a
-  client that does not cache) and right after the first cut (70 turns).
+- Context injection is gated: a node goes in only if it shares vocabulary
+  with the turn, or is a goal or an active decision.
 
-### Retrieval recall@6 88% → 95%
+### Retrieval recall@6 92% → 95% (main + this branch)
 
-- Query intent: "what broke", "what is still outstanding", "which did we
-  settle on" boost errors, open work and decisions respectively; the
-  session goal no longer tops every list on importance alone.
-- Paths and identifiers are split into words, so "how do people sign in"
-  reaches `POST /api/auth/login` and `login_success`.
 - Overlap is scored per question word through its aliases; expanding first
   penalised a question for using a word with many synonyms.
 - Everyday synonyms: slow ↔ latency/performance/render, check ↔ verify,
@@ -259,7 +251,7 @@ field by field (byte-identical to the stored format, so nothing is
 rewritten) and session-ownership grants cached for 30 seconds instead of a
 database round trip on every request.
 
-### Short sessions no longer cost more than no proxy; long sessions cost less
+### Short sessions cost less than before; long sessions cost less
 
 Measured with `python -m benchmarks.savings.runner` (input only, against a
 client that caches its own history): 10 turns 21% more → 11% more, 40
@@ -386,6 +378,386 @@ sessions now cost exactly what the client alone costs.
 - Stale guidance corrected: the multi-worker warning, the Dockerfile comment,
   the LLM-extraction cost, the recall figure in `tokenmizer.yaml`, and `.env`
   values now override the YAML file as documented.
+### Fixed — a worker answered from a stale copy of a session; the resume followed the clock; a lone surrogate failed a request
+
+Found by the new `benchmarks/load`, which runs the real server under
+uvicorn (1 to N workers) against a stand-in Ollama and checks every
+response and every upstream request.
+
+- **With more than one worker, a session's turns could be answered from
+  an outdated graph.** Each worker cached its own copy of a session and
+  never re-read it, so a turn routed to a worker saw nothing the other
+  workers had extracted since. Writes merged safely on disk; reads did not
+  follow them. With 4 workers, 23 of 48 sessions were answered with a
+  decision a later turn had replaced. `graph_meta` now carries a write
+  counter (added to older databases on open); a worker reloads a cached
+  session when the counter has moved, after saving its own unsaved
+  changes. Now 48 of 48, with throughput unchanged (131 → 137 req/s).
+- **A lone UTF-16 surrogate in a message (`"\ud800"`, legal JSON) failed
+  the request with a 502** when the provider client encoded it. Request
+  text is scrubbed at entry, as stored text already was.
+- **The resume depended on the machine's clock.** It ranked recent facts
+  by whole seconds of `updated_at`, then importance, so whether two
+  requests' facts tied depended on where a second boundary fell: identical
+  input gave a different resume in 18 of 716 real sessions between two
+  runs (15 of those 18 varied across six repeat runs of unchanged code).
+  Nodes now carry `turn` (the extraction call that last mentioned them)
+  and `seq` (mention order), and the resume, checkpoints, change-of-mind
+  supersession and the pruning tie-break order by those. Two full runs of
+  the 716 sessions are now identical in both modes. Nodes stored earlier
+  keep their `updated_at` order.
+
+### Fixed — which decision replaces which; memory that grew with input size
+
+Decisions (both present on `main`, found last round):
+
+- **A decision's scope is part of what it is.** "The ledger service uses
+  `ledger_events`" no longer supersedes "the billing service uses
+  `billing_events`", nor "Redis for rate limiting" replace "Redis for
+  caching". Scope comes from "for the X", "for <doing something>" and "the X
+  uses"; scopes match only when one contains the other ("the quartz
+  scheduler" and "the quartz gateway" are two components). A bare reason is
+  not a scope: "Rust for performance" → "Go for simplicity" still
+  supersedes. A technology named in the reason ("because Postgres row locks
+  were too slow") is no longer read as the choice.
+- **Changes of mind are read.** "Switch/change the SLOT to X" and "let's …
+  instead" record the new decision and supersede the latest one for that
+  slot and scope; a restatement supersedes nothing. "Replace X with Y" in
+  the imperative was never matched.
+- A scope at the head of a sentence ("For the search service we'll use
+  Elasticsearch") stays in the label.
+
+In the soak, planted decisions wrongly superseded went from 16 of 18 nodes
+to 0, and `query()` finds 10 of 10 instead of 2.
+
+Memory (found by attributing growth with tracemalloc over 600 turns):
+
+- The message-word memo was an `lru_cache` keyed on whole message texts —
+  up to 4,096 messages, megabyte tool outputs included. 38 MB in 600 turns,
+  unbounded in bytes. The tool-output path memo and the redaction memo were
+  capped by entries only. All three now use `core/bounded_cache.BoundedCache`
+  (digest keys, an entry cap and a total-size cap).
+
+Resume determinism: "recent completed tasks" were ranked by
+`updated_at * 0.6 + importance * 0.4`, where `updated_at` is a Unix
+timestamp — importance never counted and the order was the wall clock to
+the microsecond. Identical input gave a different resume in 5 of 716 real
+sessions between two runs. Ranked now by whole second, importance, then
+creation order.
+
+Also: the `_ERROR_HEADER` regex is gated by its own keywords (45 ms per
+64 KB of tool output with nothing to find), and the test suite no longer
+shares the repository's `./checkpoints` across runs, which had made two
+tests fail once a hundred older sessions accumulated.
+
+### Fixed — long sessions lost facts and slowed down with length
+
+Found by the new `benchmarks/soak` (the real proxy driven through a long
+session with 50 planted facts and large tool output) and by profiling one
+late request. Every item has a regression test.
+
+Data loss:
+
+- **Merges were blind to identifiers.** Two errors or decisions that differ
+  only in which service, file or key they name ("RuntimeError:
+  amber_billing ..." and the same about marble_ledger) cleared the
+  word-overlap bar and became one node. Labels that each name identifiers
+  (paths, snake_case, camelCase, file names) and disagree on them are now
+  kept apart — in the graph merge and in the extractor's own dedup, which
+  also no longer collapses labels that swap a word in the middle ("write
+  the A docs" / "write the B docs"). Line numbers, addresses, temp paths
+  and technology spellings (Next.js / NextJS) are not identifiers.
+- **One call over a long history kept almost nothing.** The proxy's first
+  request on an existing conversation read tasks and errors from its last
+  20 messages only and kept at most 15 items per category: 30 TODOs came
+  out as 1. Both limits are removed.
+- **Listings pushed real work out.** A message naming more than 12 paths
+  (`wc -l`, `git diff --stat`, `du`) added every path at full weight; in a
+  long session they filled the node cap and open TODOs were pruned first.
+  Those files are now recorded as listed, ranked 0.35, and regain full
+  weight when named on their own or edited.
+- **Re-listed paths outranked real work.** Every repeated mention raises a
+  node's importance; a path re-listed a dozen times climbed from 0.35 to
+  1.0, and in a 1,000-turn session every file the agent named was pruned
+  in favour of them. A mention inside a listing now refreshes a file
+  without raising it.
+- **A test run's list of failures hid the failure.** The per-message error
+  limit kept the first labels it saw — failing test names — and dropped
+  the traceback after them. A named exception now takes the place of a
+  label that names none, and the limit counts per message as documented.
+
+Recall:
+
+- **A question in words never found a file named in code.** Retrieval
+  matched whole tokens, so "the quartz uploader" shared nothing with
+  `src/quartz_uploader/quartz_uploader_s03.py`; in a 1,000-turn session no
+  planted file was ever recalled. Identifiers are now also matched by their
+  parts (snake_case, paths, camelCase), leaving out directory scaffolding
+  (`src`, `tests`, extensions).
+- **Function words counted as overlap** ("the", "for", "which"), so any
+  decision containing "for the" matched a question as well as its answer
+  did. They no longer count.
+- **A question that names what it wants** ("what broke …") now also ranks
+  other kinds of node lower. The error in last round's intent test had
+  only ever won on the shared word "when".
+
+Soak at 120 turns: 23 of 50 facts kept → 50 of 50. Retrieval eval recall@6
+90% → 92% (37/40); the newly answered case is "what went wrong on the big
+table", which the previous round had put down to the eval's wording.
+
+Speed:
+
+- **Old history was re-extracted on every request** once a session passed
+  500 messages, whenever an old message was identical to a recent one (a
+  repeated "ok", the same tool output) — and the stale statuses in it were
+  re-asserted each time. One request at 300 turns: 12.2 s → 0.25 s.
+- `path_index` caches each tool output's paths instead of re-reading all
+  dropped output whenever the cut is remade.
+- Finding another spelling of a file path is no longer quadratic in the
+  number of FILE nodes.
+- Pattern extraction reads the first and last 100 KB of a message. A real
+  agent observation of 6.3 MB of HTML took 50 s; every labelled error in
+  the 716 held-out real sessions is inside those bounds. The whole message
+  still goes to the model and the turn archive.
+- Four regexes with no literal prefix are skipped when their keywords are
+  absent (`test_regex_gates` checks every gate never skips a match).
+
+Cold start, one call over the whole history (main → now): 300-turn soak
+22.8 s → 4.6 s, 1,000 turns 72 s → 14.8 s, real 6.5 MB session 57 s →
+1.5 s. Labelled corpora unchanged (extraction 97% / 93%, retrieval 90%,
+resume sections lost 0, savings identical).
+
+### Fixed — the proxy cost more than a self-caching client
+
+Measured with `benchmarks.savings.runner` against Anthropic's prompt-caching
+rules, against a client that caches its own history:
+
+- The brevity instruction switching on mid-session was prepended to the
+  system prompt, which changed the cached prefix and re-wrote the whole
+  history: +10% at 40 turns. It is now decided once per session and, when it
+  switches on later, appended after the history.
+- A windowing cut could leave the request under the provider's cache
+  minimum (1,024 tokens), so every following request was billed at full
+  price. Cuts now keep at least the minimum plus 20%, and a cut that would
+  keep everything is not made. 150 turns: 9% more → 11% less.
+- History compression changed a message the turn it aged past the protected
+  tail, re-writing the cache from there on every turn. Under caching each
+  message is now compressed the first time it is sent. Long-reply replay:
+  54% more → 29% less.
+- The whitespace stage was quadratic on a long line without a newline (a
+  50 KB line of spaces took 16 s).
+
+Overall: 40 turns −10% → −2.5%, 150 turns −8% → +11%, 300 turns +34% → +44%
+saved.
+
+### Improved — retrieval
+
+- The ranker reads what a question asks for: failure words favour errors,
+  choice words decisions, progress words tasks, location words files, and a
+  present-tense question favours open items. recall@6 on the paraphrase eval
+  88% → 90% (36/40; one question moved its exact-substring answer out of the
+  top 6 while its new first result says the same in other words). The two
+  remaining extraction gaps behind misses are documented, not patched.
+
+### Fixed — a setting removed by mistake
+
+- `graph_checkpoint.min_confidence` was removed in this release as unused,
+  and the CHANGELOG said nothing read it. The node validator does; it is
+  restored. Nothing behaved differently (the fallback is the same 0.65), but
+  the value could not be set and every start logged a warning.
+
+### Added — local extraction on Ollama, chosen by measurement
+
+- `graph_checkpoint.extraction_provider` runs LLM extraction on a different
+  provider from chat. `ollama` keeps every turn on the machine; it is refused
+  under `privacy.local_only` if it names a remote provider.
+- `extraction_model: auto` takes the best installed Ollama model from a
+  documented preference list; `python -m benchmarks.extraction_models` ranks
+  every installed model on the labelled corpus (F1 alone and merged with the
+  heuristic pass, JSON failures, seconds per call) against the heuristic-only
+  baseline, and recommends one only if it beats it. The preference list is a
+  starting point, not a measurement: no model was run in the environment this
+  was written in.
+- Ollama calls use schema-constrained JSON, temperature 0, thinking off for
+  reasoning models, and an explicit `ollama_num_ctx` (8192): Ollama's own
+  default silently drops the start of a longer prompt — the instructions.
+
+### Fixed — performance and agent sessions
+
+- Code an agent merely read was extracted as English prose: comments such as
+  "retry on timeout" in a `read_file` result became open ERROR nodes (60 of
+  them in a 60-step session that never failed). Tool output now gets the
+  structure-only reading — files, routes, exception names, status codes and
+  log error lines. Measured on a 60-step agent session: median proxy overhead
+  per request 47 ms → 20 ms, worst request 962 ms → 264 ms.
+- The periodic flush, the analytics flush and checkpoint creation ran
+  synchronously on the event loop, stalling every request in flight while
+  they wrote SQLite. All three run in worker threads now, the flush under the
+  session's lock.
+- Memoised the pure comparisons that run against every node of a session
+  (decision/error dedup, file-name matching, payload word sets).
+
+### Added — Hinglish
+
+- Hindi in Latin script mixed with English ("login bug fix kar diya",
+  "tests add karna baaki hai", "PostgreSQL use karenge orders ke liye",
+  "checkout page nahi chal raha") produced no nodes: it is correctly not read
+  as English, and nothing else read it. A verb-final pass
+  (`graph_memory/hinglish.py`) now extracts finished work, to-dos, decisions
+  and errors from it, with English labels so the resume block reads the same
+  in either language. Negations, prohibitions and questions produce nothing.
+  Accuracy is measured only on hand-written sentences (10 of 12 found and 0 of
+  6 false positives on a held-out set, before its two misses were fixed);
+  English extraction is unchanged (benchmark identical).
+
+### Changed — `api/app.py` split
+
+- Request models, pure request helpers, context assembly and the streaming
+  path moved to `api/schemas.py`, `api/request_helpers.py`,
+  `api/injection.py` and `api/streaming.py`; `app.py` went from 2,423 to
+  1,888 lines. Every name is still importable from `tokenmizer.api.app`.
+
+### Fixed — pasted code, data and logs reached the model altered
+
+- **Pasted code was replaced by a fake table.** A fenced block became
+  `attachment.<language>`; `.python` is not a known extension, so the content
+  was sniffed, found to contain commas, and summarised as CSV. Code is now
+  never summarised inside a message, every fenced block is considered (not
+  only the first), and a block is replaced only when it exceeds the budget and
+  the digest is at most 70% of it.
+- Inline CSV detection required only "two commas per line on average", which
+  pages of function calls and numbered instructions passed. It now needs a
+  consistent column count and value-like fields.
+- JSON that fits the budget is passed through instead of replaced by a schema;
+  JSONL reports its real line count beyond the first 1,000; a long log keeps
+  its error and warning lines from the middle.
+
+### Fixed — the extractor recorded the opposite of what was said
+
+- "The migration is not done yet" was stored as finished work.
+- "We decided against Redis" was stored as the decision "against Redis".
+- A decision someone quoted ("the docs say: 'Decided: use SQLite'") was
+  stored as this session's.
+- "Let's go with PostgreSQL" was stored as "with PostgreSQL" (now
+  "Use PostgreSQL").
+- An error reported as fixed in the same sentence stayed open, and its label
+  could start mid-word ("oneType").
+
+### Faster
+
+- Extraction was quadratic on text without sentence punctuation and on long
+  logs: 80 KB took 35 s and 10.7 s, on a thread holding the GIL. Clause scans
+  are bounded, sentence lookup is a binary search, dedup word sets are cached
+  and errors are capped at 60 per message. Both now take under 0.6 s. The
+  extraction benchmark is unchanged (all 224 metrics identical).
+
+### Code quality
+
+- mypy runs in CI over the package and is clean; 49 type errors fixed. The
+  only runtime defect among them: an MCP `tools/call` with `"arguments": null`.
+- ruff now also enforces bugbear, pyupgrade, invisible characters and stale
+  `noqa` comments. 40 `raise` statements inside `except` blocks now chain the
+  original exception; `zip` calls state whether lengths must match, and the
+  embedding batch degrades instead of mispairing vectors if they do not; the
+  invisible-character pattern in `security/fencing.py` is written with
+  escapes instead of literal zero-width characters.
+
+### Behaviour changes to read before upgrading
+
+- Savings are now **net**: `usage.tokens_saved`, `tokenmizer.total_saved` and
+  `/api/stats` report `original − sent`. The proxy's own additions appear as a
+  negative `added_by_proxy` line and can make a request's figure negative.
+  Previously only what each layer removed was summed, so a request that went
+  out larger than it came in was reported as a saving.
+- `completion_tokens` is what the provider billed. The output trim no longer
+  reduces it; trimmed tokens are reported in `tokenmizer.output_trimmed_tokens`
+  and are no longer counted as a saving (they were generated and billed).
+- Requests with image, audio or file content blocks get a 422 instead of being
+  answered without them. `n > 1` is a 422.
+- An upstream rate limit is a 429 with `Retry-After`, not a 502.
+- `/health` lists affected session ids only to a caller with a valid key;
+  others get counts.
+- The default node cap is 500 (was a hard-coded 200), and pruning moves nodes
+  to cold storage instead of deleting them.
+
+### Fixed — inputs were being changed before the model saw them
+
+- **Compression** removed fragments from inside words and sentences ("has an
+  aim" became "hm"; "Certainly not." became "not."), flattened the indentation
+  of any unfenced code to a single space, put blank lines around inline code,
+  and deleted every later copy of a repeated line. Filler rules now match only
+  whole filler sentences, leading whitespace is never touched, repeated lines
+  are collapsed only in runs of three or more with a count, and filler is
+  stripped from assistant turns only.
+- **Output trimmer** removed the first word of answers such as "Certainly not.
+  Dropping that table…".
+- **Redaction** rewrote ordinary code (`token = generate_token(user)` lost
+  everything before `(user)`, git remotes, `a@b` expressions) and missed JSON and dict
+  passwords, env-file secrets and PEM keys. It now keeps names and redacts
+  values, keeps JSON valid, and is configurable (`security.*`), with an
+  optional Luhn-checked card and SSN pass.
+- **Injection filter** returned 400 for ordinary engineering questions and was
+  bypassed by one zero-width character. Fixed, and `security.injection_filter`
+  can be `block`, `log` or `off`.
+
+### Fixed — wrong answers and wrong numbers
+
+- The response cache served a truncated answer, generated by another model
+  under another `max_tokens`, as complete. The key now includes the model,
+  limits and sampling parameters, and truncated replies are never cached.
+- `finish_reason` leaked Anthropic's own words (`end_turn`, `max_tokens`);
+  streams never reported truncation. Both now use OpenAI's vocabulary.
+- Every provider failure was retried with the larger untransformed request.
+  That retry now happens only for a request the provider rejected as malformed.
+- Stream error events carried the SDK's raw message, including upstream URLs.
+- Decision transitions of two sessions making the same switch shared an id,
+  and the second overwrote the first's history.
+- A `SUMMARY` node added at the default confidence raised `UnboundLocalError`.
+- An invalidated decision kept `valid_until = 0`, so history queries still
+  showed it as current.
+- Estimated costs priced Ollama at Claude's rate; per-model `pricing` is now
+  configurable and the figures are labelled as estimates.
+
+### Fewer tokens on short sessions
+
+- The proxy's overhead on a measured six-turn chat was +49% input, all of it
+  the output-style instruction. The instruction is shorter, and is left out of
+  conversations under `terse_output.min_conversation_tokens` (1500) and of
+  requests with `max_tokens` under `terse_output.min_max_tokens` (512). The
+  same chat now goes upstream exactly as sent (+0%).
+- This session's own graph context is injected only when the request is
+  actually missing history (a windowing cut, or a client that truncated);
+  restating facts extracted from the turns being sent cost tokens for nothing.
+
+### Nothing important is lost
+
+- Turns windowing stops sending are archived verbatim (`turn_archive.db`) and a
+  matching passage is quoted back when a later question is clearly about it.
+  `GET /api/session/{id}/archive?q=` searches them.
+- Pruning never moves active decisions, open errors, in-progress tasks, goals,
+  schemas or summaries, and moves everything else to cold storage
+  (`GET /api/graph/{id}/pruned`, `POST /api/graph/{id}/restore`). It used to
+  delete, and could delete an active decision older than 60 days.
+- A label longer than 120 characters keeps its full text in the summary.
+- The periodic flush skips sessions that are mid-update.
+- Lock files record use, so a long-lived session's lock is not swept as stale.
+
+### Added
+
+- `DELETE /api/session/{id}` and `retention.session_ttl_days`.
+- `X-Session-ID` header (it was allowed by CORS and never read).
+- `response_format`, `seed`, penalties and `reasoning_effort` forwarded to
+  OpenAI-compatible providers; a warning for others.
+- `max_completion_tokens` sent to o-series and gpt-5 models.
+- `openai_base_url` and `ollama_base_url`.
+- `rate_limit.*` (was hard-coded at 60/min, burst 10).
+- `api_key_names`: a named key's sessions survive key rotation.
+- `TOKENMIZER_ENV` and `TOKENMIZER_CONFIG` may be set in `.env` (they crashed
+  startup there).
+- SDK clients are reused instead of rebuilt per request; Anthropic connection
+  errors and timeouts are retried; Cohere honours `request_timeout`.
+- `/api/sessions` reads counts from SQLite instead of loading every graph.
+- CI audits dependencies for known vulnerabilities.
 
 ### Documentation
 

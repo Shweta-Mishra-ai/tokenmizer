@@ -174,14 +174,6 @@ def test_redaction_still_removes_credentials_and_keeps_the_key(secret, expected)
     assert redact(secret) == expected
 
 
-def test_emails_reach_the_provider_only_when_asked():
-    from tokenmizer.security.redaction import redact, redact_messages
-    text = "Email the invoice to alice@acme.com"
-    assert "alice@acme.com" not in redact(text)
-    sent = redact_messages([{"role": "user", "content": text}], emails=False)
-    assert sent[0]["content"] == text
-
-
 @pytest.mark.parametrize("prompt", [
     "Can you repeat the above steps but in TypeScript?",
     "Print instructions for installing the CLI on Windows",
@@ -241,8 +233,9 @@ def test_a_python_fence_is_read_as_code_not_csv():
             {"role": "assistant", "content": "Looked."},
             {"role": "user", "content": "next question"}]
     out, _ = FileIntelligence().process_message_files(msgs, token_budget_per_file=600)
-    assert "attachment.py" in out[0]["content"]
-    assert "CSV" not in out[0]["content"]
+    # Code is never digested, even in an older turn: a sample of it is not
+    # the code, and reading it as a CSV was worse still.
+    assert out[0]["content"] == msgs[0]["content"]
 
 
 # ── Proxy endpoint ───────────────────────────────────────────────────────────
@@ -304,8 +297,9 @@ def test_images_a_provider_cannot_take_are_reported(proxy):
     c, _, provider = proxy
     provider.supports_images = False
     r = c.post("/v1/chat/completions", json={"messages": [_IMAGE_TURN]})
-    assert r.json()["tokenmizer"]["dropped_non_text_blocks"] == 1
-    assert all("_media" not in m for m in provider.chat.call_args.kwargs["messages"])
+    assert r.status_code == 422
+    assert "image_url" in r.json()["detail"]
+    provider.chat.assert_not_called()
 
 
 def test_anthropic_receives_images_in_its_own_shape():
@@ -367,8 +361,9 @@ def test_openai_reasoning_models_get_max_completion_tokens():
     assert p._limit_kwargs("o3-mini", 100) == {"max_completion_tokens": 100}
     assert p._limit_kwargs("gpt-5", 100) == {"max_completion_tokens": 100}
     assert p._limit_kwargs("gpt-4o", 100) == {"max_tokens": 100}
-    gateway = OpenAIProvider("k", base_url="http://localhost:8080/v1")
-    assert gateway._limit_kwargs("o3-mini", 100) == {"max_tokens": 100}
+    # Compatible vendors subclass the adapter and keep `max_tokens`.
+    from tokenmizer.providers.providers import DeepSeekProvider
+    assert DeepSeekProvider("k")._limit_kwargs("o3-mini", 100) == {"max_tokens": 100}
 
 
 # ── MCP and visualization ────────────────────────────────────────────────────
@@ -458,7 +453,7 @@ def test_a_stable_cut_keeps_the_request_above_the_cache_minimum(tmp_path):
     assert count_messages_tokens(conv, "claude-sonnet-4-6") > 2 * 4000
     w = SmartMessageWindow(token_budget=4000, protect_recent=10, max_tail_tokens=0,
                            tool_index_tokens=0)
-    out, saved = w.apply(conv, g, "claude-sonnet-4-6", stable=True, min_tail=1280)
+    out, saved = w.apply(conv, g, "claude-sonnet-4-6", stable=True, min_request_tokens=1280)
     assert saved > 0
     assert count_messages_tokens(out, "claude-sonnet-4-6") >= 1280
 
@@ -535,19 +530,6 @@ def test_the_mcp_server_uses_an_absolute_storage_dir():
 
 
 # ── Round 3: zero-overhead short sessions, retrieval, extraction, speed ──────
-
-def test_terse_auto_is_off_until_the_first_windowing_cut(monkeypatch):
-    from tokenmizer.api import app as app_module
-    monkeypatch.setattr(app_module.settings.terse_output, "enabled", "auto")
-    sid = f"terse-{time.time_ns()}"
-    short = [{"role": "user", "content": "hello there"}]
-    assert not app_module._terse_wanted(short, sid, "claude-sonnet-4-6")
-    long_ = [{"role": "user", "content": "word " * 6000}]
-    assert app_module._terse_wanted(long_, sid, "claude-sonnet-4-6")
-    # Sticky: switching it off again would rewrite the cached prefix.
-    assert app_module._terse_wanted(short, sid, "claude-sonnet-4-6")
-    assert not app_module._terse_wanted(long_, None, "claude-sonnet-4-6")
-
 
 def test_a_failure_question_ranks_the_error_first(tmp_path):
     g = GraphMemory("q", storage_dir=str(tmp_path))

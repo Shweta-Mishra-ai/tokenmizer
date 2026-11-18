@@ -102,8 +102,7 @@ async def test_anthropic_streaming_uses_real_usage_for_input_tokens(monkeypatch)
     # proving the system prompt's tokens are no longer silently dropped.
     assert resp.input_tokens == 999
     assert resp.output_tokens == 3
-    # OpenAI-compatible: Anthropic's end_turn is reported as "stop".
-    assert resp.finish_reason == "stop"
+    assert resp.finish_reason == "stop"  # mapped to the OpenAI vocabulary
 
 
 @dataclass
@@ -281,3 +280,33 @@ class TestOllamaRetryClassification:
     def test_generic_error_with_no_retryable_text_is_not_retryable(self):
         from tokenmizer.providers.providers import _ollama_error_is_retryable
         assert _ollama_error_is_retryable(ValueError("model 'nonexistent' not found")) is False
+
+
+@pytest.mark.asyncio
+async def test_gemini_counts_output_when_usage_has_no_candidate_count(monkeypatch):
+    """A blocked or empty response reports prompt tokens but no candidate
+    count; None was passed on as output_tokens."""
+    genai = pytest.importorskip("google.genai")
+    fake_response = _FakeGeminiResponse(
+        text="", usage=_FakeGeminiUsage(prompt_token_count=40, candidates_token_count=None))
+    monkeypatch.setattr(genai, "Client", lambda **kw: _FakeGeminiClient(fake_response, {}))
+    resp = await GeminiProvider(api_key="test-key")._call(
+        messages=[{"role": "user", "content": "hi"}], model="gemini-1.5-pro",
+        max_tokens=100, stream=False, system=None)
+    assert resp.input_tokens == 40
+    assert resp.output_tokens == 0
+
+
+@pytest.mark.parametrize("timeout,expected", [(30.0, {"timeout": 30000}), (0, None), (None, None)])
+def test_gemini_client_gets_the_request_timeout_in_ms(timeout, expected):
+    seen: dict = {}
+
+    class _SDK:
+        @staticmethod
+        def Client(**kw):
+            seen.update(kw)
+
+    provider = GeminiProvider(api_key="test-key")
+    provider.request_timeout = timeout
+    provider._client(_SDK)
+    assert seen == {"api_key": "test-key", "http_options": expected}

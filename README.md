@@ -428,7 +428,7 @@ is a small sample and the same person wrote every label.
 **Retrieval is measured separately.** `python -m
 benchmarks.graph_retrieval.query_eval` scores what `query()` returns for
 questions phrased the way a person asks them, not in the node's own
-words: **recall@6 95% over 40 cases** (was 88%), keyword ranking only. The eval was
+words: **recall@6 95% over 40 cases**, keyword ranking only. The eval was
 13 cases until this branch, where one case flipping moved the headline by
 8 points; every case is checked to be answerable from its own transcript,
 because an ungrounded question measures extraction and reads as a
@@ -439,12 +439,11 @@ quoted for it predates the enlarged eval and has not been re-measured.
 **Input cost is measured end to end.** `python -m
 benchmarks.savings.runner` replays a conversation through the real proxy
 against a stand-in that applies Anthropic's documented prompt-caching
-rules. A short session costs **exactly** what the client alone costs
-(0.0% at 4, 10, 40 and 50 turns): the proxy adds nothing until it has
-something to save. Against a client sending its history with no caching,
-input cost is **65% lower at 40 turns, 90% at 150 and 95% at 300**; against
-a client that already caches its own history, **11% lower at 100 turns, 25%
-at 150 and 54% at 300**.
+rules. Against a client sending its history with no caching, input cost
+is **64% lower at 40 turns, 90% at 150 and 95% at 300**; against a client
+that already caches its own history, 2.5% higher at 40 turns, **20% lower
+at 150 and 51% lower at 300**. A ten-turn session goes upstream exactly as
+the client sent it.
 Details and caveats in [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
 **Agent sessions are measured separately**, because tool output, not prose,
@@ -455,12 +454,25 @@ still had 97% of what the agent went on to use in the request (94% over 58
 requests). That is one session and an input-only estimate, and information
 retained is not answer quality: see [Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
 
+**Long sessions are tested for loss, not only for cost.** `python -m
+benchmarks.soak` drives the real proxy through a session with 50 planted
+facts. At 120 turns `main` keeps 22 of them; this branch keeps all 50 —
+in the graph, recalled into the request that asks, and after a restart —
+and still all 50 at 1,000 turns with 19.7 MB of history and a 4 MB tool
+output, where `main` does not finish in an hour. Late requests there take a
+median 576 ms; eight sessions run in parallel leak none of their facts into
+each other. Facts are planted in explicit wording: see
+[Benchmarks](https://github.com/Shweta-Mishra-ai/tokenmizer/blob/main/docs/benchmarks.md).
+
 **Independently verified against 7 other methods.** A separate
 100-session benchmark ([tokenmizer-research](https://github.com/Shweta-Mishra-ai/tokenmizer-research),
 a different corpus and scorer than the numbers above) ties TokenMizer
 0.5.4 for first place at **60% macro F1** — level with Mem0-style (60%)
 and Graphiti-style (59%), ahead of GraphRAG-style (44%), MemGPT-style
-(35%), and every naive baseline (under 20%).
+(35%), and every naive baseline (under 20%). Re-measured on this branch
+(2026-11-14): 92% on that corpus, which later rounds were tuned against, and
+**65% and 59% on two held-out sets frozen before tuning**, where the best
+comparison method reaches 35% and 25%.
 
 **Measured on real agent traffic, not only on labelled corpora.** The
 same research repository runs the product on **1,467 public SWE-bench
@@ -546,7 +558,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check tokenmizer/     # 2294 tests, must stay green
+pytest tests/ -q && ruff check . && mypy     # 2535 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

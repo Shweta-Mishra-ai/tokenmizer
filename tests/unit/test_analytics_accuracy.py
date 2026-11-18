@@ -58,6 +58,10 @@ class TestSentTokensReflectFinalPayload:
         monkeypatch.setattr(app_module.settings.graph_checkpoint, "enabled", True)
         monkeypatch.setattr(app_module.settings.memory, "max_tokens_before_summary", 30)
         monkeypatch.setattr(app_module.settings.memory, "recent_turns_verbatim", 1)
+        # A provider without prefix caching: under caching the cut never goes
+        # below the cache minimum (see SmartMessageWindow._respect_floor), and
+        # this conversation is far smaller than that.
+        monkeypatch.setattr(app_module.settings.memory, "stable_window", "off")
         # _smart_window is a singleton constructed once at import time with
         # its own captured token_budget/protect_recent — mutating settings
         # above doesn't propagate to it (matches how existing window tests

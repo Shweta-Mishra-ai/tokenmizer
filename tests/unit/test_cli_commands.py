@@ -424,14 +424,14 @@ class TestForgetCommand:
 
         def fake_delete(url, **kwargs):
             captured["url"] = url
-            return _FakeResponse(200, {"deleted": {"graph_rows": 4, "checkpoints": 1,
-                                                   "cached_answers": 2}})
+            return _FakeResponse(200, {"deleted": {"graph": 4, "checkpoints": 1,
+                                                   "archived_turns": 0, "cache_entries": 2}})
 
         monkeypatch.setattr(httpx, "delete", fake_delete)
         result = runner.invoke(app, ["forget", "a/b c"], input="y\n")
         assert result.exit_code == 0, result.output
-        assert captured["url"].endswith("/api/sessions/a%2Fb%20c")
-        assert "4 graph rows" in result.output
+        assert captured["url"].endswith("/api/session/a%2Fb%20c")
+        assert "4 memory nodes" in result.output
 
     def test_declining_the_prompt_deletes_nothing(self, monkeypatch):
         monkeypatch.setattr(httpx, "delete", lambda *a, **k: pytest.fail("deleted"))

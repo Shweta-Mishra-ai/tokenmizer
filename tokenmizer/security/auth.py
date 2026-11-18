@@ -87,7 +87,7 @@ async def verify_api_key(request: Request) -> None:
             status_code=503,
             detail="Auth configuration unavailable — request rejected for safety. "
                    "This is a server-side configuration problem, not a client error.",
-        )
+        ) from None
 
     # Dev mode is decided from EVERY configured credential, not the primary
     # alone. Reading only `api_key` meant a deployment configured with
@@ -143,4 +143,9 @@ async def verify_api_key(request: Request) -> None:
     if not valid:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    request.state.principal = principal_for_key(key)
+    try:
+        from tokenmizer.config.settings import get_settings
+        names = get_settings().api_key_names
+    except Exception:
+        names = {}
+    request.state.principal = principal_for_key(key, names)

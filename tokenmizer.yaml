@@ -91,9 +91,9 @@ cache:
 
 # ── Terse Output ─────────────────────────────────────────────────────────────
 terse_output:
-  enabled: auto               # auto = only once a request is big enough to be
-                              # prompt-cached, so short sessions never cost more
-                              # input than without the proxy. true | false | auto
+  enabled: true               # left out of requests shorter than
+                              # min_conversation_tokens (1500) and of requests
+                              # whose max_tokens is under min_max_tokens (512)
   level: full                 # lite | full | ultra
   style: terse                # terse = shorter answers
                               # minimal = shorter answers and smaller
@@ -151,9 +151,12 @@ rate_limit:
 # ── Request-altering layers ───────────────────────────────────────────────────
 # Each has false positives, so each can be switched off.
 security:
-  redact_provider_messages: true    # scrub credentials before the provider sees them
-  redact_emails_to_provider: false  # stored memory always redacts emails
-  injection_filter: true            # 400 on known jailbreak phrasings
+  redact_secrets: true              # replace credentials with [REDACTED] before the provider sees them
+  redact_emails: true               # git remotes and scp targets are not treated as addresses
+  redact_pii: false                 # also Luhn-valid card numbers and US SSNs
+  injection_filter: block           # block (400) | log | off, for known jailbreak phrasings
+  trusted_hosts: []                 # extra Host names to answer (LAN / reverse proxy); keyless = localhost only
+  max_request_bytes: 33554432       # 413 above this, before parsing
 file_intelligence:
   enabled: true                     # digest large files in OLDER turns
   token_budget_per_file: 600

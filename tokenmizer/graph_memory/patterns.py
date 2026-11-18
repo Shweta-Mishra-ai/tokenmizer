@@ -16,6 +16,8 @@ these patterns still work, a line-count split cannot.
 """
 from __future__ import annotations
 
+import bisect
+import functools
 import re
 
 # ── Extraction prompt ─────────────────────────────────────────────────────────
@@ -57,6 +59,33 @@ CRITICAL RULES:
 - Max 20 items per category
 - If nothing found for a category, use []
 - NEVER fabricate — only extract what is explicitly stated"""
+
+
+def _string_list() -> dict:
+    return {"type": "array", "items": {"type": "string"}}
+
+
+# The reply shape EXTRACTION_SYSTEM describes, as a JSON schema. A provider
+# that can constrain decoding to it (Ollama's `format`) is given it, so a
+# small local model cannot answer with prose, a code fence or a truncated
+# object; the prompt still describes it for providers that cannot.
+EXTRACTION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        **{k: _string_list() for k in (
+            "goals", "tasks_done", "tasks_wip", "tasks_todo", "files", "errors",
+            "dependencies", "environments", "endpoints", "schemas")},
+        "decisions": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"label": {"type": "string"}, "reason": {"type": "string"}},
+            "required": ["label"]}},
+        "superseded": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+            "required": ["old", "new"]}},
+    },
+    "required": ["tasks_done", "tasks_todo", "decisions", "files", "errors"],
+}
 
 
 EXTRACTION_USER_TEMPLATE = """Extract from these conversation messages:
@@ -356,13 +385,18 @@ _WORK_CLAUSE_START = re.compile(
 )
 
 
-# How far either side of a match the clause helpers look for a sentence
-# boundary. Without a cap, a message with no ".!?\n" made every match scan
-# the whole text: 100k chars of "Decided: " took 8.7s (quadratic). A
-# negation or question mark further away than this belongs to another
-# thought in practice.
+# How far a clause boundary is looked for, either side of a match.
+#
+# The scans used to walk character by character to the nearest boundary,
+# once per match. Text without sentence punctuation — a pasted list, a log,
+# minified output — has no boundary, so every match walked back to the
+# start of the message: quadratic, and 80 KB of "use redis, " took 35
+# seconds of extraction (on a thread holding the GIL, so the whole proxy
+# stalled with it). A clause longer than this is a run-on, and context
+# further back than this does not govern a word here anyway.
 _CLAUSE_SCAN = 400
 _SENTENCE_END_FWD = re.compile(r"[.!?\n]")
+
 
 
 def _clause_start(content: str, pos: int) -> int:
@@ -473,8 +507,49 @@ _BOGUS_DECISION_LABEL = re.compile(
 )
 
 
+# The verb itself is negated: "is NOT done", "haven't fixed", "never
+# shipped", "yet to be merged". Narrower than _is_negated_context, which
+# looks at the whole clause and would discard "Fixed the bug where users
+# could not log in" for the "not" after the verb — this only reads the two
+# words right before it.
+_NEGATED_VERB = re.compile(
+    # The apostrophe is required: without it "incide|nt| was resolved" read
+    # as "n't was resolved" and a finished task was thrown away.
+    r"(?:\bnot|\bnever|\bcannot|n['\u2019]t|\bno longer|\byet to(?:\s+be)?)\s+(?:\w+\s+)?$",
+
+    re.IGNORECASE,
+)
+
+
 def is_bogus_decision_label(label: str) -> bool:
     return bool(_BOGUS_DECISION_LABEL.search(label.strip().rstrip(".!")))
+def is_negated_verb(content: str, verb_start: int) -> bool:
+    return bool(_NEGATED_VERB.search(content[max(0, verb_start - 30):verb_start]))
+
+
+def inside_quotation(content: str, pos: int) -> bool:
+    """True if `pos` is inside a quotation opened earlier on its line.
+
+    A quotation reports what someone else said or wrote — the docs, a
+    ticket, an error message — and a decision quoted ("the docs say:
+    'Decided: use SQLite for everything.'") is not one this session made.
+    Apostrophes inside words (let's, don't) are not quotation marks: a
+    single quote counts only where it opens or closes a word.
+    """
+    line_start = content.rfind("\n", max(0, pos - _CLAUSE_SCAN), pos) + 1
+    open_double = open_single = False
+    for i in range(max(line_start, pos - _CLAUSE_SCAN), pos):
+        ch = content[i]
+        if ch in '"\u201c\u201d':
+            open_double = not open_double if ch == '"' else ch == "\u201c"
+        elif ch in "'\u2018\u2019":
+            prev_alnum = i > 0 and content[i - 1].isalnum()
+            next_alnum = i + 1 < len(content) and content[i + 1].isalnum()
+            if not prev_alnum and next_alnum:
+                open_single = True
+            elif prev_alnum and not next_alnum:
+                open_single = False
+    return open_double or open_single
 
 
 # "Should we go with Postgres or Redis for this?" matches Pass 1's "go
@@ -483,9 +558,12 @@ def is_bogus_decision_label(label: str) -> bool:
 # the match sits mid-question, so the terminator that disambiguates it
 # is ahead, not behind.
 def _is_question_context(content: str, match_start: int) -> bool:
-    """True if the clause containing `match_start` ends in a question mark."""
-    clause_end = _sentence_end(content, match_start)
-    return content[clause_end:clause_end + 1] == "?"
+    """True if the clause containing `match_start` ends in a question mark.
+    Looks at most _CLAUSE_SCAN characters ahead; see _clause_start."""
+    hi = min(len(content), match_start + _CLAUSE_SCAN)
+    m = _SENTENCE_END_FWD.search(content, match_start, hi)
+    return m is not None and m.group() == "?"
+
 
 
 # Pass 5: config decisions — "expires in 15 minutes", "cost factor 12"
@@ -524,7 +602,10 @@ _SUPERSEDED = re.compile(
 
 # "replaced X with Y", "replacing X by Y"
 _SUPERSEDED_REPLACE = re.compile(
-    r'replac(?:ed|ing|es)?\s+(' + _OPERAND + r')\s+(?:with|by)\s+(' + _OPERAND + r')',
+    # `replac(?:ed|ing|es)?\s` never matched the imperative "replace": the
+    # optional group cannot take a lone "e", so "Let's replace Jest with
+    # Vitest" recorded Vitest and never that it replaced Jest.
+    r'replac(?:e|ed|ing|es)\s+(' + _OPERAND + r')\s+(?:with|by)\s+(' + _OPERAND + r')',
     re.IGNORECASE,
 )
 
@@ -599,6 +680,64 @@ def _is_common_phrase(span: str) -> bool:
     cut = _OPERAND_SENTENCE.search(head)
     head = head[:cut.start()] if cut else head
     return bool(_COMMON_PHRASE.match(head.strip(" ,;:.\u2014-")))
+
+
+# A change of mind that names the SLOT, not the old value:
+# "switch the partition key to `account_id`", "change our default model to
+# gpt-4o". The old value is whatever this session last chose for that slot,
+# so the graph resolves it (GraphMemory._supersede_slot).
+_SLOT_VALUE = r"(`[^`\n]{1,60}`|(?!(?:the|a|an|my|our|your|their)\b)[\w][\w./@+\-]*(?:[ \t]+[\w][\w./@+\-]*){0,3}?)"
+_SWITCH_SLOT = re.compile(
+    r"\b(?:switch(?:ed|ing)?|chang(?:e|ed|ing))\s+(?:the|our)\s+"
+    r"((?:(?!from\b|away\b)[a-z][\w-]*\s+){0,3}?(?!from\b|away\b)[a-z][\w-]*)"
+    r"\s+(?:over\s+)?to\s+" + _SLOT_VALUE + r"(?=\s*(?:[.,;:!?)]|\n|$|\s+(?:instead|now|because|since|so|for|as)\b))",
+    re.IGNORECASE,
+)
+# "Actually, let's store sessions in `memcached_pool` instead." The clause is
+# the decision; "instead" says it replaces the earlier choice it restates.
+# Not "instead of" — that names the rejected option in the same breath, one
+# decision (see _SUPERSEDED_REPLACE's note below).
+_INSTEAD_CLAUSE = re.compile(
+    r"\b(?:let'?s|let us|we'?ll|we will|we should|i'?ll|we're going to|going to)\s+"
+    r"((?:(?!\binstead\b)[^.!?\n]){6,100}?)\s+instead\b(?!\s+of\b)",
+    re.IGNORECASE,
+)
+_SLOT_PREPOSITIONS = frozenset("in on to with for as at into onto via from by".split())
+_SLOT_FILLER = frozenset("the a an our use go with just".split())
+
+
+def _value_text(value: str) -> str:
+    return " ".join(value.split()).rstrip(".,;:")
+
+
+def find_slot_changes(content: str) -> list[tuple[str, str, int, int]]:
+    """Every change of mind that names what it changes, as
+    (slot, new decision label, start, end).
+
+    The slot is the words a previous decision for the same thing will also
+    contain: "partition key", or "store sessions" for "store sessions in
+    X instead". A clause with too little left to identify a slot (a bare
+    "go with gRPC instead") still yields its decision, with an empty slot.
+    """
+    found: list[tuple[str, str, int, int]] = []
+    for m in _SWITCH_SLOT.finditer(content or ""):
+        slot = " ".join(m.group(1).lower().split())
+        value = _value_text(m.group(2))
+        if not value or value.lower() in ("it", "that", "this", "them"):
+            continue
+        found.append((slot, f"{value} as the {slot}", m.start(), m.end()))
+    for m in _INSTEAD_CLAUSE.finditer(content or ""):
+        clause = " ".join(m.group(1).split()).rstrip(",;:")
+        words = clause.split()
+        # The slot is what comes before the last preposition: "store
+        # sessions" in "store sessions in X". No preposition, no slot.
+        cut = max((i for i, w in enumerate(words) if w.lower() in _SLOT_PREPOSITIONS),
+                  default=-1)
+        slot_words = [w.lower() for w in words[:cut] if w.lower() not in _SLOT_FILLER] \
+            if cut > 0 else []
+        slot = " ".join(slot_words) if len(slot_words) >= 2 else ""
+        found.append((slot, clause, m.start(), m.end()))
+    return found
 
 
 def find_supersessions(content: str) -> list[tuple[str, str, int, int]]:
@@ -820,9 +959,19 @@ def _drop_leading_sentence(text: str) -> str:
     return s[last.end():].strip() if last else s
 
 
+@functools.lru_cache(maxsize=16)
+def _sentence_ends(text: str) -> tuple[int, ...]:
+    return tuple(m.end() for m in _SENTENCE_BOUNDARY.finditer(text))
+
+
 def _sentence_index(text: str, position: int) -> int:
-    """Which sentence of `text` contains `position` (0-based)."""
-    return sum(1 for m in _SENTENCE_BOUNDARY.finditer(text) if m.end() <= position)
+    """Which sentence of `text` contains `position` (0-based).
+
+    Boundaries are found once per text and binary-searched. This re-scanned
+    the whole message for every error it was asked about, which made error
+    extraction quadratic in the length of a pasted log.
+    """
+    return bisect.bisect_right(_sentence_ends(text), position)
 
 
 def _content_words(text: str) -> int:
@@ -1028,6 +1177,9 @@ _PAST_ASPECT_LEAD = re.compile(
 _INTRANSITIVE_TAIL = re.compile(
     r"^(?:in|on|at|into|with|from|off|over|during|after|before|last|yesterday|"
     r"earlier|today|this morning|this afternoon|already|successfully|fine|cleanly|"
+    # "The TypeError in billing.py is fixed now — I added a None check" was
+    # stored as the finished task "now — I added a None check".
+    r"now|just now|for now|too|as well|"
     # "The incident was resolved within an hour": a time or manner adverbial,
     # not the work. It was stored as the finished task "within an hour".
     r"within|without|overnight|quickly|immediately|eventually|again)\b",

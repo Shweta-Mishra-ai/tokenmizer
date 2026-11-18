@@ -263,9 +263,19 @@ class TestFillerRemovalDoesNotCorruptWords:
 
     def test_an_interjection_after_a_sentence_break_is_removed(self):
         from tokenmizer.compression.engine import FillerRemover
-        out, _ = FillerRemover().apply("First point. Certainly, the second point.")
+        out, _ = FillerRemover().apply("First point. Certainly! The second point.")
         assert "Certainly" not in out
         assert "second point" in out
+
+    def test_a_word_that_opens_a_real_sentence_is_kept(self):
+        # A comma means the sentence goes on: "Certainly not." and "Sure,
+        # but only after the backup" lost their first word to this stage.
+        from tokenmizer.compression.engine import FillerRemover
+        for text in ("Certainly not. Dropping that table deletes data.",
+                     "Sure, but only after the backup completes.",
+                     "First point. Certainly, the second point."):
+            out, _ = FillerRemover().apply(text)
+            assert out == text
 
 
 class TestHistoryPrunerKeepsDistinctReplies:

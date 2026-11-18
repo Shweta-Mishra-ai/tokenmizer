@@ -27,8 +27,10 @@ _is_same_decision/_semantic_same_slot rather than in a second file.
 """
 from __future__ import annotations
 
+import functools
 import re
-from typing import Optional
+
+from tokenmizer.graph_memory.patterns import is_library_name
 
 # ── Topic taxonomy ────────────────────────────────────────────────────────────
 # Maps keywords → topic bucket name
@@ -114,6 +116,9 @@ for _topic, _keywords in _TOPIC_KEYWORDS.items():
         _KEYWORD_TO_TOPIC[_kw.lower()] = _topic
 
 
+
+_REASON_TAIL = re.compile(r"[,;]?\s+\b(?:because|since|due to|given that)\b", re.IGNORECASE)
+
 def _classify_ordered(label: str, summary: str = "") -> list[str]:
     """
     All topic buckets matched by a decision, in match order (bigrams first,
@@ -128,6 +133,9 @@ def _classify_ordered(label: str, summary: str = "") -> list[str]:
     spurious single-word match ("session" → auth_mechanism).
     """
     label = label.rstrip(".,!?;:")
+    # What follows "because" is why, not what: "`x` as the partition key,
+    # because Postgres row locks were too slow" did not choose Postgres.
+    label = _REASON_TAIL.split(label, maxsplit=1)[0]
     text = (label + " " + summary).lower()
     # Remove punctuation for matching — but preserve version numbers
     text = re.sub(r"[^\w\s\.]", " ", text)
@@ -171,7 +179,7 @@ def classify_topics(label: str, summary: str = "") -> set[str]:
     return set(_classify_ordered(label, summary))
 
 
-def classify_topic(label: str, summary: str = "") -> Optional[str]:
+def classify_topic(label: str, summary: str = "") -> str | None:
     """
     Backward-compatible singular form: the primary (first-matched) topic,
     or None if nothing matched. Prefer classify_topics() in new code —
@@ -259,6 +267,9 @@ def _matched_topic_keywords(label: str, summary: str) -> frozenset:
     "pgvector") have no reason to resemble the original's ("storage").
     """
     label = label.rstrip(".,!?;:")
+    # What follows "because" is why, not what: "`x` as the partition key,
+    # because Postgres row locks were too slow" did not choose Postgres.
+    label = _REASON_TAIL.split(label, maxsplit=1)[0]
     text = (label + " " + summary).lower()
     text = re.sub(r"[^\w\s\.]", " ", text)
     text = text.replace("next.js", "nextjs").replace("node.js", "nodejs")
@@ -353,6 +364,57 @@ def _same_slot(new_label: str, new_summary: str, existing_label: str, existing_s
     return _semantic_same_slot(new_label, existing_label)
 
 
+# ── Scope: what a decision covers ─────────────────────────────────────────
+#
+# "The billing service uses `billing_events` as its Kafka topic" and "the
+# ledger service uses `ledger_events` as its Kafka topic" name the same
+# technology, so _same_slot read the second as a refinement of the first and
+# superseded it; "Redis for caching" and "Redis for rate limiting" likewise.
+# They cover different things and are two decisions. The scope is read from
+# what a decision says it covers — "for the X", "for <doing something>",
+# "the X uses" — and never from a bare reason: "Rust for performance" then
+# "Go for simplicity" is a real reversal and must still supersede.
+
+_SCOPE_FOR_THE = re.compile(
+    r"\bfor\s+(?:the|our|each|every|all)\s+([a-z0-9][\w-]*(?:\s+[a-z0-9][\w-]*){0,2})",
+    re.IGNORECASE)
+_SCOPE_FOR_USE = re.compile(
+    r"\bfor\s+((?:[a-z0-9][\w-]*\s+){0,2}[a-z][\w-]{2,}ing)\b", re.IGNORECASE)
+_SCOPE_SUBJECT = re.compile(
+    r"\bthe\s+([a-z0-9][\w-]*(?:\s+[a-z0-9][\w-]*){0,2}?)\s+"
+    r"(?:uses|will use|should use|is using|now uses|gets|runs on|stores|writes to|reads from)\b",
+    re.IGNORECASE)
+_SCOPE_CUT = frozenset((
+    "we we'll i i'll let's let use uses it they you because since so and but with to as "
+    "is are was will should instead rather which that this then now").split())
+_SCOPE_GENERIC = frozenset((
+    "service services module modules app apps component components layer system side "
+    "part one thing things project team example instance code stuff").split())
+
+
+def decision_scope(label: str, summary: str = "") -> frozenset:
+    """The content words of what a decision says it covers; empty when it
+    says nothing about that."""
+    text = f"{label} {summary}"
+    words: set[str] = set()
+    for pattern in (_SCOPE_FOR_THE, _SCOPE_FOR_USE, _SCOPE_SUBJECT):
+        for m in pattern.finditer(text):
+            for w in re.sub(r"[^\w\s-]", " ", m.group(1).lower()).split():
+                if w in _SCOPE_CUT:
+                    break
+                if len(w) > 2 and w not in _SCOPE_GENERIC:
+                    words.add(w)
+    return frozenset(words)
+
+
+def _different_scope(label_a: str, summary_a: str, label_b: str, summary_b: str) -> bool:
+    """Both state a scope, and neither contains the other. Sharing a word is
+    not the same scope: "the quartz scheduler" and "the quartz gateway" are
+    two components; "billing" and "the billing service" are one."""
+    a, b = decision_scope(label_a, summary_a), decision_scope(label_b, summary_b)
+    return bool(a) and bool(b) and not (a <= b or b <= a)
+
+
 def find_contradicting_decisions(
     new_label: str,
     new_summary: str,
@@ -408,6 +470,8 @@ def find_contradicting_decisions(
                 continue  # same decision — not a contradiction
             if _refines_or_endorses(new_label, new_summary, node.label):
                 continue
+            if _different_scope(new_label, new_summary, node.label, node.summary):
+                continue  # covers something else — an independent decision
             if _same_slot(new_label, new_summary, node.label, node.summary):
                 to_supersede.append(node_id)
 
@@ -486,6 +550,8 @@ def find_contested_decisions(
             continue
         if _is_same_decision(new_label, node.label):
             continue
+        if _different_scope(new_label, new_summary, node.label, node.summary):
+            continue  # covers something else: independent, not contested
         # Reaching here means topics overlapped but _same_slot said no —
         # ambiguous, not confidently a replacement.
         if not _same_slot(new_label, new_summary, node.label, node.summary):
@@ -530,6 +596,8 @@ def _find_by_word_overlap(
         if node.status != NodeStatus.COMPLETED:
             continue
 
+        if _different_scope(new_label, "", node.label, node.summary):
+            continue
         existing_words = {w for w in re.sub(r"[^\w]", " ", node.label.lower()).split()
                           if w not in _STOP and len(w) > 2}
         if not existing_words:
@@ -615,6 +683,56 @@ def _names_competing_alternatives(label_a: str, label_b: str) -> bool:
     return bool(_topics(exclusive_a) & _topics(exclusive_b))
 
 
+# Pure functions of two labels, called for every new node against every
+# existing one of its type: memoised, because the same pairs come back on
+# every turn of a session (measured: 1,720 calls on one cold 100-turn chat).
+# ── Identifiers keep different things apart ───────────────────────────────
+#
+# Word overlap cannot tell "RuntimeError: amber_billing overflowed the batch
+# buffer" from the same sentence about marble_ledger: five words of six
+# match, so the second error was merged into the first and lost. The words
+# that differ are the ones that say WHICH thing — a path, a snake_case or
+# camelCase name, a file name. Two labels that each name such identifiers,
+# where neither label's set contains the other's, describe different things.
+# Line numbers, memory addresses and temp paths are not identifiers: they
+# change between two reports of the same failure.
+
+_IDENT_STRIP = "`'\"()[]{}<>,;:!?"
+_HEXISH = re.compile(r"^(?:0x)?[0-9a-f]{6,}$")
+# camelCase as code writes it (getUserName, userId): two or more lowercase
+# letters, then a capital starting a lowercase word. Not a product name —
+# TypeScript, PostgreSQL, NextJS, macOS, iPhone — which is a spelling of a
+# technology, not an identifier, and comes in several spellings.
+_CAMEL = re.compile(r"^[a-z]{2,}[A-Z][a-z]")
+_FILE_NAME = re.compile(r"^[\w-]+\.[A-Za-z][A-Za-z0-9]{0,4}$")
+
+
+@functools.lru_cache(maxsize=65536)
+def _identifiers(label: str) -> frozenset[str]:
+    out = set()
+    for raw in label.split():
+        tok = raw.strip(_IDENT_STRIP).rstrip(".")
+        if len(tok) < 4 or not re.search(r"[A-Za-z]", tok):
+            continue
+        low = tok.lower()
+        if _HEXISH.match(low) or low.startswith(("/tmp/", "/var/folders/", "http")):
+            continue
+        if _ERROR_CLASS_NAME.fullmatch(tok):
+            continue          # the class check handles those
+        if is_library_name(tok):
+            continue          # Next.js, Vue.js: a technology, not a file
+        if ("/" in tok or "_" in tok.strip("_") or _CAMEL.search(tok)
+                or (_FILE_NAME.match(tok) and len(tok) >= 5)):
+            out.add(low)
+    return frozenset(out)
+
+
+def _different_identifiers(label_a: str, label_b: str) -> bool:
+    a, b = _identifiers(label_a), _identifiers(label_b)
+    return bool(a) and bool(b) and not (a <= b or b <= a)
+
+
+@functools.lru_cache(maxsize=65536)
 def _is_same_decision(label_a: str, label_b: str) -> bool:
     """True if two labels are essentially the same decision (dedup check)."""
 
@@ -624,6 +742,8 @@ def _is_same_decision(label_a: str, label_b: str) -> bool:
     # heuristics get this case backwards — see
     # _names_competing_alternatives.
     if _names_competing_alternatives(label_a, label_b):
+        return False
+    if _different_identifiers(label_a, label_b):
         return False
 
     def _norm(s: str) -> str:
@@ -744,6 +864,7 @@ def _named_error_classes_conflict(label_a: str, label_b: str) -> bool:
     return not (classes_a & classes_b)
 
 
+@functools.lru_cache(maxsize=65536)
 def _is_same_error(label_a: str, label_b: str) -> bool:
     """True if two error labels describe the same underlying failure,
     phrased identically or near-identically. Mirrors _is_same_decision's
@@ -751,7 +872,7 @@ def _is_same_error(label_a: str, label_b: str) -> bool:
     handling — an error either is or isn't the same failure; there's no
     "opposite" of an error the way there's an opposite of a decision.
     """
-    if _named_error_classes_conflict(label_a, label_b):
+    if _named_error_classes_conflict(label_a, label_b) or _different_identifiers(label_a, label_b):
         return False
 
     def _norm(s: str) -> str:
@@ -793,7 +914,7 @@ def _semantic_same_error(label_a: str, label_b: str) -> bool:
     installed, reusing the same EmbeddingEngine reasoning.py's semantic
     recall and _semantic_same_slot already use.
     """
-    if _named_error_classes_conflict(label_a, label_b):
+    if _named_error_classes_conflict(label_a, label_b) or _different_identifiers(label_a, label_b):
         return False
     if not label_a.strip() or not label_b.strip():
         return False

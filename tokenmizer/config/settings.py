@@ -1,7 +1,7 @@
 """TokenMizer configuration — Pydantic Settings with env var support."""
 from __future__ import annotations
 
-from typing import List, Literal, Union
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -59,6 +59,19 @@ class MemorySettings(BaseModel):
     # again. The index goes in the frozen bridge, so it is billed once per
     # cut and read from the provider's cache after. 0 leaves it out.
     tool_index_tokens: int = Field(default=1500, ge=0)
+    # Keep the turns windowing drops, verbatim, in storage_dir.
+    #
+    # The graph remembers what the extractor has a node type for. A figure,
+    # a snippet, an exact error string or a constraint stated in passing has
+    # none, and before this it left the session permanently at the first
+    # cut. Archived turns are already redacted, are searched by keyword on
+    # each later turn, and the best match is quoted back when the question
+    # is clearly about it — so a windowed session can still answer "what
+    # was the exact timeout we set?". Deleted with the session.
+    archive_dropped_turns: bool = True
+    # Ceiling, in tokens, on the verbatim excerpt quoted back from the
+    # archive on a turn that asks about it. 0 archives without recalling.
+    recall_excerpt_tokens: int = Field(default=300, ge=0)
 
 
 class GraphCheckpointSettings(BaseModel):
@@ -66,18 +79,44 @@ class GraphCheckpointSettings(BaseModel):
     trigger_at_percent: float = Field(default=0.85, ge=0.5, le=0.99)
     storage_dir: str = "./checkpoints"
     max_resume_tokens: int = Field(default=400, ge=1)
-    # True = the configured chat provider and model also run a background
-    # extraction call each turn. That is a second call to the SAME model
-    # you chat with, so its cost is comparable to a chat turn's input, not
-    # a cheap-model fraction of it.
+    # True = a background extraction call runs each turn. With
+    # extraction_provider empty it goes to the SAME provider and model you
+    # chat with, so its cost is comparable to a chat turn's input, not a
+    # cheap-model fraction of it.
     use_llm_extraction: bool = False
-    extraction_model: str = ""        # empty = the chat model; set one to use a cheaper model
+    # Where LLM extraction runs, separately from chat. Empty = the chat
+    # provider. "ollama" runs it on a local model: nothing the session says
+    # leaves the machine for extraction, and it costs nothing per call, while
+    # chat can stay on whichever provider answers best. Any other provider
+    # name uses that provider's key.
+    extraction_provider: Literal["", "anthropic", "claude", "openai", "gpt", "deepseek",
+                                 "mistral", "grok", "cohere", "gemini", "ollama",
+                                 "openrouter"] = ""
+    # The extraction model. Empty = the chat model on the same provider.
+    # With extraction_provider: ollama, "auto" (or empty) picks the best
+    # installed model — see providers/ollama_models.py, and rank what you
+    # have with `python -m benchmarks.extraction_models`.
+    extraction_model: str = ""
+    # Seconds one extraction call may take. Separate from request_timeout
+    # because a local model on a CPU is slow and extraction runs in the
+    # background, where waiting costs no one a response.
+    extraction_timeout: float = Field(default=300.0, gt=0)
     # Output-token budget for the LLM extraction call. A model that reasons
     # before it answers spends part of this on reasoning, so a budget sized
     # for the JSON alone can be exhausted before the JSON is complete; raise
     # it if the log reports a truncated extraction reply.
     extraction_max_tokens: int = Field(default=2048, ge=256, le=16384)
-    min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)  # minimum validation confidence threshold
+    # Validation score a candidate node needs to be written to the graph
+    # (graph_memory/validator.py). Higher keeps fewer, surer nodes.
+    min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
+    # Node cap per session. Over it, pruning moves the least important
+    # resolved nodes to cold storage (graph_pruned) — kept, searchable and
+    # restorable, just no longer ranked. Active decisions, open errors,
+    # work in progress, goals and schemas are never moved, whatever the
+    # count. Was a hard-coded 200, sized for a storage layout that rewrote
+    # the whole graph on every turn; per-row storage made that cost
+    # irrelevant.
+    max_nodes: int = Field(default=500, ge=50)
     # Blend embedding similarity into GraphMemory.query(), the ranker that
     # decides which nodes get injected into the prompt each turn.
     #
@@ -118,7 +157,7 @@ class GraphCheckpointSettings(BaseModel):
     # the weights are present. sentence-transformers ships no weights, so
     # "installed" and "loadable" are different questions on an air-gapped
     # host or behind an egress proxy.
-    semantic_retrieval: Union[bool, Literal["auto"]] = "auto"
+    semantic_retrieval: bool | Literal["auto"] = "auto"
     # Rank a principal's OTHER sessions' nodes alongside the current
     # session's when building retrieval results (Memory.search() and the
     # proxy's context-injection step) — see graph_memory/cross_session.py.
@@ -216,10 +255,7 @@ class PreferenceSettings(BaseModel):
 
 
 class TerseOutputSettings(BaseModel):
-    # true / false, or "auto": add the instruction only once a request is
-    # large enough for the provider to cache it, so a short session never
-    # pays more input than it would without the proxy. See app._terse_wanted.
-    enabled: Union[bool, Literal["auto"]] = "auto"
+    enabled: bool = True
     level: Literal["lite", "full", "ultra"] = "full"
     # What the injected instruction asks for.
     #   terse    — shorter answers: no preamble, no closing, fragments allowed.
@@ -232,6 +268,18 @@ class TerseOutputSettings(BaseModel):
     # other, which docs/comparisons.md already warns about for running any
     # other brevity prompt alongside this layer.
     style: Literal["terse", "minimal"] = "terse"
+    # Leave the instruction out of requests whose output limit is below
+    # this. It costs its own length in input on every request and can only
+    # save output; a reply capped at a few hundred tokens has little to
+    # save, so on short exchanges it was a net cost.
+    min_max_tokens: int = Field(default=512, ge=0)
+    # ...and out of conversations shorter than this many tokens. Measured on
+    # a six-turn chat, the instruction was the proxy's ENTIRE overhead: +22%
+    # input with it, +0% without. Its saving is in output, which no local
+    # measurement can see, so on a conversation this small it is left out
+    # and the request goes upstream exactly as the client sent it. Past
+    # this size it is a few percent of the request. 0 = always add it.
+    min_conversation_tokens: int = Field(default=1500, ge=0)
 
 
 class PrivacySettings(BaseModel):
@@ -242,35 +290,53 @@ class PrivacySettings(BaseModel):
     # Hosts a local_only process may still reach: your own gateway or
     # inference server. Loopback is always allowed. An HTTP proxy must be
     # listed to be reachable, and then so is everything behind it.
-    allowed_hosts: List[str] = Field(default_factory=list)
+    allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class SecuritySettings(BaseModel):
-    """The layers that change or refuse what a client sent.
+    """What the proxy changes or refuses on the way in.
 
-    Each one has false positives, so each one can be turned off by the
-    operator who would rather have the request untouched.
+    Each of these edits or blocks a request the caller believes went out
+    as written, so each has to be something an operator can see and turn
+    off. Until these existed, redaction and the injection filter were
+    unconditional.
     """
-    # Scrub credentials from messages before they reach the provider.
-    # Stored memory (graph nodes, checkpoints) is redacted regardless.
-    redact_provider_messages: bool = True
-    # Also replace email addresses in what the provider sees. Off by
-    # default: an address is usually the subject of the request ("send the
-    # report to alice@acme.com"). Stored memory always redacts them.
-    redact_emails_to_provider: bool = False
-    # The keyword filter that answers 400 to well-known jailbreak
-    # phrasings. A speed bump, not a defence; see security/middleware.py.
-    injection_filter: bool = True
+    # Replace recognisable credentials with [REDACTED] before a message
+    # reaches the provider, the graph or a checkpoint.
+    redact_secrets: bool = True
+    # Email addresses. On by default as it always was; turn it off when the
+    # addresses ARE the work (a mail merge, a contacts migration).
+    redact_emails: bool = True
+    # Card numbers (Luhn-checked) and US SSNs. Off by default: a digit run
+    # that passes a checksum is not always a card.
+    redact_pii: bool = False
+    # The keyword denylist in security/middleware.py.
+    #   block — refuse the request with a 400 (the previous behaviour)
+    #   log   — let it through and log the match
+    #   off   — do not scan
+    # It is a speed bump against copy-pasted jailbreaks, not a boundary;
+    # see that module's docstring before relying on it.
+    injection_filter: Literal["block", "log", "off"] = "block"
     # Hosts this server answers to, by Host header. Empty (the default):
     # localhost only when no api_key is set — which blocks DNS-rebinding
     # pages from reading memory through the visitor's browser — and any
     # host once a key is required. List the names you reach it by
     # (e.g. "tokenmizer.internal") to serve them without a key; "*" allows all.
-    trusted_hosts: List[str] = Field(default_factory=list)
+    trusted_hosts: list[str] = Field(default_factory=list)
     # Largest request body accepted, in bytes. 32 MiB covers an agent turn
     # carrying large tool output; beyond it a request is a 413, not a
     # memory spike.
     max_request_bytes: int = Field(default=32 * 1024 * 1024, ge=1024)
+
+
+class RetentionSettings(BaseModel):
+    """How long a session nobody has touched is kept.
+
+    0 keeps everything forever, which is what happened before there was a
+    setting: no session was ever deleted, by anything. `DELETE
+    /api/session/{id}` removes one on request whatever this is set to.
+    """
+    session_ttl_days: float = Field(default=0, ge=0)
 
 
 class FileIntelligenceSettings(BaseModel):
@@ -288,6 +354,7 @@ class FileIntelligenceSettings(BaseModel):
 
 
 class RateLimitSettings(BaseModel):
+    """Per-client request budget. These were constants in api/app.py."""
     enabled: bool = True
     # Per client address, and on localhost the agent, the dashboard and the
     # MCP server all share one address. At 60/min (burst 10) a busy agent
@@ -324,6 +391,16 @@ class Settings(BaseSettings):
 
     default_model: str = "claude-sonnet-4-6"
 
+    # TOKENMIZER_ENV and TOKENMIZER_CONFIG, declared so that writing them
+    # in a .env file works. They were read straight from os.environ and
+    # were not fields, so with extra="forbid" a `.env` line saying
+    # TOKENMIZER_ENV=production — the natural place for it — was an
+    # "extra input" that crashed startup. `env` is honoured from either
+    # source (see get_settings); `config` only from the real environment,
+    # because the file it names has to be found before .env is read.
+    env: str = ""
+    config: str = ""
+
     # Client model alias -> the model actually sent to the provider. This
     # is what the never-implemented `routing` block was reached for: a
     # client hard-codes "gpt-4" or an agent framework pins a name you do
@@ -352,6 +429,22 @@ class Settings(BaseSettings):
     cohere_api_key: str = ""
     openrouter_api_key: str = ""
 
+    # Where the provider lives, when it is not the vendor's own endpoint.
+    #
+    # openai_base_url points the `openai` provider at anything that speaks
+    # its API: Azure OpenAI, LiteLLM, vLLM, LM Studio, a corporate gateway.
+    # ollama_base_url matters the moment the proxy runs in a container,
+    # where "localhost" is the container and not the machine Ollama is on
+    # (use http://host.docker.internal:11434 there). Empty keeps each
+    # adapter's default.
+    openai_base_url: str = ""
+    ollama_base_url: str = ""
+    # Context window, in tokens, requested from Ollama for every call, chat
+    # and extraction. Ollama's default is small (2,048 or 4,096 depending on
+    # the version) and a longer prompt loses its START silently — the system
+    # prompt and the oldest turns. 0 keeps Ollama's default.
+    ollama_num_ctx: int = Field(default=8192, ge=0)
+
     # Where the state that is NOT the graph lives — today, the rate
     # limiter's token buckets.
     #
@@ -379,10 +472,22 @@ class Settings(BaseSettings):
     # deployment is single-tenant: every caller shares one principal and
     # therefore one session namespace — which is the honest description
     # of what a single shared api_key has always meant.
-    api_keys: List[str] = []
+    api_keys: list[str] = []
+    # Optional stable names for keys: {"<key>": "team-a"}. A session belongs
+    # to the principal that created it, and the principal was a hash of the
+    # key, so rotating a key orphaned every session made with it. A named
+    # key's principal is its name: give the new key the old key's name and
+    # its sessions follow. At startup, sessions owned by a named key's hash
+    # are moved to the name, so naming an existing key keeps its sessions.
+    api_key_names: dict[str, str] = Field(default_factory=dict)
+    # Price per 1K tokens, (input, output) in USD, for the cost estimates in
+    # /api/stats. Matched as a substring of the MODEL name, longest first,
+    # then of the provider name. Built-in figures are rough defaults per
+    # provider and are labelled as estimates; put your contract prices here.
+    pricing: dict[str, list[float]] = Field(default_factory=dict)
 
     # CORS
-    cors_origins: List[str] = ["http://localhost:3000", "http://localhost:8000"]
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8000"]
 
     # Rate limiting: trust X-Forwarded-For?
     #
@@ -413,12 +518,7 @@ class Settings(BaseSettings):
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     file_intelligence: FileIntelligenceSettings = Field(default_factory=FileIntelligenceSettings)
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
-
-    # Where the provider lives, for the two that are commonly self-hosted
-    # or fronted by a gateway. Empty base URL = the vendor's own endpoint
-    # (the OpenAI SDK still honours OPENAI_BASE_URL).
-    openai_base_url: str = ""
-    ollama_base_url: str = "http://localhost:11434"
+    retention: RetentionSettings = Field(default_factory=RetentionSettings)
 
     # How long an upstream provider call may hang before it is
     # abandoned. Every vendor SDK used by providers/providers.py
@@ -457,7 +557,7 @@ class Settings(BaseSettings):
         return mapping.get(provider, "")
 
     @classmethod
-    def from_yaml(cls, path: str) -> "Settings":
+    def from_yaml(cls, path: str) -> Settings:
         """Load settings from YAML, with environment variables taking
         precedence over the file — the behaviour tokenmizer.yaml's own
         header has always promised ("Environment variables always
@@ -655,6 +755,9 @@ def get_settings() -> Settings:
         # set api_key at all — no typo, no load error, just a genuine
         # config gap — would otherwise get a perfectly "successful" boot
         # into the same unauthenticated state.
+        # TOKENMIZER_ENV=production written in .env rather than exported.
+        production = production or loaded.env.strip().lower() == "production"
+
         if production and not (loaded.api_key or any(loaded.api_keys)):
             logger.error(
                 "TOKENMIZER_ENV=production but no api_key is configured — "

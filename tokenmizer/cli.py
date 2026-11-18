@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -67,7 +66,7 @@ def _cli_get(url: str, headers: dict, timeout: float):
         return httpx.get(url, headers=headers, timeout=timeout)
     except httpx.HTTPError as e:
         _report_unreachable(e)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
 
 def _cli_post(url: str, headers: dict, timeout: float):
@@ -76,7 +75,7 @@ def _cli_post(url: str, headers: dict, timeout: float):
         return httpx.post(url, headers=headers, timeout=timeout)
     except httpx.HTTPError as e:
         _report_unreachable(e)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
 
 def _cli_delete(url: str, headers: dict, timeout: float):
@@ -85,10 +84,10 @@ def _cli_delete(url: str, headers: dict, timeout: float):
         return httpx.delete(url, headers=headers, timeout=timeout)
     except httpx.HTTPError as e:
         _report_unreachable(e)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
-def _resolve_session_id(session_id: Optional[str]) -> str:
+def _resolve_session_id(session_id: str | None) -> str:
     """Use the id given, else derive one from the working directory.
 
     Nothing had a default, so the plugin skills instructed the assistant to
@@ -171,7 +170,7 @@ def analyze(
         content = path.read_bytes()
     except OSError as e:
         console.print(f"[red]Could not read {file}:[/red] {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     try:
         result = FileIntelligence().process(
@@ -179,7 +178,7 @@ def analyze(
         )
     except Exception as e:
         console.print(f"[red]Analysis failed:[/red] {type(e).__name__}: {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     if raw:
         print(result.content)
@@ -208,13 +207,13 @@ def analyze(
 
 @app.command()
 def serve(
-    host: Optional[str] = typer.Option(
+    host: str | None = typer.Option(
         None, help="Bind host (default: proxy_host from tokenmizer.yaml, or 127.0.0.1)"
     ),
-    port: Optional[int] = typer.Option(
+    port: int | None = typer.Option(
         None, help="Bind port (default: proxy_port from tokenmizer.yaml, or 8000)"
     ),
-    config: Optional[str] = typer.Option(None, help="Path to tokenmizer.yaml"),
+    config: str | None = typer.Option(None, help="Path to tokenmizer.yaml"),
     reload: bool = typer.Option(False, help="Auto-reload on code changes (dev only)"),
     workers: int = typer.Option(1, help="Number of worker processes"),
 ):
@@ -268,9 +267,9 @@ def serve(
 
 @app.command()
 def stats(
-    session_id: Optional[str] = typer.Argument(None, help="Session ID (optional)"),
+    session_id: str | None = typer.Argument(None, help="Session ID (optional)"),
     server: str = typer.Option("http://localhost:8000", help="TokenMizer server URL"),
-    api_key: Optional[str] = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
+    api_key: str | None = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
 ):
     """Print session/global analytics."""
     from urllib.parse import quote
@@ -374,10 +373,10 @@ def _print_durability(server: str, headers: dict) -> None:
 
 @app.command()
 def checkpoint(
-    session_id: Optional[str] = typer.Argument(
+    session_id: str | None = typer.Argument(
         None, help="Session ID (default: the current directory name)"),
     server: str = typer.Option("http://localhost:8000"),
-    api_key: Optional[str] = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
+    api_key: str | None = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
     level: str = typer.Option("standard", help="Resume level: critical | standard | full"),
 ):
     """Create a manual checkpoint and show resume context."""
@@ -418,11 +417,11 @@ def checkpoint(
 
 @app.command()
 def resume(
-    session_id: Optional[str] = typer.Argument(
+    session_id: str | None = typer.Argument(
         None, help="Session ID (default: the current directory name)"),
     server: str = typer.Option("http://localhost:8000"),
     level: str = typer.Option("standard", help="critical | standard | full"),
-    api_key: Optional[str] = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
+    api_key: str | None = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
 ):
     """Get the resume context for a session checkpoint."""
     from urllib.parse import quote
@@ -470,7 +469,7 @@ def forget(
     session_id: str = typer.Argument(..., help="Session to delete"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation"),
     server: str = typer.Option("http://localhost:8000", help="TokenMizer server URL"),
-    api_key: Optional[str] = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
+    api_key: str | None = typer.Option(None, envvar="TOKENMIZER_API_KEY"),
 ):
     """Delete a session's memory, checkpoints and cached answers."""
     from urllib.parse import quote
@@ -480,7 +479,7 @@ def forget(
             "This cannot be undone"):
         raise typer.Exit(1)
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    r = _cli_delete(f"{server}/api/sessions/{quote(session_id, safe='')}", headers, timeout=30)
+    r = _cli_delete(f"{server}/api/session/{quote(session_id, safe='')}", headers, timeout=30)
     if r.status_code == 404:
         console.print(f"[yellow]No session '{session_id}' that this key owns.[/yellow]")
         raise typer.Exit(1)
@@ -488,22 +487,23 @@ def forget(
         console.print(f"[red]Error: {r.text}[/red]")
         raise typer.Exit(1)
     d = r.json().get("deleted", {})
-    if not any(v for k, v in d.items() if k != "analytics_rows_unlinked"):
+    if not any(v for k, v in d.items() if k not in ("analytics_rows_unlinked", "owner")):
         console.print(f"[yellow]Nothing was stored for '{session_id}'.[/yellow]")
         return
-    console.print(f"[green]Forgot '{session_id}':[/green] {d.get('graph_rows', 0)} graph rows, "
-                  f"{d.get('checkpoints', 0)} checkpoints, {d.get('cached_answers', 0)} cached answers.")
+    console.print(f"[green]Forgot '{session_id}':[/green] {d.get('graph', 0)} memory nodes, "
+                  f"{d.get('checkpoints', 0)} checkpoints, {d.get('archived_turns', 0)} archived turns, "
+                  f"{d.get('cache_entries', 0)} cached answers.")
 
 
 @app.command("reassign-sessions")
 def reassign_sessions(
     to_key: str = typer.Option(..., "--to-key", envvar="TOKENMIZER_NEW_API_KEY",
                                help="The API key that should own the sessions"),
-    from_key: Optional[str] = typer.Option(None, "--from-key",
+    from_key: str | None = typer.Option(None, "--from-key",
                                            help="The old API key"),
     from_dev: bool = typer.Option(False, "--from-dev",
                                   help="Sessions created while no API key was set"),
-    config: Optional[str] = typer.Option(None, help="Path to tokenmizer.yaml"),
+    config: str | None = typer.Option(None, help="Path to tokenmizer.yaml"),
 ):
     """Give an old key's sessions to a new key, after rotating it.
 
@@ -527,7 +527,7 @@ def reassign_sessions(
         os.environ["TOKENMIZER_CONFIG"] = config
     from tokenmizer.config.settings import get_settings
     storage = get_settings().graph_checkpoint.storage_dir
-    old = DEV_PRINCIPAL if from_dev else principal_for_key(from_key)
+    old = DEV_PRINCIPAL if from_dev else principal_for_key(from_key or "")
     new = principal_for_key(to_key)
     moved = OwnershipStore(storage_dir=storage).reassign(old, new)
     prefs = PreferenceStore(storage_dir=storage).reassign(old, new)
