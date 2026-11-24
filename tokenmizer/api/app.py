@@ -1119,6 +1119,54 @@ def _terse_placement(session_id: str | None, qualifies: bool) -> str | None:
     return None if mode == "off" else mode
 
 
+# The user message each session's late-starting instruction is pinned to,
+# by a hash of that message's own text. See _anchor_terse.
+_TERSE_ANCHOR: OrderedDict[str, str] = OrderedDict()
+
+
+def _anchor_terse(messages: list[dict], session_id: str | None, terse: str) -> list[dict]:
+    """Append the output instruction to ONE user message and keep it there.
+
+    It used to be appended to the newest user message on every request.
+    The client resends that message next turn without it, so the
+    instruction was never inside the cached prefix: it was billed at full
+    price on every request, which is why a 40-turn session cost 2.5% more
+    through the proxy than a client caching on its own.
+
+    Now the first request that needs it pins it to its last user message,
+    and every later request appends it to that same message, found by its
+    text. The bytes of the history no longer change, so after one cache
+    write the instruction is read from the cache at a tenth of the price.
+    If the client drops that message from its history, the instruction
+    moves to the newest user message once and is pinned there.
+
+    Only a plain-text user message can carry it; anywhere else (a tool
+    result closing an agent step) it would have to go in the system prompt,
+    the prefix change this placement exists to avoid.
+    """
+    def key(m: dict) -> str | None:
+        if m.get("role") != "user" or not isinstance(m.get("content"), str):
+            return None
+        return hashlib.sha256(m["content"].encode("utf-8", "surrogatepass")).hexdigest()
+
+    want = _TERSE_ANCHOR.get(session_id) if session_id else None
+    idx = None
+    if want is not None:
+        idx = next((i for i, m in enumerate(messages) if key(m) == want), None)
+    if idx is None:
+        if not messages or key(messages[-1]) is None:
+            return messages
+        idx = len(messages) - 1
+        if session_id:
+            _TERSE_ANCHOR[session_id] = key(messages[idx]) or ""
+            _TERSE_ANCHOR.move_to_end(session_id)
+            while len(_TERSE_ANCHOR) > _TERSE_PLACEMENT_MAX:
+                _TERSE_ANCHOR.popitem(last=False)
+    out = list(messages)
+    out[idx] = {**out[idx], "content": f"{out[idx]['content']}\n\n[{terse}]"}
+    return out
+
+
 def _apply_compression_layers(
     messages: list[dict],
     settings,
@@ -1174,15 +1222,9 @@ def _apply_compression_layers(
              or count_messages_tokens(messages) >= settings.terse_output.min_conversation_tokens))
     placement = _terse_placement(session_id, qualifies) if settings.terse_output.enabled else None
     if placement == "tail":
-        # Only after a trailing user turn; anywhere else (a tool result
-        # closing an agent step) it would have to go in the system prompt,
-        # which is exactly the prefix change this placement avoids.
-        if messages and messages[-1].get("role") == "user" \
-                and isinstance(messages[-1].get("content"), str):
-            terse = _compression.terse_system_prompt(
-                settings.terse_output.level, style=settings.terse_output.style)
-            messages[-1] = {**messages[-1],
-                            "content": f"{messages[-1]['content']}\n\n[{terse}]"}
+        terse = _compression.terse_system_prompt(
+            settings.terse_output.level, style=settings.terse_output.style)
+        messages = _anchor_terse(messages, session_id, terse)
     elif placement == "system":
         terse = _compression.terse_system_prompt(
             settings.terse_output.level, style=settings.terse_output.style)
@@ -2227,6 +2269,7 @@ async def delete_session_data(session_id: str) -> dict:
         _graph_cache.pop(session_id, None)
         _last_auto_checkpoint.pop(session_id, None)
         _TERSE_PLACEMENT.pop(session_id, None)
+        _TERSE_ANCHOR.pop(session_id, None)
         removed = {"graph": await asyncio.to_thread(
             delete_session_rows, settings.graph_checkpoint.storage_dir, session_id)}
         removed["checkpoints"] = await asyncio.to_thread(_checkpoint_mgr.delete_session, session_id)

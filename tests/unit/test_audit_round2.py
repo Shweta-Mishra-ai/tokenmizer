@@ -695,17 +695,39 @@ def test_the_output_instruction_never_rewrites_a_cached_prefix(client, monkeypat
     provider's cache missed on the whole history: +10% on a 40-turn replay."""
     c, fake = client
     monkeypatch.setattr(app_module.settings.terse_output, "min_conversation_tokens", 200)
-    history, systems = [], []
+    history, systems, sends = [], [], []
     for i in range(12):
         history.append({"role": "user", "content": f"question {i} " + "word " * 20})
         _chat_body = {"session_id": "terse-stable", "max_tokens": 1024, "messages": history}
         c.post("/v1/chat/completions", json=_chat_body)
         sent = fake.chat.call_args.kwargs["messages"]
         systems.append(next((m["content"] for m in sent if m["role"] == "system"), None))
+        sends.append([m["content"] for m in sent if m["role"] != "system"])
         history.append({"role": "assistant", "content": "ok"})
     assert len(set(systems)) == 1, "the system prompt changed mid-session"
-    last = fake.chat.call_args.kwargs["messages"][-1]["content"]
-    assert "preamble" in last          # it went after the history instead
+    # It went after the history instead, once, and stays on that message:
+    # the client resends it without the instruction, and re-adding it to
+    # the newest message every turn kept it out of the cached prefix.
+    pinned = [i for i, c_ in enumerate(sends[-1]) if "preamble" in str(c_)]
+    assert len(pinned) == 1, sends[-1]
+    first = next(k for k, s_ in enumerate(sends) if any("preamble" in str(x) for x in s_))
+    for later in sends[first:]:
+        assert later[pinned[0]] == sends[first][pinned[0]], "the pinned message changed bytes"
+
+
+def test_the_output_instruction_moves_once_when_its_message_is_dropped():
+    from tokenmizer.api.app import _TERSE_ANCHOR, _anchor_terse
+    _TERSE_ANCHOR.pop("pin", None)
+    h = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "x"},
+         {"role": "user", "content": "b"}]
+    out = _anchor_terse(h, "pin", "T")
+    assert out[2]["content"] == "b\n\n[T]" and h[2]["content"] == "b"
+    h += [{"role": "assistant", "content": "y"}, {"role": "user", "content": "c"}]
+    out = _anchor_terse(h, "pin", "T")
+    assert out[2]["content"] == "b\n\n[T]" and out[4]["content"] == "c"
+    out = _anchor_terse(h[3:], "pin", "T")     # the client windowed "b" away
+    assert out[-1]["content"] == "c\n\n[T]"
+    _TERSE_ANCHOR.pop("pin", None)
 
 
 def test_history_compression_is_stable_under_prompt_caching(monkeypatch):
