@@ -111,3 +111,31 @@ def test_full_tier_does_not_repeat_done_or_env(tmp_path):
     full = ckpt.resume_full
     assert full.count("User model in api/models.py") == 1, full
     assert full.count("Python 3.12") == 1, full
+
+
+# ── Errors the extractor could not see, and one it cut short ──────────────
+
+def test_unreliable_keeps_where(tmp_path):
+    g = _graph(tmp_path, "Also flock is unreliable on NFS. Working on the docs.")
+    assert "flock is unreliable on NFS" in _errors(g)
+
+
+def test_still_per_process_is_a_known_limitation(tmp_path):
+    g = _graph(tmp_path, "Rate limiting, analytics and the semantic cache are still "
+                         "per-process, so limits apply per worker.")
+    assert any("still per-process" in e and "Rate limiting" in e for e in _errors(g))
+
+
+def test_still_running_is_not_a_defect(tmp_path):
+    g = _graph(tmp_path, "The migration is still running on the replica.")
+    assert not any("still running" in e for e in _errors(g))
+
+
+def test_low_quality_metric_is_an_error(tmp_path):
+    g = _graph(tmp_path, "Error recall is 8 percent — 1 of 12 labelled errors found.")
+    assert "Error recall is 8 percent" in _errors(g)
+
+
+def test_high_metric_or_lower_is_better_metric_is_not(tmp_path):
+    g = _graph(tmp_path, "Accuracy is 94% on the holdout set. Error rate is 8 percent.")
+    assert not any("percent" in e or "94%" in e for e in _errors(g))

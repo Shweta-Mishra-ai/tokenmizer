@@ -63,7 +63,8 @@
     ],
     "errors": [
       "reinstating rows another worker deleted",
-      "flock is unreliable on NFS"
+      "flock is unreliable on NFS",
+      "Rate limiting, analytics and the semantic cache are still per-process"
     ]
   }
 }

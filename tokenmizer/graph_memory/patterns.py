@@ -1804,7 +1804,37 @@ _ERROR_INERT = re.compile(
     r'\b(' + _subject_window(50) + r'(?:is|are|was|were)\s+'
     r'(?:unreachable|unreliable|dead code|silently ignored|'
     r'never (?:called|reached|run|hit|used|fired)|'
-    r'not (?:reached|called|persisted|applied|enforced)))',
+    r'not (?:reached|called|persisted|applied|enforced))'
+    # Where it fails is part of the fact: "flock is unreliable ON NFS" is a
+    # limitation of one filesystem; cut at "unreliable" it reads as a
+    # defect of flock everywhere.
+    r'(?:\s+(?:on|under|with|over|across|in|for|when)\s+(?:(?:the|a|an)\s+)?' + _TOKEN
+    + r'(?:(?<![.,;:!?])\s+(?!(?:and|or|but|so|which|that|when|is|was|are|were)\b)'
+    + _TOKEN + r')?)?(?<![.,;:!?]))',
+    re.IGNORECASE,
+)
+
+# A known limitation stated as a lasting property: "Rate limiting, analytics
+# and the semantic cache are still per-process, so limits apply per worker."
+# Nothing failed and nothing is missing, so no other pattern reads it, yet it
+# is exactly what the next session must not assume away. `still` is the
+# signal that it is a shortcoming and not a design note; the property list
+# is closed on purpose ("still running" is not a defect).
+_ERROR_STILL_LIMITED = re.compile(
+    r'\b(' + _subject_window(60, ",") + r'(?:is|are)\s+still\s+'
+    r'(?:per-[\w-]+|process-local|in-memory only|not (?:shared|thread-safe|safe|'
+    r'atomic|persisted|enforced|isolated)\b[\w -]{0,30}|unsafe\b[\w -]{0,30}|'
+    r'racy|single-threaded|unbounded|unauthenticated|unencrypted|hard-coded|hardcoded))',
+    re.IGNORECASE,
+)
+
+# A quality metric stated at a level that is itself the problem: "Error
+# recall is 8 percent". Only higher-is-better metrics, and only under half,
+# so "error rate is 8 percent" or "accuracy is 94%" never match.
+_ERROR_LOW_METRIC = re.compile(
+    r'\b((?:[\w-]+\s+){0,2}(?:recall|precision|accuracy|F1|coverage|hit rate|'
+    r'success rate|pass rate)\s+(?:is|was|stays|stayed|sits|dropped to|fell to)\s+'
+    r'(?:only\s+|just\s+)?(?:[0-9]|[1-4][0-9])(?:\.\d+)?\s?(?:%|percent)(?![\w.]))',
     re.IGNORECASE,
 )
 

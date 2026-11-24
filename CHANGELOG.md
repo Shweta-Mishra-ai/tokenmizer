@@ -33,6 +33,37 @@ Found by reading the resume text the checkpoint benchmark sessions produce:
 Checkpoint v2 average resume: 167 → 163 tokens while carrying more facts.
 Extraction F1, retrieval recall, resume quality: unchanged.
 
+### Small sessions no longer pay full price for the output instruction
+
+Once a session grew past `terse_output.min_conversation_tokens`, the
+instruction was appended to the newest user message on every request.
+The client resends that message without it, so it never entered the
+cached prefix and was billed at full price every turn. It is now pinned
+to the first message it went on and re-added there, byte-identical, so
+after one cache write it is read at a tenth of the price.
+
+| Savings vs a self-caching client | before | after |
+|---|---|---|
+| 40 turns | −2.5% | −0.5% |
+| 150 turns | 20.1% | 22.5% |
+| 300 turns | 51.0% | 51.8% |
+
+With `terse_output.enabled: false`, 40 turns is 0.0%. The 0.5% that is
+left is the instruction itself (one cache write, then cache reads); this
+input-only benchmark cannot credit the shorter replies it buys.
+
+### Facts the extractor missed
+
+- "flock is unreliable **on NFS**" was cut to "flock is unreliable".
+- Known limitations ("rate limiting … are still per-process") and low
+  quality metrics ("Error recall is 8 percent") were not read at all.
+
+Retrieval recall@6: 95% → **100%** (40/40): both misses were facts no node
+held. Error extraction: recall 96% → 100%, F1 94% → 96%. One eval label
+was added: `real_audit_concurrency` states the per-process limitation as
+a fact (and `query_eval` already asked about it), but its label set did
+not list it.
+
 ### Security
 
 Reproduced against the default (keyless, localhost) setup, then fixed:

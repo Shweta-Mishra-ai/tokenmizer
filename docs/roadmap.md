@@ -17,13 +17,13 @@ benchmark, the suite is right and this file is a bug.
 |---|---|---|
 | Extraction, macro F1 on the labelled corpus | 97% overall; **91% on real transcripts**, 98% synthetic | `python -m benchmarks.eval` |
 | Label quality | 0% truncated mid-word; 0 near-duplicate pairs over 169 labels | same run |
-| Retrieval, recall@6 on paraphrased questions | **95% keyword, n=40** (92% before per-word alias scoring; 90% before identifier sub-words; 88% before intent ranking; 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
+| Retrieval, recall@6 on paraphrased questions | **100% keyword, n=40** (95% before the two missing facts were extracted; 92% before per-word alias scoring; 90% before identifier sub-words; 88% before intent ranking; 85% at n=13) | `benchmarks.graph_retrieval.query_eval` |
 | Extraction outside coding | **93%** macro F1 with a domain pack, **11%** without | `benchmarks.eval --corpus benchmarks/eval/corpus_domains` |
 | Out-of-ontology facts surviving windowing | **0% to 100%**, at +25 tokens of resume per session | `benchmarks.resume_quality.runner` |
 | Checkpoint accuracy | 80% task / 100% decision / 100% file recall, 207-token resume | `benchmarks.checkpoint_accuracy.runner` |
 | Graph density, fastapi_auth session | 29 nodes, 27 edges, 4 communities + 6 unclustered | `/api/graph/{id}/viz` |
 | Independent 100-session benchmark | **92%** macro F1 on the n=100 corpus (tuned against); **65% / 59%** on held-out v3 / v4, never tuned against, where the best reimplemented comparison method reaches 35% / 25%. 0.5.4 tied for first at 60% | tokenmizer-research, 2026-11-14 |
-| Suite | 2545 tests, ruff clean | `pytest tests/` |
+| Suite | 2553 tests, ruff clean | `pytest tests/` |
 
 Read the 91% real-transcript figure as the honest one. It is the reason
 several items below exist.
@@ -129,14 +129,13 @@ no longer gets quietly worse ranking than the same deployment's proxy.
 The eval is enlarged from 13 cases to **40**, across every corpus session
 including the six captured transcripts, with a grounding check that
 refuses a question its own transcript cannot answer. Keyword ranking
-scores **recall@6 95%** (38/40) on it. The two misses, named
-rather than characterised, are `real_audit_concurrency` / "what is still not safe
-across workers" (expects a node about per-process state; returns the
-advisory-lock nodes) and `real_audit_extraction` / "what were we getting
-badly wrong" (expects the error-recall node). Both are abstract
-questions whose answer shares no keyword with them, which is the shape
-embeddings are meant for — but whether embeddings actually recover
-them is untested here and is not claimed.
+scores **recall@6 100%** (40/40) on it. The last two misses,
+`real_audit_concurrency` / "what is still not safe across workers" and
+`real_audit_extraction` / "what were we getting badly wrong", turned out
+to be extraction gaps rather than ranking ones: no node held the answer.
+The extractor now reads a known limitation ("…are still per-process")
+and a low quality metric ("Error recall is 8 percent") as open issues,
+and both questions are answered by keyword ranking alone.
 
 **The 92%-with-embeddings figure is not re-measured and should not be
 quoted.** It came from the 13-case eval, and this branch was written in a

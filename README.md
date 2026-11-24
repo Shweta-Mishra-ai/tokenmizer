@@ -428,7 +428,7 @@ is a small sample and the same person wrote every label.
 **Retrieval is measured separately.** `python -m
 benchmarks.graph_retrieval.query_eval` scores what `query()` returns for
 questions phrased the way a person asks them, not in the node's own
-words: **recall@6 95% over 40 cases**, keyword ranking only. The eval was
+words: **recall@6 100% over 40 cases**, keyword ranking only. The eval was
 13 cases until this branch, where one case flipping moved the headline by
 8 points; every case is checked to be answerable from its own transcript,
 because an ungrounded question measures extraction and reads as a
@@ -558,7 +558,7 @@ with the measurement that motivates it.
 git clone https://github.com/Shweta-Mishra-ai/tokenmizer
 cd tokenmizer
 pip install -e ".[dev]"
-pytest tests/ -q && ruff check . && mypy     # 2545 tests, must stay green
+pytest tests/ -q && ruff check . && mypy     # 2553 tests, must stay green
 ```
 
 **The most valuable contribution is a session where extraction got it

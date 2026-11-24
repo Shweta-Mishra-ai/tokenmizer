@@ -12,7 +12,7 @@ python -m benchmarks.checkpoint_accuracy.runner_v2   # graph vs summary
 python -m benchmarks.graph_retrieval.query_eval       # what query() returns
 python -m benchmarks.persistence.runner              # storage + concurrency
 python -m benchmarks.savings.runner                 # input cost, with and without
-pytest tests/ -q                                     # 2545 tests
+pytest tests/ -q                                     # 2553 tests
 ```
 
 ## Extraction quality — precision, recall and F1
@@ -242,7 +242,10 @@ re-render"). If the question quoted the answer, the person would not have
 needed to ask — and those are exactly the cases token-overlap ranking
 cannot serve.
 
-**recall@6 95%** (38/40) with keyword ranking. It was 92% before overlap was
+**recall@6 100%** (40/40) with keyword ranking. It was 95% before the
+extractor read known limitations ("still per-process") and low quality
+metrics ("error recall is 8 percent") as open issues: both misses were
+facts no node held, not ranking failures. It was 92% before overlap was
 scored per question word through its aliases (expanding first penalised a
 question for using a word with many synonyms) and everyday synonyms were
 added (slow ↔ latency, check ↔ verify, sign in ↔ login). It was 88% before the ranker
