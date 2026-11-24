@@ -187,6 +187,34 @@ _REJECTION_LEAD = re.compile(r"(?:against|not\s+to|to\s+not|no\b|to\s+drop|to\s+
 # verb's, and the label is what follows it.
 _CHOICE_PREPOSITION = re.compile(r"^(?:with|on|to|for)\s+(?=\S)", re.IGNORECASE)
 
+# A sentence that opens by reporting a fix: "Fixed: WebSocket message not
+# triggering re-render, was missing dependency in useEffect." The clause
+# after the dash is the CAUSE of the fixed bug, and it is over too. Only the
+# fix lead itself was checked, so the cause was stored as an open bug and
+# the resume told the next session to fix it again. A contrast word in
+# between ("but", "still", "another") means the second clause is a
+# different, open failure, so it is left alone.
+_FIX_SENTENCE_LEAD = re.compile(
+    r"^\s*(?:[-*]\s+)?(?:\*\*)?(?:fixed|resolved|patched|solved|repaired)\b\s*(?:\*\*)?\s*[:\-\u2014]",
+    re.IGNORECASE,
+)
+_FIX_SENTENCE_CONTRAST = re.compile(
+    r"\b(?:but|however|still|yet|although|though|except|another|remaining|"
+    r"new|unrelated|separate|also\s+(?:broken|failing|fails))\b",
+    re.IGNORECASE,
+)
+
+
+def _in_fix_sentence(content: str, pos: int) -> bool:
+    """Does `pos` sit in a sentence that opens with "Fixed:" and states
+    nothing contrary between that lead and `pos`?"""
+    start = 0
+    for m in _SENTENCE_BREAK.finditer(content, 0, pos):
+        start = m.end()
+    lead = content[start:pos]
+    return bool(_FIX_SENTENCE_LEAD.match(lead)) and not _FIX_SENTENCE_CONTRAST.search(lead)
+
+
 # The error just quoted is reported as dealt with, after it: "The
 # TypeError … in billing.py is fixed now". It was kept as an open bug.
 _FIXED_AFTER = re.compile(
@@ -1960,7 +1988,8 @@ class HybridExtractor:
                 # the same signal when it sat inside the captured span.
                 if _FIX_LEAD.search(before) or _FIX_PREFIX.match(raw.strip()) \
                         or _under_fixed_heading(content, span_start) \
-                        or _FIXED_AFTER.match(content, span_end):
+                        or _FIXED_AFTER.match(content, span_end) \
+                        or _in_fix_sentence(content, span_start):
                     result.resolved_errors.append(err)
                 key = (id(pattern), _sentence_index(content, label_start))
                 prior = sentence_claims.get(key)

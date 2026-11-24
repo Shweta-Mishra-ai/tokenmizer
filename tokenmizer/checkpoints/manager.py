@@ -325,7 +325,10 @@ class CheckpointManager:
             key=lambda x: x.importance, reverse=True
         )
         if decisions:
-            lines.append("KEY DECISIONS: " + " | ".join(d.label for d in decisions[:3]))
+            # A restated decision would take one of only three slots.
+            from tokenmizer.graph_memory.context_block import drop_restated
+            labels = drop_restated([d.label for d in decisions])
+            lines.append("KEY DECISIONS: " + " | ".join(labels[:3]))
 
         # Invalidated decisions are surfaced as an explicit warning rather
         # than dropped, matching the documented 4-state model (README:
@@ -354,15 +357,25 @@ class CheckpointManager:
     def _build_full(self, graph: GraphMemory, messages: list[dict], next_action: str) -> str:
         """~600 tokens. Deep resume with environment, schemas, dependencies."""
         from tokenmizer.graph_memory.graph import NodeStatus, NodeType
-        parts = [self._build_standard(graph, "")]
+        standard = self._build_standard(graph, "")
+        parts = [standard]
+
+        # The standard block already lists some of these: its "Done" holds
+        # the latest finished tasks and its "Env" the environments. Printing
+        # them again under a second heading cost tokens and said nothing new,
+        # so each line below keeps only the items the block above lacks,
+        # and is left out when that is none.
+        def _new(labels: list[str]) -> list[str]:
+            return [x for x in labels if x not in standard]
 
         # All of these go through _live_nodes for the same reason
         # _build_critical does: an ARCHIVED dependency or an evicted
         # endpoint is not part of the current state of the project, and
         # presenting it in a resume block states it as fact.
         env_nodes = self._live_nodes(graph, NodeType.ENVIRONMENT)
-        if env_nodes:
-            parts.append("Environment: " + ", ".join(e.label for e in env_nodes[:8]))
+        env = _new([e.label for e in env_nodes[:8]])
+        if env:
+            parts.append("Environment: " + ", ".join(env))
 
         dep_nodes = self._live_nodes(graph, NodeType.DEPENDENCY)
         if dep_nodes:
@@ -379,8 +392,9 @@ class CheckpointManager:
         done_tasks = self._live_nodes(graph, NodeType.TASK,
                                       statuses={NodeStatus.COMPLETED})
         done_tasks.sort(key=lambda x: x.recency(), reverse=True)
-        if done_tasks:
-            parts.append("Recently completed: " + " | ".join(t.label for t in done_tasks[:6]))
+        done = _new([t.label for t in done_tasks[:6]])
+        if done:
+            parts.append("Recently completed: " + " | ".join(done))
 
         if next_action:
             parts.append(f"Continue from: {next_action[:150]}")

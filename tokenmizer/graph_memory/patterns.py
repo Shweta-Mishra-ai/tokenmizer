@@ -1788,7 +1788,10 @@ _ABSENCE_WORD = (r'(?:\s+(?!(?:in|on|from|for|and|or|but|is|are|was|were|so|to|'
 _ERROR_ABSENCE = re.compile(
     r'\b((?:missing|lacks|lacking|never set|unset)'
     r'\s+(?:a|an|the)?\s*(?!\w*ly\b)' + _TOKEN + _ABSENCE_WORD + r'{0,2}'
-    r'(?:\s+(?:in|on|from|for)\s+' + _TOKEN + r')?)',
+    # "missing CSRF token in the logout form": the place takes its article,
+    # and a second word, so the label is not cut to "missing CSRF token in".
+    r'(?:\s+(?:in|on|from|for)\s+(?:(?:the|a|an)\s+)?' + _TOKEN
+    + r'(?:(?<![.,;:!?])\s+(?!(?:and|or|but|so|which|that|when|is|was|are|were)\b)' + _TOKEN + r')?)?)',
     re.IGNORECASE,
 )
 

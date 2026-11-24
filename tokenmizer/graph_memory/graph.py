@@ -305,6 +305,30 @@ def _start_of_longest_run(flags: list[bool]) -> int | None:
             run_len = 0
     return best_start
 
+
+_STILL_OPEN = re.compile(
+    r"\b(?:but|however|yet|except)\b[^.;]*?\b(?:still|not yet|remains?|left)\b"
+    r"|\bstill\s+(?:missing|failing|broken|fails|open|crashes|errors?)\b",
+    re.IGNORECASE,
+)
+
+
+def _states_still_open(task_label: str, err_words: frozenset | set) -> bool:
+    """Does the completed task say the error is NOT over?
+
+    "Fixed the login 422, but still missing CSRF token in the logout form"
+    is a completed task that shares every word with the CSRF error, and
+    word overlap alone closed that error: the one bug the sentence says
+    is left. The error words sitting after a "but ... still" means the
+    task names the error as remaining, not as fixed.
+    """
+    m = _STILL_OPEN.search(task_label)
+    if not m:
+        return False
+    tail = {w.lower() for w in re.findall(r"[\w./-]+", task_label[m.start():])}
+    return len(err_words & tail) >= max(1, len(err_words) // 2)
+
+
 class GraphMemory:
     """
     In-process graph with SQLite persistence.
@@ -1585,7 +1609,8 @@ class GraphMemory:
                     continue
                 shared = err_words & self._meaningful_words(task.label)
                 smaller = min(len(err_words), len(self._meaningful_words(task.label))) or 1
-                if task.status == NodeStatus.COMPLETED and len(shared) / smaller >= 0.6:
+                if task.status == NodeStatus.COMPLETED and len(shared) / smaller >= 0.6 \
+                        and not _states_still_open(task.label, err_words):
                     self.add_edge(tid, eid, EdgeType.FIXES)
                     if err.status == NodeStatus.FAILED:
                         err.status = NodeStatus.COMPLETED

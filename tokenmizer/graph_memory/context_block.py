@@ -31,6 +31,53 @@ _DEFAULT_WORDS = {
 
 
 
+# Words that carry no fact of their own in a label: "Use X", "X for Y".
+# Negations ("not", "no", "never") are NOT here, so "not localStorage" is
+# never treated as covered by a label that only says "localStorage".
+_FILLER = frozenset({
+    "a", "an", "the", "and", "or", "for", "with", "to", "of", "in", "on",
+    "use", "using", "used", "we", "our", "will", "be", "is", "are", "as",
+    "decided", "going", "go", "chose", "choose", "picked", "pick",
+})
+_SEGMENT_SPLIT = re.compile(r"\s*(?:,|;|\band\b|\+|&)\s*", re.IGNORECASE)
+
+
+def _fact_words(text: str) -> frozenset[str]:
+    return frozenset(
+        w.strip(".,:;()[]'\"").lower()
+        for w in re.findall(r"[\w.+#/'-]+", text)
+    ) - _FILLER - {""}
+
+
+def drop_restated(labels: list[str]) -> list[str]:
+    """Drop labels that say nothing the others do not already say.
+
+    A user's request and the assistant's confirmation become two decisions:
+    "Python 3.12 and bcrypt for password hashing" beside "Python 3.12
+    runtime" and "bcrypt for password hashing (industry standard)". The
+    first costs resume tokens and, worse, takes one of the few slots a tight
+    tier has, so a real decision ("Redis for refresh token storage") was
+    the one left out.
+
+    Strict on purpose, so nothing is lost: a label goes only when EACH of
+    its parts ("Python 3.12", "bcrypt for password hashing") is wholly
+    contained in ONE other kept label. Words spread over several labels do
+    not count; that could pair facts the session never paired. Order is
+    kept, and of two identical labels the first stays.
+    """
+    alive = [True] * len(labels)
+    words = [_fact_words(x) for x in labels]
+    for i in range(len(labels) - 1, -1, -1):
+        parts = [_fact_words(p) for p in _SEGMENT_SPLIT.split(labels[i])]
+        parts = [p for p in parts if p]
+        if not parts:
+            continue
+        others = [words[j] for j in range(len(labels)) if j != i and alive[j]]
+        if others and all(any(p <= o for o in others) for p in parts):
+            alive[i] = False
+    return [x for x, a in zip(labels, alive, strict=True) if a]
+
+
 def _recent_first_key(graph):
     """Sort key: mentioned in the latest request first, then most
     important, then latest created.
@@ -156,18 +203,13 @@ def to_context_block(graph: GraphMemory, token_budget: int = 400) -> str:
         key=_recent_first_key(graph),
         reverse=True
     )
-    # Deduplicate: skip if label is very similar to already-included task
-    done_deduped = []
-    seen_prefixes: set[str] = set()
-    for t in done:
-        prefix = graph._normalize_label(t.label)[:20]
-        if prefix not in seen_prefixes:
-            done_deduped.append(t)
-            seen_prefixes.add(prefix)
-        if len(done_deduped) >= 6:
-            break
-    if done_deduped:
-        _add(words["done"], [t.label for t in done_deduped], " | ", prio=5)
+    # Deduplicate restatements only. This compared the first 20 characters,
+    # so "Implemented POST /api/auth/register" and ".../login" counted as
+    # copies of ".../logout" and two finished endpoints vanished from the
+    # resume. A task now goes only when another one already says all of it.
+    done_labels = drop_restated([t.label for t in done[:12]])[:6]
+    if done_labels:
+        _add(words["done"], done_labels, " | ", prio=5)
 
     # ── 5. Active decisions — top 6 by importance ─────────────────────────
     decisions = sorted(
@@ -178,6 +220,10 @@ def to_context_block(graph: GraphMemory, token_budget: int = 400) -> str:
         key=lambda x: x.importance, reverse=True
     )
     if decisions:
+        # Restated decisions go before the cap, so they cannot crowd a real
+        # one out of the six slots.
+        kept = set(drop_restated([d.label for d in decisions]))
+        decisions = [d for d in decisions if d.label in kept]
         _add(words["decided"], [d.label + _rationale(d) for d in decisions[:6]], " | ", prio=3)
 
     # ── 5b. Contested decisions — same topic, ambiguous whether one replaces

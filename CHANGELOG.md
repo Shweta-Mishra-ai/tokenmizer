@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Resume accuracy — no lost, invented or repeated facts
+
+Found by reading the resume text the checkpoint benchmark sessions produce:
+
+- **A fixed bug was reported as open.** "Fixed: WebSocket message not
+  triggering re-render — was missing dependency in useEffect" stored the
+  cause as an open error, so the resume said `OPEN BUGS: missing dependency
+  in useEffect`. A clause in a sentence that opens with "Fixed:" is now
+  resolved too, unless a contrast word ("but", "still", "another") puts it
+  outside the fix.
+- **An open bug was reported as fixed.** "Fixed the login 422, but still
+  missing CSRF token in the logout form" closed the CSRF error, because it
+  shared words with the completed task. A task that says the error is still
+  there no longer closes it. The label also keeps its place ("in the logout
+  form", not "in").
+- **Finished tasks vanished from "Done".** Tasks were deduplicated on their
+  first 20 characters, so "Implemented POST /api/auth/register" and
+  ".../login" were dropped as copies of ".../logout". Only a task another one
+  fully restates is dropped now.
+- **Restated decisions took real ones' slots.** A user's "Python 3.12 and
+  bcrypt for password hashing" beside the assistant's two separate decisions
+  took one of three critical-tier slots, and "Redis for refresh token
+  storage" was left out. A decision is dropped only when each of its parts
+  is wholly contained in one other kept decision.
+- **The full tier repeated itself.** "Recently completed" re-listed the
+  "Done" line and "Environment" re-listed "Env". Each now carries only items
+  the block above lacks.
+
+Checkpoint v2 average resume: 167 → 163 tokens while carrying more facts.
+Extraction F1, retrieval recall, resume quality: unchanged.
+
 ### Security
 
 Reproduced against the default (keyless, localhost) setup, then fixed:
